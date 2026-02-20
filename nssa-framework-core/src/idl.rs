@@ -42,7 +42,12 @@ pub struct IdlAccountItem {
     pub owner: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pda: Option<IdlPda>,
+    /// If true, this account represents a variable-length trailing list.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub rest: bool,
 }
+
+fn is_false(v: &bool) -> bool { !v }
 
 /// PDA derivation specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]

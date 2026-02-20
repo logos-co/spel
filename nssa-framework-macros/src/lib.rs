@@ -136,6 +136,8 @@ struct InstructionInfo {
 struct AccountParam {
     name: Ident,
     constraints: AccountConstraints,
+    /// True if this is a Vec<AccountWithMetadata> (variable-length trailing accounts)
+    is_rest: bool,
 }
 
 #[derive(Default)]
@@ -310,6 +312,14 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                     accounts.push(AccountParam {
                         name: param_name,
                         constraints,
+                        is_rest: false,
+                    });
+                } else if is_vec_account_type(ty) {
+                    let constraints = parse_account_constraints(&pat_type.attrs)?;
+                    accounts.push(AccountParam {
+                        name: param_name,
+                        constraints,
+                        is_rest: true,
                     });
                 } else {
                     args.push(ArgParam {
@@ -349,6 +359,22 @@ fn is_account_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "AccountWithMetadata";
+        }
+    }
+    false
+}
+
+/// Check if a type is Vec<AccountWithMetadata> (variable-length account list).
+fn is_vec_account_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            if segment.ident == "Vec" {
+                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return is_account_type(inner);
+                    }
+                }
+            }
         }
     }
     false
@@ -510,13 +536,39 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 quote! { Instruction::#variant_name { #(#field_names),* } }
             };
 
-            let account_names: Vec<&Ident> = ix.accounts.iter().map(|a| &a.name).collect();
-            let account_destructure = quote! {
-                let [#(#account_names),*] = <[_; #num_accounts]>::try_from(pre_states)
-                    .unwrap_or_else(|v: Vec<_>| panic!(
-                        "Account count mismatch: expected {}, got {}",
-                        #num_accounts, v.len()
-                    ));
+            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
+            let account_destructure = if has_rest {
+                // Split into fixed accounts + rest
+                let fixed_accounts: Vec<&AccountParam> = ix.accounts.iter().filter(|a| !a.is_rest).collect();
+                let rest_account = ix.accounts.iter().find(|a| a.is_rest).unwrap();
+                let num_fixed = fixed_accounts.len();
+                let fixed_names: Vec<&Ident> = fixed_accounts.iter().map(|a| &a.name).collect();
+                let rest_name = &rest_account.name;
+                
+                quote! {
+                    if pre_states.len() < #num_fixed {
+                        panic!(
+                            "Account count mismatch: expected at least {}, got {}",
+                            #num_fixed, pre_states.len()
+                        );
+                    }
+                    let (fixed_accounts, rest_accounts) = pre_states.split_at(#num_fixed);
+                    let [#(#fixed_names),*] = <[_; #num_fixed]>::try_from(fixed_accounts.to_vec())
+                        .unwrap_or_else(|v: Vec<_>| panic!(
+                            "Account count mismatch: expected {}, got {}",
+                            #num_fixed, v.len()
+                        ));
+                    let #rest_name: Vec<nssa_core::account::AccountWithMetadata> = rest_accounts.to_vec();
+                }
+            } else {
+                let account_names: Vec<&Ident> = ix.accounts.iter().map(|a| &a.name).collect();
+                quote! {
+                    let [#(#account_names),*] = <[_; #num_accounts]>::try_from(pre_states)
+                        .unwrap_or_else(|v: Vec<_>| panic!(
+                            "Account count mismatch: expected {}, got {}",
+                            #num_accounts, v.len()
+                        ));
+                }
             };
 
             // Check if this instruction has any validation (signer/init checks)
