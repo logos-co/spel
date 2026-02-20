@@ -682,7 +682,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
 
             quote! {
                 #[allow(dead_code)]
-                fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), nssa_framework_core::error::NssaError> {
+                pub fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), nssa_framework_core::error::NssaError> {
                     #(#signer_checks)*
                     #(#init_checks)*
                     Ok(())
@@ -831,6 +831,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                         }
                     };
 
+                    let is_rest = acc.is_rest;
                     quote! {
                         nssa_framework_core::idl::IdlAccountItem {
                             name: #acc_name.to_string(),
@@ -839,6 +840,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                             init: #init,
                             owner: None,
                             pda: #pda_expr,
+                            rest: #is_rest,
                         }
                     }
                 })
