@@ -45,11 +45,16 @@ command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 command -v cargo-risczero >/dev/null 2>&1 || warn "cargo-risczero not found — guest build may fail"
 docker info >/dev/null 2>&1 || warn "Docker not running — guest build may fail"
 
+LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
 SEQUENCER_BIN=""
 if command -v sequencer_runner >/dev/null 2>&1; then
     SEQUENCER_BIN="sequencer_runner"
 elif [ -x "$HOME/bin/sequencer_runner" ]; then
     SEQUENCER_BIN="$HOME/bin/sequencer_runner"
+elif [ -x "$LSSA_DIR/target/release/sequencer_runner" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/release/sequencer_runner"
+elif [ -x "$LSSA_DIR/target/debug/sequencer_runner" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/debug/sequencer_runner"
 else
     warn "sequencer_runner not found — will skip deploy/submit steps"
 fi
@@ -108,14 +113,29 @@ fi
 
 log "Step 4: Starting sequencer and deploying..."
 
-# Start sequencer with fresh state
-SEQUENCER_STATE=$(mktemp -d)
-$SEQUENCER_BIN --port "$SEQUENCER_PORT" --state-dir "$SEQUENCER_STATE" > "$LOG_DIR/sequencer.log" 2>&1 &
-SEQ_PID=$!
+# Kill any existing sequencer
+pgrep -f 'sequencer_runner.*configs' | xargs -r kill 2>/dev/null || true
+sleep 1
 
-# Wait for sequencer to be ready
+# Clean old state
+rm -rf "${LSSA_DIR}/.sequencer_db" "${LSSA_DIR}/rocksdb"
+
+# Start sequencer with lssa configs
+SEQ_CONFIGS="${LSSA_DIR}/sequencer_runner/configs/debug"
+if [ ! -d "$SEQ_CONFIGS" ]; then
+    fail "Sequencer configs not found at $SEQ_CONFIGS"
+fi
+
+cd "$LSSA_DIR"
+RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+SEQ_PID=$!
+cd "$WORK_DIR/$PROJECT_NAME"
+
+# Wait for sequencer to be ready (up to 60s)
+log "  Waiting for sequencer (PID $SEQ_PID)..."
 for i in $(seq 1 60); do
-    if curl -sf "$SEQUENCER_URL/health" >/dev/null 2>&1 || curl -sf "$SEQUENCER_URL" >/dev/null 2>&1; then
+    if curl -s -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '(200|405)'; then
+        log "  Sequencer up after ${i}s"
         break
     fi
     if ! kill -0 "$SEQ_PID" 2>/dev/null; then
@@ -124,9 +144,32 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-# Deploy
-nssa-cli --idl "$IDL_FILE" -p "$GUEST_BIN" deploy \
-    --sequencer-url "$SEQUENCER_URL" > "$LOG_DIR/deploy.log" 2>&1 \
+if ! curl -s -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '(200|405)'; then
+    fail "Sequencer failed to start after 60s (see $LOG_DIR/sequencer.log)"
+fi
+
+# Deploy using wallet CLI (same as `make deploy`)
+GUEST_BIN_ABS="$(cd "$(dirname "$GUEST_BIN")" && pwd)/$(basename "$GUEST_BIN")"
+IDL_FILE_ABS="$(cd "$(dirname "$IDL_FILE")" && pwd)/$(basename "$IDL_FILE")"
+
+WALLET_BIN=""
+if command -v wallet >/dev/null 2>&1; then
+    WALLET_BIN="wallet"
+elif [ -x "$LSSA_DIR/target/release/wallet" ]; then
+    WALLET_BIN="$LSSA_DIR/target/release/wallet"
+elif [ -x "$LSSA_DIR/target/debug/wallet" ]; then
+    WALLET_BIN="$LSSA_DIR/target/debug/wallet"
+else
+    warn "wallet CLI not found — skipping deploy/submit"
+    log "Smoke test passed (scaffold + build + IDL + sequencer start)"
+    exit 0
+fi
+
+export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
+WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
+
+# Wallet needs password on stdin; first run creates storage
+printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" > "$LOG_DIR/deploy.log" 2>&1 \
     || fail "Deploy failed (see $LOG_DIR/deploy.log)"
 log "  ✅ Program deployed"
 
@@ -142,13 +185,11 @@ with open('$IDL_FILE') as f:
 print(idl['instructions'][0]['name'])
 ")
 
-# Try dry-run first
-nssa-cli --idl "$IDL_FILE" -p "$GUEST_BIN" --dry-run \
-    --sequencer-url "$SEQUENCER_URL" \
-    "$FIRST_IX" > "$LOG_DIR/dryrun.log" 2>&1 \
-    || warn "Dry run failed (may need args — see $LOG_DIR/dryrun.log)"
-
-log "  ✅ Transaction submitted"
+# Try submitting the first instruction (may fail if it needs specific args — that's OK)
+SEQUENCER_URL="$SEQUENCER_URL" nssa-cli --idl "$IDL_FILE_ABS" -p "$GUEST_BIN_ABS" \
+    "$FIRST_IX" > "$LOG_DIR/submit.log" 2>&1 \
+    && log "  ✅ Transaction submitted" \
+    || warn "Submit failed (may need args — see $LOG_DIR/submit.log). Deploy was successful."
 
 # ─── Done ─────────────────────────────────────────────────────────────────
 
