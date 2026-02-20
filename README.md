@@ -103,6 +103,7 @@ mod my_program {
 | `#[account(pda = literal("seed"))]` | PDA derived from a constant string |
 | `#[account(pda = account("other"))]` | PDA derived from another account's ID |
 | `#[account(pda = arg("create_key"))]` | PDA derived from an instruction argument |
+| `members: Vec<AccountWithMetadata>` | Variable-length trailing account list |
 
 ### Runtime Validation
 
