@@ -236,7 +236,7 @@ fn expand_nssa_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Tok
             // Dispatch to instruction handler
             let result: Result<
                 (Vec<nssa_core::program::AccountPostState>, Vec<nssa_core::program::ChainedCall>),
-                nssa_framework_core::error::NssaError
+                nssa_framework::error::NssaError
             > = match instruction {
                 #(#match_arms)*
             };
@@ -589,16 +589,30 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 .collect();
 
             let validation_call = if has_validation {
-                let account_refs: Vec<TokenStream2> = ix
-                    .accounts
-                    .iter()
-                    .map(|a| {
-                        let name = &a.name;
-                        quote! { #name }
-                    })
-                    .collect();
-                quote! {
-                    #mod_name::#validate_fn_name(&[#(#account_refs.clone()),*]).expect("account validation failed");
+                if has_rest {
+                    // For instructions with Vec accounts, build the slice dynamically
+                    let fixed_refs: Vec<TokenStream2> = ix.accounts.iter()
+                        .filter(|a| !a.is_rest)
+                        .map(|a| { let name = &a.name; quote! { #name.clone() } })
+                        .collect();
+                    let rest_ref = &ix.accounts.iter().find(|a| a.is_rest).unwrap().name;
+                    quote! {
+                        let mut __all_accounts = vec![#(#fixed_refs),*];
+                        __all_accounts.extend(#rest_ref.clone());
+                        #mod_name::#validate_fn_name(&__all_accounts).expect("account validation failed");
+                    }
+                } else {
+                    let account_refs: Vec<TokenStream2> = ix
+                        .accounts
+                        .iter()
+                        .map(|a| {
+                            let name = &a.name;
+                            quote! { #name }
+                        })
+                        .collect();
+                    quote! {
+                        #mod_name::#validate_fn_name(&[#(#account_refs.clone()),*]).expect("account validation failed");
+                    }
                 }
             } else {
                 quote! {}
@@ -649,7 +663,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     let idx = i;
                     quote! {
                         if !accounts[#idx].is_authorized {
-                            return Err(nssa_framework_core::error::NssaError::Unauthorized {
+                            return Err(nssa_framework::error::NssaError::Unauthorized {
                                 message: format!("Account '{}' (index {}) must be a signer", #acc_name, #idx),
                             });
                         }
@@ -668,7 +682,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     let idx = i;
                     quote! {
                         if accounts[#idx].account != nssa_core::account::Account::default() {
-                            return Err(nssa_framework_core::error::NssaError::AccountAlreadyInitialized {
+                            return Err(nssa_framework::error::NssaError::AccountAlreadyInitialized {
                                 account_index: #idx,
                             });
                         }
@@ -682,7 +696,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
 
             quote! {
                 #[allow(dead_code)]
-                pub fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), nssa_framework_core::error::NssaError> {
+                pub fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), nssa_framework::error::NssaError> {
                     #(#signer_checks)*
                     #(#init_checks)*
                     Ok(())
@@ -813,19 +827,19 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                             .iter()
                             .map(|seed| match seed {
                                 PdaSeedDef::Const(val) => quote! {
-                                    nssa_framework_core::idl::IdlSeed::Const { value: #val.to_string() }
+                                    nssa_framework::idl::IdlSeed::Const { value: #val.to_string() }
                                 },
                                 PdaSeedDef::Account(name) => quote! {
-                                    nssa_framework_core::idl::IdlSeed::Account { path: #name.to_string() }
+                                    nssa_framework::idl::IdlSeed::Account { path: #name.to_string() }
                                 },
                                 PdaSeedDef::Arg(name) => quote! {
-                                    nssa_framework_core::idl::IdlSeed::Arg { path: #name.to_string() }
+                                    nssa_framework::idl::IdlSeed::Arg { path: #name.to_string() }
                                 },
                             })
                             .collect();
 
                         quote! {
-                            Some(nssa_framework_core::idl::IdlPda {
+                            Some(nssa_framework::idl::IdlPda {
                                 seeds: vec![#(#seed_literals),*],
                             })
                         }
@@ -833,7 +847,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
 
                     let is_rest = acc.is_rest;
                     quote! {
-                        nssa_framework_core::idl::IdlAccountItem {
+                        nssa_framework::idl::IdlAccountItem {
                             name: #acc_name.to_string(),
                             writable: #writable,
                             signer: #signer,
@@ -853,16 +867,16 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                     let arg_name = arg.name.to_string().trim_start_matches('_').to_string();
                     let type_str = rust_type_to_idl_string(&arg.ty);
                     quote! {
-                        nssa_framework_core::idl::IdlArg {
+                        nssa_framework::idl::IdlArg {
                             name: #arg_name.to_string(),
-                            type_: nssa_framework_core::idl::IdlType::Primitive(#type_str.to_string()),
+                            type_: nssa_framework::idl::IdlType::Primitive(#type_str.to_string()),
                         }
                     }
                 })
                 .collect();
 
             quote! {
-                nssa_framework_core::idl::IdlInstruction {
+                nssa_framework::idl::IdlInstruction {
                     name: #ix_name.to_string(),
                     accounts: vec![#(#account_literals),*],
                     args: vec![#(#arg_literals),*],
@@ -873,8 +887,8 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
 
     quote! {
         #[allow(dead_code)]
-        pub fn __program_idl() -> nssa_framework_core::idl::NssaIdl {
-            nssa_framework_core::idl::NssaIdl {
+        pub fn __program_idl() -> nssa_framework::idl::NssaIdl {
+            nssa_framework::idl::NssaIdl {
                 version: "0.1.0".to_string(),
                 name: #program_name.to_string(),
                 instructions: vec![#(#instruction_literals),*],
