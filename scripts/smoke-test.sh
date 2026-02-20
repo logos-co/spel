@@ -75,7 +75,7 @@ log "  ✅ Project scaffolded"
 log "Step 2: Building guest binary (this may take a while)..."
 make build > "$LOG_DIR/build.log" 2>&1 || fail "Guest build failed (see $LOG_DIR/build.log)"
 
-GUEST_BIN=$(find target -name "*.bin" -path "*/riscv32im*" | head -1)
+GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
 [ -n "$GUEST_BIN" ] || fail "No guest binary found after build"
 log "  ✅ Guest binary built: $GUEST_BIN"
 
