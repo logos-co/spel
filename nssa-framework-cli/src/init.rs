@@ -275,7 +275,7 @@ path = "src/bin/{snake_name}.rs"
 [dependencies]
 nssa-framework = {{ git = "https://github.com/jimmy-claw/nssa-framework.git" }}
 nssa-framework-core = {{ git = "https://github.com/jimmy-claw/nssa-framework.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", branch = "schouhy/full-bedrock-integration" }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }}
 risc0-zkvm = {{ version = "3.0.3", default-features = false }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}

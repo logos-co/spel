@@ -7,5 +7,5 @@ description = "Developer framework for building NSSA/LEZ programs (like Anchor f
 [dependencies]
 nssa-framework-core = { path = "../nssa-framework-core" }
 nssa-framework-macros = { path = "../nssa-framework-macros" }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "schouhy/full-bedrock-integration", features = ["host"] }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }

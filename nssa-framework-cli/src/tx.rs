@@ -227,7 +227,7 @@ pub async fn execute_instruction(
     };
 
     let signing_keys: Vec<_> = signer_accounts.iter().map(|id| {
-        wallet_core.storage().user_data.get_pub_account_signing_key(id).unwrap_or_else(|| {
+        wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
             eprintln!("❌ Signing key not found for account {}", id);
             process::exit(1);
         })
