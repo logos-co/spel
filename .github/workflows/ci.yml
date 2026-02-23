@@ -14,6 +14,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: Build (core + macros)
-        run: cargo build -p nssa-framework -p nssa-framework-core -p nssa-framework-macros
+        run: cargo build -p lez-framework -p lez-framework-core -p lez-framework-macros
       - name: Test (core + macros)
-        run: cargo test -p nssa-framework -p nssa-framework-core -p nssa-framework-macros
+        run: cargo test -p lez-framework -p lez-framework-core -p lez-framework-macros

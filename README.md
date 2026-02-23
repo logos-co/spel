@@ -1,8 +1,8 @@
-# nssa-framework
+# lez-framework
 
-[![CI](https://github.com/jimmy-claw/nssa-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmy-claw/nssa-framework/actions/workflows/ci.yml)
+[![CI](https://github.com/jimmy-claw/lez-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmy-claw/lez-framework/actions/workflows/ci.yml)
 
-Developer framework for building NSSA/LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
+Developer framework for building LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
 Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
 
@@ -11,8 +11,8 @@ Write your program logic with proc macros. Get IDL generation, a full CLI with T
 ### Scaffold a new project
 
 ```bash
-cargo install --path nssa-framework-cli
-nssa-cli init my-program
+cargo install --path lez-cli
+lez-cli init my-program
 cd my-program
 ```
 
@@ -38,7 +38,7 @@ my-program/
 
 ```bash
 make build        # Build the guest binary (risc0)
-make idl          # Generate IDL from #[nssa_program] annotations
+make idl          # Generate IDL from #[lez_program] annotations
 make deploy       # Deploy to sequencer
 make cli ARGS="--help"   # See auto-generated commands
 make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
@@ -51,11 +51,11 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::AccountPostState;
-use nssa_framework::prelude::*;
+use lez_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
 
-#[nssa_program]
+#[lez_program]
 mod my_program {
     #[allow(unused_imports)]
     use super::*;
@@ -66,9 +66,9 @@ mod my_program {
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-    ) -> NssaResult {
+    ) -> LezResult {
         // Your logic here
-        Ok(NssaOutput::states_only(vec![
+        Ok(LezOutput::states_only(vec![
             AccountPostState::new_claimed(state.account.clone()),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -82,9 +82,9 @@ mod my_program {
         #[account(signer)]
         sender: AccountWithMetadata,
         amount: u128,
-    ) -> NssaResult {
+    ) -> LezResult {
         // Your logic here
-        Ok(NssaOutput::states_only(vec![
+        Ok(LezOutput::states_only(vec![
             AccountPostState::new(state.account.clone()),
             AccountPostState::new(recipient.account.clone()),
             AccountPostState::new(sender.account.clone()),
@@ -109,8 +109,8 @@ mod my_program {
 
 Accounts marked with `#[account(signer)]` or `#[account(init)]` get **automatic runtime checks** before your handler runs:
 
-- **Signer**: Verifies `is_authorized` is true, returns `NssaError::Unauthorized` if not
-- **Init**: Verifies account is in default state, returns `NssaError::AccountAlreadyInitialized` if not
+- **Signer**: Verifies `is_authorized` is true, returns `LezError::Unauthorized` if not
+- **Init**: Verifies account is in default state, returns `LezError::AccountAlreadyInitialized` if not
 
 No manual checking needed in your instruction handlers.
 
@@ -119,7 +119,7 @@ No manual checking needed in your instruction handlers.
 If your `Instruction` enum lives in a shared core crate (used by both on-chain program and CLI), you can tell the macro to use it instead of generating one:
 
 ```rust
-#[nssa_program(instruction = "my_core::Instruction")]
+#[lez_program(instruction = "my_core::Instruction")]
 mod my_program {
     // ...
 }
@@ -132,7 +132,7 @@ Every program gets a full CLI for free. The wrapper is just:
 ```rust
 #[tokio::main]
 async fn main() {
-    nssa_framework_cli::run().await;
+    lez_cli::run().await;
 }
 ```
 
@@ -150,37 +150,37 @@ This provides:
 The IDL generator is also a one-liner:
 
 ```rust
-nssa_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
+lez_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
 ```
 
-It reads the `#[nssa_program]` annotations at compile time and generates a complete JSON IDL describing instructions, arguments, accounts, and PDA seeds.
+It reads the `#[lez_program]` annotations at compile time and generates a complete JSON IDL describing instructions, arguments, accounts, and PDA seeds.
 
 ## CLI Usage
 
 ```bash
 # Scaffold a new project (no --idl needed)
-nssa-cli init my-program
+lez-cli init my-program
 
 # Inspect program binaries (no --idl needed)
-nssa-cli inspect program.bin
+lez-cli inspect program.bin
 
 # Show available commands
-nssa-cli --idl program-idl.json --help
+lez-cli --idl program-idl.json --help
 
 # Dry run an instruction
-nssa-cli --idl program-idl.json --dry-run -p program.bin \
+lez-cli --idl program-idl.json --dry-run -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Submit a transaction
-nssa-cli --idl program-idl.json -p program.bin \
+lez-cli --idl program-idl.json -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Auto-fill program IDs from binaries
-nssa-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
+lez-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Get help for a specific instruction
-nssa-cli --idl program-idl.json create-vault --help
+lez-cli --idl program-idl.json create-vault --help
 ```
 
 ### Type Formats
@@ -198,10 +198,10 @@ nssa-cli --idl program-idl.json create-vault --help
 
 | Crate | Description |
 |-------|-------------|
-| `nssa-framework` | Umbrella crate — re-exports macros + core with a prelude |
-| `nssa-framework-core` | IDL types, error types, `NssaOutput` |
-| `nssa-framework-macros` | Proc macros: `#[nssa_program]`, `#[instruction]`, `generate_idl!` |
-| `nssa-framework-cli` | Generic IDL-driven CLI with TX submission + project scaffolding |
+| `lez-framework` | Umbrella crate — re-exports macros + core with a prelude |
+| `lez-framework-core` | IDL types, error types, `LezOutput` |
+| `lez-framework-macros` | Proc macros: `#[lez_program]`, `#[instruction]`, `generate_idl!` |
+| `lez-cli` | Generic IDL-driven CLI with TX submission + project scaffolding |
 
 ## License
 

@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "nssa-framework",
-    "nssa-framework-core",
-    "nssa-framework-macros",
-    "nssa-framework-cli",
+    "lez-framework",
+    "lez-framework-core",
+    "lez-framework-macros",
+    "lez-cli",
 ]
 resolver = "2"

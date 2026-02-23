@@ -1,0 +1,11 @@
+[package]
+name = "lez-framework"
+version = "0.1.0"
+edition = "2021"
+description = "Developer framework for building LEZ programs (like Anchor for Solana)"
+
+[dependencies]
+lez-framework-core = { path = "../lez-framework-core" }
+lez-framework-macros = { path = "../lez-framework-macros" }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main", features = ["host"] }
+borsh = { version = "1.0", features = ["derive"] }
