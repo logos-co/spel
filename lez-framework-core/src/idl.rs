@@ -3,6 +3,13 @@
 //! The proc-macro generates an IDL JSON file at compile time that
 //! describes the program's interface. This module defines the
 //! serializable IDL format.
+//!
+//! ## LSSA-lang compatibility
+//!
+//! This IDL format is a superset of the lssa-lang IDL spec. Fields like
+//! `discriminator`, `execution`, and `visibility` are included for
+//! compatibility with lssa-lang tooling. All new fields are optional
+//! and backward-compatible with existing LEZ programs.
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +25,30 @@ pub struct LezIdl {
     pub types: Vec<IdlTypeDef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<IdlError>,
+    /// IDL spec identifier (lssa-lang compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spec: Option<String>,
+    /// Program metadata (lssa-lang compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<IdlMetadata>,
+}
+
+/// Program metadata (lssa-lang compat).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdlMetadata {
+    pub name: String,
+    pub version: String,
+}
+
+/// Execution mode for an instruction (lssa-lang compat).
+///
+/// Maps to lssa-lang's `Execution` type which has `public` and `private_owned` flags.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct IdlExecution {
+    #[serde(default)]
+    pub public: bool,
+    #[serde(default)]
+    pub private_owned: bool,
 }
 
 /// An instruction in the IDL.
@@ -26,6 +57,15 @@ pub struct IdlInstruction {
     pub name: String,
     pub accounts: Vec<IdlAccountItem>,
     pub args: Vec<IdlArg>,
+    /// SHA256("global:{name}")[..8] discriminator (lssa-lang compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discriminator: Option<Vec<u8>>,
+    /// Execution mode (lssa-lang compat). Defaults to public.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution: Option<IdlExecution>,
+    /// Variant name in PascalCase (lssa-lang compat).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<String>,
 }
 
 /// An account expected by an instruction.
@@ -45,6 +85,9 @@ pub struct IdlAccountItem {
     /// If true, this account represents a variable-length trailing list.
     #[serde(default, skip_serializing_if = "is_false")]
     pub rest: bool,
+    /// Visibility tags (lssa-lang compat). e.g. ["public"].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub visibility: Vec<String>,
 }
 
 fn is_false(v: &bool) -> bool { !v }
@@ -129,6 +172,17 @@ pub struct IdlError {
     pub msg: Option<String>,
 }
 
+/// Compute the lssa-lang discriminator for an instruction name.
+///
+/// This is SHA256("global:{name}")[..8], matching lssa-lang's convention.
+pub fn compute_discriminator(name: &str) -> Vec<u8> {
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{}", name).as_bytes());
+    let result = hasher.finalize();
+    result[..8].to_vec()
+}
+
 impl LezIdl {
     /// Create a new IDL with the given program name.
     pub fn new(name: impl Into<String>) -> Self {
@@ -139,6 +193,8 @@ impl LezIdl {
             accounts: vec![],
             types: vec![],
             errors: vec![],
+            spec: None,
+            metadata: None,
         }
     }
 

@@ -30,6 +30,7 @@
 //! ```
 
 use proc_macro::TokenStream;
+use sha2::{Sha256, Digest};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use syn::{
@@ -801,6 +802,14 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
 
 // ─── IDL generation (code-based, for __program_idl()) ────────────────────
 
+/// Compute SHA256("global:{name}")[..8] discriminator at macro expansion time.
+fn compute_discriminator(name: &str) -> Vec<u8> {
+    let mut hasher = Sha256::new();
+    hasher.update(format!("global:{}", name).as_bytes());
+    let result = hasher.finalize();
+    result[..8].to_vec()
+}
+
 fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenStream2 {
     let program_name = mod_name.to_string();
 
@@ -855,6 +864,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                             owner: None,
                             pda: #pda_expr,
                             rest: #is_rest,
+                            visibility: vec!["public".to_string()],
                         }
                     }
                 })
@@ -875,11 +885,34 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                 })
                 .collect();
 
+            let discriminator_bytes = compute_discriminator(&ix_name);
+            let disc_bytes_lit: Vec<proc_macro2::TokenStream> = discriminator_bytes.iter()
+                .map(|b| { let val = proc_macro2::Literal::u8_unsuffixed(*b); quote! { #val } })
+                .collect();
+            let variant_name_str = {
+                let s = &ix_name;
+                s.split('_')
+                    .map(|w| {
+                        let mut c = w.chars();
+                        match c.next() {
+                            None => String::new(),
+                            Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                        }
+                    })
+                    .collect::<String>()
+            };
+
             quote! {
                 lez_framework::idl::IdlInstruction {
                     name: #ix_name.to_string(),
                     accounts: vec![#(#account_literals),*],
                     args: vec![#(#arg_literals),*],
+                    discriminator: Some(vec![#(#disc_bytes_lit),*]),
+                    execution: Some(lez_framework::idl::IdlExecution {
+                        public: true,
+                        private_owned: false,
+                    }),
+                    variant: Some(#variant_name_str.to_string()),
                 }
             }
         })
@@ -895,6 +928,11 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                 accounts: vec![],
                 types: vec![],
                 errors: vec![],
+                spec: Some("0.1.0".to_string()),
+                metadata: Some(lez_framework::idl::IdlMetadata {
+                    name: #program_name.to_string(),
+                    version: "0.1.0".to_string(),
+                }),
             }
         }
     }

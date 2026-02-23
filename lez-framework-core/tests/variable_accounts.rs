@@ -13,6 +13,7 @@ fn test_rest_account_serializes() {
         owner: None,
         pda: None,
         rest: true,
+        visibility: vec!["public".to_string()],
     };
     let json = serde_json::to_string(&acc).unwrap();
     assert!(json.contains("\"rest\":true"), "JSON: {}", json);
@@ -28,6 +29,7 @@ fn test_non_rest_account_omits_rest() {
         owner: None,
         pda: None,
         rest: false,
+        visibility: vec![],
     };
     let json = serde_json::to_string(&acc).unwrap();
     assert!(!json.contains("rest"), "rest=false should be omitted, JSON: {}", json);

@@ -155,6 +155,20 @@ lez_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
 
 It reads the `#[lez_program]` annotations at compile time and generates a complete JSON IDL describing instructions, arguments, accounts, and PDA seeds.
 
+#### LSSA-lang compatible fields
+
+The generated IDL is a superset of the lssa-lang IDL spec. In addition to our core fields, each instruction includes:
+
+- **discriminator** -- SHA256 of global:name, first 8 bytes, matching lssa-lang convention
+- **execution** -- public/private_owned flags (default: public execution)
+- **variant** -- PascalCase variant name
+
+Each account field includes:
+
+- **visibility** -- list of visibility tags (default: public)
+
+These fields are optional and backward-compatible -- existing IDL consumers that do not know about them will simply ignore them.
+
 ## CLI Usage
 
 ```bash
