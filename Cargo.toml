@@ -4,5 +4,6 @@ members = [
     "lez-framework-core",
     "lez-framework-macros",
     "lez-cli",
+    "lez-client-gen",
 ]
 resolver = "2"
