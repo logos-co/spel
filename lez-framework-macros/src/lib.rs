@@ -743,6 +743,7 @@ fn rust_type_to_idl_string(ty: &Type) -> String {
                     }
                 }
                 "ProgramId" => "program_id".to_string(),
+                "AccountId" => "account_id".to_string(),
                 other => other.to_string(),
             }
         }
@@ -783,6 +784,7 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
                     }
                 }
                 "ProgramId" => "\"program_id\"".to_string(),
+                "AccountId" => "\"account_id\"".to_string(),
                 other => format!("{{\"defined\":\"{}\"}}", other),
             }
         }
