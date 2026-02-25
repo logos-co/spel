@@ -55,7 +55,7 @@ pub fn idl_type_to_rust(ty: &lez_framework_core::idl::IdlType) -> String {
     use lez_framework_core::idl::IdlType;
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
-            "AccountId" | "[u8; 32]" | "[u8;32]" => "AccountId".to_string(),
+            "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => "AccountId".to_string(),
             "ProgramId" | "[u32; 8]" | "[u32;8]" => "ProgramId".to_string(),
             s => s.to_string(),
         },
@@ -74,7 +74,7 @@ pub fn idl_type_to_json_parse(ty: &lez_framework_core::idl::IdlType, var: &str) 
     use lez_framework_core::idl::IdlType;
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
-            "AccountId" | "[u8; 32]" | "[u8;32]" => {
+            "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => {
                 format!("parse_account_id({var}.as_str().ok_or(\"expected string for AccountId\")?)?")
             }
             "ProgramId" | "[u32; 8]" | "[u32;8]" => {
