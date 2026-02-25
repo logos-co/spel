@@ -74,16 +74,18 @@ pub fn generate_ffi(idl: &LezIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // PDA computation
+    // PDA computation — SHA-256(seed1 || seed2 || ...) matching on-chain derivation
     writeln!(out, "fn compute_pda(seeds: &[&[u8]]) -> nssa::AccountId {{").unwrap();
-    writeln!(out, "    let mut result = [0u8; 32];").unwrap();
+    writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
+    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
     writeln!(out, "    for seed in seeds {{").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
     writeln!(out, "        let len = seed.len().min(32);").unwrap();
     writeln!(out, "        padded[..len].copy_from_slice(&seed[..len]);").unwrap();
-    writeln!(out, "        for (i, b) in padded.iter().enumerate() {{ result[i] ^= b; }}").unwrap();
+    writeln!(out, "        hasher.update(&padded);").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out, "    nssa::AccountId::from(result)").unwrap();
+    writeln!(out, "    let hash: [u8; 32] = hasher.finalize().into();").unwrap();
+    writeln!(out, "    nssa::AccountId::from(hash)").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 

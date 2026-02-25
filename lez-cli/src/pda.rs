@@ -81,20 +81,27 @@ fn resolve_seed(
     }
 }
 
-/// XOR two 32-byte arrays.
-fn xor_bytes(a: &[u8; 32], b: &[u8; 32]) -> [u8; 32] {
-    let mut result = [0u8; 32];
-    for i in 0..32 {
-        result[i] = a[i] ^ b[i];
+/// Hash multiple 32-byte seeds via SHA-256(seed1 || seed2 || ...).
+///
+/// Uses concatenation + SHA-256 (not XOR) to avoid commutativity and
+/// self-cancellation issues. Matches the on-chain nssa derivation pattern.
+fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
+    use risc0_zkvm::sha::{Impl, Sha256};
+    let mut bytes = Vec::with_capacity(seeds.len() * 32);
+    for seed in seeds {
+        bytes.extend_from_slice(seed);
     }
-    result
+    Impl::hash_bytes(&bytes)
+        .as_bytes()
+        .try_into()
+        .expect("SHA-256 output must be exactly 32 bytes")
 }
 
 /// Compute PDA AccountId from IDL seed definitions.
 ///
 /// Supports single and multi-seed PDAs:
 /// - Single seed: used directly as PDA seed
-/// - Multi-seed: XOR-combined into a single 32-byte seed
+/// - Multi-seed: SHA-256(seed1 || seed2 || ...) combined into a single 32-byte seed
 ///
 /// Supports all seed types: `const`, `account`, and `arg`.
 pub fn compute_pda_from_seeds(
@@ -113,11 +120,13 @@ pub fn compute_pda_from_seeds(
         .map(|s| resolve_seed(s, program_id, account_map, parsed_args))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Combine via XOR (matching lez-multisig pattern)
-    let combined = resolved
-        .iter()
-        .skip(1)
-        .fold(resolved[0], |acc, seed| xor_bytes(&acc, seed));
+    // Single seed: use directly. Multi-seed: SHA-256(seed1 || seed2 || ...)
+    // This avoids XOR commutativity and self-cancellation issues.
+    let combined = if resolved.len() == 1 {
+        resolved[0]
+    } else {
+        hash_seeds(&resolved)
+    };
 
     let pda_seed = PdaSeed::new(combined);
     Ok(AccountId::from((program_id, &pda_seed)))
@@ -171,34 +180,41 @@ mod tests {
     }
 
     #[test]
-    fn test_xor_combines_seeds() {
-        let a = [0xFFu8; 32];
-        let b = [0xFFu8; 32];
-        let result = xor_bytes(&a, &b);
-        assert_eq!(result, [0u8; 32]); // FF XOR FF = 00
+    fn test_hash_seeds_not_commutative() {
+        use risc0_zkvm::sha::{Impl, Sha256};
+        // SHA-256(A || B) != SHA-256(B || A) for A != B
+        let a = [0x01u8; 32];
+        let b = [0x02u8; 32];
+        let ab = hash_seeds(&[a, b]);
+        let ba = hash_seeds(&[b, a]);
+        assert_ne!(ab, ba, "seed order must matter (non-commutative)");
     }
 
     #[test]
-    fn test_multi_seed_xor() {
-        let seeds = vec![
+    fn test_hash_seeds_no_self_cancellation() {
+        // SHA-256(A || A) != zero
+        let a = [0xFFu8; 32];
+        let result = hash_seeds(&[a, a]);
+        assert_ne!(result, [0u8; 32], "identical seeds must not cancel out");
+    }
+
+    #[test]
+    fn test_multi_seed_differs_from_single() {
+        let seeds_multi = vec![
             IdlSeed::Const { value: "test".to_string() },
             IdlSeed::Arg { path: "key".to_string() },
+        ];
+        let seeds_single = vec![
+            IdlSeed::Const { value: "test".to_string() },
         ];
         let program_id: ProgramId = [1u32; 8];
         let mut args = HashMap::new();
         args.insert("key".to_string(), ParsedValue::ByteArray(vec![0u8; 32]));
 
-        // XOR with zeros should give us the const seed padded
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args).unwrap();
+        let multi = compute_pda_from_seeds(&seeds_multi, &program_id, &HashMap::new(), &args).unwrap();
+        let single = compute_pda_from_seeds(&seeds_single, &program_id, &HashMap::new(), &HashMap::new()).unwrap();
 
-        // Same as single const seed
-        let single = compute_pda_from_seeds(
-            &[IdlSeed::Const { value: "test".to_string() }],
-            &program_id,
-            &HashMap::new(),
-            &HashMap::new(),
-        ).unwrap();
-
-        assert_eq!(result, single);
+        // Multi-seed SHA-256 must differ from single seed (no zero-cancellation)
+        assert_ne!(multi, single);
     }
 }

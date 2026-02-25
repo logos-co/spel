@@ -24,19 +24,20 @@ pub fn generate_client(idl: &LezIdl) -> Result<String, String> {
     writeln!(out, "use wallet::WalletCore;").unwrap();
     writeln!(out).unwrap();
 
-    // PDA helper
-    writeln!(out, "/// Compute a PDA by XOR-ing seed bytes (padded/truncated to 32 bytes).").unwrap();
+    // PDA helper — SHA-256(seed1 || seed2 || ...) matching on-chain derivation
+    writeln!(out, "/// Compute a PDA by SHA-256 hashing concatenated seeds.").unwrap();
+    writeln!(out, "/// Matches the on-chain nssa PDA derivation (not XOR).").unwrap();
     writeln!(out, "fn compute_pda(seeds: &[&[u8]]) -> AccountId {{").unwrap();
-    writeln!(out, "    let mut result = [0u8; 32];").unwrap();
+    writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
+    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
     writeln!(out, "    for seed in seeds {{").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
     writeln!(out, "        let len = seed.len().min(32);").unwrap();
     writeln!(out, "        padded[..len].copy_from_slice(&seed[..len]);").unwrap();
-    writeln!(out, "        for (i, b) in padded.iter().enumerate() {{").unwrap();
-    writeln!(out, "            result[i] ^= b;").unwrap();
-    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        hasher.update(&padded);").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out, "    AccountId::from(result)").unwrap();
+    writeln!(out, "    let hash: [u8; 32] = hasher.finalize().into();").unwrap();
+    writeln!(out, "    AccountId::from(hash)").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
