@@ -994,9 +994,10 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                         format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
                     };
 
+                    let rest_json = if acc.is_rest { ",\"rest\":true".to_string() } else { String::new() };
                     format!(
-                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}}}",
-                        name, writable, signer, init, pda_json
+                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}{}}}",
+                        name, writable, signer, init, pda_json, rest_json
                     )
                 })
                 .collect();
