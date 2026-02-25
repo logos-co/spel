@@ -5,17 +5,39 @@ on:
   push:
     branches: [main]
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
-  test:
-    name: Tests
+  unit-tests:
+    name: Unit Tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build (framework + codegen, excluding lez-cli)
+        with:
+          prefix-key: "unit"
+      - name: Build (framework + codegen)
         run: cargo build -p lez-framework -p lez-framework-core -p lez-framework-macros -p lez-client-gen
       - name: Unit tests
         run: cargo test -p lez-framework-core -p lez-framework-macros -p lez-client-gen
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "e2e"
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build (all packages including lez-cli)
+        run: cargo build -p lez-framework -p lez-framework-core -p lez-framework-macros -p lez-client-gen -p lez-cli
       - name: E2E tests
         run: cargo test -p lez-framework
