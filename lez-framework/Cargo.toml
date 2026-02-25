@@ -9,3 +9,7 @@ lez-framework-core = { path = "../lez-framework-core" }
 lez-framework-macros = { path = "../lez-framework-macros" }
 nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", branch = "main", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
+
+[dev-dependencies]
+lez-client-gen = { path = "../lez-client-gen" }
+serde_json = "1"

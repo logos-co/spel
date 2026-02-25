@@ -6,4 +6,5 @@ members = [
     "lez-cli",
     "lez-client-gen",
 ]
+exclude = ["tests/e2e/fixture_program"]
 resolver = "2"
