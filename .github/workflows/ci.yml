@@ -13,7 +13,9 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Build (core + macros)
-        run: cargo build -p lez-framework -p lez-framework-core -p lez-framework-macros
-      - name: Test (core + macros)
-        run: cargo test -p lez-framework -p lez-framework-core -p lez-framework-macros
+      - name: Build (all workspace members)
+        run: cargo build --workspace
+      - name: Unit tests
+        run: cargo test -p lez-framework-core -p lez-framework-macros -p lez-cli -p lez-client-gen
+      - name: E2E tests
+        run: cargo test -p lez-framework
