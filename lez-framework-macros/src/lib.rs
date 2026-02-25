@@ -261,8 +261,12 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     };
 
     // Generate IDL function and const JSON
-    let idl_fn = generate_idl_fn(mod_name, &instructions);
-    let idl_json = generate_idl_json(mod_name, &instructions);
+    let ext_instr_str: Option<String> = config.external_instruction.as_ref().map(|p| {
+        let segments: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
+        segments.join("::")
+    });
+    let idl_fn = generate_idl_fn(mod_name, &instructions, ext_instr_str.as_deref());
+    let idl_json = generate_idl_json(mod_name, &instructions, ext_instr_str.as_deref());
 
     // Assemble everything
     let expanded = quote! {
@@ -813,7 +817,7 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
     result[..8].to_vec()
 }
 
-fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenStream2 {
+fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> TokenStream2 {
     let program_name = mod_name.to_string();
 
     let instruction_literals: Vec<TokenStream2> = instructions
@@ -921,6 +925,13 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
         })
         .collect();
 
+    // Compute instruction_type at proc-macro expansion time
+    let instruction_type_expr = if let Some(ext) = external_instruction {
+        quote! { Some(#ext.to_string()) }
+    } else {
+        quote! { None }
+    };
+
     quote! {
         #[allow(dead_code)]
         pub fn __program_idl() -> lez_framework::idl::LezIdl {
@@ -932,7 +943,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
                 types: vec![],
                 errors: vec![],
                 spec: Some("0.1.0".to_string()),
-                instruction_type: None,
+                instruction_type: #instruction_type_expr,
                 metadata: Some(lez_framework::idl::IdlMetadata {
                     name: #program_name.to_string(),
                     version: "0.1.0".to_string(),
@@ -944,7 +955,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo]) -> TokenS
 
 // ─── IDL generation (JSON string, for PROGRAM_IDL_JSON const) ────────────
 
-fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo]) -> String {
+fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> String {
     let program_name = mod_name.to_string();
 
     let instructions_json: Vec<String> = instructions
@@ -1009,10 +1020,16 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo]) -> Stri
         })
         .collect();
 
+    let instruction_type_suffix = if let Some(ext) = external_instruction {
+        format!(",\"instruction_type\":\"{}\"", ext)
+    } else {
+        String::new()
+    };
     format!(
-        "{{\"version\":\"0.1.0\",\"name\":\"{}\",\"instructions\":[{}],\"accounts\":[],\"types\":[],\"errors\":[]}}",
+        "{{\"version\":\"0.1.0\",\"name\":\"{}\",\"instructions\":[{}],\"accounts\":[],\"types\":[],\"errors\":[]{}}}"    ,
         program_name,
-        instructions_json.join(",")
+        instructions_json.join(","),
+        instruction_type_suffix
     )
 }
 
@@ -1089,8 +1106,27 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         ));
     }
 
+    // Detect external instruction type from the #[lez_program(...)] attr
+    let external_instruction_str: Option<String> = program_mod.attrs.iter()
+        .find(|a| a.path().is_ident("lez_program"))
+        .and_then(|attr| {
+            // Try to parse as lez_program(instruction = "some::Path")
+            let mut ext: Option<String> = None;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("instruction") {
+                    if let Ok(value) = meta.value() {
+                        if let Ok(lit) = value.parse::<syn::LitStr>() {
+                            ext = Some(lit.value());
+                        }
+                    }
+                }
+                Ok(())
+            });
+            ext
+        });
+
     // Generate the IDL JSON
-    let idl_json = generate_idl_json(mod_name, &instructions);
+    let idl_json = generate_idl_json(mod_name, &instructions, external_instruction_str.as_deref());
 
     // Embed the resolved path for cargo tracking
     let resolved = resolved_path.clone();
