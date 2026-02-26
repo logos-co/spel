@@ -380,3 +380,124 @@ fn test_pda_helpers_in_ffi_output() {
         "FFI PDA helper for multi-seed must use SHA256"
     );
 }
+
+#[test]
+fn test_pda_helpers_u64_single_seed() {
+    use lez_framework_core::idl::*;
+    use crate::ffi_codegen::generate_pda_helpers;
+
+    // A PDA with a single u64 arg seed (e.g. proposal_index)
+    let idl = LezIdl {
+        version: "0.1.0".to_string(),
+        name: "test_program".to_string(),
+        instructions: vec![IdlInstruction {
+            name: "create_proposal".to_string(),
+            accounts: vec![IdlAccountItem {
+                name: "proposal".to_string(),
+                writable: true,
+                signer: false,
+                init: true,
+                owner: None,
+                pda: Some(IdlPda {
+                    seeds: vec![IdlSeed::Arg { path: "proposal_index".to_string() }],
+                }),
+                rest: false,
+                visibility: vec![],
+            }],
+            args: vec![IdlArg {
+                name: "proposal_index".to_string(),
+                type_: IdlType::Primitive("u64".to_string()),
+            }],
+            discriminator: None,
+            execution: None,
+            variant: None,
+        }],
+        accounts: vec![],
+        types: vec![],
+        errors: vec![],
+        spec: None,
+        metadata: None,
+        instruction_type: None,
+    };
+
+    let output = generate_pda_helpers(&idl);
+
+    // Function signature: u64 passed by value (no &)
+    assert!(output.contains("pub fn compute_proposal_pda("), "missing fn signature: {}", output);
+    assert!(output.contains("proposal_index: u64"), "u64 param should be by value: {}", output);
+    assert!(!output.contains("proposal_index: &u64"), "u64 param must not be by reference: {}", output);
+    assert!(output.contains("-> AccountId"), "missing return type: {}", output);
+
+    // Single u64 seed: uses to_le_bytes() padded into [u8; 32]
+    assert!(output.contains("to_le_bytes()"), "u64 seed must use to_le_bytes: {}", output);
+    assert!(output.contains("seed_bytes[..8].copy_from_slice"), "must copy 8 bytes of u64: {}", output);
+    assert!(output.contains("PdaSeed::new(seed_bytes)"), "must create PdaSeed: {}", output);
+}
+
+#[test]
+fn test_pda_helpers_u64_multi_seed() {
+    use lez_framework_core::idl::*;
+    use crate::ffi_codegen::generate_pda_helpers;
+
+    // A PDA with const + u64 arg seeds (e.g. proposal with index)
+    let idl = LezIdl {
+        version: "0.1.0".to_string(),
+        name: "test_program".to_string(),
+        instructions: vec![IdlInstruction {
+            name: "create_proposal".to_string(),
+            accounts: vec![IdlAccountItem {
+                name: "proposal".to_string(),
+                writable: true,
+                signer: false,
+                init: true,
+                owner: None,
+                pda: Some(IdlPda {
+                    seeds: vec![
+                        IdlSeed::Arg { path: "create_key".to_string() },
+                        IdlSeed::Arg { path: "proposal_index".to_string() },
+                    ],
+                }),
+                rest: false,
+                visibility: vec![],
+            }],
+            args: vec![
+                IdlArg {
+                    name: "create_key".to_string(),
+                    type_: IdlType::Primitive("[u8; 32]".to_string()),
+                },
+                IdlArg {
+                    name: "proposal_index".to_string(),
+                    type_: IdlType::Primitive("u64".to_string()),
+                },
+            ],
+            discriminator: None,
+            execution: None,
+            variant: None,
+        }],
+        accounts: vec![],
+        types: vec![],
+        errors: vec![],
+        spec: None,
+        metadata: None,
+        instruction_type: None,
+    };
+
+    let output = generate_pda_helpers(&idl);
+
+    // Function signature: [u8;32] by ref, u64 by value
+    assert!(output.contains("pub fn compute_proposal_pda("), "missing fn signature: {}", output);
+    assert!(output.contains("create_key: &[u8; 32]"), "create_key should be by reference: {}", output);
+    assert!(output.contains("proposal_index: u64"), "u64 param should be by value: {}", output);
+    assert!(!output.contains("proposal_index: &u64"), "u64 param must not be by reference: {}", output);
+
+    // Multi-seed: uses SHA256
+    assert!(output.contains("Sha256"), "multi-seed must use SHA256: {}", output);
+    assert!(output.contains("hasher.update"), "must call hasher.update: {}", output);
+
+    // u64 seed uses to_le_bytes, not as &[u8]
+    assert!(output.contains("proposal_index.to_le_bytes()"), "u64 seed must use to_le_bytes: {}", output);
+    assert!(!output.contains("proposal_index as &[u8]"), "u64 must not use as &[u8]: {}", output);
+
+    // [u8;32] seed uses as &[u8]
+    assert!(output.contains("create_key as &[u8]"), "byte array seed must use as &[u8]: {}", output);
+}

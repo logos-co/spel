@@ -331,11 +331,21 @@ pub fn generate_pda_helpers(idl: &LezIdl) -> String {
                 writeln!(out, "/// Compute PDA for `{}` account.", acc.name).unwrap();
                 writeln!(out, "/// Seeds: [{}]", seed_desc.join(", ")).unwrap();
 
+                // Build a type map for seed loops to look up arg types
+                let param_type_map: std::collections::HashMap<String, String> =
+                    params.iter().cloned().collect();
+
                 // Function signature
                 write!(out, "pub fn compute_{}_pda(", acc_name).unwrap();
                 write!(out, "program_id: &ProgramId").unwrap();
                 for (name, ty) in &params {
-                    write!(out, ", {}: &{}", name, ty).unwrap();
+                    // Primitive scalars (u64, u32, etc.) are passed by value
+                    let is_scalar = matches!(ty.as_str(), "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128");
+                    if is_scalar {
+                        write!(out, ", {}: {}", name, ty).unwrap();
+                    } else {
+                        write!(out, ", {}: &{}", name, ty).unwrap();
+                    }
                 }
                 writeln!(out, ") -> AccountId {{").unwrap();
 
@@ -350,7 +360,14 @@ pub fn generate_pda_helpers(idl: &LezIdl) -> String {
                         }
                         IdlSeed::Arg { path } => {
                             let pname = rust_ident(path);
-                            writeln!(out, "    let seed_bytes: [u8; 32] = *{};", pname).unwrap();
+                            let arg_ty = param_type_map.get(&pname).map(|s| s.as_str()).unwrap_or("");
+                            if arg_ty == "u64" {
+                                // u64 single seed: pad little-endian bytes into [u8; 32]
+                                writeln!(out, "    let mut seed_bytes = [0u8; 32];").unwrap();
+                                writeln!(out, "    seed_bytes[..8].copy_from_slice(&{}.to_le_bytes());", pname).unwrap();
+                            } else {
+                                writeln!(out, "    let seed_bytes: [u8; 32] = *{};", pname).unwrap();
+                            }
                         }
                         IdlSeed::Account { path } => {
                             let pname = rust_ident(path);
@@ -376,7 +393,13 @@ pub fn generate_pda_helpers(idl: &LezIdl) -> String {
                             }
                             IdlSeed::Arg { path } => {
                                 let pname = rust_ident(path);
-                                writeln!(out, "    hasher.update({} as &[u8]);", pname).unwrap();
+                                let arg_ty = param_type_map.get(&pname).map(|s| s.as_str()).unwrap_or("");
+                                if arg_ty == "u64" {
+                                    // u64 seed: hash the little-endian bytes directly
+                                    writeln!(out, "    hasher.update(&{}.to_le_bytes());", pname).unwrap();
+                                } else {
+                                    writeln!(out, "    hasher.update({} as &[u8]);", pname).unwrap();
+                                }
                             }
                             IdlSeed::Account { path } => {
                                 let pname = rust_ident(path);
