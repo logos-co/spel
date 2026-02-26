@@ -180,6 +180,11 @@ pub fn generate_ffi(idl: &LezIdl) -> Result<String, String> {
         }
         writeln!(out).unwrap();
 
+        // Build a type map for PDA seed arg type checks (same pattern as generate_pda_helpers)
+        let param_type_map: std::collections::HashMap<String, String> = ix.args.iter()
+            .map(|a| (rust_ident(&a.name), idl_type_to_rust(&a.type_)))
+            .collect();
+
         // Resolve accounts
         for acc in &ix.accounts {
             let name = rust_ident(&acc.name);
@@ -194,7 +199,15 @@ pub fn generate_ffi(idl: &LezIdl) -> Result<String, String> {
                     match seed {
                         IdlSeed::Const { value } => writeln!(out, "        b\"{value}\",").unwrap(),
                         IdlSeed::Account { path } => writeln!(out, "        {}.as_ref(),", rust_ident(path)).unwrap(),
-                        IdlSeed::Arg { path } => writeln!(out, "        &{} as &[u8],", rust_ident(path)).unwrap(),
+                        IdlSeed::Arg { path } => {
+                            let pname = rust_ident(path);
+                            let arg_ty = param_type_map.get(&pname).map(|s| s.as_str()).unwrap_or("");
+                            if arg_ty == "u64" {
+                                writeln!(out, "        &{pname}.to_le_bytes(),").unwrap();
+                            } else {
+                                writeln!(out, "        &{pname} as &[u8],").unwrap();
+                            }
+                        }
                     }
                 }
                 writeln!(out, "    ]);").unwrap();
