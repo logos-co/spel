@@ -36,6 +36,23 @@ pub struct LezIdl {
     /// Example: "multisig_core::Instruction"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_type: Option<String>,
+    /// Standalone PDA account definitions for generating compute helpers.
+    /// Used for PDAs whose seeds include args not present in any instruction
+    /// (e.g. proposal_index which comes from on-chain state, not instruction args).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pda_accounts: Vec<IdlPdaAccount>,
+}
+
+/// A standalone PDA account definition for standalone PDA helper generation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdlPdaAccount {
+    /// Account name (snake_case). The generated function will be `compute_{name}_pda`.
+    pub name: String,
+    /// PDA seed definitions.
+    pub seeds: Vec<IdlSeed>,
+    /// Argument definitions for seeds of type `arg`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<IdlArg>,
 }
 
 /// Program metadata (lssa-lang compat).
@@ -201,6 +218,7 @@ impl LezIdl {
             spec: None,
             metadata: None,
             instruction_type: None,
+            pda_accounts: vec![],
         }
     }
 
