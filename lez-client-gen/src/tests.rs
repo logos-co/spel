@@ -199,3 +199,184 @@ fn test_rest_accounts() {
     // FFI should handle rest accounts as optional array, defaulting to empty
     assert!(output.ffi_code.contains("signers"));
 }
+
+#[test]
+fn test_pda_helpers_single_arg_seed() {
+    use lez_framework_core::idl::*;
+    use crate::ffi_codegen::generate_pda_helpers;
+
+    let idl = LezIdl {
+        version: "0.1.0".to_string(),
+        name: "test_program".to_string(),
+        instructions: vec![IdlInstruction {
+            name: "create".to_string(),
+            accounts: vec![IdlAccountItem {
+                name: "multisig_state".to_string(),
+                writable: true,
+                signer: false,
+                init: true,
+                owner: None,
+                pda: Some(IdlPda {
+                    seeds: vec![IdlSeed::Arg { path: "create_key".to_string() }],
+                }),
+                rest: false,
+                visibility: vec![],
+            }],
+            args: vec![IdlArg {
+                name: "create_key".to_string(),
+                type_: IdlType::Primitive("[u8; 32]".to_string()),
+
+            }],
+            discriminator: None,
+            execution: None,
+            variant: None,
+        }],
+        accounts: vec![],
+        types: vec![],
+        errors: vec![],
+        spec: None,
+        metadata: None,
+        instruction_type: None,
+    };
+
+    let output = generate_pda_helpers(&idl);
+
+    // Function signature
+    assert!(output.contains("pub fn compute_multisig_state_pda("), "missing fn signature: {}", output);
+    assert!(output.contains("program_id: &ProgramId"), "missing program_id param: {}", output);
+    assert!(output.contains("create_key: &[u8; 32]"), "missing create_key param: {}", output);
+    assert!(output.contains("-> AccountId"), "missing return type: {}", output);
+
+    // Single-seed: use directly (no SHA256)
+    assert!(output.contains("PdaSeed::new(seed_bytes)"), "missing PdaSeed::new: {}", output);
+    assert!(output.contains("AccountId::from((program_id, &pda_seed))"), "missing AccountId::from: {}", output);
+
+    // Single seed means no SHA256 hasher
+    assert!(!output.contains("Sha256"), "single-seed should not use SHA256: {}", output);
+}
+
+#[test]
+fn test_pda_helpers_multi_seed() {
+    use lez_framework_core::idl::*;
+    use crate::ffi_codegen::generate_pda_helpers;
+
+    let idl = LezIdl {
+        version: "0.1.0".to_string(),
+        name: "test_program".to_string(),
+        instructions: vec![IdlInstruction {
+            name: "create".to_string(),
+            accounts: vec![IdlAccountItem {
+                name: "multisig_state".to_string(),
+                writable: true,
+                signer: false,
+                init: true,
+                owner: None,
+                pda: Some(IdlPda {
+                    seeds: vec![
+                        IdlSeed::Const { value: "multisig_state__".to_string() },
+                        IdlSeed::Arg { path: "create_key".to_string() },
+                    ],
+                }),
+                rest: false,
+                visibility: vec![],
+            }],
+            args: vec![IdlArg {
+                name: "create_key".to_string(),
+                type_: IdlType::Primitive("[u8; 32]".to_string()),
+
+            }],
+            discriminator: None,
+            execution: None,
+            variant: None,
+        }],
+        accounts: vec![],
+        types: vec![],
+        errors: vec![],
+        spec: None,
+        metadata: None,
+        instruction_type: None,
+    };
+
+    let output = generate_pda_helpers(&idl);
+
+    // Function signature
+    assert!(output.contains("pub fn compute_multisig_state_pda("), "missing fn signature: {}", output);
+    assert!(output.contains("create_key: &[u8; 32]"), "missing create_key param: {}", output);
+
+    // Multi-seed: must use SHA256
+    assert!(output.contains("Sha256"), "multi-seed must use SHA256: {}", output);
+    assert!(output.contains("hasher.update"), "must call hasher.update: {}", output);
+    assert!(output.contains("multisig_state__"), "must inline const seed: {}", output);
+
+    // Doc comment seeds annotation
+    assert!(output.contains("Seeds: ["), "missing Seeds doc comment: {}", output);
+    assert!(output.contains("arg(create_key)"), "missing arg seed in doc: {}", output);
+}
+
+#[test]
+fn test_pda_helpers_deduplication() {
+    use lez_framework_core::idl::*;
+    use crate::ffi_codegen::generate_pda_helpers;
+
+    // Same account name appears in two instructions — should only generate one helper
+    let make_ix = |name: &str| IdlInstruction {
+        name: name.to_string(),
+        accounts: vec![IdlAccountItem {
+            name: "shared_state".to_string(),
+            writable: true,
+            signer: false,
+            init: false,
+            owner: None,
+            pda: Some(IdlPda {
+                seeds: vec![IdlSeed::Arg { path: "my_key".to_string() }],
+            }),
+            rest: false,
+            visibility: vec![],
+        }],
+        args: vec![IdlArg {
+            name: "my_key".to_string(),
+            type_: IdlType::Primitive("[u8; 32]".to_string()),
+        }],
+        discriminator: None,
+        execution: None,
+        variant: None,
+    };
+
+    let idl = LezIdl {
+        version: "0.1.0".to_string(),
+        name: "test_program".to_string(),
+        instructions: vec![make_ix("create"), make_ix("update")],
+        accounts: vec![],
+        types: vec![],
+        errors: vec![],
+        spec: None,
+        metadata: None,
+        instruction_type: None,
+    };
+
+    let output = generate_pda_helpers(&idl);
+
+    // Should appear exactly once
+    let count = output.matches("pub fn compute_shared_state_pda(").count();
+    assert_eq!(count, 1, "account PDA helper should be generated exactly once, got {}", count);
+}
+
+#[test]
+fn test_pda_helpers_in_ffi_output() {
+    // Verify generate_ffi includes PDA helpers in its output
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+
+    // The SAMPLE_IDL has multisig_state with a 2-seed PDA (const + arg)
+    assert!(
+        output.ffi_code.contains("pub fn compute_multisig_state_pda("),
+        "FFI output must include PDA helper function"
+    );
+    assert!(
+        output.ffi_code.contains("create_key: &[u8; 32]"),
+        "FFI PDA helper must have create_key param"
+    );
+    assert!(
+        output.ffi_code.contains("Sha256"),
+        "FFI PDA helper for multi-seed must use SHA256"
+    );
+}

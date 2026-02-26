@@ -273,7 +273,128 @@ pub fn generate_ffi(idl: &LezIdl) -> Result<String, String> {
     writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
 
+    // PDA compute helpers
+    out.push_str(&generate_pda_helpers(idl));
     Ok(out)
+}
+
+/// Generate standalone PDA compute helper functions from an IDL.
+///
+/// Emits one `pub fn compute_{account}_pda(...)` per unique account that has
+/// a `pda` field in the IDL. The generated functions use SHA-256 to combine
+/// multiple seeds (matching `lez-cli/src/pda.rs` behaviour) and return an
+/// `AccountId` derived from the program ID and the combined seed.
+pub fn generate_pda_helpers(idl: &LezIdl) -> String {
+    use std::collections::HashSet;
+    let mut out = String::new();
+    let mut seen: HashSet<String> = HashSet::new();
+
+    for ix in &idl.instructions {
+        for acc in &ix.accounts {
+            let acc_name = snake_case(&acc.name);
+            if let Some(pda) = &acc.pda {
+                if !seen.insert(acc_name.clone()) {
+                    continue; // already generated for this account name
+                }
+
+                // Collect function parameters from arg seeds.
+                // Const seeds are inlined; account seeds get a TODO comment.
+                let mut params: Vec<(String, String)> = Vec::new();
+                for seed in &pda.seeds {
+                    match seed {
+                        IdlSeed::Arg { path } => {
+                            let ty = ix.args.iter().find(|a| a.name == *path)
+                                .map(|a| idl_type_to_rust(&a.type_))
+                                .unwrap_or_else(|| "[u8; 32]".to_string());
+                            // Normalise aliases to raw array types for cleaner FFI signatures
+                            let param_ty = match ty.as_str() {
+                                "AccountId" => "[u8; 32]".to_string(),
+                                "ProgramId" => "[u32; 8]".to_string(),
+                                other => other.to_string(),
+                            };
+                            params.push((rust_ident(path), param_ty));
+                        }
+                        IdlSeed::Account { .. } => {
+                            // account seeds: less common, skipped (see TODO inside generated fn)
+                        }
+                        IdlSeed::Const { .. } => {}
+                    }
+                }
+
+                // Doc comment
+                writeln!(out).unwrap();
+                let seed_desc: Vec<String> = pda.seeds.iter().map(|s| match s {
+                    IdlSeed::Const { value } => format!("const(\"{}\")", value),
+                    IdlSeed::Arg { path } => format!("arg({})", path),
+                    IdlSeed::Account { path } => format!("account({})", path),
+                }).collect();
+                writeln!(out, "/// Compute PDA for `{}` account.", acc.name).unwrap();
+                writeln!(out, "/// Seeds: [{}]", seed_desc.join(", ")).unwrap();
+
+                // Function signature
+                write!(out, "pub fn compute_{}_pda(", acc_name).unwrap();
+                write!(out, "program_id: &ProgramId").unwrap();
+                for (name, ty) in &params {
+                    write!(out, ", {}: &{}", name, ty).unwrap();
+                }
+                writeln!(out, ") -> AccountId {{").unwrap();
+
+                let n_seeds = pda.seeds.len();
+                if n_seeds == 1 {
+                    // Single seed: use directly as PdaSeed bytes
+                    match &pda.seeds[0] {
+                        IdlSeed::Const { value } => {
+                            writeln!(out, "    let mut seed_bytes = [0u8; 32];").unwrap();
+                            writeln!(out, "    let src = b\"{}\";", value).unwrap();
+                            writeln!(out, "    seed_bytes[..src.len()].copy_from_slice(src);").unwrap();
+                        }
+                        IdlSeed::Arg { path } => {
+                            let pname = rust_ident(path);
+                            writeln!(out, "    let seed_bytes: [u8; 32] = *{};", pname).unwrap();
+                        }
+                        IdlSeed::Account { path } => {
+                            let pname = rust_ident(path);
+                            writeln!(out, "    // TODO: account seed '{}' — pass the raw AccountId bytes here", path).unwrap();
+                            writeln!(out, "    let seed_bytes: [u8; 32] = *{};", pname).unwrap();
+                        }
+                    }
+                    writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(seed_bytes);").unwrap();
+                    writeln!(out, "    AccountId::from((program_id, &pda_seed))").unwrap();
+                } else {
+                    // Multi-seed: SHA-256(seed1 || seed2 || ...) — matches lez-cli/src/pda.rs
+                    writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
+                    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
+                    for seed in &pda.seeds {
+                        match seed {
+                            IdlSeed::Const { value } => {
+                                writeln!(out, "    {{").unwrap();
+                                writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
+                                writeln!(out, "        let src = b\"{}\";", value).unwrap();
+                                writeln!(out, "        padded[..src.len()].copy_from_slice(src);").unwrap();
+                                writeln!(out, "        hasher.update(&padded);").unwrap();
+                                writeln!(out, "    }}").unwrap();
+                            }
+                            IdlSeed::Arg { path } => {
+                                let pname = rust_ident(path);
+                                writeln!(out, "    hasher.update({} as &[u8]);", pname).unwrap();
+                            }
+                            IdlSeed::Account { path } => {
+                                let pname = rust_ident(path);
+                                writeln!(out, "    // TODO: account seed '{}' — use account bytes", path).unwrap();
+                                writeln!(out, "    hasher.update({} as &[u8]);", pname).unwrap();
+                            }
+                        }
+                    }
+                    writeln!(out, "    let combined: [u8; 32] = hasher.finalize().into();").unwrap();
+                    writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(combined);").unwrap();
+                    writeln!(out, "    AccountId::from((program_id, &pda_seed))").unwrap();
+                }
+                writeln!(out, "}}").unwrap();
+            }
+        }
+    }
+
+    out
 }
 
 /// Generate a C header file from an IDL.
