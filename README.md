@@ -189,6 +189,12 @@ lez-cli --idl program-idl.json --dry-run -p program.bin \
 lez-cli --idl program-idl.json -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
+# Use --program-id instead of binary (skips loading the file)
+lez-cli --idl program-idl.json --program-id <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
+
+# Compute a PDA from the IDL
+lez-cli --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+
 # Auto-fill program IDs from binaries
 lez-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
