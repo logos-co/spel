@@ -225,6 +225,7 @@ lez-cli --idl program-idl.json create-vault --help
 | `lez-framework-core` | IDL types, error types, `LezOutput` |
 | `lez-framework-macros` | Proc macros: `#[lez_program]`, `#[instruction]`, `generate_idl!` |
 | `lez-cli` | Generic IDL-driven CLI with TX submission + project scaffolding |
+| `lez-client-gen` | Code generator — produces typed Rust FFI clients from IDL JSON |
 
 ## License
 
