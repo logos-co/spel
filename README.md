@@ -210,7 +210,10 @@ lez-cli --idl program-idl.json create-vault --help
 | `u8`, `u32`, `u64`, `u128` | Decimal number |
 | `[u8; N]` | Hex string (2×N chars) or UTF-8 string (≤N chars, right-padded) |
 | `[u32; 8]` / `program_id` | Comma-separated u32s: `"0,0,0,0,0,0,0,0"` |
+| `Vec<u8>` | Comma-separated decimal bytes: `"0,1,2"` |
+| `Vec<u32>` | Comma-separated decimal u32s: `"0,200,0,0,0"` |
 | `Vec<[u8; 32]>` | Comma-separated hex or base58: `"addr1,addr2"` |
+| `rest` accounts | Comma-separated base58/hex: `--foo-account "addr1,addr2"` |
 | `Option<T>` | Value or `"none"` |
 | Account IDs | Base58 or 64-char hex |
 
