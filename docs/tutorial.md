@@ -736,7 +736,7 @@ cargo build --release --lib
 
 ## Next Steps
 
-- **Read the [Reference](reference.md)** for complete API documentation
+- **Read the [Reference](reference/README.md)** for complete API documentation
 - **Study [lez-multisig](https://github.com/logos-co/lez-multisig)** for a production-quality example with multi-seed PDAs, variable-length accounts, and external instruction enums
 - **Generate client code** with `lez-client-gen` for integrating your program into applications
 - **Write tests** — the `#[cfg(not(test))]` gate on `main()` means your handlers are directly callable in host-side tests:
