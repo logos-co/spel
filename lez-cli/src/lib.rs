@@ -15,6 +15,7 @@ pub mod serialize;
 pub mod pda;
 pub mod tx;
 pub mod inspect;
+pub mod account_inspect;
 pub mod cli;
 pub mod init;
 
@@ -43,6 +44,8 @@ pub async fn run() {
     let mut program_path = "program.bin".to_string();
     let mut program_id_hex: Option<String> = None;
     let mut dry_run = false;
+    let mut type_name: Option<String> = None;
+    let mut data_hex: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut i = 1;
@@ -60,6 +63,14 @@ pub async fn run() {
             "--program-id" => {
                 i += 1;
                 if i < args.len() { program_id_hex = Some(args[i].clone()); }
+            }
+            "--type" | "-t" => {
+                i += 1;
+                if i < args.len() { type_name = Some(args[i].clone()); }
+            }
+            "--data" | "-d" => {
+                i += 1;
+                if i < args.len() { data_hex = Some(args[i].clone()); }
             }
             "--dry-run" => { dry_run = true; }
             s if s.starts_with("--bin-") => {
@@ -85,8 +96,41 @@ pub async fn run() {
                 init_project(name);
                 return;
             }
-            "inspect" => {
+            "inspect" if type_name.is_none() && data_hex.is_none() && idl_path.is_empty() => {
                 inspect_binaries(&remaining_args[2..]);
+                return;
+            }
+            "inspect" => {
+                // Account inspection mode: --type and --idl required
+                if idl_path.is_empty() {
+                    eprintln!("Account inspection requires --idl <IDL_FILE>");
+                    process::exit(1);
+                }
+                if type_name.is_none() {
+                    eprintln!("Account inspection requires --type <TypeName>");
+                    process::exit(1);
+                }
+                let account_id = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                    process::exit(1);
+                });
+                let idl_content = match fs::read_to_string(&idl_path) {
+                    Ok(c) => c,
+                    Err(e) => {
+                        eprintln!("Error reading IDL '{}': {}", idl_path, e);
+                        process::exit(1);
+                    }
+                };
+                let idl: LezIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
+                    eprintln!("Error parsing IDL: {}", e);
+                    process::exit(1);
+                });
+                account_inspect::inspect_account(
+                    account_id,
+                    &idl,
+                    type_name.as_ref().unwrap(),
+                    data_hex.as_deref(),
+                ).await;
                 return;
             }
             "pda" if program_id_hex.is_some() && remaining_args.get(2).map(|s| !s.starts_with("--")).unwrap_or(false) => {
@@ -108,6 +152,7 @@ pub async fn run() {
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new LEZ project");
         eprintln!("  inspect <FILE> [FILE...]  Print ProgramId for ELF binary(ies)");
+        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>  Decode account data");
         eprintln!();
         eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
         eprintln!("  pda --program-id <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
@@ -139,6 +184,18 @@ pub async fn run() {
         }
         Some("idl") => {
             println!("{}", serde_json::to_string_pretty(&idl).unwrap());
+        }
+        Some("inspect") if type_name.is_some() => {
+            let account_id = remaining_args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                process::exit(1);
+            });
+            account_inspect::inspect_account(
+                account_id,
+                &idl,
+                type_name.as_ref().unwrap(),
+                data_hex.as_deref(),
+            ).await;
         }
         Some("inspect") => {
             inspect_binaries(&remaining_args[2..]);
