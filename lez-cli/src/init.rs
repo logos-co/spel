@@ -141,7 +141,7 @@ clean: ## Remove saved state
     // README
     write_file(root, "README.md", &format!(r#"# {name}
 
-A LEZ program built with [lez-framework](https://github.com/jimmy-claw/lez-framework).
+A LEZ program built with [lez-framework](https://github.com/logos-co/spel).
 
 ## Prerequisites
 
@@ -224,6 +224,7 @@ edition = "2021"
 [dependencies]
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
+
 "#));
 
     write_file(root, &format!("{}_core/src/lib.rs", snake_name), r#"use serde::{Deserialize, Serialize};
@@ -243,10 +244,10 @@ version = "0.1.0"
 edition = "2021"
 
 [build-dependencies]
-risc0-build = "3.0"
+risc0-build = "=3.0.5"
 
 [dependencies]
-risc0-zkvm = {{ version = "3.0.3", features = ["std"] }}
+risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 "#));
 
@@ -274,19 +275,17 @@ path = "src/bin/{snake_name}.rs"
 
 [dependencies]
 lez-framework = {{ git = "https://github.com/jimmy-claw/lez-framework.git" }}
-lez-framework-core = {{ git = "https://github.com/jimmy-claw/lez-framework.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", branch = "main" }}
-risc0-zkvm = {{ version = "3.0.3", default-features = false }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }}
+risc0-zkvm = {{ version = "=3.0.5", default-features = false }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
+
 "#));
 
     // Guest program skeleton
     write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
 use lez_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
@@ -345,7 +344,7 @@ path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
 lez-framework = {{ git = "https://github.com/jimmy-claw/lez-framework.git" }}
-lez-framework-core = {{ git = "https://github.com/jimmy-claw/lez-framework.git" }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }}
 lez-cli = {{ git = "https://github.com/jimmy-claw/lez-framework.git" }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
@@ -369,6 +368,32 @@ async fn main() {
 "#);
 
     println!();
+    // Generate Cargo.lock for the guest to pin dependency versions
+    // (prevents getrandom 0.3.x breakage in Docker builds)
+    let guest_dir = root.join("methods/guest");
+    let status = std::process::Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&guest_dir)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with: {}", s),
+        Err(e) => eprintln!("⚠️  Failed to generate Cargo.lock (cargo not found?): {}", e),
+    }
+
+    // Generate Cargo.lock for the guest to pin dependency versions
+    // (prevents getrandom 0.3.x resolution issues in Docker builds)
+    let guest_dir = root.join("methods/guest");
+    let status = std::process::Command::new("cargo")
+        .arg("generate-lockfile")
+        .current_dir(&guest_dir)
+        .status();
+    match status {
+        Ok(s) if s.success() => {}
+        Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with {}", s),
+        Err(e) => eprintln!("⚠️  Could not run cargo generate-lockfile: {}", e),
+    }
+
     println!("✅ Project '{}' created!", name);
     println!();
     println!("Next steps:");
