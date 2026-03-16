@@ -1,10 +1,16 @@
-# lez-framework
+# SPEL — Smart Program Execution Layer
 
-[![CI](https://github.com/jimmy-claw/lez-framework/actions/workflows/ci.yml/badge.svg)](https://github.com/jimmy-claw/lez-framework/actions/workflows/ci.yml)
+[![CI](https://github.com/logos-co/spel/actions/workflows/ci.yml/badge.svg)](https://github.com/logos-co/spel/actions/workflows/ci.yml)
 
-Developer framework for building LEZ programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
+Developer framework for building [LEZ](https://github.com/logos-blockchain/lssa) programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
 Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
+
+## Documentation
+
+- **[Tutorial: Build Your First LEZ Program](docs/tutorial.md)** — step-by-step guide from zero to deployed program
+- **[Reference Docs](docs/reference/)** — macros, types, CLI, IDL, and client generation
+- **[Multi-Seed PDA Guide](docs/multi-seed-pda.md)** — advanced PDA derivation patterns
 
 ## Quick Start
 
@@ -16,7 +22,7 @@ lez-cli init my-program
 cd my-program
 ```
 
-This generates a complete project:
+This generates a complete project with a `Cargo.lock` for reproducible builds:
 
 ```
 my-program/
@@ -27,6 +33,7 @@ my-program/
 │   └── src/lib.rs
 ├── methods/
 │   └── guest/                 # RISC Zero guest (runs on-chain)
+│       ├── Cargo.lock         # Pinned deps for reproducible Docker builds
 │       └── src/bin/my_program.rs
 └── examples/
     └── src/bin/
@@ -49,8 +56,6 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 ```rust
 #![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
 use lez_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
@@ -63,7 +68,7 @@ mod my_program {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = literal("state"))]
-        state: AccountWithMetadata,
+        mut state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> LezResult {
@@ -77,7 +82,7 @@ mod my_program {
     #[instruction]
     pub fn transfer(
         #[account(mut, pda = literal("state"))]
-        state: AccountWithMetadata,
+        mut state: AccountWithMetadata,
         recipient: AccountWithMetadata,
         #[account(signer)]
         sender: AccountWithMetadata,
@@ -92,6 +97,8 @@ mod my_program {
     }
 }
 ```
+
+> **Note:** Import everything from `lez_framework::prelude::*` — this provides `AccountWithMetadata`, `AccountPostState`, `LezOutput`, `LezResult`, `LezError`, `BorshSerialize`, `BorshDeserialize`, and more. Do not import from `nssa_core` directly to avoid version conflicts.
 
 ### Account Attributes
 
@@ -143,7 +150,7 @@ This provides:
 - risc0-compatible serialization
 - Transaction building and submission with wallet integration
 - `--dry-run` mode for testing
-- `inspect` subcommand to extract ProgramId from binaries
+- `inspect` subcommand to extract ProgramId from binaries and decode account data
 
 ### IDL Generation
 
@@ -159,15 +166,15 @@ It reads the `#[lez_program]` annotations at compile time and generates a comple
 
 The generated IDL is a superset of the lssa-lang IDL spec. In addition to our core fields, each instruction includes:
 
-- **discriminator** -- SHA256 of global:name, first 8 bytes, matching lssa-lang convention
-- **execution** -- public/private_owned flags (default: public execution)
-- **variant** -- PascalCase variant name
+- **discriminator** — SHA256 of global:name, first 8 bytes, matching lssa-lang convention
+- **execution** — public/private_owned flags (default: public execution)
+- **variant** — PascalCase variant name
 
 Each account field includes:
 
-- **visibility** -- list of visibility tags (default: public)
+- **visibility** — list of visibility tags (default: public)
 
-These fields are optional and backward-compatible -- existing IDL consumers that do not know about them will simply ignore them.
+These fields are optional and backward-compatible — existing IDL consumers that do not know about them will simply ignore them.
 
 ## CLI Usage
 
@@ -177,6 +184,9 @@ lez-cli init my-program
 
 # Inspect program binaries (no --idl needed)
 lez-cli inspect program.bin
+
+# Inspect with raw data (offline, no sequencer needed)
+lez-cli inspect --data <hex-encoded-borsh> --idl program-idl.json
 
 # Show available commands
 lez-cli --idl program-idl.json --help
@@ -190,10 +200,12 @@ lez-cli --idl program-idl.json -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Use --program-id instead of binary (skips loading the file)
-lez-cli --idl program-idl.json --program-id <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
+lez-cli --idl program-idl.json --program-id <64-char-hex> \
+  create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Compute a PDA from the IDL
-lez-cli --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+lez-cli --idl program-idl.json --program-id <64-char-hex> \
+  pda vault --create-key my-multisig
 
 # Auto-fill program IDs from binaries
 lez-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
@@ -229,4 +241,4 @@ lez-cli --idl program-idl.json create-vault --help
 
 ## License
 
-MIT
+Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE-v2).
