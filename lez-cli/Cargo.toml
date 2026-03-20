@@ -9,7 +9,7 @@ name = "lez-cli"
 path = "src/bin/main.rs"
 
 [dependencies]
-lez-framework-core = { path = "../lez-framework-core" }
+lez-framework-core = { path = "../lez-framework-core", features = ["idl-gen"] }
 nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }
 nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }
 wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }

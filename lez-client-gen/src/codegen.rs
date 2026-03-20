@@ -1,6 +1,7 @@
 //! Typed Rust client generation from LEZ IDL.
 
 use lez_framework_core::idl::*;
+use std::collections::HashSet;
 use std::fmt::Write;
 use crate::util::*;
 
@@ -20,25 +21,9 @@ pub fn generate_client(idl: &LezIdl) -> Result<String, String> {
     writeln!(out, "    AccountId, ProgramId, PublicTransaction,").unwrap();
     writeln!(out, "    public_transaction::{{Message, WitnessSet}},").unwrap();
     writeln!(out, "}};").unwrap();
+    writeln!(out, "use borsh::BorshDeserialize;").unwrap();
     writeln!(out, "use serde::{{Deserialize, Serialize}};").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
-    writeln!(out).unwrap();
-
-    // PDA helper — SHA-256(seed1 || seed2 || ...) matching on-chain derivation
-    writeln!(out, "/// Compute a PDA by SHA-256 hashing concatenated seeds.").unwrap();
-    writeln!(out, "/// Matches the on-chain nssa PDA derivation (not XOR).").unwrap();
-    writeln!(out, "fn compute_pda(seeds: &[&[u8]]) -> AccountId {{").unwrap();
-    writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
-    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
-    writeln!(out, "    for seed in seeds {{").unwrap();
-    writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
-    writeln!(out, "        let len = seed.len().min(32);").unwrap();
-    writeln!(out, "        padded[..len].copy_from_slice(&seed[..len]);").unwrap();
-    writeln!(out, "        hasher.update(&padded);").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "    let hash: [u8; 32] = hasher.finalize().into();").unwrap();
-    writeln!(out, "    AccountId::from(hash)").unwrap();
-    writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     // Parse helpers
@@ -56,6 +41,27 @@ pub fn generate_client(idl: &LezIdl) -> Result<String, String> {
     writeln!(out, "    Ok(pid)").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
+
+    // --- Standalone PDA computation helpers ---
+    let pda_helpers = collect_pda_helpers(idl);
+    for helper in &pda_helpers {
+        writeln!(out, "/// Compute PDA for the `{}` account.", helper.account_name).unwrap();
+        write!(out, "pub fn compute_{}_pda(program_id: &ProgramId", helper.account_name).unwrap();
+        for (pname, pty) in &helper.params {
+            write!(out, ", {}: {}", pname, pty).unwrap();
+        }
+        writeln!(out, ") -> AccountId {{").unwrap();
+        for binding in &helper.let_bindings {
+            writeln!(out, "    {}", binding).unwrap();
+        }
+        writeln!(out, "    lez_framework_core::pda::compute_pda(program_id, &[").unwrap();
+        for expr in &helper.seed_exprs {
+            writeln!(out, "        {},", expr).unwrap();
+        }
+        writeln!(out, "    ])").unwrap();
+        writeln!(out, "}}").unwrap();
+        writeln!(out).unwrap();
+    }
 
     // Instruction enum
     writeln!(out, "#[derive(Clone, Debug, Serialize, Deserialize)]").unwrap();
@@ -161,45 +167,134 @@ pub fn generate_client(idl: &LezIdl) -> Result<String, String> {
         writeln!(out, "    }}").unwrap();
     }
 
-    // PDA helpers
-    for ix in &idl.instructions {
-        for acc in &ix.accounts {
-            if let Some(pda) = &acc.pda {
-                writeln!(out).unwrap();
-                let method_name = format!("compute_{}_pda", snake_case(&acc.name));
-                let mut pda_args: Vec<(String, String)> = Vec::new();
-                for seed in &pda.seeds {
-                    match seed {
-                        IdlSeed::Account { path } => pda_args.push((snake_case(path), "AccountId".to_string())),
-                        IdlSeed::Arg { path } => {
-                            let ty = ix.args.iter().find(|a| a.name == *path)
-                                .map(|a| idl_type_to_rust(&a.type_))
-                                .unwrap_or_else(|| "String".to_string());
-                            pda_args.push((snake_case(path), ty));
-                        }
-                        IdlSeed::Const { .. } => {}
-                    }
-                }
-                write!(out, "    pub fn {}(", method_name).unwrap();
-                for (i, (name, ty)) in pda_args.iter().enumerate() {
-                    if i > 0 { write!(out, ", ").unwrap(); }
-                    write!(out, "{}: &{}", name, ty).unwrap();
-                }
-                writeln!(out, ") -> AccountId {{").unwrap();
-                writeln!(out, "        compute_pda(&[").unwrap();
-                for seed in &pda.seeds {
-                    match seed {
-                        IdlSeed::Const { value } => writeln!(out, "            b\"{}\",", value).unwrap(),
-                        IdlSeed::Account { path } => writeln!(out, "            {}.as_ref(),", snake_case(path)).unwrap(),
-                        IdlSeed::Arg { path } => writeln!(out, "            {}.to_string().as_bytes(),", snake_case(path)).unwrap(),
-                    }
-                }
-                writeln!(out, "        ])").unwrap();
-                writeln!(out, "    }}").unwrap();
-            }
+    // --- State fetch+deserialize helpers ---
+    for helper in &pda_helpers {
+        writeln!(out).unwrap();
+        writeln!(out, "    /// Fetch and deserialize the `{}` account state.", helper.account_name).unwrap();
+        write!(out, "    pub async fn fetch_{}<T: BorshDeserialize>(\n        &self", helper.account_name).unwrap();
+        for (pname, pty) in &helper.params {
+            write!(out, ",\n        {}: {}", pname, pty).unwrap();
         }
+        writeln!(out, ",\n    ) -> Result<T, String> {{").unwrap();
+        write!(out, "        let account_id = compute_{}_pda(&self.program_id", helper.account_name).unwrap();
+        for (pname, _) in &helper.params {
+            write!(out, ", {}", pname).unwrap();
+        }
+        writeln!(out, ");").unwrap();
+        writeln!(out, "        let account = self.wallet.sequencer_client").unwrap();
+        writeln!(out, "            .get_account(account_id).await").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"fetch {}: {{}}\", e))?;", helper.account_name).unwrap();
+        writeln!(out, "        T::try_from_slice(&account.data)").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"deserialize {}: {{}}\", e))", helper.account_name).unwrap();
+        writeln!(out, "    }}").unwrap();
     }
 
     writeln!(out, "}}").unwrap();
     Ok(out)
+}
+
+/// Information about a PDA helper to generate.
+struct PdaHelper {
+    account_name: String,
+    params: Vec<(String, String)>,  // (param_name, param_type) for non-const seeds
+    let_bindings: Vec<String>,      // let bindings needed before compute_pda call
+    seed_exprs: Vec<String>,        // seed slice expressions for compute_pda
+}
+
+/// Collect unique PDA accounts across all instructions, deduplicating by account name.
+fn collect_pda_helpers(idl: &LezIdl) -> Vec<PdaHelper> {
+    let mut seen = HashSet::new();
+    let mut helpers = Vec::new();
+
+    for ix in &idl.instructions {
+        for acc in &ix.accounts {
+            if let Some(pda) = &acc.pda {
+                let account_name = snake_case(&acc.name);
+                if !seen.insert(account_name.clone()) {
+                    continue;
+                }
+
+                let mut params = Vec::new();
+                let mut let_bindings = Vec::new();
+                let mut seed_exprs = Vec::new();
+
+                for seed in &pda.seeds {
+                    match seed {
+                        IdlSeed::Const { value } => {
+                            let var = format!("seed_const_{}", let_bindings.len());
+                            let_bindings.push(format!(
+                                "let {} = lez_framework_core::pda::seed_from_str(\"{}\");",
+                                var, value
+                            ));
+                            seed_exprs.push(format!("&{}", var));
+                        }
+                        IdlSeed::Account { path } => {
+                            let name = snake_case(path);
+                            params.push((name.clone(), "&AccountId".to_string()));
+                            seed_exprs.push(format!("{}.value()", name));
+                        }
+                        IdlSeed::Arg { path } => {
+                            let name = snake_case(path);
+                            let ty = ix.args.iter()
+                                .find(|a| a.name == *path)
+                                .map(|a| idl_type_to_rust(&a.type_))
+                                .unwrap_or_else(|| "String".to_string());
+
+                            let (param_ty, binding, expr) = seed_arg_codegen(&name, &ty);
+                            params.push((name, param_ty));
+                            if let Some(b) = binding {
+                                let_bindings.push(b);
+                            }
+                            seed_exprs.push(expr);
+                        }
+                    }
+                }
+
+                helpers.push(PdaHelper {
+                    account_name,
+                    params,
+                    let_bindings,
+                    seed_exprs,
+                });
+            }
+        }
+    }
+    helpers
+}
+
+/// Generate codegen expressions for a seed argument based on its Rust type.
+/// Returns (param_type, optional_let_binding, seed_expression).
+fn seed_arg_codegen(name: &str, rust_type: &str) -> (String, Option<String>, String) {
+    match rust_type {
+        "AccountId" => (
+            "&AccountId".to_string(),
+            None,
+            format!("{}.value()", name),
+        ),
+        "[u8; 32]" | "[u8;32]" => (
+            format!("&{}", rust_type),
+            None,
+            format!("{}", name),
+        ),
+        "ProgramId" | "[u32; 8]" | "[u32;8]" => (
+            "&ProgramId".to_string(),
+            Some(format!("let {name}_seed: [u8; 32] = {name}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>().try_into().unwrap();")),
+            format!("&{name}_seed"),
+        ),
+        "u64" | "u32" | "u16" | "u8" | "u128" | "i64" | "i32" | "i16" | "i8" | "i128" => (
+            rust_type.to_string(),
+            Some(format!("let {name}_be = {name}.to_be_bytes();\n    let mut {name}_seed = [0u8; 32];\n    {name}_seed[..{name}_be.len()].copy_from_slice(&{name}_be);")),
+            format!("&{name}_seed"),
+        ),
+        "String" => (
+            "&str".to_string(),
+            Some(format!("let {name}_seed = lez_framework_core::pda::seed_from_str({name});")),
+            format!("&{name}_seed"),
+        ),
+        _ => (
+            format!("&{}", rust_type),
+            Some(format!("let {name}_seed = lez_framework_core::pda::seed_from_str(&{name}.to_string());")),
+            format!("&{name}_seed"),
+        ),
+    }
 }

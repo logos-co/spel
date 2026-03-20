@@ -10,9 +10,19 @@ pub fn init_project(name: &str) {
         std::process::exit(1);
     }
 
-    println!("🚀 Creating LEZ project '{}'...", name);
+    // Extract just the directory name for use as the project name,
+    // so absolute paths like "/tmp/my-project" yield "my-project".
+    let project_name = root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| {
+            eprintln!("❌ Could not extract project name from '{}'", name);
+            std::process::exit(1);
+        });
 
-    let snake_name = name.replace('-', "_");
+    println!("🚀 Creating LEZ project '{}'...", project_name);
+
+    let snake_name = project_name.replace('-', "_");
 
     // Create directories
     let dirs = [
@@ -52,7 +62,7 @@ methods/guest/target/
 "#));
 
     // Makefile
-    write_file(root, "Makefile", &format!(r#"# {name} — LEZ Program
+    write_file(root, "Makefile", &format!(r#"# {project_name} — LEZ Program
 #
 # Quick start:
 #   make build idl deploy setup
@@ -61,7 +71,7 @@ methods/guest/target/
 
 SHELL := /bin/bash
 STATE_FILE := .{snake_name}-state
-IDL_FILE := {name}-idl.json
+IDL_FILE := {project_name}-idl.json
 PROGRAMS_DIR := methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
 
@@ -77,7 +87,7 @@ endef
 .PHONY: help build idl cli deploy setup inspect status clean
 
 help: ## Show this help
-	@echo "{name} — LEZ Program"
+	@echo "{project_name} — LEZ Program"
 	@echo ""
 	@echo "  make build       Build the guest binary (needs risc0 toolchain)"
 	@echo "  make idl         Generate IDL from program source"
@@ -123,7 +133,7 @@ setup: ## Create accounts needed for the program
 	@echo "✅ Account saved to $(STATE_FILE)"
 
 status: ## Show saved state and binary info
-	@echo "{name} Status"
+	@echo "{project_name} Status"
 	@echo "──────────────────────────────────────"
 	@if [ -f "$(STATE_FILE)" ]; then cat $(STATE_FILE); else echo "(no state — run 'make setup')"; fi
 	@echo ""
@@ -139,7 +149,7 @@ clean: ## Remove saved state
 "#));
 
     // README
-    write_file(root, "README.md", &format!(r#"# {name}
+    write_file(root, "README.md", &format!(r#"# {project_name}
 
 A LEZ program built with [lez-framework](https://github.com/logos-co/spel).
 
@@ -189,7 +199,7 @@ make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 ## Project Structure
 
 ```
-{name}/
+{project_name}/
 ├── {snake_name}_core/    # Shared types (used by guest + host)
 │   └── src/lib.rs
 ├── methods/
@@ -200,7 +210,7 @@ make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 │       ├── generate_idl.rs    # One-liner IDL generator
 │       └── {snake_name}_cli.rs # Three-line CLI wrapper
 ├── Makefile
-└── {name}-idl.json       # Auto-generated IDL
+└── {project_name}-idl.json       # Auto-generated IDL
 ```
 
 ## How It Works
@@ -352,10 +362,10 @@ tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "ma
 "#));
 
     // generate_idl.rs
-    write_file(root, "examples/src/bin/generate_idl.rs", &format!(r#"/// Generate IDL JSON for the {name} program.
+    write_file(root, "examples/src/bin/generate_idl.rs", &format!(r#"/// Generate IDL JSON for the {project_name} program.
 ///
 /// Usage:
-///   cargo run --bin generate_idl > {name}-idl.json
+///   cargo run --bin generate_idl > {project_name}-idl.json
 
 lez_framework::generate_idl!("../methods/guest/src/bin/{snake_name}.rs");
 "#));
@@ -394,7 +404,7 @@ async fn main() {
         Err(e) => eprintln!("⚠️  Could not run cargo generate-lockfile: {}", e),
     }
 
-    println!("✅ Project '{}' created!", name);
+    println!("✅ Project '{}' created!", project_name);
     println!();
     println!("Next steps:");
     println!("  cd {}", name);

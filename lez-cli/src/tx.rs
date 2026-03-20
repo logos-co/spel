@@ -8,7 +8,7 @@ use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
 use nssa_core::program::ProgramId;
 use lez_framework_core::idl::{IdlSeed, LezIdl, IdlInstruction};
-use crate::hex::{hex_encode, decode_bytes_32};
+use crate::hex::hex_encode;
 use crate::parse::{parse_value, ParsedValue};
 use crate::serialize::serialize_to_risc0;
 use crate::pda::compute_pda_from_seeds;
@@ -56,7 +56,7 @@ pub async fn execute_instruction(
     for acc in &ix.accounts {
         // rest accounts are variadic (0 or more) — never required
         if acc.pda.is_none() && !acc.rest {
-            let key = format!("{}-account", snake_to_kebab(&acc.name));
+            let key = snake_to_kebab(&acc.name);
             if !args.contains_key(&key) {
                 missing.push(format!("--{}", key));
             }
@@ -85,8 +85,8 @@ pub async fn execute_instruction(
     let mut rest_accounts: Vec<(&str, Vec<Vec<u8>>)> = Vec::new();
     for acc in &ix.accounts {
         if acc.pda.is_some() { continue; }
-        if acc.rest { let key = format!("{}-account", snake_to_kebab(&acc.name)); if !args.contains_key(&key) { continue; } }
-        let key = format!("{}-account", snake_to_kebab(&acc.name));
+        if acc.rest { let key = snake_to_kebab(&acc.name); if !args.contains_key(&key) { continue; } }
+        let key = snake_to_kebab(&acc.name);
         if acc.rest {
             // variadic: optional, comma-separated list of account IDs (0 entries is valid)
             let entries: Vec<Vec<u8>> = if let Some(raw) = args.get(&key) {
@@ -218,7 +218,7 @@ pub async fn execute_instruction(
             for seed in &pda.seeds {
                 if let IdlSeed::Account { path } = seed {
                     if !account_map.contains_key(path) {
-                        let key = format!("{}-account", snake_to_kebab(path));
+                        let key = snake_to_kebab(path);
                         if let Some(raw) = args.get(&key) {
                             match decode_bytes_32(raw) {
                                 Ok(bytes) => {

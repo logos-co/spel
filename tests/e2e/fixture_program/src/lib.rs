@@ -24,6 +24,30 @@ mod treasury {
         Ok(LezOutput::states_only(vec![]))
     }
 
+
+    /// Create a user vault (PDA from arg seed).
+    #[instruction]
+    pub fn create_vault(
+        #[account(init, pda = arg("owner_key"))]
+        vault: AccountWithMetadata,
+        #[account(signer)]
+        owner: AccountWithMetadata,
+        owner_key: [u8; 32],
+    ) -> LezResult {
+        Ok(LezOutput::states_only(vec![]))
+    }
+
+    /// Create a user config (PDA from literal + arg multi-seed).
+    #[instruction]
+    pub fn create_config(
+        #[account(init, pda = [literal("config"), arg("user_id")])]
+        config: AccountWithMetadata,
+        #[account(signer)]
+        admin: AccountWithMetadata,
+        user_id: [u8; 32],
+    ) -> LezResult {
+        Ok(LezOutput::states_only(vec![]))
+    }
     /// Transfer funds.
     #[instruction]
     pub fn transfer(
@@ -57,9 +81,8 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 2);
+        assert_eq!(idl.instructions.len(), 4);
         assert_eq!(idl.instructions[0].name, "initialize");
-        assert_eq!(idl.instructions[1].name, "transfer");
     }
 
     #[test]
@@ -67,7 +90,7 @@ mod tests {
         let idl: lez_framework::idl::LezIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 2);
+        assert_eq!(idl.instructions.len(), 4);
     }
 
     #[test]
@@ -90,7 +113,7 @@ mod tests {
     #[test]
     fn transfer_instruction_metadata() {
         let idl = __program_idl();
-        let ix = &idl.instructions[1];
+        let ix = &idl.instructions[3];
         assert_eq!(ix.name, "transfer");
         assert_eq!(ix.accounts.len(), 3);
         assert!(ix.accounts[0].writable); // from: mut
@@ -122,4 +145,45 @@ mod tests {
         );
         assert!(result.is_ok());
     }
+
+    #[test]
+    fn create_vault_instruction_metadata() {
+        let idl = __program_idl();
+        let ix = &idl.instructions[1]; // create_vault is second
+        assert_eq!(ix.name, "create_vault");
+        assert_eq!(ix.accounts.len(), 2);
+        assert!(ix.accounts[0].init);
+        assert!(ix.accounts[0].pda.is_some());
+        let pda = ix.accounts[0].pda.as_ref().unwrap();
+        assert_eq!(pda.seeds.len(), 1); // arg seed
+        assert_eq!(ix.args.len(), 1);
+        assert_eq!(ix.args[0].name, "owner_key");
+    }
+
+    #[test]
+    fn create_config_instruction_metadata() {
+        let idl = __program_idl();
+        let ix = &idl.instructions[2]; // create_config is third
+        assert_eq!(ix.name, "create_config");
+        assert_eq!(ix.accounts.len(), 2);
+        assert!(ix.accounts[0].init);
+        assert!(ix.accounts[0].pda.is_some());
+        let pda = ix.accounts[0].pda.as_ref().unwrap();
+        assert_eq!(pda.seeds.len(), 2); // literal + arg
+    }
+
+    #[test]
+    fn handler_create_vault_callable() {
+        let acc = make_account(true);
+        let result = treasury::create_vault(acc.clone(), acc.clone(), [42u8; 32]);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handler_create_config_callable() {
+        let acc = make_account(true);
+        let result = treasury::create_config(acc.clone(), acc.clone(), [99u8; 32]);
+        assert!(result.is_ok());
+    }
+
 }

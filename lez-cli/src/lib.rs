@@ -18,6 +18,7 @@ pub mod inspect;
 pub mod account_inspect;
 pub mod cli;
 pub mod init;
+pub mod generate_idl;
 
 use cli::{print_help, parse_instruction_args, snake_to_kebab};
 use init::init_project;
@@ -133,6 +134,51 @@ pub async fn run() {
                 ).await;
                 return;
             }
+            "generate-idl" => {
+                use lez_framework_core::idl_gen::generate_idl_from_file;
+                use generate_idl::discover_sources;
+
+                let arg = remaining_args.get(2).map(|s| s.as_str());
+                let sources = discover_sources(arg).unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    process::exit(1);
+                });
+
+                if sources.len() == 1 {
+                    match generate_idl_from_file(&sources[0]) {
+                        Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
+                        Err(e) => {
+                            eprintln!("Error: {}", e);
+                            process::exit(1);
+                        }
+                    }
+                } else {
+                    // Multiple programs: write <name>-idl.json for each
+                    let mut had_error = false;
+                    for source in &sources {
+                        match generate_idl_from_file(source) {
+                            Ok(idl) => {
+                                let out_name = format!("{}-idl.json", idl.name);
+                                match fs::write(&out_name, serde_json::to_string_pretty(&idl).unwrap()) {
+                                    Ok(_) => eprintln!("✅ {}", out_name),
+                                    Err(e) => {
+                                        eprintln!("Error writing {}: {}", out_name, e);
+                                        had_error = true;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Error processing {}: {}", source.display(), e);
+                                had_error = true;
+                            }
+                        }
+                    }
+                    if had_error {
+                        process::exit(1);
+                    }
+                }
+                return;
+            }
             "pda" if program_id_hex.is_some() && remaining_args.get(2).map(|s| !s.starts_with("--")).unwrap_or(false) => {
                 // Raw PDA mode: no IDL needed
                 // Triggered when --program-id <hex> is passed as a global flag + pda command
@@ -153,6 +199,7 @@ pub async fn run() {
         eprintln!("  init <name>              Scaffold a new LEZ project");
         eprintln!("  inspect <FILE> [FILE...]  Print ProgramId for ELF binary(ies)");
         eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>  Decode account data");
+        eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
         eprintln!();
         eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
         eprintln!("  pda --program-id <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
