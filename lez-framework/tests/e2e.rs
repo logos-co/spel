@@ -58,7 +58,7 @@ fn e2e_idl_generation() {
     // Top-level fields
     assert_eq!(idl.version, "0.1.0");
     assert_eq!(idl.name, "treasury");
-    assert_eq!(idl.instructions.len(), 2);
+    assert_eq!(idl.instructions.len(), 4);
 
     // initialize instruction
     let init = &idl.instructions[0];
@@ -73,8 +73,30 @@ fn e2e_idl_generation() {
     assert_eq!(init.args.len(), 1);
     assert_eq!(init.args[0].name, "threshold");
 
+    // create_vault instruction
+    let vault = &idl.instructions[1];
+    assert_eq!(vault.name, "create_vault");
+    assert_eq!(vault.accounts.len(), 2);
+    assert!(vault.accounts[0].init, "vault should be init");
+    assert!(vault.accounts[0].pda.is_some(), "vault should have PDA");
+    assert!(vault.accounts[1].signer, "owner should be signer");
+    assert_eq!(vault.args.len(), 1);
+    assert_eq!(vault.args[0].name, "owner_key");
+
+    // create_config instruction
+    let config = &idl.instructions[2];
+    assert_eq!(config.name, "create_config");
+    assert_eq!(config.accounts.len(), 2);
+    assert!(config.accounts[0].init, "config should be init");
+    assert!(config.accounts[0].pda.is_some(), "config should have PDA");
+    let config_pda = config.accounts[0].pda.as_ref().unwrap();
+    assert_eq!(config_pda.seeds.len(), 2);
+    assert!(config.accounts[1].signer, "admin should be signer");
+    assert_eq!(config.args.len(), 1);
+    assert_eq!(config.args[0].name, "user_id");
+
     // transfer instruction
-    let transfer = &idl.instructions[1];
+    let transfer = &idl.instructions[3];
     assert_eq!(transfer.name, "transfer");
     assert_eq!(transfer.accounts.len(), 3);
     assert!(transfer.accounts[0].writable, "from should be writable");

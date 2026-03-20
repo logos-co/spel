@@ -8,6 +8,9 @@ pub mod idl;
 pub mod pda;
 pub mod validation;
 
+#[cfg(feature = "idl-gen")]
+pub mod idl_gen;
+
 pub mod prelude {
     pub use crate::error::{LezError, LezResult};
     pub use crate::pda::{compute_pda, seed_from_str};

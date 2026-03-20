@@ -86,8 +86,9 @@ fn test_parse_and_generate() {
     assert!(output.client_code.contains("async fn create("));
     assert!(output.client_code.contains("async fn approve("));
 
-    // PDA computation lives in the client
-    assert!(output.client_code.contains("compute_multisig_state_pda"));
+    // PDA computation — standalone function
+    assert!(output.client_code.contains("pub fn compute_multisig_state_pda("));
+
 
     // Correct endianness — in client's parse_program_id_hex
     assert!(output.client_code.contains("from_le_bytes"));
@@ -500,4 +501,196 @@ fn test_pda_helpers_u64_multi_seed() {
 
     // [u8;32] seed uses as &[u8]
     assert!(output.contains("create_key as &[u8]"), "byte array seed must use as &[u8]: {}", output);
+}
+
+#[test]
+fn test_standalone_pda_helpers() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    let code = &output.client_code;
+
+    // PDA helper is a standalone pub function (not a method)
+    assert!(
+        code.contains("pub fn compute_multisig_state_pda(program_id: &ProgramId"),
+        "should generate standalone PDA helper with program_id parameter"
+    );
+
+    // Should use lez_framework_core::pda::compute_pda
+    assert!(
+        code.contains("lez_framework_core::pda::compute_pda(program_id"),
+        "PDA helper should use framework core compute_pda"
+    );
+
+    // Should use create_key seed (from first occurrence); [u8; 32] maps to AccountId
+    assert!(
+        code.contains("create_key: &AccountId"),
+        "PDA helper should take create_key arg seed"
+    );
+
+    // Deduplication: only one compute_multisig_state_pda (not two, despite appearing in both instructions)
+    let count = code.matches("pub fn compute_multisig_state_pda(").count();
+    assert_eq!(count, 1, "should deduplicate PDA helpers by account name");
+}
+
+#[test]
+fn test_fetch_helpers() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    let code = &output.client_code;
+
+    // Fetch helper is a method on the client
+    assert!(
+        code.contains("pub async fn fetch_multisig_state<T: BorshDeserialize>("),
+        "should generate fetch helper"
+    );
+
+    // Fetch helper calls PDA computation
+    assert!(
+        code.contains("compute_multisig_state_pda(&self.program_id"),
+        "fetch helper should call PDA helper with self.program_id"
+    );
+
+    // Fetch helper deserializes with Borsh
+    assert!(
+        code.contains("T::try_from_slice("),
+        "fetch helper should use BorshDeserialize"
+    );
+
+    // Fetch helper gets account from sequencer
+    assert!(
+        code.contains("get_account(account_id)"),
+        "fetch helper should fetch account data"
+    );
+
+    // Deduplication: only one fetch_multisig_state
+    let count = code.matches("async fn fetch_multisig_state<").count();
+    assert_eq!(count, 1, "should deduplicate fetch helpers by account name");
+}
+
+#[test]
+fn test_borsh_import() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    assert!(
+        output.client_code.contains("use borsh::BorshDeserialize;"),
+        "should import BorshDeserialize"
+    );
+}
+
+#[test]
+fn test_pda_helper_with_numeric_seed() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "counter",
+        "instructions": [{
+            "name": "increment",
+            "accounts": [
+                {
+                    "name": "counter_state",
+                    "writable": true,
+                    "signer": false,
+                    "init": false,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "counter"},
+                            {"kind": "arg", "path": "counter_id"}
+                        ]
+                    }
+                }
+            ],
+            "args": [
+                {"name": "counter_id", "type": "u64"}
+            ]
+        }]
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+    let code = &output.client_code;
+
+    // u64 arg should be passed by value
+    assert!(
+        code.contains("counter_id: u64"),
+        "numeric seed arg should be passed by value"
+    );
+
+    // Should use to_be_bytes for u64 and pad to [u8; 32]
+    assert!(
+        code.contains("counter_id_be = counter_id.to_be_bytes()"),
+        "should convert u64 to big-endian bytes"
+    );
+
+    // Fetch helper for this account
+    assert!(
+        code.contains("async fn fetch_counter_state<T: BorshDeserialize>("),
+        "should generate fetch helper for counter_state"
+    );
+}
+
+#[test]
+fn test_pda_helper_with_account_seed() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "vault",
+        "instructions": [{
+            "name": "create_vault",
+            "accounts": [
+                {
+                    "name": "vault_state",
+                    "writable": true,
+                    "signer": false,
+                    "init": true,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "vault"},
+                            {"kind": "account", "path": "owner"}
+                        ]
+                    }
+                },
+                {
+                    "name": "owner",
+                    "writable": false,
+                    "signer": true,
+                    "init": false
+                }
+            ],
+            "args": []
+        }]
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+    let code = &output.client_code;
+
+    // Account seed should be &AccountId
+    assert!(
+        code.contains("owner: &AccountId"),
+        "account seed param should be &AccountId"
+    );
+
+    // Should use value() for AccountId to get &[u8; 32]
+    assert!(
+        code.contains("owner.value()"),
+        "should use value() for account seed"
+    );
+}
+
+#[test]
+fn test_no_pda_no_helpers() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "simple",
+        "instructions": [{
+            "name": "do_thing",
+            "accounts": [
+                {"name": "state", "writable": true, "signer": false, "init": false}
+            ],
+            "args": [{"name": "value", "type": "u64"}]
+        }]
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+    let code = &output.client_code;
+
+    // No PDA helpers should be generated
+    assert!(
+        !code.contains("pub fn compute_"),
+        "should not generate PDA helpers when no PDAs"
+    );
+    assert!(
+        !code.contains("async fn fetch_"),
+        "should not generate fetch helpers when no PDAs"
+    );
 }
