@@ -9,7 +9,7 @@ default = []
 idl-gen = ["dep:syn"]
 
 [dependencies]
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b", features = ["host"] }
+nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "9df121704fe3ae8831d616e26157be15e1f3f26d", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }
