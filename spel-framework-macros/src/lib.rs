@@ -251,12 +251,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             };
 
             // Write outputs to zkVM host
-            nssa_core::program::write_nssa_outputs_with_chained_call(
+            nssa_core::program::ProgramOutput::new(
                 instruction_words,
                 pre_states_clone,
                 post_states,
-                chained_calls,
-            );
+            )
+            .with_chained_calls(chained_calls)
+            .write();
         }
     };
 
