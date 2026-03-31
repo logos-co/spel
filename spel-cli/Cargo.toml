@@ -10,9 +10,11 @@ path = "src/bin/main.rs"
 
 [dependencies]
 spel-framework-core = { path = "../spel-framework-core", features = ["idl-gen"] }
-nssa_core = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }
-nssa = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }
-wallet = { git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }
+nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b", features = ["client"] }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }

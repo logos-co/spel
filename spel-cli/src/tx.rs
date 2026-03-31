@@ -13,6 +13,8 @@ use crate::parse::{parse_value, ParsedValue};
 use crate::serialize::serialize_to_risc0;
 use crate::pda::compute_pda_from_seeds;
 use crate::cli::{snake_to_kebab, to_pascal_case};
+use common::transaction::NSSATransaction;
+use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;
 
 /// Execute an instruction: parse args, build TX, optionally submit.
@@ -309,21 +311,21 @@ pub async fn execute_instruction(
     let witness_set = WitnessSet::for_message(&message, &signing_keys);
     let tx = PublicTransaction::new(message, witness_set);
 
-    let response = wallet_core.sequencer_client.send_tx_public(tx).await.unwrap_or_else(|e| {
+    let tx_hash = wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to submit transaction: {:?}", e);
         process::exit(1);
     });
 
     println!("📤 Transaction submitted!");
-    println!("   tx_hash: {}", response.tx_hash);
+    println!("   tx_hash: {}", tx_hash);
     println!("   Waiting for confirmation...");
 
     let poller = wallet::poller::TxPoller::new(
-        wallet_core.config().clone(),
+        wallet_core.config(),
         wallet_core.sequencer_client.clone(),
     );
 
-    match poller.poll_tx(response.tx_hash).await {
+    match poller.poll_tx(tx_hash).await {
         Ok(_) => println!("✅ Transaction confirmed — included in a block."),
         Err(e) => {
             eprintln!("❌ Transaction NOT confirmed: {e:#}");
