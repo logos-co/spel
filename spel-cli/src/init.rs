@@ -286,7 +286,7 @@ path = "src/bin/{snake_name}.rs"
 [dependencies]
 spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
 nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
-risc0-zkvm = {{ version = "=3.0.5", default-features = false }}
+risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
