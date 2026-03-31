@@ -45,6 +45,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use sha2::{{Sha256, Digest}};").unwrap();
     writeln!(out, "use nssa::{{AccountId, ProgramId, PublicTransaction}};").unwrap();
     writeln!(out, "use nssa::public_transaction::{{Message, WitnessSet}};").unwrap();
+    writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
 
     // Import or generate instruction type
@@ -265,9 +266,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "            .map_err(|e| format!(\"message: {{:?}}\", e))?;").unwrap();
         writeln!(out, "        let witness_set = WitnessSet::for_message(&message, &signing_keys);").unwrap();
         writeln!(out, "        let tx = PublicTransaction::new(message, witness_set);").unwrap();
-        writeln!(out, "        wallet.sequencer_client.send_tx_public(tx).await").unwrap();
+        writeln!(out, "        wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
         writeln!(out, "            .map_err(|e| format!(\"submit: {{}}\", e))").unwrap();
-        writeln!(out, "            .map(|r| r.tx_hash.to_string())").unwrap();
+        writeln!(out, "            .map(|r| hex::encode(r.0))").unwrap();
         writeln!(out, "    }})?;").unwrap();
         writeln!(out).unwrap();
         writeln!(out, "    Ok(json!({{\"success\": true, \"tx_hash\": tx_hash}}).to_string())").unwrap();

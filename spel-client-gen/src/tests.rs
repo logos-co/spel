@@ -114,7 +114,7 @@ fn test_ffi_generation() {
     assert!(output.ffi_code.contains("use wallet::WalletCore"));
     assert!(output.ffi_code.contains("tokio::runtime::Runtime::new"));
     assert!(output.ffi_code.contains("rt.block_on"));
-    assert!(output.ffi_code.contains("send_tx_public"));
+    assert!(output.ffi_code.contains("send_transaction"));
 
     // FFI returns tx_hash JSON
     assert!(output.ffi_code.contains("tx_hash"));
@@ -155,7 +155,7 @@ fn test_ffi_calls_client_methods() {
     // The FFI impl builds instruction enum and submits transaction inline
     let ffi = &output.ffi_code;
     assert!(ffi.contains("Message::try_new"), "FFI should build Message");
-    assert!(ffi.contains("send_tx_public"), "FFI should submit transaction");
+    assert!(ffi.contains("send_transaction"), "FFI should submit transaction");
     assert!(ffi.contains("MyMultisigInstruction"), "FFI should reference instruction enum");
 }
 
