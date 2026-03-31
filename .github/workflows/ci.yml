@@ -41,3 +41,40 @@ jobs:
         run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen -p spel
       - name: E2E tests
         run: cargo test -p spel-framework
+
+  privacy-smoke-test:
+    name: Privacy Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "privacy"
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install spel
+        run: cargo install --path spel-cli --locked
+
+      - name: Install LEZ tools
+        run: |
+          # Clone LEZ for sequencer and wallet
+          git clone --depth 1 https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
+          cd /tmp/lssa
+          cargo build --release --features standalone -p sequencer_service -p wallet 2>&1 | tail -20
+          echo "/tmp/lssa/target/release" >> $GITHUB_PATH
+
+      - name: Run privacy smoke test
+        env:
+          RISC0_DEV_MODE: 1
+          RISC0_SKIP_BUILD: 1
+          LSSA_DIR: /tmp/lssa
+        run: |
+          export PATH="/tmp/lssa/target/release:$PATH"
+          bash scripts/smoke-test-privacy.sh /tmp/privacy-smoke
