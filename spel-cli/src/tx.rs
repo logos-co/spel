@@ -8,12 +8,13 @@ use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
 use nssa_core::program::ProgramId;
 use spel_framework_core::idl::{IdlSeed, SpelIdl, IdlInstruction};
-use crate::hex::hex_encode;
+use crate::hex::{hex_encode, decode_bytes_32, parse_account_id};
 use crate::parse::{parse_value, ParsedValue};
 use crate::serialize::serialize_to_risc0;
 use crate::pda::compute_pda_from_seeds;
 use crate::cli::{snake_to_kebab, to_pascal_case};
 use common::transaction::NSSATransaction;
+use hex;
 use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;
 
@@ -82,23 +83,23 @@ pub async fn execute_instruction(
     }
 
     // Parse non-PDA account IDs
-    let mut parsed_accounts: Vec<(&str, Vec<u8>)> = Vec::new();
+    let mut parsed_accounts: Vec<(&str, Vec<u8>, bool)> = Vec::new();
     // rest accounts are variadic: each expands to 0 or more AccountIds
-    let mut rest_accounts: Vec<(&str, Vec<Vec<u8>>)> = Vec::new();
+    let mut rest_accounts: Vec<(&str, Vec<(Vec<u8>, bool)>)> = Vec::new();
     for acc in &ix.accounts {
         if acc.pda.is_some() { continue; }
         if acc.rest { let key = snake_to_kebab(&acc.name); if !args.contains_key(&key) { continue; } }
         let key = snake_to_kebab(&acc.name);
         if acc.rest {
             // variadic: optional, comma-separated list of account IDs (0 entries is valid)
-            let entries: Vec<Vec<u8>> = if let Some(raw) = args.get(&key) {
+            let entries: Vec<(Vec<u8>, bool)> = if let Some(raw) = args.get(&key) {
                 raw.split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .map(|s| {
-                        match decode_bytes_32(s) {
-                            Ok(bytes) => bytes.to_vec(),
-                            Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; vec![] }
+                        match parse_account_id(s) {
+                            Ok((bytes, is_priv)) => (bytes.to_vec(), is_priv),
+                            Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; (vec![], false) }
                         }
                     })
                     .collect()
@@ -108,8 +109,8 @@ pub async fn execute_instruction(
             rest_accounts.push((&acc.name, entries));
         } else {
             let raw = args.get(&key).unwrap();
-            match decode_bytes_32(raw) {
-                Ok(bytes) => parsed_accounts.push((&acc.name, bytes.to_vec())),
+            match parse_account_id(raw) {
+                Ok((bytes, is_priv)) => parsed_accounts.push((&acc.name, bytes.to_vec(), is_priv)),
                 Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; }
             }
         }
@@ -131,13 +132,13 @@ pub async fn execute_instruction(
                 if entries.is_empty() {
                     println!("  📦 {} → (none — variadic rest)", acc.name);
                 } else {
-                    for e in entries {
+                    for (e, _) in entries {
                         println!("  📦 {} → 0x{}", acc.name, hex_encode(e));
                     }
                 }
             }
         } else {
-            let account_bytes = parsed_accounts.iter().find(|(n, _)| *n == acc.name).unwrap();
+            let account_bytes = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name).unwrap();
             println!("  📦 {} → 0x{}", acc.name, hex_encode(&account_bytes.1));
         }
     }
@@ -174,8 +175,7 @@ pub async fn execute_instruction(
     println!("📤 Submitting transaction...");
 
     // Resolve program_id: from --program-id hex flag, or by loading the binary
-    use crate::hex::decode_bytes_32;
-    let program_id: ProgramId = if let Some(hex) = program_id_hex {
+    let (program_id, program_obj): (ProgramId, Option<Program>) = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
             eprintln!("❌ Invalid --program-id '{}': {}", hex, e);
             process::exit(1);
@@ -184,30 +184,32 @@ pub async fn execute_instruction(
         for (i, chunk) in bytes.chunks(4).enumerate() {
             pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
-        pid
+        (pid, None)
     } else {
         let program_bytecode = fs::read(program_path).unwrap_or_else(|e| {
             eprintln!("❌ Failed to read program binary '{}': {}", program_path, e);
             eprintln!("   Hint: pass --program-id <hex> to skip loading the binary");
             process::exit(1);
         });
-        Program::new(program_bytecode).unwrap_or_else(|e| {
+        let program = Program::new(program_bytecode).unwrap_or_else(|e| {
             eprintln!("❌ Failed to load program: {:?}", e);
             process::exit(1);
-        }).id()
+        });
+        let pid = program.id();
+        (pid, Some(program))
     };
     println!("  Program ID: {:?}", program_id);
 
     // Build account map for PDA resolution
     let mut account_map: HashMap<String, AccountId> = HashMap::new();
-    for (name, bytes) in &parsed_accounts {
+    for (name, bytes, _) in &parsed_accounts {
         let mut arr = [0u8; 32];
         arr.copy_from_slice(bytes);
         account_map.insert(name.to_string(), AccountId::new(arr));
     }
     // Note: rest accounts are variadic; store first entry (if any) for PDA seed resolution
     for (name, entries) in &rest_accounts {
-        if let Some(first) = entries.first() {
+        if let Some((first, _)) = entries.first() {
             let mut arr = [0u8; 32];
             arr.copy_from_slice(first);
             account_map.insert(name.to_string(), AccountId::new(arr));
@@ -260,56 +262,143 @@ pub async fn execute_instruction(
         }
     }
 
-    let mut account_ids: Vec<AccountId> = Vec::new();
-    for acc in &ix.accounts {
-        if acc.rest {
-            // expand variadic rest accounts in order (may be 0 or more)
-            if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
-                for bytes in entries {
-                    let mut arr = [0u8; 32];
-                    arr.copy_from_slice(bytes);
-                    account_ids.push(AccountId::new(arr));
-                }
-            }
-        } else {
-            let id = account_map.get(&acc.name).unwrap_or_else(|| {
-                eprintln!("❌ Account '{}' not resolved", acc.name);
-                process::exit(1);
-            });
-            account_ids.push(*id);
-        }
-    }
-
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
 
-    let signer_accounts: Vec<AccountId> = ix.accounts.iter()
-        .filter(|a| a.signer)
-        .map(|a| *account_map.get(&a.name).unwrap())
-        .collect();
+    // Check if any account has a Private/ prefix
+    let has_private = parsed_accounts.iter().any(|(_, _, is_priv)| *is_priv)
+        || rest_accounts.iter().any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
 
-    let nonces = if signer_accounts.is_empty() {
-        vec![]
+    if has_private {
+        // ─── Privacy-preserving transaction ──────────────────
+        use wallet::PrivacyPreservingAccount;
+        use nssa::privacy_preserving_transaction::circuit::ProgramWithDependencies;
+
+        let program = program_obj.unwrap_or_else(|| {
+            eprintln!("❌ Privacy-preserving transactions require the program binary (not --program-id)");
+            process::exit(1);
+        });
+
+        // Build dependencies from extra_bins
+        let mut dependencies = HashMap::new();
+        for (_, bin_path) in extra_bins {
+            if let Ok(bytes) = fs::read(bin_path) {
+                if let Ok(dep_program) = Program::new(bytes) {
+                    dependencies.insert(dep_program.id(), dep_program);
+                }
+            }
+        }
+        let program_with_deps = ProgramWithDependencies::new(program, dependencies);
+
+        // Build privacy-preserving account list
+        let mut pp_accounts: Vec<PrivacyPreservingAccount> = Vec::new();
+        for acc in &ix.accounts {
+            if acc.rest {
+                if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
+                    for (bytes, is_priv) in entries {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(bytes);
+                        let account_id = AccountId::new(arr);
+                        if *is_priv {
+                            pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(account_id));
+                        } else {
+                            pp_accounts.push(PrivacyPreservingAccount::Public(account_id));
+                        }
+                    }
+                }
+            } else if let Some((_, _, is_priv)) = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name) {
+                let id = *account_map.get(&acc.name).unwrap_or_else(|| {
+                    eprintln!("❌ Account '{}' not resolved", acc.name);
+                    process::exit(1);
+                });
+                if *is_priv {
+                    pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(id));
+                } else {
+                    pp_accounts.push(PrivacyPreservingAccount::Public(id));
+                }
+            } else {
+                // PDA account — always public
+                let id = *account_map.get(&acc.name).unwrap_or_else(|| {
+                    eprintln!("❌ Account '{}' not resolved", acc.name);
+                    process::exit(1);
+                });
+                pp_accounts.push(PrivacyPreservingAccount::Public(id));
+            }
+        }
+
+        let (response, _shared_secrets) = wallet_core.send_privacy_preserving_tx(
+            pp_accounts,
+            instruction_data,
+            &program_with_deps,
+        ).await.unwrap_or_else(|e| {
+            eprintln!("❌ Failed to submit privacy-preserving transaction: {:?}", e);
+            process::exit(1);
+        });
+
+        println!("📤 Privacy-preserving transaction submitted!");
+        println!("   tx_hash: {}", hex::encode(response.0));
+        println!("   Waiting for confirmation...");
+
+        let poller = wallet::poller::TxPoller::new(
+            wallet_core.config(),
+            wallet_core.sequencer_client.clone(),
+        );
+
+        match poller.poll_tx(response).await {
+            Ok(_) => println!("✅ Transaction confirmed — included in a block."),
+            Err(e) => {
+                eprintln!("❌ Transaction NOT confirmed: {e:#}");
+                process::exit(1);
+            }
+        }
     } else {
-        wallet_core.get_accounts_nonces(signer_accounts.clone()).await.unwrap_or_else(|e| {
-            eprintln!("❌ Failed to fetch nonces: {:?}", e);
-            process::exit(1);
-        })
-    };
+        // ─── Public transaction (existing path) ──────────────
+        let mut account_ids: Vec<AccountId> = Vec::new();
+        for acc in &ix.accounts {
+            if acc.rest {
+                if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
+                    for (bytes, _) in entries {
+                        let mut arr = [0u8; 32];
+                        arr.copy_from_slice(bytes);
+                        account_ids.push(AccountId::new(arr));
+                    }
+                }
+            } else {
+                let id = account_map.get(&acc.name).unwrap_or_else(|| {
+                    eprintln!("❌ Account '{}' not resolved", acc.name);
+                    process::exit(1);
+                });
+                account_ids.push(*id);
+            }
+        }
 
-    let signing_keys: Vec<_> = signer_accounts.iter().map(|id| {
-        wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
-            eprintln!("❌ Signing key not found for account {}", id);
-            process::exit(1);
-        })
-    }).collect();
+        let signer_accounts: Vec<AccountId> = ix.accounts.iter()
+            .filter(|a| a.signer)
+            .map(|a| *account_map.get(&a.name).unwrap())
+            .collect();
 
-    let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
-    let witness_set = WitnessSet::for_message(&message, &signing_keys);
-    let tx = PublicTransaction::new(message, witness_set);
+        let nonces = if signer_accounts.is_empty() {
+            vec![]
+        } else {
+            wallet_core.get_accounts_nonces(signer_accounts.clone()).await.unwrap_or_else(|e| {
+                eprintln!("❌ Failed to fetch nonces: {:?}", e);
+                process::exit(1);
+            })
+        };
+
+        let signing_keys: Vec<_> = signer_accounts.iter().map(|id| {
+            wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
+                eprintln!("❌ Signing key not found for account {}", id);
+                process::exit(1);
+            })
+        }).collect();
+
+        let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
+        let witness_set = WitnessSet::for_message(&message, &signing_keys);
+        let tx = PublicTransaction::new(message, witness_set);
 
     let tx_hash = wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to submit transaction: {:?}", e);
@@ -332,4 +421,5 @@ pub async fn execute_instruction(
             process::exit(1);
         }
     }
+}
 }

@@ -20,7 +20,13 @@ pub fn hex_decode(hex: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Decode a 32-byte value from base58 or hex string.
+/// Strips "Public/" or "Private/" prefix if present before decoding.
 pub fn decode_bytes_32(input: &str) -> Result<[u8; 32], String> {
+    let input = input
+        .strip_prefix("Public/")
+        .or_else(|| input.strip_prefix("Private/"))
+        .unwrap_or(input);
+
     if let Ok(bytes) = input.from_base58() {
         if bytes.len() == 32 {
             let mut arr = [0u8; 32];
@@ -48,4 +54,11 @@ pub fn decode_bytes_32(input: &str) -> Result<[u8; 32], String> {
             bytes.len()
         ))
     }
+}
+
+/// Parse an account ID, returning the decoded bytes and whether it had a "Private/" prefix.
+pub fn parse_account_id(input: &str) -> Result<([u8; 32], bool), String> {
+    let is_private = input.starts_with("Private/");
+    let bytes = decode_bytes_32(input)?;
+    Ok((bytes, is_private))
 }
