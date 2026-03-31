@@ -1,0 +1,104 @@
+name: LEZ Compatibility Check
+
+on:
+  schedule:
+    # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      lez_ref:
+        description: 'LEZ commit/branch to test against (default: main)'
+        required: false
+        default: 'main'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lez-compat:
+    name: Check SPEL against latest LEZ
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "lez-compat"
+
+      - name: Get latest LEZ commit
+        id: lez
+        run: |
+          REF="${{ github.event.inputs.lez_ref || 'main' }}"
+          COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git "$REF" | head -1 | cut -f1)
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "ref=$REF" >> "$GITHUB_OUTPUT"
+          echo "🔍 Testing against LEZ $REF ($COMMIT)"
+
+      - name: Update LEZ deps to latest
+        run: |
+          COMMIT="${{ steps.lez.outputs.commit }}"
+          echo "Updating all LEZ deps to $COMMIT"
+          
+          # Find all Cargo.toml files with LEZ git deps
+          find . -name Cargo.toml -exec grep -l 'logos-execution-zone\|logos-blockchain/lssa' {} \; | while read f; do
+            # Update rev= pins
+            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$COMMIT\"|g" "$f"
+            # Ensure URL points to new repo name
+            sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
+            echo "  Updated: $f"
+          done
+
+      - name: cargo check (spel-cli)
+        run: cargo check -p spel-cli
+
+      - name: cargo check (spel-framework)
+        run: cargo check -p spel-framework
+
+      - name: cargo check (spel-framework-core)
+        run: cargo check -p spel-framework-core
+
+      - name: Report
+        if: always()
+        run: |
+          echo "## LEZ Compatibility Report" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **LEZ ref:** ${{ steps.lez.outputs.ref }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **LEZ commit:** \`${{ steps.lez.outputs.commit }}\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- **SPEL ref:** \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const commit = '${{ steps.lez.outputs.commit }}';
+            const ref = '${{ steps.lez.outputs.ref }}';
+            const title = `LEZ compatibility broken (${ref}: ${commit.slice(0, 8)})`;
+            
+            // Check for existing open issue
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'lez-compat',
+              per_page: 1,
+            });
+            
+            if (existing.data.length > 0) {
+              // Comment on existing issue
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.data[0].number,
+                body: `Still broken as of LEZ \`${commit}\` (${ref}).\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                labels: ['lez-compat'],
+                body: `The weekly LEZ compatibility check failed.\n\n- **LEZ ref:** ${ref}\n- **LEZ commit:** \`${commit}\`\n- **Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nPlease update SPEL to match the latest LEZ API changes.`,
+              });
+            }
