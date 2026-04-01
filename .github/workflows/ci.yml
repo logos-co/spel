@@ -55,6 +55,8 @@ jobs:
         with:
           prefix-key: "privacy"
 
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
       - name: Extract LEZ commit from Cargo.lock
         id: lez-ref
         run: |
