@@ -162,6 +162,10 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
+# Extra warm-up: wait for first block to be produced
+log "  Waiting for first block..."
+sleep 20
+
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
