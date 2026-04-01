@@ -47,6 +47,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      RISC0_VERSION: "3.0.5"
       LSSA_REF: ffcbc15972adbf557939bf3e2852af276422631b
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +55,14 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "privacy"
+
+      - name: Install risc0 toolchain
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
+          rzup install rust
 
       - name: Install logos-blockchain-circuits
         run: |
