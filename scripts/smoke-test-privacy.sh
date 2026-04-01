@@ -162,9 +162,19 @@ for i in $(seq 1 60); do
     sleep 1
 done
 
-# Extra warm-up: wait for first block to be produced
+# Wait for first block to be produced before proceeding
 log "  Waiting for first block..."
-sleep 20
+for i in $(seq 1 60); do
+    LAST_BLOCK=$(curl -sf -X POST "$SEQUENCER_URL" \
+        -H 'Content-Type: application/json' \
+        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null \
+        | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('result',0))" 2>/dev/null || echo 0)
+    if [ "${LAST_BLOCK:-0}" -gt 0 ] 2>/dev/null; then
+        log "  ✅ First block produced (block $LAST_BLOCK)"
+        break
+    fi
+    sleep 2
+done
 
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
 
