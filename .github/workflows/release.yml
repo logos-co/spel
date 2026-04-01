@@ -192,7 +192,7 @@ jobs:
           body: |
             ## v${{ steps.version.outputs.version }}
 
-            See CHANGELOG.md for full details.
+            ${{ steps.changelog.outputs.body }}
 
             ---
 
