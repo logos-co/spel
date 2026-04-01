@@ -80,6 +80,7 @@ log "Step 2: Setting up test program..."
 cat > "methods/guest/src/bin/${PROJECT_NAME}.rs" << 'RUSTEOF'
 #![no_main]
 use spel_framework::prelude::*;
+use nssa_core::account::Data;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -87,7 +88,8 @@ risc0_zkvm::guest::entry!(main);
 mod privacy_test {
     use super::*;
 
-    /// Greet: appends greeting bytes to account data
+    /// Greet: appends greeting bytes to account data.
+    /// Works with both Public/ and Private/ accounts.
     #[instruction]
     pub fn greet(
         #[account(mut)]
@@ -95,13 +97,10 @@ mod privacy_test {
         greeting: Vec<u8>,
     ) -> SpelResult {
         let mut acc = account.account.clone();
-        let mut data = acc.data.into_inner();
+        let mut data: Vec<u8> = acc.data.into();
         data.extend_from_slice(&greeting);
-        acc.data = data.try_into().map_err(|_| SpelError::custom(999, "data overflow"))?;
-
-        let data_bytes: nssa_core::account::AccountData = data.try_into()
-            .map_err(|_| SpelError::new(999, "data overflow".to_string()))?;
-        acc.data = data_bytes;
+        acc.data = Data::try_from(data)
+            .map_err(|_| SpelError::custom(999, "data too big"))?;
 
         let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
             AccountPostState::new_claimed(acc)
@@ -187,7 +186,7 @@ FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
 if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_ACCOUNT" \
-    --greeting "$(echo -n 'Hello Public' | xxd -p)" \
+    --greeting "[72,101,108,108,111,32,80,117,98,108,105,99]" \
     > "$LOG_DIR/public-tx.log" 2>&1; then
     
     if grep -q "Transaction submitted\|tx_hash" "$LOG_DIR/public-tx.log"; then
@@ -213,7 +212,7 @@ FRESH_PRIVATE="Private/0x$(openssl rand -hex 32)"
 if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_PRIVATE" \
-    --greeting "$(echo -n 'Hello Private' | xxd -p)" \
+    --greeting "[72,101,108,108,111,32,80,114,105,118,97,116,101]" \
     > "$LOG_DIR/private-tx.log" 2>&1; then
     
     if grep -q "privacy-preserving\|PrivacyPreserving\|submitted" "$LOG_DIR/private-tx.log"; then
