@@ -186,7 +186,7 @@ FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
 if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_ACCOUNT" \
-    --greeting "[72,101,108,108,111,32,80,117,98,108,105,99]" \
+    --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
     > "$LOG_DIR/public-tx.log" 2>&1; then
     
     if grep -q "Transaction submitted\|tx_hash" "$LOG_DIR/public-tx.log"; then
@@ -212,7 +212,7 @@ FRESH_PRIVATE="Private/0x$(openssl rand -hex 32)"
 if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_PRIVATE" \
-    --greeting "[72,101,108,108,111,32,80,114,105,118,97,116,101]" \
+    --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \
     > "$LOG_DIR/private-tx.log" 2>&1; then
     
     if grep -q "privacy-preserving\|PrivacyPreserving\|submitted" "$LOG_DIR/private-tx.log"; then
