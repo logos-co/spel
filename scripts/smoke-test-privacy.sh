@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # SPEL Privacy Smoke Test
 # Verifies both public and Private/ prefixed transactions work end-to-end
+# including auth-transfer init for the private account.
 #
 # Usage: ./smoke-test-privacy.sh [WORK_DIR]
 
@@ -168,11 +169,11 @@ log "  ✅ Program deployed"
 
 log "Step 7: Generating test accounts..."
 
-# Create a public account
+# Create a public account (random)
 PUBLIC_ACCOUNT="0x$(openssl rand -hex 32)"
 log "  Public account: ${PUBLIC_ACCOUNT:0:20}..."
 
-# Create a private account  
+# Create a private account via wallet (wallet holds the ZK keys)
 PRIVATE_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new private 2>&1 | grep -o "Private/[^ ]*" | head -1)
 [ -n "$PRIVATE_ACCOUNT" ] || fail "Could not create private account from wallet"
 log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
@@ -180,65 +181,43 @@ log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 # ─── Step 8: Test PUBLIC transaction ────────────────────────────────────
 
 log "Step 8: Testing PUBLIC transaction..."
-
-# Initialize with a fresh account
 FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
 
-if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
-    > "$LOG_DIR/public-tx.log" 2>&1; then
-    
-    if grep -q "Transaction submitted\|tx_hash" "$LOG_DIR/public-tx.log"; then
-        log "  ✅ Public TX submitted successfully"
-    else
-        warn "Public TX submitted but output unclear (see $LOG_DIR/public-tx.log)"
-    fi
-else
-    # Check if it's an expected error (auth-transfer not needed for public)
-    if grep -q "submitted\|included" "$LOG_DIR/public-tx.log" 2>/dev/null; then
-        log "  ✅ Public TX processed (with expected note)"
-    else
-        fail "Public TX failed unexpectedly (see $LOG_DIR/public-tx.log)"
-    fi
-fi
+    > "$LOG_DIR/public-tx.log" 2>&1 || fail "Public TX failed (see $LOG_DIR/public-tx.log)"
 
-# ─── Step 9: Test PRIVACY-PRESERVING transaction ────────────────────────
+log "  ✅ Public TX submitted and confirmed"
 
-log "Step 9: Testing PRIVACY-PRESERVING transaction..."
-FRESH_PRIVATE=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new private 2>&1 | grep -o "Private/[^ ]*" | head -1)
-[ -n "$FRESH_PRIVATE" ] || fail "Could not create second private account"
+# ─── Step 9: Init auth-transfer for private account ─────────────────────
 
-if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+log "Step 9: Initializing auth-transfer for private account..."
+echo "$WALLET_PASSWORD" | $WALLET_BIN auth-transfer init --account-id "$PRIVATE_ACCOUNT" \
+    > "$LOG_DIR/auth-transfer.log" 2>&1 || fail "auth-transfer init failed (see $LOG_DIR/auth-transfer.log)"
+log "  ✅ auth-transfer initialized"
+
+# Wait for auth-transfer TX to be included in a block
+log "  Waiting for auth-transfer to be confirmed..."
+sleep 20
+
+# ─── Step 10: Test PRIVACY-PRESERVING transaction ───────────────────────
+
+log "Step 10: Testing PRIVACY-PRESERVING transaction..."
+SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
-    --account "$FRESH_PRIVATE" \
+    --account "$PRIVATE_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \
-    > "$LOG_DIR/private-tx.log" 2>&1; then
-    
-    if grep -q "privacy-preserving\|PrivacyPreserving\|submitted" "$LOG_DIR/private-tx.log"; then
-        log "  ✅ Private TX routed correctly"
-    else
-        log "  ✅ Private TX submitted (verify routing in log)"
-    fi
-else
-    EXIT_CODE=$?
-    # Privacy TXs may fail if auth-transfer not initialized — that's expected for fresh accounts
-    if grep -q "auth.transfer\|authorization\|not authorized" "$LOG_DIR/private-tx.log" 2>/dev/null; then
-        log "  ✅ Private TX routed to privacy-preserving path (auth-transfer required — expected)"
-    elif grep -q "submitted\|included" "$LOG_DIR/private-tx.log" 2>/dev/null; then
-        log "  ✅ Private TX processed"
-    else
-        warn "Private TX failed (see $LOG_DIR/private-tx.log)"
-        # Don't fail — the routing detection is what we're testing
-    fi
-fi
+    > "$LOG_DIR/private-tx.log" 2>&1 || { cat "$LOG_DIR/private-tx.log"; fail "Private TX failed"; }
+
+log "  ✅ Privacy-preserving TX submitted and confirmed"
 
 # ─── Done ─────────────────────────────────────────────────────────────────
 
 log ""
-log "🎉 Privacy smoke test complete!"
-log "  Logs: $LOG_DIR/"
-log "  Public: $LOG_DIR/public-tx.log"
-log "  Private: $LOG_DIR/private-tx.log"
-log "  Sequencer: $LOG_DIR/sequencer.log"
+log "🎉 Privacy smoke test PASSED!"
+log "  Public TX:       $LOG_DIR/public-tx.log"
+log "  Auth-transfer:   $LOG_DIR/auth-transfer.log"
+log "  Private TX:      $LOG_DIR/private-tx.log"
+log "  Sequencer:       $LOG_DIR/sequencer.log"
