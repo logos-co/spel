@@ -144,14 +144,7 @@ jobs:
             --title "Release v${{ inputs.version }}" \
             --base main \
             --head "release/v${{ inputs.version }}" \
-            --body "## Release v${{ inputs.version }}
-
-This PR prepares the release by:
-- Bumping version in all Cargo.toml files
-- Generating CHANGELOG.md
-- Running tests
-
-**On merge**, the release will be automatically tagged and published."  
+            --body "Release v${{ inputs.version }} — see CHANGELOG.md for details." 
 
   # ── Tag and release on merge ────────────────────────────────────────────
   publish-release:
