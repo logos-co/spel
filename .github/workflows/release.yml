@@ -1,0 +1,119 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Release version (e.g. 0.2.0)'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release:
+    name: Cut Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history for changelog
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      # ── Bump versions ──────────────────────────────────────────────────
+      - name: Bump versions in Cargo.toml files
+        run: |
+          VERSION="${{ inputs.version }}"
+          for toml in \
+            spel-framework-core/Cargo.toml \
+            spel-framework-macros/Cargo.toml \
+            spel-framework/Cargo.toml \
+            spel-client-gen/Cargo.toml \
+            spel-cli/Cargo.toml; do
+            sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$toml"
+            echo "Bumped $toml to $VERSION"
+          done
+
+      # ── Build check ────────────────────────────────────────────────────
+      - name: Cargo check
+        run: cargo check
+
+      - name: Run unit tests
+        run: cargo test --lib
+
+      # ── Generate CHANGELOG ─────────────────────────────────────────────
+      - name: Generate CHANGELOG entry
+        id: changelog
+        run: |
+          VERSION="${{ inputs.version }}"
+          PREV_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+          
+          if [ -z "$PREV_TAG" ]; then
+            RANGE="HEAD"
+            echo "No previous tag found — using full history"
+          else
+            RANGE="${PREV_TAG}..HEAD"
+            echo "Generating changelog from $PREV_TAG to HEAD"
+          fi
+          
+          # Build changelog from conventional commits
+          CHANGELOG=$(git log $RANGE --pretty=format:"- %s (%h)" \
+            --no-merges \
+            | grep -v "^- chore: bump\|^- ci:\|^- chore: retrigger" \
+            || echo "- Various improvements and fixes")
+          
+          DATE=$(date +%Y-%m-%d)
+          ENTRY="## v${VERSION} (${DATE})\n\n${CHANGELOG}"
+          
+          # Prepend to CHANGELOG.md
+          if [ -f CHANGELOG.md ]; then
+            echo -e "${ENTRY}\n\n$(cat CHANGELOG.md)" > CHANGELOG.md
+          else
+            echo -e "# Changelog\n\n${ENTRY}" > CHANGELOG.md
+          fi
+          
+          # Save for GitHub release body
+          echo "entry<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$CHANGELOG" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # ── Commit, tag, push ──────────────────────────────────────────────
+      - name: Commit version bump + changelog
+        run: |
+          VERSION="${{ inputs.version }}"
+          git add -A
+          git commit -m "chore: release v${VERSION}"
+          git tag -a "v${VERSION}" -m "Release v${VERSION}"
+          git push origin main
+          git push origin "v${VERSION}"
+
+      # ── GitHub Release ─────────────────────────────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          body: |
+            ## What's Changed
+
+            ${{ steps.changelog.outputs.entry }}
+
+            ---
+
+            **Installation** (Cargo.toml):
+            ```toml
+            spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v${{ inputs.version }}" }
+            ```
+          draft: false
+          prerelease: false
