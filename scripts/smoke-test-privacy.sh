@@ -173,8 +173,9 @@ PUBLIC_ACCOUNT="0x$(openssl rand -hex 32)"
 log "  Public account: ${PUBLIC_ACCOUNT:0:20}..."
 
 # Create a private account  
-PRIVATE_ACCOUNT="Private/0x$(openssl rand -hex 32)"
-log "  Private account: ${PRIVATE_ACCOUNT:0:25}..."
+PRIVATE_ACCOUNT=$($WALLET_BIN account new private 2>&1 | grep -o "Private/[^ ]*" | head -1)
+[ -n "$PRIVATE_ACCOUNT" ] || fail "Could not create private account from wallet"
+log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 
 # ─── Step 8: Test PUBLIC transaction ────────────────────────────────────
 
@@ -206,8 +207,8 @@ fi
 # ─── Step 9: Test PRIVACY-PRESERVING transaction ────────────────────────
 
 log "Step 9: Testing PRIVACY-PRESERVING transaction..."
-
-FRESH_PRIVATE="Private/0x$(openssl rand -hex 32)"
+FRESH_PRIVATE=$($WALLET_BIN account new private 2>&1 | grep -o "Private/[^ ]*" | head -1)
+[ -n "$FRESH_PRIVATE" ] || fail "Could not create second private account"
 
 if SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
