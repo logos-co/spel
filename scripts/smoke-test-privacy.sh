@@ -97,7 +97,11 @@ mod privacy_test {
         let mut acc = account.account.clone();
         let mut data = acc.data.into_inner();
         data.extend_from_slice(&greeting);
-        acc.data = data.try_into().map_err(|_| "data overflow")?;
+        acc.data = data.try_into().map_err(|_| SpelError::custom(999, "data overflow"))?;
+
+        let data_bytes: nssa_core::account::AccountData = data.try_into()
+            .map_err(|_| SpelError::new(999, "data overflow".to_string()))?;
+        acc.data = data_bytes;
 
         let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
             AccountPostState::new_claimed(acc)
