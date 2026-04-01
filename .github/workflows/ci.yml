@@ -60,7 +60,7 @@ jobs:
       - name: Extract LEZ commit from Cargo.lock
         id: lez-ref
         run: |
-          LEZ_REV=\$(grep -A2 'name = "nssa_core"' Cargo.lock | grep 'source = ' | sed 's/.*rev=\([^#]*\).*/\1/')
+          LEZ_REV=$(grep -A2 'name = "nssa_core"' Cargo.lock | grep 'source = ' | sed 's/.*rev=\\([^#]*\\).*/\\1/')
           echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
           echo "Using LEZ commit: $LEZ_REV"
 
