@@ -46,6 +46,8 @@ jobs:
     name: Privacy Smoke Test
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      LSSA_REF: ffcbc15972adbf557939bf3e2852af276422631b
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -62,13 +64,30 @@ jobs:
       - name: Install spel
         run: cargo install --path spel-cli --locked
 
-      - name: Install LEZ tools
+      - name: Clone LEZ
+        run: git clone --depth 1 https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
+
+      - name: Get LEZ commit hash
+        id: lez-hash
+        run: echo "hash=$(git -C /tmp/lssa rev-parse HEAD)" >> $GITHUB_OUTPUT
+
+      - name: Cache sequencer
+        id: cache-seq
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ steps.lez-hash.outputs.hash }}
+
+      - name: Build sequencer
+        if: steps.cache-seq.outputs.cache-hit != 'true'
         run: |
-          # Clone LEZ for sequencer and wallet
-          git clone --depth 1 https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
           cd /tmp/lssa
-          cargo build --release --features standalone -p sequencer_service -p wallet 2>&1 | tail -20
-          echo "/tmp/lssa/target/release" >> $GITHUB_PATH
+          cargo build --release --features standalone -p sequencer_service
+
+      - name: Build wallet
+        run: |
+          cd /tmp/lssa
+          cargo build --release -p wallet
 
       - name: Run privacy smoke test
         env:
