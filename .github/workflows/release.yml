@@ -136,33 +136,22 @@ jobs:
 
       # ── Open PR ───────────────────────────────────────────────────────
       - name: Create Release PR
-        uses: peter-evans/create-pull-request@v6
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          branch: release/v${{ inputs.version }}
-          title: "Release v${{ inputs.version }}"
-          body: |
-            ## Release v${{ inputs.version }}
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh pr create \
+            --repo logos-co/spel \
+            --title "Release v${{ inputs.version }}" \
+            --base main \
+            --head "release/v${{ inputs.version }}" \
+            --body "## Release v${{ inputs.version }}
 
-            This PR prepares the release by:
-            - Bumping version in all Cargo.toml files
-            - Generating CHANGELOG.md
-            - Running tests
+This PR prepares the release by:
+- Bumping version in all Cargo.toml files
+- Generating CHANGELOG.md
+- Running tests
 
-            **On merge**, the release will be automatically tagged and published.
-
-            ---
-
-            ${{ steps.changelog.outputs.body }}
-
-            ---
-
-            **Installation** (Cargo.toml):
-            ```toml
-            spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v${{ inputs.version }}" }
-            ```
-          base: main
-          delete-branch: true
+**On merge**, the release will be automatically tagged and published."  
 
   # ── Tag and release on merge ────────────────────────────────────────────
   publish-release:
