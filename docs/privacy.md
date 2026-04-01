@@ -64,8 +64,8 @@ The sequencer verifies the proof but never sees plaintext account data.
 
 | Account prefix | Transaction type | ZK proof |
 |---------------|-----------------|----------|
-| `Public/` | `PublicTransaction` | Signature |
-| `Private/` | `PrivacyPreservingTransaction` | RISC0 receipt |
+| `0x...` (public) | `PublicTransaction` | Signature |
+| `Private/...` | `PrivacyPreservingTransaction` | RISC0 receipt |
 | Mixed | `PrivacyPreservingTransaction` | RISC0 receipt |
 
 ## Writing Privacy-Compatible SPEL Programs
@@ -78,17 +78,22 @@ mod my_program {
     #[instruction]
     pub fn store_data(
         #[account(mut)]
-        target: AccountWithMetadata,   // works as Public/ or Private/
+        target: AccountWithMetadata,   // works with public or Private/ accounts
         data: Vec<u8>,
-    ) -> LezResult {
+    ) -> SpelResult {
         let mut account = target.account.clone();
-        account.data = data.try_into()?;
-        Ok(LezOutput::states_only(vec![
+        account.data = Data::try_from(data)
+            .map_err(|_| SpelError::custom(999, "data too large"))?;
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(account),
         ]))
     }
 }
 ```
+
+> **Note:** Programs can only write data to accounts they own. For auth-transfer owned accounts
+> (freshly initialized private accounts), the program can read but not modify data until the
+> account is claimed by the program.
 
 ## Private Account Lifecycle
 
@@ -100,20 +105,3 @@ spel ... --account Private/<id>     # use in any SPEL instruction
 wallet account sync-private         # sync updated state
 wallet account get --account-id ... # read decrypted data
 ```
-
-## IDL Privacy Metadata (optional)
-
-You can mark accounts as intended for private use in the IDL:
-
-```rust
-#[instruction(execution = { private_owned: true })]
-pub fn private_only_instruction(...) -> LezResult
-```
-
-This is informational — it signals to tooling that this instruction expects private accounts. The program logic remains the same.
-
-## Related
-
-- [LEZ Privacy Technical Deep Dive](lez/lez-privacy-technical-deep-dive.md)
-- [Private Multisig (LP-0002)](lez/lp-0002-rfc.md)
-- [SPEL PR #83](https://github.com/logos-co/spel/pull/83) — `Private/` prefix auto-detection
