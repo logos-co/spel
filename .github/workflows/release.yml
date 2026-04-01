@@ -81,10 +81,10 @@ jobs:
           fi
           
           # Categorize commits
-          FEATS=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^feat:" | sed 's/^feat: //' || true)
-          FIXES=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^fix:" | sed 's/^fix: //' || true)
-          BREAKING=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep -E "^feat!:|^fix!:|BREAKING" || true)
-          OTHER=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep -vE "^(feat|fix|feat!|fix!|chore: bump|ci:|chore: retrigger)" || true)
+          FEATS=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^- feat" | sed 's/^- feat[^:]*: //' || true)
+          FIXES=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^- fix" | sed 's/^- fix[^:]*: //' || true)
+          BREAKING=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep -E "^- feat!:|^- fix!:|BREAKING" || true)
+          OTHER=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep -vE "^- (feat|fix|feat!|fix!|chore: bump|ci:|chore: retrigger)" || true)
           
           DATE=$(date +%Y-%m-%d)
           
