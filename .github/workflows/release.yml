@@ -137,16 +137,19 @@ jobs:
           git push origin "release/v${VERSION}"
 
       # ── Open PR ───────────────────────────────────────────────────────
-      - name: Create Release PR
+      - name: Open release issue
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr create \
+          PR_URL="https://github.com/logos-co/spel/compare/main...release/v${{ inputs.version }}?expand=1&title=Release+v${{ inputs.version }}&body=Release+v${{ inputs.version }}"
+          gh issue create \
             --repo logos-co/spel \
-            --title "Release v${{ inputs.version }}" \
-            --base main \
-            --head "release/v${{ inputs.version }}" \
-            --body "Release v${{ inputs.version }} — see CHANGELOG.md for details." 
+            --title "Release v${{ inputs.version }} ready to merge" \
+            --body "Release branch has been prepared. Click to open the PR:\n\n$PR_URL" \
+            --label "release" 2>/dev/null || true
+          echo ""
+          echo "✅ Release branch pushed: release/v${{ inputs.version }}"
+          echo "👉 Open PR manually: $PR_URL" 
 
   # ── Tag and release on merge ────────────────────────────────────────────
   publish-release:
