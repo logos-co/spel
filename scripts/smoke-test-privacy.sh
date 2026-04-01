@@ -90,22 +90,26 @@ mod privacy_test {
     use super::*;
 
     /// Greet: appends greeting bytes to account data.
-    /// Works with both Public/ and Private/ accounts.
+    /// For default (unclaimed) accounts: claims and writes data.
+    /// For already-owned accounts: returns unchanged (privacy TX compatible).
     #[instruction]
     pub fn greet(
         #[account(mut)]
         account: AccountWithMetadata,
         greeting: Vec<u8>,
     ) -> SpelResult {
-        let mut acc = account.account.clone();
-        let mut data: Vec<u8> = acc.data.into();
-        data.extend_from_slice(&greeting);
-        acc.data = Data::try_from(data)
-            .map_err(|_| SpelError::custom(999, "data too big"))?;
+        let acc = account.account.clone();
 
         let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
+            // Unclaimed account: claim it and write greeting
+            let mut acc = acc;
+            let mut data: Vec<u8> = acc.data.into();
+            data.extend_from_slice(&greeting);
+            acc.data = Data::try_from(data)
+                .map_err(|_| SpelError::custom(999, "data too big"))?;
             AccountPostState::new_claimed(acc)
         } else {
+            // Already owned (e.g. by auth-transfer): return unchanged
             AccountPostState::new(acc)
         };
 
