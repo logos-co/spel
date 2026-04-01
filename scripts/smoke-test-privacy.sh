@@ -115,7 +115,7 @@ log "  ✅ Guest program configured"
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
 
 log "Step 3: Building guest binary (RISC0_DEV_MODE=1)..."
-RISC0_SKIP_BUILD= make build > "$LOG_DIR/build.log" 2>&1 || fail "Build failed (see $LOG_DIR/build.log)"
+RISC0_SKIP_BUILD= make build > "$LOG_DIR/build.log" 2>&1 || { cat "$LOG_DIR/build.log"; fail "Build failed"; }
 GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
 [ -n "$GUEST_BIN" ] || fail "No guest binary found"
 GUEST_BIN_ABS="$(realpath "$GUEST_BIN")"
