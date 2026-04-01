@@ -2,7 +2,7 @@
 
 SPEL programs are **privacy-agnostic** — the same program code works identically with both public and private accounts. Privacy is handled at the transaction layer, not the program layer.
 
-## How LEZ Privacy Works
+## How Privacy Works in SPEL
 
 LEZ uses a commitment/nullifier scheme:
 
@@ -81,12 +81,20 @@ mod my_program {
         target: AccountWithMetadata,   // works with public or Private/ accounts
         data: Vec<u8>,
     ) -> SpelResult {
-        let mut account = target.account.clone();
-        account.data = Data::try_from(data)
-            .map_err(|_| SpelError::custom(999, "data too large"))?;
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(account),
-        ]))
+        let acc = target.account.clone();
+
+        // Claim the account if unowned; otherwise return unchanged
+        // (auth-transfer owned accounts cannot have data written to them)
+        let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
+            let mut acc = acc;
+            acc.data = Data::try_from(data)
+                .map_err(|_| SpelError::custom(999, "data too large"))?;
+            AccountPostState::new_claimed(acc)
+        } else {
+            AccountPostState::new(acc)
+        };
+
+        Ok(SpelOutput::states_only(vec![post]))
     }
 }
 ```
