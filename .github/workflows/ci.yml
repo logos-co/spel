@@ -57,10 +57,10 @@ jobs:
 
       - name: Generate Cargo.lock
         run: cargo generate-lockfile
-      - name: Set LEZ commit
+      - name: Extract LEZ commit from spel-framework/Cargo.toml
         id: lez-ref
         run: |
-          LEZ_REV="ffcbc15972adbf557939bf3e2852af276422631b"
+          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -o 'rev = "[^"]*"' | cut -d'"' -f2)
           echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
           echo "Using LEZ commit: $LEZ_REV"
 
