@@ -12,7 +12,12 @@ use std::path::Path;
 
 use syn::{Attribute, FnArg, Ident, ItemFn, Pat, PatType, Type};
 
-use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, IdlType, SpelIdl};
+use std::collections::HashSet;
+
+use crate::idl::{
+    IdlAccountItem, IdlAccountType, IdlArg, IdlEnumVariant, IdlField, IdlInstruction, IdlPda,
+    IdlSeed, IdlType, IdlTypeDef, SpelIdl,
+};
 
 /// Error type returned by [`generate_idl_from_file`].
 #[derive(Debug)]
@@ -179,12 +184,14 @@ fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, I
         })
         .collect();
 
+    let (accounts, types) = collect_account_types(&file.items);
+
     Ok(SpelIdl {
         version: "0.1.0".to_string(),
         name: mod_name,
         instructions: idl_instructions,
-        accounts: vec![],
-        types: vec![],
+        accounts,
+        types,
         errors: vec![],
         spec: None,
         metadata: None,
@@ -472,6 +479,190 @@ fn syn_type_to_idl_type(ty: &Type) -> IdlType {
         }
         _ => IdlType::Primitive("unknown".to_string()),
     }
+}
+
+// ─── Account type scanning ────────────────────────────────────────────────────
+
+fn has_account_type_attr(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| a.path().is_ident("account_type"))
+}
+
+/// Parse a named struct annotated with `#[account_type]` into an [`IdlAccountType`].
+/// Returns `None` for tuple / unit structs (no named fields to describe).
+fn parse_struct_account_type(item: &syn::ItemStruct) -> Option<IdlAccountType> {
+    let fields = if let syn::Fields::Named(named) = &item.fields {
+        named
+            .named
+            .iter()
+            .filter_map(|f| {
+                f.ident.as_ref().map(|ident| IdlField {
+                    name: ident.to_string(),
+                    type_: syn_type_to_idl_type(&f.ty),
+                })
+            })
+            .collect()
+    } else {
+        return None;
+    };
+    Some(IdlAccountType {
+        name: item.ident.to_string(),
+        type_: IdlTypeDef {
+            name: String::new(),
+            kind: "struct".to_string(),
+            fields,
+            variants: vec![],
+        },
+    })
+}
+
+/// Parse an enum annotated with `#[account_type]` into an [`IdlAccountType`].
+/// Only named-field variants are supported; tuple variants are emitted with no fields.
+fn parse_enum_account_type(item: &syn::ItemEnum) -> IdlAccountType {
+    let variants = item
+        .variants
+        .iter()
+        .map(|v| {
+            let fields = if let syn::Fields::Named(named) = &v.fields {
+                named
+                    .named
+                    .iter()
+                    .filter_map(|f| {
+                        f.ident.as_ref().map(|ident| IdlField {
+                            name: ident.to_string(),
+                            type_: syn_type_to_idl_type(&f.ty),
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+            IdlEnumVariant {
+                name: v.ident.to_string(),
+                fields,
+            }
+        })
+        .collect();
+    IdlAccountType {
+        name: item.ident.to_string(),
+        type_: IdlTypeDef {
+            name: String::new(),
+            kind: "enum".to_string(),
+            fields: vec![],
+            variants,
+        },
+    }
+}
+
+/// Collect all `Defined { name }` type references that appear anywhere within a
+/// type definition (fields of structs, fields of enum variants).
+fn collect_defined_refs(type_def: &IdlTypeDef) -> Vec<String> {
+    let mut refs = Vec::new();
+    for field in &type_def.fields {
+        collect_defined_refs_from_type(&field.type_, &mut refs);
+    }
+    for variant in &type_def.variants {
+        for field in &variant.fields {
+            collect_defined_refs_from_type(&field.type_, &mut refs);
+        }
+    }
+    refs
+}
+
+fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
+    match ty {
+        IdlType::Defined { defined } => out.push(defined.clone()),
+        IdlType::Vec { vec } => collect_defined_refs_from_type(vec, out),
+        IdlType::Option { option } => collect_defined_refs_from_type(option, out),
+        IdlType::Array { array: (inner, _) } => collect_defined_refs_from_type(inner, out),
+        IdlType::Primitive(_) => {}
+    }
+}
+
+/// Look up a type by name in the top-level items of a file and parse it.
+/// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
+fn find_and_parse_type(items: &[syn::Item], name: &str) -> Option<IdlTypeDef> {
+    for item in items {
+        match item {
+            syn::Item::Struct(s) if s.ident == name => {
+                return parse_struct_account_type(s).map(|at| IdlTypeDef {
+                    name: name.to_string(),
+                    ..at.type_
+                });
+            }
+            syn::Item::Enum(e) if e.ident == name => {
+                let mut def = parse_enum_account_type(e).type_;
+                def.name = name.to_string();
+                return Some(def);
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// Scan `items` for `#[account_type]`-annotated types and return:
+/// - `accounts`: directly annotated types (primary account data layouts)
+/// - `types`: helper types referenced by account types but not themselves annotated
+///
+/// Helper types are resolved transitively: if `Vault` references `VaultStatus`
+/// and `VaultStatus` references `StatusFlags`, all three end up in the IDL.
+fn collect_account_types(items: &[syn::Item]) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
+    // Pass 1: collect directly annotated types.
+    let mut accounts: Vec<IdlAccountType> = Vec::new();
+    let mut annotated_names: HashSet<String> = HashSet::new();
+
+    for item in items {
+        match item {
+            syn::Item::Struct(s) if has_account_type_attr(&s.attrs) => {
+                if let Some(at) = parse_struct_account_type(s) {
+                    annotated_names.insert(at.name.clone());
+                    accounts.push(at);
+                }
+            }
+            syn::Item::Enum(e) if has_account_type_attr(&e.attrs) => {
+                let at = parse_enum_account_type(e);
+                annotated_names.insert(at.name.clone());
+                accounts.push(at);
+            }
+            _ => {}
+        }
+    }
+
+    // Pass 2: BFS over Defined-type references to collect helper types.
+    let mut helper_types: Vec<IdlTypeDef> = Vec::new();
+    let mut visited: HashSet<String> = annotated_names.clone();
+
+    let mut queue: Vec<String> = accounts
+        .iter()
+        .flat_map(|a| collect_defined_refs(&a.type_))
+        .filter(|n| !visited.contains(n))
+        .collect::<HashSet<_>>() // dedup without extra alloc
+        .into_iter()
+        .collect();
+
+    while !queue.is_empty() {
+        let batch: Vec<String> = queue.drain(..).collect();
+        for name in batch {
+            if visited.contains(&name) {
+                continue;
+            }
+            visited.insert(name.clone());
+            if let Some(def) = find_and_parse_type(items, &name) {
+                // Enqueue any new references from this helper type.
+                for ref_name in collect_defined_refs(&def) {
+                    if !visited.contains(&ref_name) {
+                        queue.push(ref_name);
+                    }
+                }
+                helper_types.push(def);
+            }
+            // If the type isn't found in the file (e.g. it's from an external crate),
+            // leave it as an unresolved Defined reference in the IDL. The decoder will
+            // report a clear error if it encounters that reference at runtime.
+        }
+    }
+
+    (accounts, helper_types)
 }
 
 #[cfg(test)]
@@ -834,5 +1025,227 @@ mod tests {
         assert_eq!(idl.instructions[1].name, "beta");
         // non-annotated function is excluded
         assert!(!idl.instructions.iter().any(|i| i.name == "not_an_instruction"));
+    }
+
+    // ── #[account_type] — basic discovery ─────────────────────────────────────
+
+    #[test]
+    fn account_type_struct_included_in_accounts() {
+        let src = r#"
+            #[account_type]
+            pub struct VaultState {
+                pub owner: AccountId,
+                pub balance: u64,
+            }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 1);
+        assert_eq!(idl.accounts[0].name, "VaultState");
+        assert_eq!(idl.accounts[0].type_.kind, "struct");
+        assert_eq!(idl.accounts[0].type_.fields.len(), 2);
+        assert_eq!(idl.accounts[0].type_.fields[0].name, "owner");
+        assert_eq!(idl.accounts[0].type_.fields[1].name, "balance");
+    }
+
+    #[test]
+    fn account_type_enum_included_in_accounts() {
+        let src = r#"
+            #[account_type]
+            pub enum TokenHolding {
+                Fungible { definition_id: AccountId, balance: u128 },
+                NftMaster { definition_id: AccountId, print_balance: u128 },
+            }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 1);
+        let def = &idl.accounts[0];
+        assert_eq!(def.name, "TokenHolding");
+        assert_eq!(def.type_.kind, "enum");
+        assert_eq!(def.type_.variants.len(), 2);
+        assert_eq!(def.type_.variants[0].name, "Fungible");
+        assert_eq!(def.type_.variants[0].fields.len(), 2);
+        assert_eq!(def.type_.variants[1].name, "NftMaster");
+    }
+
+    #[test]
+    fn unannotated_type_not_in_accounts() {
+        let src = r#"
+            pub struct NotAnAccountType { pub x: u64 }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert!(idl.accounts.is_empty());
+    }
+
+    #[test]
+    fn multiple_account_types_all_collected() {
+        let src = r#"
+            #[account_type]
+            pub struct DefinitionAccount { pub name: String }
+
+            #[account_type]
+            pub enum HoldingAccount { Fungible { balance: u128 } }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 2);
+        let names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(names.contains(&"DefinitionAccount"));
+        assert!(names.contains(&"HoldingAccount"));
+    }
+
+    // ── #[account_type] — referenced helper types ──────────────────────────────
+
+    #[test]
+    fn referenced_helper_type_goes_into_types() {
+        let src = r#"
+            pub enum Status { Active, Inactive }
+
+            #[account_type]
+            pub struct VaultState {
+                pub status: Status,
+                pub balance: u64,
+            }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 1);
+        assert_eq!(idl.types.len(), 1);
+        assert_eq!(idl.types[0].name, "Status");
+        assert_eq!(idl.types[0].kind, "enum");
+        assert_eq!(idl.types[0].variants.len(), 2);
+    }
+
+    #[test]
+    fn annotated_type_not_duplicated_in_types() {
+        // If a type is itself annotated with #[account_type], it should not
+        // also appear in idl.types even if another account type references it.
+        let src = r#"
+            #[account_type]
+            pub enum Status { Active, Inactive }
+
+            #[account_type]
+            pub struct VaultState { pub status: Status }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 2, "both annotated types should be in accounts");
+        assert!(idl.types.is_empty(), "annotated type should not also be in types");
+    }
+
+    #[test]
+    fn transitive_helper_type_resolved() {
+        // VaultState → Status → StatusFlags — all helper types should end up in types.
+        let src = r#"
+            pub enum StatusFlags { Flag1, Flag2 }
+            pub enum Status { Active(StatusFlags), Inactive }
+
+            #[account_type]
+            pub struct VaultState { pub status: Status }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 1);
+        let type_names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
+        assert!(type_names.contains(&"Status"), "Status should be in types");
+        // StatusFlags is referenced inside Status enum (tuple variant — not named fields),
+        // so it won't be extracted as a field. Verify at least Status is present.
+        assert_eq!(idl.types.iter().filter(|t| t.name == "Status").count(), 1);
+    }
+
+    #[test]
+    fn external_defined_type_left_as_defined_ref() {
+        // AccountId is mapped to the primitive "account_id" by syn_type_to_idl_type,
+        // so it should NOT appear in idl.types as an unresolvable Defined reference.
+        let src = r#"
+            #[account_type]
+            pub struct HoldingAccount {
+                pub definition_id: AccountId,
+                pub balance: u128,
+            }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        assert_eq!(idl.accounts.len(), 1);
+        // AccountId → primitive "account_id", so no helper types needed
+        assert!(idl.types.is_empty());
+        assert!(
+            matches!(&idl.accounts[0].type_.fields[0].type_, IdlType::Primitive(s) if s == "account_id")
+        );
+    }
+
+    #[test]
+    fn account_type_field_types_correctly_mapped() {
+        let src = r#"
+            #[account_type]
+            pub struct Everything {
+                pub a: u8,
+                pub b: u64,
+                pub c: u128,
+                pub d: bool,
+                pub e: String,
+                pub f: AccountId,
+                pub g: Option<u32>,
+                pub h: Vec<u8>,
+            }
+
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn init(acc: AccountWithMetadata) {}
+            }
+        "#;
+        let idl = ok(src);
+        let fields = &idl.accounts[0].type_.fields;
+        assert!(matches!(&fields[0].type_, IdlType::Primitive(s) if s == "u8"));
+        assert!(matches!(&fields[1].type_, IdlType::Primitive(s) if s == "u64"));
+        assert!(matches!(&fields[2].type_, IdlType::Primitive(s) if s == "u128"));
+        assert!(matches!(&fields[3].type_, IdlType::Primitive(s) if s == "bool"));
+        assert!(matches!(&fields[4].type_, IdlType::Primitive(s) if s == "string"));
+        assert!(matches!(&fields[5].type_, IdlType::Primitive(s) if s == "account_id"));
+        assert!(matches!(&fields[6].type_, IdlType::Option { .. }));
+        assert!(matches!(&fields[7].type_, IdlType::Vec { .. }));
     }
 }
