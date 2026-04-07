@@ -21,6 +21,7 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
+      id-token: write
 
     outputs:
       lez_commit: ${{ steps.lez.outputs.commit }}
@@ -38,16 +39,18 @@ jobs:
           COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git "$REF" | head -1 | cut -f1)
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "Testing against LEZ $REF: $COMMIT"
+
+      - name: Configure git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
       - name: Find or create LEZ bump PR
         id: pr
         uses: actions/github-script@v7
         with:
           script: |
-            const LEZ = '${{ steps.lez.outputs.commit }}'.slice(0,8);
             const FORCE = '${{ github.event.inputs.force }}' === 'true';
-
             const existing = await github.rest.pulls.list({
               owner: context.repo.owner,
               repo: context.repo.repo,
@@ -58,38 +61,39 @@ jobs:
 
             if (existing.data.length > 0 && !FORCE) {
               const pr = existing.data[0];
-              console.log(`Updating existing PR #${pr.number}`);
+              console.log(`Found existing PR #${pr.number}`);
               await github.rest.issues.createComment({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
                 issue_number: pr.number,
-                body: `🤖 LEZ updated to \`${LEZ}\` — running checks...`,
+                body: `🤖 LEZ updated — running checks...`,
               });
-              core.setOutput('pr_number', pr.number);
+              core.setOutput('pr_number', String(pr.number));
               core.setOutput('branch', pr.head.ref);
               core.setOutput('action', 'updated');
             } else {
               const branch = `lez-bump/${new Date().toISOString().slice(0,10)}`;
-              console.log(`Creating new PR on branch: ${branch}`);
+              console.log(`Creating new branch: ${branch}`);
               core.setOutput('branch', branch);
               core.setOutput('pr_number', '');
               core.setOutput('action', 'created');
             }
 
-      - name: Create new PR branch
-        if: steps.pr.outputs.action == 'created'
+      - name: Create or update branch
         run: |
-          # Check if branch exists (from previous run)
-          if git ls-remote --exit-code --heads origin "${{ steps.pr.outputs.branch }}" > /dev/null 2>&1; then
-            echo "Branch exists remotely, fetching..."
-            git fetch origin "${{ steps.pr.outputs.branch }}"
-            git checkout "${{ steps.pr.outputs.branch }}"
+          BRANCH="${{ steps.pr.outputs.branch }}"
+          LEZ="${{ steps.lez.outputs.commit }}"
+
+          if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
+            echo "Fetching existing branch: $BRANCH"
+            git fetch origin "$BRANCH"
+            git checkout "$BRANCH"
+            git rebase origin/main || true
           else
-            echo "Creating new branch..."
-            git checkout -b "${{ steps.pr.outputs.branch }}"
+            echo "Creating new branch: $BRANCH"
+            git checkout -b "$BRANCH"
           fi
 
-          LEZ="${{ steps.lez.outputs.commit }}"
           for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
             [ -f "$f" ] || continue
             sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
@@ -97,52 +101,26 @@ jobs:
             echo "Updated: $f"
           done
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
           git add .
           git commit --amend --no-edit || git commit -m "chore(bump): update LEZ to $LEZ"
-          git push --force-with-lease origin "${{ steps.pr.outputs.branch }}"
+          git push --force-with-lease origin "$BRANCH"
 
-      - name: Push update to existing PR
-        if: steps.pr.outputs.action == 'updated'
-        run: |
-          git fetch origin
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout "${{ steps.pr.outputs.branch }}"
-
-          LEZ="${{ steps.lez.outputs.commit }}"
-          for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
-            [ -f "$f" ] || continue
-            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
-            sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
-          done
-
-          git add .
-          git commit --amend --no-edit || true
-          git push --force-with-lease
-
-      - name: Create PR
+      - name: Create PR (new branch only)
         if: steps.pr.outputs.action == 'created'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const branch = '${{ steps.pr.outputs.branch }}';
-            const LEZ = '${{ steps.lez.outputs.commit }}'.slice(0,8);
-            const { data: pr } = await github.rest.pulls.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: `chore(bump): update LEZ to ${LEZ}`,
-              body: `Automated LEZ dependency bump.\n\n- **LEZ:** \`${LEZ}\`\n- **Actor:** @${context.actor}\n\nCI will run cargo check. Merge if all pass.`,
-              head: branch,
-              base: 'main',
-            });
-            await github.rest.issues.addLabels({
-              owner: context.repo.owner, repo: context.repo.repo,
-              issue_number: pr.number, labels: ['lez-bump'],
-            }).catch(() => {});
-            core.setOutput('pr_number', pr.number);
-            console.log(`Created PR #${pr.number}`);
+        run: |
+          BRANCH="${{ steps.pr.outputs.branch }}"
+          LEZ="${{ steps.lez.outputs.commit }}"
+          LEZ_SHORT="${LEZ:0:8}"
+          gh pr create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "chore(bump): update LEZ to $LEZ_SHORT" \
+            --body "Automated LEZ dependency bump. LEZ: \`$LEZ\`. Actor: @$GITHUB_ACTOR. CI will run cargo check. Merge if all pass." \
+            --head "$BRANCH" \
+            --base main \
+            --label lez-bump \
+            --output json > /tmp/pr.json
+          PR_NUM=$(cat /tmp/pr.json | jq -r '.number')
+          echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
 
   ci:
     name: Cargo Check
@@ -182,28 +160,13 @@ jobs:
 
       - name: Post result + merge
         if: always()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const prNum = parseInt('${{ needs.bump.outputs.pr_number }}');
-            const lez = '${{ needs.bump.outputs.lez_commit }}'.slice(0,8);
-            const success = '${{ job.status }}' === 'success';
+        run: |
+          PR_NUM="${{ needs.bump.outputs.pr_number }}"
+          LEZ="${{ needs.bump.outputs.lez_commit }}"
+          LEZ_SHORT="${LEZ:0:8}"
 
-            const emoji = success ? '✅' : '❌';
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNum,
-              body: `${emoji} **Cargo check** against LEZ \`${lez}\` — ${success ? 'all passed, merging!' : 'FAILED. See CI logs.'}`,
-            });
-
-            if (success) {
-              await github.rest.pulls.merge({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                pull_number: prNum,
-                merge_method: 'squash',
-                commit_title: `chore(bump): merge LEZ ${lez} (auto)`,
-              });
-              console.log('Auto-merged!');
-            }
+          if [ '${{ job.status }}' = 'success' ]; then
+            gh pr merge "$GITHUB_REPOSITORY" "$PR_NUM" --squash --delete-branch && echo "Merged!" || echo "Merge failed (check permissions)"
+          else
+            gh issue comment "$GITHUB_REPOSITORY" "$PR_NUM" --body "❌ Cargo check failed against LEZ \`$LEZ_SHORT\`. See CI logs." || true
+          fi
