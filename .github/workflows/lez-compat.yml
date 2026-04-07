@@ -1,13 +1,12 @@
-name: LEZ Compatibility Check
+name: LEZ Bump
 
 on:
   schedule:
-    # Every Monday at 06:00 UTC
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
   workflow_dispatch:
     inputs:
       lez_ref:
-        description: 'LEZ commit/branch to test against (default: main)'
+        description: 'LEZ commit/branch (default: main)'
         required: false
         default: 'main'
 
@@ -15,17 +14,22 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lez-compat:
-    name: Check SPEL against latest LEZ
+  bump:
+    name: Bump LEZ + PR
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    outputs:
+      lez_commit: ${{ steps.lez.outputs.commit }}
+      pr_number: ${{ steps.pr.outputs.pr_number }}
+      action: ${{ steps.pr.outputs.action }}
+      branch: ${{ steps.pr.outputs.branch }}
+
     steps:
       - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "lez-compat"
 
       - name: Get latest LEZ commit
         id: lez
@@ -34,21 +38,120 @@ jobs:
           COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git "$REF" | head -1 | cut -f1)
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "🔍 Testing against LEZ $REF ($COMMIT)"
+          echo "Testing against LEZ $REF: $COMMIT"
 
-      - name: Update LEZ deps to latest
+      - name: Find or create LEZ bump PR
+        id: pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LEZ = '${{ steps.lez.outputs.commit }}'.slice(0,8);
+            const FORCE = '${{ github.event.inputs.force }}' === 'true';
+
+            const existing = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:lez-bump/`,
+              per_page: 5,
+            }).catch(() => ({ data: [] }));
+
+            if (existing.data.length > 0 && !FORCE) {
+              const pr = existing.data[0];
+              console.log(`Updating existing PR #${pr.number}`);
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body: `🤖 LEZ updated to \`${LEZ}\` — running checks...`,
+              });
+              core.setOutput('pr_number', pr.number);
+              core.setOutput('branch', pr.head.ref);
+              core.setOutput('action', 'updated');
+            } else {
+              const branch = `lez-bump/${new Date().toISOString().slice(0,10)}`;
+              console.log(`Creating new PR on branch: ${branch}`);
+              core.setOutput('branch', branch);
+              core.setOutput('pr_number', '');
+              core.setOutput('action', 'created');
+            }
+
+      - name: Create new PR branch
+        if: steps.pr.outputs.action == 'created'
         run: |
-          COMMIT="${{ steps.lez.outputs.commit }}"
-          echo "Updating all LEZ deps to $COMMIT"
-          
-          # Find all Cargo.toml files with LEZ git deps
-          find . -name Cargo.toml -exec grep -l 'logos-execution-zone\|logos-blockchain/lssa' {} \; | while read f; do
-            # Update rev= pins
-            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$COMMIT\"|g" "$f"
-            # Ensure URL points to new repo name
+          git checkout -b "${{ steps.pr.outputs.branch }}"
+
+          LEZ="${{ steps.lez.outputs.commit }}"
+          for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
+            [ -f "$f" ] || continue
+            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
             sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
-            echo "  Updated: $f"
+            echo "Updated: $f"
           done
+
+          git add .
+          git commit -m "chore(bump): update LEZ to $LEZ"
+          git push -u origin "${{ steps.pr.outputs.branch }}" -o ci.skip
+
+      - name: Push update to existing PR
+        if: steps.pr.outputs.action == 'updated'
+        run: |
+          git fetch origin
+          git checkout "${{ steps.pr.outputs.branch }}"
+
+          LEZ="${{ steps.lez.outputs.commit }}"
+          for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
+            [ -f "$f" ] || continue
+            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
+            sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
+          done
+
+          git add .
+          git commit --amend --no-edit || true
+          git push --force-with-lease
+
+      - name: Create PR
+        if: steps.pr.outputs.action == 'created'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ steps.pr.outputs.branch }}';
+            const LEZ = '${{ steps.lez.outputs.commit }}'.slice(0,8);
+            const { data: pr } = await github.rest.pulls.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `chore(bump): update LEZ to ${LEZ}`,
+              body: `Automated LEZ dependency bump.\n\n- **LEZ:** \`${LEZ}\`\n- **Actor:** @${context.actor}\n\nCI will run cargo check. Merge if all pass.`,
+              head: branch,
+              base: 'main',
+            });
+            await github.rest.issues.addLabels({
+              owner: context.repo.owner, repo: context.repo.repo,
+              issue_number: pr.number, labels: ['lez-bump'],
+            }).catch(() => {});
+            core.setOutput('pr_number', pr.number);
+            console.log(`Created PR #${pr.number}`);
+
+  ci:
+    name: Cargo Check
+    needs: bump
+    runs-on: ubuntu-latest
+    if: needs.bump.outputs.pr_number != ''
+    permissions:
+      contents: read
+      pull-requests: write
+      checks: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.bump.outputs.branch }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "lez-bump-ci"
 
       - name: Install logos-blockchain-circuits
         run: |
@@ -56,55 +159,39 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: cargo check (spel-cli)
+      - name: Cargo check (spel)
         run: cargo check -p spel
 
-      - name: cargo check (spel-framework)
+      - name: Cargo check (spel-framework)
         run: cargo check -p spel-framework
 
-      - name: cargo check (spel-framework-core)
+      - name: Cargo check (spel-framework-core)
         run: cargo check -p spel-framework-core
 
-      - name: Report
+      - name: Post result + merge
         if: always()
-        run: |
-          echo "## LEZ Compatibility Report" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **LEZ ref:** ${{ steps.lez.outputs.ref }}" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **LEZ commit:** \`${{ steps.lez.outputs.commit }}\`" >> "$GITHUB_STEP_SUMMARY"
-          echo "- **SPEL ref:** \`$(git rev-parse HEAD)\`" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Create issue on failure
-        if: failure()
         uses: actions/github-script@v7
         with:
           script: |
-            const commit = '${{ steps.lez.outputs.commit }}';
-            const ref = '${{ steps.lez.outputs.ref }}';
-            const title = `LEZ compatibility broken (${ref}: ${commit.slice(0, 8)})`;
-            
-            // Check for existing open issue
-            const existing = await github.rest.issues.listForRepo({
+            const prNum = parseInt('${{ needs.bump.outputs.pr_number }}');
+            const lez = '${{ needs.bump.outputs.lez_commit }}'.slice(0,8);
+            const success = '${{ job.status }}' === 'success';
+
+            const emoji = success ? '✅' : '❌';
+            await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              state: 'open',
-              labels: 'lez-compat',
-              per_page: 1,
+              issue_number: prNum,
+              body: `${emoji} **Cargo check** against LEZ \`${lez}\` — ${success ? 'all passed, merging!' : 'FAILED. See CI logs.'}`,
             });
-            
-            if (existing.data.length > 0) {
-              // Comment on existing issue
-              await github.rest.issues.createComment({
+
+            if (success) {
+              await github.rest.pulls.merge({
                 owner: context.repo.owner,
                 repo: context.repo.repo,
-                issue_number: existing.data[0].number,
-                body: `Still broken as of LEZ \`${commit}\` (${ref}).\n\nRun: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+                pull_number: prNum,
+                merge_method: 'squash',
+                commit_title: `chore(bump): merge LEZ ${lez} (auto)`,
               });
-            } else {
-              await github.rest.issues.create({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                title,
-                labels: ['lez-compat'],
-                body: `The weekly LEZ compatibility check failed.\n\n- **LEZ ref:** ${ref}\n- **LEZ commit:** \`${commit}\`\n- **Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nPlease update SPEL to match the latest LEZ API changes.`,
-              });
+              console.log('Auto-merged!');
             }
