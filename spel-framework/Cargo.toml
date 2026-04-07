@@ -7,7 +7,7 @@ description = "Developer framework for building SPEL programs (like Anchor for S
 [dependencies]
 spel-framework-core = { path = "../spel-framework-core" }
 spel-framework-macros = { path = "../spel-framework-macros" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b", features = ["host"] }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "98e98c6214afb6e0b60db3627ccfeae8293fe361", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
 
 [dev-dependencies]

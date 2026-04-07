@@ -8,6 +8,6 @@ publish = false
 
 [dependencies]
 spel-framework = { path = "../../../spel-framework" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b", features = ["host"] }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "98e98c6214afb6e0b60db3627ccfeae8293fe361", features = ["host"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
