@@ -145,6 +145,39 @@ This provides:
 - `--dry-run` mode for testing
 - `inspect` subcommand to extract ProgramId from binaries
 
+### Account Types
+
+Types that represent on-chain account data can be annotated with `#[account_type]`. This causes them to appear in the generated IDL so `spel inspect` can decode raw account bytes into readable JSON.
+
+```rust
+use spel_framework::prelude::*;
+
+#[account_type]
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct VaultState {
+    pub owner: AccountId,
+    pub balance: u128,
+    pub locked: bool,
+}
+
+#[account_type]
+#[derive(BorshSerialize, BorshDeserialize)]
+pub enum TokenHolding {
+    Fungible { definition_id: AccountId, balance: u128 },
+    NftMaster { definition_id: AccountId, print_balance: u128 },
+}
+```
+
+Types referenced by an `#[account_type]` (such as helper enums or nested structs) are collected automatically — they do not need their own annotation:
+
+```rust
+// No annotation needed — picked up automatically because VaultState references it
+#[derive(BorshSerialize, BorshDeserialize)]
+pub enum VaultStatus { Active, Frozen }
+```
+
+The IDL generator embeds all annotated types in the `accounts` array and all transitively referenced helper types in the `types` array of the generated JSON. No file paths or external references — the IDL is fully self-contained.
+
 ### IDL Generation
 
 The IDL generator is also a one-liner:
@@ -177,6 +210,15 @@ spel init my-program
 
 # Inspect program binaries (no --idl needed)
 spel inspect program.bin
+
+# Generate IDL from a program source file (includes all #[account_type] definitions)
+spel generate-idl methods/guest/src/bin/my_program.rs > my_program-idl.json
+
+# Decode on-chain account data using a type from the IDL
+spel inspect <account-id> --idl my_program-idl.json --type VaultState
+
+# Same, but supply raw borsh bytes directly instead of fetching from the network
+spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
 
 # Show available commands
 spel --idl program-idl.json --help
@@ -216,6 +258,56 @@ spel --idl program-idl.json create-vault --help
 | `rest` accounts | Comma-separated base58/hex: `--foo-account "addr1,addr2"` |
 | `Option<T>` | Value or `"none"` |
 | Account IDs | Base58 or 64-char hex |
+
+### Inspecting Account Data
+
+Once types are annotated with `#[account_type]` and the IDL is generated, you can decode any on-chain account into JSON:
+
+```bash
+# Generate the IDL (embeds all annotated account types)
+spel generate-idl methods/guest/src/bin/token.rs > token-idl.json
+
+# Fetch and decode a live account from the network
+spel inspect 3f2a...bc01 --idl token-idl.json --type TokenHolding
+```
+
+```
+Account: 3f2a...bc01
+Data:    33 bytes
+Hex:     01aabbccdd...
+
+{
+  "NftMaster": {
+    "definition_id": "aabbccddee...",
+    "print_balance": "99"
+  }
+}
+```
+
+For accounts with nested types (e.g. `TokenMetadata` referencing `MetadataStandard`), the IDL contains both and decoding works transparently:
+
+```bash
+spel inspect 9d1c...f4 --idl token-idl.json --type TokenMetadata
+```
+
+```json
+{
+  "definition_id": "aabbccddee...",
+  "standard": "Simple",
+  "uri": "https://example.com/metadata.json",
+  "creators": "Alice",
+  "primary_sale_date": "1720000000"
+}
+```
+
+You can also pass raw borsh bytes directly with `--data` to decode without a network connection — useful during development and testing:
+
+```bash
+spel inspect 0000...0000 \
+  --idl token-idl.json \
+  --type TokenHolding \
+  --data 00<32-byte-definition-id-hex>00000000000000000000000000000064
+```
 
 ## Crates
 

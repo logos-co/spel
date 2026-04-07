@@ -92,6 +92,7 @@ fn find_type_def<'a>(idl: &'a SpelIdl, name: &str) -> Option<&'a IdlTypeDef> {
         .iter()
         .find(|a| a.name == name)
         .map(|a| &a.type_)
+        .or_else(|| idl.types.iter().find(|t| t.name == name))
 }
 
 // ── Borsh decoding from IDL types ────────────────────────────────────
@@ -234,8 +235,8 @@ fn decode_primitive(cursor: &mut &[u8], name: &str) -> Result<Value, String> {
             let s = String::from_utf8(buf).map_err(|e| format!("Invalid UTF-8: {}", e))?;
             Ok(json!(s))
         }
-        "program_id" => {
-            // ProgramId is [u32; 8] = 32 bytes
+        "program_id" | "account_id" => {
+            // ProgramId / AccountId is [u32; 8] = 32 bytes
             let mut buf = [0u8; 32];
             read_exact(cursor, &mut buf)?;
             Ok(json!(hex_encode(&buf)))
