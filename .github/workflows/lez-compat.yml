@@ -51,7 +51,7 @@ jobs:
           done
 
       - name: cargo check (spel-cli)
-        run: cargo check -p spel-cli
+        run: cargo check -p spel
 
       - name: cargo check (spel-framework)
         run: cargo check -p spel-framework
