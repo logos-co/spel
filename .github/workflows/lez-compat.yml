@@ -2,7 +2,7 @@ name: LEZ Bump
 
 on:
   schedule:
-    - cron: '0 6 * * 1'
+    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
   workflow_dispatch:
 
 env:
@@ -14,17 +14,11 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-      pull-requests: write
       issues: write
 
     outputs:
       lez_commit: ${{ steps.lez.outputs.commit }}
       lez_short: ${{ steps.lez.outputs.short }}
-      pr_number: ${{ steps.find_pr.outputs.pr_number }}
-      branch: ${{ env.BRANCH }}
-
-    env:
-      BRANCH: lez-bump/main
 
     steps:
       - uses: actions/checkout@v4
@@ -45,90 +39,74 @@ jobs:
       - name: Push LEZ deps to branch
         run: |
           LEZ="${{ steps.lez.outputs.commit }}"
-          echo "=== Branch: $BRANCH ==="
+          LEZ_SHORT="${{ steps.lez.outputs.short }}"
+          BRANCH="lez-bump/main"
 
-          # Try to fetch existing branch; if it doesn't exist, create it
+          # Find or create branch
           if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
             echo "Fetching existing branch..."
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
             git rebase origin/main || true
           else
-            echo "Creating new branch..."
+            echo "Creating new branch: $BRANCH"
             git checkout -b "$BRANCH"
           fi
 
+          # Update deps
           for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
             [ -f "$f" ] || continue
             sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
             sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
           done
 
-          git add .
-          git commit --amend --no-edit || git commit -m "chore(bump): update LEZ to $LEZ"
-          git push --force-with-lease origin "$BRANCH"
+          # Check if anything changed
+          if git diff --stat | grep -q '0 files changed'; then
+            echo "No changes — LEZ deps already up to date."
+            echo "up_to_date=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected:"
+            git diff --stat
+            git add .
+            git commit --amend --no-edit || git commit -m "chore(bump): update LEZ to $LEZ_SHORT"
+            git push --force-with-lease origin "$BRANCH"
+            echo "up_to_date=false" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Find or create PR
+      - name: Find existing PR
+        if: env.UP_TO_DATE != 'true'
         id: find_pr
         uses: actions/github-script@v7
         with:
           script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const branch = '${{ env.BRANCH }}';
-
-            // Find existing PR
-            const { data: existing } = await github.rest.pulls.list({
-              owner, repo,
-              head: `${owner}:${branch}`,
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              head: `${context.repo.owner}:lez-bump/main`,
               state: 'open',
-              per_page: 5,
             }).catch(() => ({ data: [] }));
-
-            if (existing.length > 0) {
-              const pr = existing[0];
-              console.log(`Found existing PR #${pr.number}`);
+            const pr = prs[0];
+            if (pr) {
+              console.log(`Found PR #${pr.number}`);
               core.setOutput('pr_number', String(pr.number));
             } else {
-              // Create new PR
-              const LEZ_SHORT = '${{ steps.lez.outputs.short }}';
-              const { data: pr } = await github.rest.pulls.create({
-                owner, repo,
-                title: `chore(bump): update LEZ to ${LEZ_SHORT}`,
-                body: `Automated LEZ dependency bump.\n\n- **LEZ:** \`${{ steps.lez.outputs.commit }}\`\n- **Actor:** @${context.actor}\n\nCI will cargo check. Merge if all pass.`,
-                head: branch,
-                base: 'main',
-              }).catch(async (err) => {
-                // If API fails (fork context), try CLI
-                console.error('API create failed:', err.message);
-                return { data: null };
-              });
-
-              if (pr && pr.number) {
-                console.log(`Created PR #${pr.number}`);
-                core.setOutput('pr_number', String(pr.number));
-              } else {
-                // Fallback: try gh CLI
-                console.log('Trying gh CLI...');
-                core.setOutput('pr_number', '');
-              }
+              console.log('No existing PR found');
+              core.setOutput('pr_number', '');
             }
 
   ci:
     name: Cargo Check
     needs: bump
     runs-on: ubuntu-latest
-    if: needs.bump.outputs.pr_number != ''
-
+    if: needs.bump.outputs.up_to_date != 'true'
     permissions:
       contents: read
-      pull-requests: write
-      checks: write
+      issues: write
 
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ needs.bump.outputs.branch }}
+          ref: lez-bump/main
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -149,16 +127,38 @@ jobs:
       - name: Cargo check (spel-framework-core)
         run: cargo check -p spel-framework-core
 
-      - name: Merge or comment
+      - name: Report result
         if: always()
         run: |
-          PN="${{ needs.bump.outputs.pr_number }}"
-          LS="${{ needs.bump.outputs.lez_short }}"
+          LEZ_SHORT="${{ needs.bump.outputs.lez_short }}"
+          LEZ_COMMIT="${{ needs.bump.outputs.lez_commit }}"
+
           if [ '${{ job.status }}' = 'success' ]; then
-            gh pr merge "$GITHUB_REPOSITORY" "$PN" --squash --delete-branch \
-              && echo "Merged PR #$PN!" \
-              || echo "Merge failed (check permissions)"
+            echo "✅ All cargo checks passed!"
+            echo ""
+            echo "LEZ bump is ready to merge."
+            echo "Branch: lez-bump/main"
+            echo "Commit: $LEZ_COMMIT"
+            echo ""
+            echo "Merge manually at: https://github.com/$GITHUB_REPOSITORY/pull/lez-bump/main"
           else
-            gh issue comment "$GITHUB_REPOSITORY" "$PN" \
-              --body "❌ Cargo check failed against LEZ \`$LS\`. See CI logs."
+            echo "❌ Cargo check failed."
+            echo "LEZ commit: $LEZ_COMMIT"
+            echo ""
+            echo "An issue has been created automatically."
           fi
+
+      - name: Create issue on failure
+        if: job.status == 'failure'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LEZ = '${{ needs.bump.outputs.lez_short }}';
+            const COMMIT = '${{ needs.bump.outputs.lez_commit }}';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `LEZ bump failed — LEZ ${LEZ}`,
+              body: `## LEZ Compatibility Check Failed\n\n**LEZ:** \`${COMMIT}\`\n**Triggered by:** @${context.actor}\n\nCargo check failed against the latest LEZ. See CI logs for details.\n\n**Action required:** Investigate and fix SPEL before merging LEZ update.`,
+              labels: ['lez-bump', 'bug'],
+            });
