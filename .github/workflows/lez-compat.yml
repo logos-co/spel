@@ -117,9 +117,9 @@ jobs:
             --body "Automated LEZ dependency bump. LEZ: \`$LEZ\`. Actor: @$GITHUB_ACTOR. CI will run cargo check. Merge if all pass." \
             --head "$BRANCH" \
             --base main \
-            --label lez-bump \
-            --output json > /tmp/pr.json
-          PR_NUM=$(cat /tmp/pr.json | jq -r '.number')
+            --label lez-bump > /tmp/pr_url.txt 2>&1
+          PR_URL=$(cat /tmp/pr_url.txt | grep '^https://' | head -1)
+          PR_NUM=$(echo "$PR_URL" | grep -o '[0-9]*$' | tail -1)
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
 
   ci:
