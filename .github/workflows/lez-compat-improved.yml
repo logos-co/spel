@@ -1,0 +1,446 @@
+name: LEZ Compatibility Check
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
+  workflow_dispatch:
+    inputs:
+      lez_commit:
+        description: 'LEZ commit SHA to test (leave empty for latest main)'
+        required: false
+        default: ''
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-compatibility:
+    name: Check LEZ Compatibility
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+
+    outputs:
+      lez_commit: ${{ steps.lez.outputs.commit }}
+      lez_short: ${{ steps.lez.outputs.short }}
+      current_lez_commit: ${{ steps.current.outputs.commit }}
+      needs_update: ${{ steps.check-update.outputs.needs_update }}
+      update_needed: ${{ steps.check-update.outputs.update_needed }}
+
+    steps:
+      - name: Checkout SPEL
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Get current LEZ commit from Cargo.lock
+        id: current
+        run: |
+          # Extract current LEZ commit from Cargo.lock
+          CURRENT=$(grep -A 5 'name = "nssa_core"' Cargo.lock | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+          if [ -z "$CURRENT" ]; then
+            # Try alternative: check Cargo.toml files
+            CURRENT=$(grep -rh 'logos-execution-zone' */Cargo.toml | grep 'rev' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+          fi
+          echo "commit=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "Current LEZ commit: $CURRENT"
+
+      - name: Get target LEZ commit
+        id: lez
+        run: |
+          if [ -n "${{ github.event.inputs.lez_commit }}" ]; then
+            COMMIT="${{ github.event.inputs.lez_commit }}"
+            echo "Using manually specified commit: $COMMIT"
+          else
+            COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git main | cut -f1)
+            echo "Fetching latest from LEZ main: $COMMIT"
+          fi
+          echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
+          echo "short=${COMMIT:0:8}" >> "$GITHUB_OUTPUT"
+          echo "Target LEZ commit: $COMMIT"
+
+      - name: Check if update needed
+        id: check-update
+        run: |
+          CURRENT="${{ steps.current.outputs.commit }}"
+          TARGET="${{ steps.lez.outputs.commit }}"
+          
+          if [ "$CURRENT" = "$TARGET" ]; then
+            echo "needs_update=false" >> "$GITHUB_OUTPUT"
+            echo "update_needed=false" >> "$GITHUB_OUTPUT"
+            echo "✓ SPEL is already on latest LEZ ($TARGET)"
+          else
+            echo "needs_update=true" >> "$GITHUB_OUTPUT"
+            echo "update_needed=true" >> "$GITHUB_OUTPUT"
+            echo "⚠ SPEL is on $CURRENT, target is $TARGET"
+            echo "current_short=${CURRENT:0:8}" >> "$GITHUB_OUTPUT"
+            echo "target_short=${TARGET:0:8}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure git
+        if: steps.check-update.outputs.needs_update == 'true'
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create update branch
+        if: steps.check-update.outputs.needs_update == 'true'
+        id: branch
+        run: |
+          LEZ_SHORT="${{ steps.lez.outputs.short }}"
+          BRANCH="lez-bump/${LEZ_SHORT}"
+          
+          # Fetch and checkout main
+          git fetch origin main
+          git checkout main
+          
+          # Create/update branch
+          if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+            git checkout "$BRANCH"
+            git reset --hard origin/main
+          else
+            git checkout -b "$BRANCH"
+          fi
+          
+          echo "branch=$BRANCH" >> "$GITHUB_OUTPUT"
+
+      - name: Update LEZ dependencies
+        if: steps.check-update.outputs.needs_update == 'true'
+        id: update-deps
+        run: |
+          LEZ="${{ steps.lez.outputs.commit }}"
+          LEZ_SHORT="${{ steps.lez.outputs.short }}"
+          
+          echo "Updating LEZ dependencies to $LEZ_SHORT..."
+          
+          # Update all Cargo.toml files that reference LEZ
+          UPDATED_FILES=()
+          for f in $(find . -name "Cargo.toml" -type f); do
+            if grep -q "logos-execution-zone" "$f" 2>/dev/null; then
+              echo "  Updating: $f"
+              sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
+              UPDATED_FILES+=("$f")
+            fi
+          done
+          
+          echo "Updated ${#UPDATED_FILES[@]} files:"
+          printf '  - %s\n' "${UPDATED_FILES[@]}"
+          
+          # Commit changes
+          git add .
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            git commit -m "chore(lez): bump to $LEZ_SHORT"
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push update branch
+        if: steps.update-deps.outputs.changed == 'true'
+        run: |
+          BRANCH="${{ steps.branch.outputs.branch }}"
+          git push -u origin "$BRANCH"
+
+      - name: Generate compatibility report
+        if: steps.check-update.outputs.needs_update == 'true'
+        id: report
+        run: |
+          REPORT_FILE="LEZ_COMPAT_REPORT_${{ steps.lez.outputs.short }}.md"
+          
+          cat > "$REPORT_FILE" << EOF
+          # LEZ Compatibility Report
+
+          **SPEL Branch:** ${{ github.ref_name }}
+          **Current LEZ:** \`${{ steps.current.outputs.short }}\`
+          **Target LEZ:** \`${{ steps.lez.outputs.short }}\`
+          **LEZ Commit:** \`${{ steps.lez.outputs.commit }}\`
+          **Generated:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+
+          ---
+
+          ## Update Summary
+
+          - Files to update: See Cargo.toml files modified
+          - Branch created: ${{ steps.branch.outputs.branch }}
+          - PR Status: Pending
+
+          ## Next Steps
+
+          1. Review the automated PR for this LEZ bump
+          2. Run full test suite: \`cargo test --all\`
+          3. Check for API breaking changes in LEZ
+          4. Update SPEL code if needed to match new LEZ API
+
+          ## Manual Verification Required
+
+          - [ ] Build SPEL against new LEZ
+          - [ ] Run unit tests
+          - [ ] Run integration tests
+          - [ ] Check for deprecated APIs
+          - [ ] Verify FFI bindings still work
+
+          ---
+
+          *This report was generated automatically by the LEZ Compatibility Check workflow.*
+          EOF
+          
+          echo "report_file=$REPORT_FILE" >> "$GITHUB_OUTPUT"
+          cat "$REPORT_FILE"
+
+      - name: Create PR
+        if: steps.update-deps.outputs.changed == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          branch: ${{ steps.branch.outputs.branch }}
+          title: "chore(lez): bump to ${{ steps.lez.outputs.short }}"
+          body: |
+            ## LEZ Dependency Update
+
+            This PR updates SPEL to use LEZ `${{ steps.lez.outputs.short }}`.
+
+            ### Changes
+            - Updated `logos-execution-zone` dependency from `${{ steps.current.outputs.short }}` to `${{ steps.lez.outputs.short }}`
+
+            ### Compatibility Check
+            ⚠️ **Manual verification required** - This is an automated update. Please:
+
+            1. Review the build and test results
+            2. Check for breaking API changes
+            3. Run full test suite locally if needed
+
+            See [LEZ Compat Report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details.
+
+            ### LEZ Changes
+            View LEZ commits: https://github.com/logos-blockchain/logos-execution-zone/compare/${{ steps.current.outputs.short }}...${{ steps.lez.outputs.short }}
+
+          labels: lez-bump, automated-pr
+          delete-branch: false
+          base: ${{ github.ref_name }}
+
+  test-compatibility:
+    name: Test LEZ Compatibility
+    runs-on: ubuntu-latest
+    needs: check-compatibility
+    if: needs.check-compatibility.outputs.needs_update == 'true'
+    permissions:
+      contents: read
+      issues: write
+
+    steps:
+      - name: Checkout SPEL (update branch)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.check-compatibility.outputs.lez_short && format('lez-bump/{0}', needs.check-compatibility.outputs.lez_short) || 'main' }}
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libssl-dev cmake
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          if [ -f scripts/setup-logos-blockchain-circuits.sh ]; then
+            bash scripts/setup-logos-blockchain-circuits.sh
+          else
+            echo "Setup script not found, skipping..."
+          fi
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cargo metadata (dependency analysis)
+        id: deps
+        run: |
+          # Analyze dependency changes
+          echo "### Dependency Analysis" > deps_report.md
+          echo "" >> deps_report.md
+          
+          # Check for any git dependency changes
+          echo "```" >> deps_report.md
+          cargo tree --depth 1 -p spel-framework-core 2>&1 | head -50 >> deps_report.md || true
+          echo "```" >> deps_report.md
+          
+          cat deps_report.md
+
+      - name: Check for breaking changes (cargo check)
+        id: cargo-check
+        continue-on-error: true
+        run: |
+          echo "Running cargo check on all SPEL crates..."
+          
+          FAILED=()
+          PASSED=()
+          
+          for crate in spel-framework-core spel-framework spel-cli; do
+            if cargo check -p "$crate" 2>&1; then
+              echo "✓ $crate: PASS"
+              PASSED+=("$crate")
+            else
+              echo "✗ $crate: FAIL"
+              FAILED+=("$crate")
+            fi
+          done
+          
+          echo "Passed: ${#PASSED[@]}"
+          echo "Failed: ${#FAILED[@]}"
+          
+          if [ ${#FAILED[@]} -gt 0 ]; then
+            echo "status=failed" >> "$GITHUB_OUTPUT"
+            echo "failed_crates=${FAILED[*]}" >> "$GITHUB_OUTPUT"
+          else
+            echo "status=passed" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Generate test report
+        id: test-report
+        run: |
+          REPORT="TEST_REPORT_${{ needs.check-compatibility.outputs.lez_short }}.md"
+          
+          cat > "$REPORT" << EOF
+          # LEZ Compatibility Test Report
+
+          **LEZ Commit:** \`${{ needs.check-compatibility.outputs.lez_commit }}\`
+          **Test Time:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Runner:** ${{ runner.os }}
+
+          ## Cargo Check Results
+
+          Status: ${{ steps.cargo-check.outputs.status == 'passed' && '✅ PASS' || '❌ FAIL' }}
+
+          EOF
+          
+          if [ "${{ steps.cargo-check.outputs.status }}" = "failed" ]; then
+            echo "### Failed Crates" >> "$REPORT"
+            echo "" >> "$REPORT"
+            for crate in ${{ steps.cargo-check.outputs.failed_crates }}; do
+              echo "- ❌ \`$crate\`" >> "$REPORT"
+            done
+            echo "" >> "$REPORT"
+            echo "## Action Required" >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "The following crates failed to compile against the new LEZ version:" >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo '```' >> "$REPORT"
+            echo "Check workflow logs for detailed error messages." >> "$REPORT"
+            echo '```' >> "$REPORT"
+          else
+            echo "### Results" >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "✅ All crates compiled successfully!" >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "## Recommended Next Steps" >> "$REPORT"
+            echo "" >> "$REPORT"
+            echo "- [ ] Run full test suite: \`cargo test --all\`" >> "$REPORT"
+            echo "- [ ] Run clippy: \`cargo clippy --all-targets --all-features\`" >> "$REPORT"
+            echo "- [ ] Test with localnet if applicable" >> "$REPORT"
+          fi
+          
+          cat "$REPORT"
+          
+          # Upload as artifact
+          mkdir -p reports
+          cp "$REPORT" reports/
+          echo "report_path=$REPORT" >> "$GITHUB_OUTPUT"
+
+      - name: Upload test report
+        uses: actions/upload-artifact@v4
+        with:
+          name: lez-compat-report-${{ needs.check-compatibility.outputs.lez_short }}
+          path: reports/
+          retention-days: 30
+
+      - name: Create issue on failure
+        if: steps.cargo-check.outputs.status == 'failed'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LEZ = '${{ needs.check-compatibility.outputs.lez_short }}';
+            const LEZ_COMMIT = '${{ needs.check-compatibility.outputs.lez_commit }}';
+            const FAILED_CRATES = '${{ steps.cargo-check.outputs.failed_crates }}'.split(' ');
+            
+            const body = `## LEZ Compatibility Check Failed
+            
+            **LEZ Version:** \`${LEZ_COMMIT}\` (${LEZ})
+            **Triggered by:** ${{ github.event.schedule && 'Scheduled' || github.event.sender.login }}
+            **Run:** [View logs](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+
+            ### Failed Crates
+            ${FAILED_CRATES.map(c => `- ❌ \`${c}\``).join('\n')}
+
+            ### Required Actions
+
+            1. **Investigate compilation errors** - Check the "Check for breaking changes" job logs
+            2. **Review LEZ changelog** - See what changed in LEZ: https://github.com/logos-blockchain/logos-execution-zone/commits/main
+            3. **Update SPEL code** - Fix any API incompatibilities
+            4. **Re-run workflow** - After fixes, trigger manually or wait for next schedule
+
+            ### LEZ Diff
+            Compare: https://github.com/logos-blockchain/logos-execution-zone/compare/${{ needs.check-compatibility.outputs.current_lez_commit }}...${LEZ}
+
+            ---
+            *Auto-generated by LEZ Compatibility Check*`;
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `🚨 LEZ Compatibility Check Failed - LEZ ${LEZ}`,
+              body,
+              labels: ['lez-bump', 'blocked'],
+              assignees: ['${{ github.actor }}']
+            });
+
+      - name: Comment on PR with results
+        if: always() && steps.cargo-check.status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const LEZ = '${{ needs.check-compatibility.outputs.lez_short }}';
+            const status = '${{ steps.cargo-check.outputs.status }}';
+            
+            // Find PR for this branch
+            const branch = `lez-bump/${LEZ}`;
+            const { data: prs } = await github.rest.pulls.list({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              head: `${context.repo.owner}:${branch}`
+            });
+            
+            if (prs.length === 0) {
+              console.log('No open PR found for branch:', branch);
+              return;
+            }
+            
+            const pr = prs[0];
+            const emoji = status === 'passed' ? '✅' : '❌';
+            const statusText = status === 'passed' ? 'All checks passed' : 'Some checks failed';
+            
+            const comment = `## LEZ Compatibility Test Results ${emoji}
+            
+            **LEZ:** \`${LEZ}\`
+            **Status:** ${statusText}
+            
+            ${status === 'passed' 
+              ? '✅ SPEL compiles successfully against the new LEZ version. Ready for manual testing and review.'
+              : '❌ See above for failed crates. Check logs for detailed error messages.'}
+            
+            [View full test report](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }})
+            `;
+            
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr.number,
+              body: comment
+            });
