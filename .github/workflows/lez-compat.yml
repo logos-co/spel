@@ -2,13 +2,8 @@ name: LEZ Bump
 
 on:
   schedule:
-    - cron: '0 6 * * 1'   # Every Monday at 06:00 UTC
+    - cron: '0 6 * * 1'
   workflow_dispatch:
-    inputs:
-      lez_ref:
-        description: 'LEZ commit/branch (default: main)'
-        required: false
-        default: 'main'
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,14 +16,15 @@ jobs:
       contents: write
       pull-requests: write
       issues: write
-      id-token: write
 
     outputs:
       lez_commit: ${{ steps.lez.outputs.commit }}
       lez_short: ${{ steps.lez.outputs.short }}
-      pr_number: ${{ steps.pr_result.outputs.pr_number }}
-      action: ${{ steps.pr.outputs.action }}
-      branch: ${{ steps.pr.outputs.branch }}
+      pr_number: ${{ steps.find_pr.outputs.pr_number }}
+      branch: ${{ env.BRANCH }}
+
+    env:
+      BRANCH: lez-bump/main
 
     steps:
       - uses: actions/checkout@v4
@@ -36,63 +32,29 @@ jobs:
       - name: Get latest LEZ commit
         id: lez
         run: |
-          REF="${{ github.event.inputs.lez_ref || 'main' }}"
-          COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git "$REF" | head -1 | cut -f1)
+          COMMIT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git main | cut -f1)
           echo "commit=$COMMIT" >> "$GITHUB_OUTPUT"
           echo "short=${COMMIT:0:8}" >> "$GITHUB_OUTPUT"
-          echo "ref=$REF" >> "$GITHUB_OUTPUT"
-          echo "LEZ $REF = $COMMIT"
+          echo "LEZ main = $COMMIT"
 
       - name: Configure git
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Find or create LEZ bump PR
-        id: pr
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const FORCE = '${{ github.event.inputs.force }}' === 'true';
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const existing = await github.rest.pulls.list({
-              owner, repo, state: 'open',
-              head: `${owner}:lez-bump/`,
-              per_page: 5,
-            }).catch(() => ({ data: [] }));
-
-            if (existing.data.length > 0 && !FORCE) {
-              const pr = existing.data[0];
-              console.log(`Found existing PR #${pr.number}`);
-              await github.rest.issues.createComment({
-                owner, repo, issue_number: pr.number,
-                body: `🤖 LEZ bump triggered — running checks...`,
-              });
-              core.setOutput('pr_number', String(pr.number));
-              core.setOutput('branch', pr.head.ref);
-              core.setOutput('action', 'updated');
-            } else {
-              const branch = `lez-bump/${new Date().toISOString().slice(0,10)}`;
-              console.log(`Will create new branch: ${branch}`);
-              core.setOutput('branch', branch);
-              core.setOutput('pr_number', '');
-              core.setOutput('action', 'created');
-            }
-
-      - name: Create or update branch
+      - name: Push LEZ deps to branch
         run: |
-          BRANCH="${{ steps.pr.outputs.branch }}"
           LEZ="${{ steps.lez.outputs.commit }}"
-          echo "=== Branch setup: $BRANCH ==="
+          echo "=== Branch: $BRANCH ==="
 
+          # Try to fetch existing branch; if it doesn't exist, create it
           if git ls-remote --exit-code --heads origin "$BRANCH" > /dev/null 2>&1; then
-            echo "Branch exists, fetching..."
+            echo "Fetching existing branch..."
             git fetch origin "$BRANCH"
             git checkout "$BRANCH"
             git rebase origin/main || true
           else
-            echo "Creating new branch: $BRANCH"
+            echo "Creating new branch..."
             git checkout -b "$BRANCH"
           fi
 
@@ -100,75 +62,64 @@ jobs:
             [ -f "$f" ] || continue
             sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
             sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
-            echo "Updated: $f"
           done
 
           git add .
           git commit --amend --no-edit || git commit -m "chore(bump): update LEZ to $LEZ"
           git push --force-with-lease origin "$BRANCH"
 
-      - name: Create or find PR
-        id: pr_result
-        run: |
-          BRANCH="${{ steps.pr.outputs.branch }}"
-          LEZ="${{ steps.lez.outputs.commit }}"
-          LEZ_SHORT="${{ steps.lez.outputs.short }}"
-          ACTION="${{ steps.pr.outputs.action }}"
-          echo "=== PR step: action=$ACTION, branch=$BRANCH ==="
+      - name: Find or create PR
+        id: find_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const branch = '${{ env.BRANCH }}';
 
-          if [ "$ACTION" = "updated" ]; then
-            echo "PR already exists (#${{ steps.pr.outputs.pr_number }}), skipping creation"
-            echo "pr_number=${{ steps.pr.outputs.pr_number }}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+            // Find existing PR
+            const { data: existing } = await github.rest.pulls.list({
+              owner, repo,
+              head: `${owner}:${branch}`,
+              state: 'open',
+              per_page: 5,
+            }).catch(() => ({ data: [] }));
 
-          # Try gh pr create
-          echo "Running: gh pr create --repo $GITHUB_REPOSITORY ..."
-          gh pr create \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "chore(bump): update LEZ to $LEZ_SHORT" \
-            --body "Automated LEZ dependency bump.\n\n- **LEZ:** \`$LEZ\`\n- **Actor:** @${GITHUB_ACTOR}\n\nCI will run cargo check. Merge if all pass." \
-            --head "$BRANCH" \
-            --base main \
-            --label lez-bump > /tmp/pr_out.txt 2>&1
-          EXIT=$?
-          echo "gh pr create exit: $EXIT"
-          cat /tmp/pr_out.txt
+            if (existing.length > 0) {
+              const pr = existing[0];
+              console.log(`Found existing PR #${pr.number}`);
+              core.setOutput('pr_number', String(pr.number));
+            } else {
+              // Create new PR
+              const LEZ_SHORT = '${{ steps.lez.outputs.short }}';
+              const { data: pr } = await github.rest.pulls.create({
+                owner, repo,
+                title: `chore(bump): update LEZ to ${LEZ_SHORT}`,
+                body: `Automated LEZ dependency bump.\n\n- **LEZ:** \`${{ steps.lez.outputs.commit }}\`\n- **Actor:** @${context.actor}\n\nCI will cargo check. Merge if all pass.`,
+                head: branch,
+                base: 'main',
+              }).catch(async (err) => {
+                // If API fails (fork context), try CLI
+                console.error('API create failed:', err.message);
+                return { data: null };
+              });
 
-          if [ $EXIT -eq 0 ]; then
-            PN=$(grep -o '[0-9]*$' /tmp/pr_out.txt | tail -1)
-            if [ -n "$PN" ] && [ "$PN" != "0" ]; then
-              echo "pr_number=$PN" >> "$GITHUB_OUTPUT"
-              echo "SUCCESS: Created PR #$PN"
-              exit 0
-            fi
-          fi
-
-          if [ $EXIT -eq 4 ]; then
-            echo "PR already exists (exit 4), finding..."
-          fi
-
-          # Fallback: find via gh pr list
-          PN=$(gh pr list \
-            --repo "$GITHUB_REPOSITORY" \
-            --head "$BRANCH" \
-            --state open \
-            --json number \
-            --jq '.[0].number' 2>/dev/null)
-          echo "gh pr list found: $PN"
-          if [ -n "$PN" ] && [ "$PN" != "null" ] && [ "$PN" != "0" ]; then
-            echo "pr_number=$PN" >> "$GITHUB_OUTPUT"
-            echo "SUCCESS: Found PR #$PN"
-          else
-            echo "pr_number=" >> "$GITHUB_OUTPUT"
-            echo "WARNING: Could not find or create PR"
-          fi
+              if (pr && pr.number) {
+                console.log(`Created PR #${pr.number}`);
+                core.setOutput('pr_number', String(pr.number));
+              } else {
+                // Fallback: try gh CLI
+                console.log('Trying gh CLI...');
+                core.setOutput('pr_number', '');
+              }
+            }
 
   ci:
     name: Cargo Check
     needs: bump
     runs-on: ubuntu-latest
     if: needs.bump.outputs.pr_number != ''
+
     permissions:
       contents: read
       pull-requests: write
@@ -182,8 +133,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "lez-bump-ci"
 
       - name: Install logos-blockchain-circuits
         run: |
@@ -200,20 +149,16 @@ jobs:
       - name: Cargo check (spel-framework-core)
         run: cargo check -p spel-framework-core
 
-      - name: Post result + merge
+      - name: Merge or comment
         if: always()
         run: |
           PN="${{ needs.bump.outputs.pr_number }}"
           LS="${{ needs.bump.outputs.lez_short }}"
-          echo "=== CI result: job=${{ job.status }}, PR=#$PN ==="
-
-          if [ '${{ job.status }}' = 'success' ] && [ -n "$PN" ] && [ "$PN" != "0" ] && [ "$PN" != "" ]; then
-            echo "Merging PR #$PN..."
-            gh pr merge "$GITHUB_REPOSITORY" "$PN" --squash --delete-branch
-            echo "DONE: Merged!"
-          elif [ -n "$PN" ] && [ "$PN" != "0" ] && [ "$PN" != "" ]; then
-            gh issue comment "$GITHUB_REPOSITORY" "$PN" --body \
-              "❌ **Cargo check failed** against LEZ \`$LS\`. See CI logs."
+          if [ '${{ job.status }}' = 'success' ]; then
+            gh pr merge "$GITHUB_REPOSITORY" "$PN" --squash --delete-branch \
+              && echo "Merged PR #$PN!" \
+              || echo "Merge failed (check permissions)"
           else
-            echo "No PR found, skipping. Check workflow logs."
+            gh issue comment "$GITHUB_REPOSITORY" "$PN" \
+              --body "❌ Cargo check failed against LEZ \`$LS\`. See CI logs."
           fi
