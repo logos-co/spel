@@ -143,8 +143,16 @@ pub struct IdlAccountType {
 }
 
 /// Type definition (struct or enum).
+///
+/// When stored in [`SpelIdl::types`] the `name` field identifies the type so
+/// the decoder can resolve `Defined { name }` references. When embedded inside
+/// [`IdlAccountType`] the name is redundant (already on the wrapper) and is
+/// left empty / skipped during serialisation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdlTypeDef {
+    /// Type name. Required when stored in `SpelIdl::types`; empty otherwise.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     pub kind: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<IdlField>,

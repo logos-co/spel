@@ -17,6 +17,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
 
     // Imports
+    writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use nssa::{{").unwrap();
     writeln!(out, "    AccountId, ProgramId, PublicTransaction,").unwrap();
     writeln!(out, "    public_transaction::{{Message, WitnessSet}},").unwrap();
@@ -161,9 +162,9 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "            .map_err(|e| format!(\"message: {{:?}}\", e))?;").unwrap();
         writeln!(out, "        let witness_set = WitnessSet::for_message(&message, &signing_keys);").unwrap();
         writeln!(out, "        let tx = PublicTransaction::new(message, witness_set);").unwrap();
-        writeln!(out, "        let response = self.wallet.sequencer_client.send_tx_public(tx).await").unwrap();
+        writeln!(out, "        let response = self.wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
         writeln!(out, "            .map_err(|e| format!(\"submit: {{}}\", e))?;").unwrap();
-        writeln!(out, "        Ok(response.tx_hash.to_string())").unwrap();
+        writeln!(out, "        Ok(hex::encode(response.0))").unwrap();
         writeln!(out, "    }}").unwrap();
     }
 

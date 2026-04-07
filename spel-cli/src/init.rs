@@ -285,8 +285,8 @@ path = "src/bin/{snake_name}.rs"
 
 [dependencies]
 spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }}
-risc0-zkvm = {{ version = "=3.0.5", default-features = false }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
+risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
@@ -354,7 +354,7 @@ path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
 spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/lssa.git", rev = "767b5afd388c7981bcdf6f5b5c80159607e07e5b" }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
 spel = {{ git = "https://github.com/logos-co/spel.git" }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"

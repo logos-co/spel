@@ -41,3 +41,80 @@ jobs:
         run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen -p spel
       - name: E2E tests
         run: cargo test -p spel-framework
+
+  privacy-smoke-test:
+    name: Privacy Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      RISC0_VERSION: "3.0.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "privacy"
+
+      - name: Generate Cargo.lock
+        run: cargo generate-lockfile
+      - name: Extract LEZ commit from spel-framework/Cargo.toml
+        id: lez-ref
+        run: |
+          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -o 'rev = "[^"]*"' | cut -d'"' -f2)
+          echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
+          echo "Using LEZ commit: $LEZ_REV"
+
+      - name: Install risc0 toolchain
+        run: |
+          curl -L https://risczero.com/install | bash
+          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
+          rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install spel
+        run: cargo install --path spel-cli --locked
+
+      - name: Clone LEZ at correct commit
+        run: |
+          git clone --depth 1 https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa || true
+          cd /tmp/lssa
+          git fetch --depth 1 origin ${{ steps.lez-ref.outputs.LEZ_REV }}
+          git checkout ${{ steps.lez-ref.outputs.LEZ_REV }}
+
+      - name: Cache sequencer
+        id: cache-seq
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ steps.lez-ref.outputs.LEZ_REV }}
+
+      - name: Build sequencer
+        if: steps.cache-seq.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/lssa
+          cargo build --release --features standalone -p sequencer_service
+
+      - name: Build wallet
+        run: |
+          cd /tmp/lssa
+          cargo build --release -p wallet
+
+      - name: Setup wallet
+        run: |
+          mkdir -p /tmp/wallet
+          echo '{"sequencer_addr":"http://127.0.0.1:3040","seq_poll_timeout":"30s","seq_tx_poll_max_blocks":15,"seq_poll_max_retries":10,"seq_block_poll_max_amount":100,"initial_accounts":[{"Public":{"account_id":"CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r","pub_sign_key":"7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb"}},{"Public":{"account_id":"2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2","pub_sign_key":"f434f8741720014586ae43356d2aec6257da086222f604ddb75d69733b86fc4c"}}]}' > /tmp/wallet/wallet_config.json
+
+      - name: Run privacy smoke test
+        env:
+          NSSA_WALLET_HOME_DIR: /tmp/wallet
+          LSSA_DIR: /tmp/lssa
+        run: |
+          export PATH="/tmp/lssa/target/release:$PATH"
+          scripts/smoke-test-privacy.sh /tmp/privacy-smoke

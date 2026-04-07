@@ -102,6 +102,28 @@ pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marker attribute for account data types.
+///
+/// Place this on any struct or enum whose Borsh-encoded bytes are stored
+/// in on-chain accounts. `spel generate-idl` will include the type in the
+/// IDL so that `spel inspect` can decode account data of this shape.
+///
+/// ```rust,ignore
+/// #[account_type]
+/// #[derive(BorshSerialize, BorshDeserialize)]
+/// pub struct VaultState {
+///     pub owner: AccountId,
+///     pub balance: u64,
+/// }
+/// ```
+///
+/// This attribute is a no-op at compile time; it is consumed solely by the
+/// IDL generator.
+#[proc_macro_attribute]
+pub fn account_type(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
 /// Generate IDL from a program source file.
 ///
 /// Parses the given Rust source file, finds the `#[lez_program]` module,
@@ -251,12 +273,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             };
 
             // Write outputs to zkVM host
-            nssa_core::program::write_nssa_outputs_with_chained_call(
+            nssa_core::program::ProgramOutput::new(
                 instruction_words,
                 pre_states_clone,
                 post_states,
-                chained_calls,
-            );
+            )
+            .with_chained_calls(chained_calls)
+            .write();
         }
     };
 

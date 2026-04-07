@@ -6,7 +6,7 @@
 #   - spel in PATH (cargo install --path spel)
 #   - cargo-risczero installed (cargo risczero --version)
 #   - Docker running (for risc0 guest builds)
-#   - sequencer_runner in PATH or ~/bin/
+#   - sequencer_service in PATH or ~/bin/
 
 set -euo pipefail
 
@@ -47,16 +47,16 @@ docker info >/dev/null 2>&1 || warn "Docker not running — guest build may fail
 
 LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
 SEQUENCER_BIN=""
-if command -v sequencer_runner >/dev/null 2>&1; then
-    SEQUENCER_BIN="sequencer_runner"
-elif [ -x "$HOME/bin/sequencer_runner" ]; then
-    SEQUENCER_BIN="$HOME/bin/sequencer_runner"
-elif [ -x "$LSSA_DIR/target/release/sequencer_runner" ]; then
-    SEQUENCER_BIN="$LSSA_DIR/target/release/sequencer_runner"
-elif [ -x "$LSSA_DIR/target/debug/sequencer_runner" ]; then
-    SEQUENCER_BIN="$LSSA_DIR/target/debug/sequencer_runner"
+if command -v sequencer_service >/dev/null 2>&1; then
+    SEQUENCER_BIN="sequencer_service"
+elif [ -x "$HOME/bin/sequencer_service" ]; then
+    SEQUENCER_BIN="$HOME/bin/sequencer_service"
+elif [ -x "$LSSA_DIR/target/release/sequencer_service" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/release/sequencer_service"
+elif [ -x "$LSSA_DIR/target/debug/sequencer_service" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/debug/sequencer_service"
 else
-    warn "sequencer_runner not found — will skip deploy/submit steps"
+    warn "sequencer_service not found — will skip deploy/submit steps"
 fi
 
 # ─── Step 1: Scaffold project ────────────────────────────────────────────
@@ -114,20 +114,20 @@ fi
 log "Step 4: Starting sequencer and deploying..."
 
 # Kill any existing sequencer
-pgrep -f 'sequencer_runner.*configs' | xargs -r kill 2>/dev/null || true
+pgrep -f 'sequencer_service.*configs' | xargs -r kill 2>/dev/null || true
 sleep 1
 
 # Clean old state
 rm -rf "${LSSA_DIR}/.sequencer_db" "${LSSA_DIR}/rocksdb"
 
 # Start sequencer with lssa configs
-SEQ_CONFIGS="${LSSA_DIR}/sequencer_runner/configs/debug"
+SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug"
 if [ ! -d "$SEQ_CONFIGS" ]; then
     fail "Sequencer configs not found at $SEQ_CONFIGS"
 fi
 
 cd "$LSSA_DIR"
-RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS/sequencer_config.json" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 cd "$WORK_DIR/$PROJECT_NAME"
 
