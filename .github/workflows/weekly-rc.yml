@@ -1,0 +1,169 @@
+name: Weekly RC
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # Every Monday at 8:00 UTC
+  workflow_dispatch:      # Allow manual trigger
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  weekly-rc:
+    name: Publish Weekly RC
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Check for new commits since last RC
+        id: check
+        run: |
+          # Find the latest RC tag
+          LAST_RC=$(git tag --list 'v*-rc.*' --sort=-version:refname | head -1)
+
+          if [ -z "$LAST_RC" ]; then
+            # No RC tags yet — find last stable release
+            LAST_RC=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -v '\-rc\.' | head -1)
+          fi
+
+          echo "Last RC/release: $LAST_RC"
+
+          if [ -z "$LAST_RC" ]; then
+            echo "No previous tags found, proceeding with RC"
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            COMMIT_COUNT=$(git rev-list ${LAST_RC}..HEAD --count)
+            echo "Commits since $LAST_RC: $COMMIT_COUNT"
+            if [ "$COMMIT_COUNT" -gt 0 ]; then
+              echo "has_changes=true" >> $GITHUB_OUTPUT
+            else
+              echo "has_changes=false" >> $GITHUB_OUTPUT
+              echo "No new commits since $LAST_RC — skipping RC"
+            fi
+          fi
+
+      - name: Compute next RC version
+        id: version
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          # Get current stable version from spel-framework/Cargo.toml
+          STABLE=$(grep '^version = ' spel-framework/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "Stable version: $STABLE"
+
+          # Find the highest existing RC number for this stable version
+          LAST_RC_N=$(git tag --list "v${STABLE}-rc.*" --sort=-version:refname | head -1 | sed "s/v${STABLE}-rc\.//")
+
+          if [ -z "$LAST_RC_N" ]; then
+            NEXT_N=1
+          else
+            NEXT_N=$((LAST_RC_N + 1))
+          fi
+
+          RC_VERSION="${STABLE}-rc.${NEXT_N}"
+          echo "RC version: $RC_VERSION"
+          echo "rc_version=$RC_VERSION" >> $GITHUB_OUTPUT
+          echo "stable_version=$STABLE" >> $GITHUB_OUTPUT
+          echo "rc_n=$NEXT_N" >> $GITHUB_OUTPUT
+
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.check.outputs.has_changes == 'true'
+
+      - name: Install logos-blockchain-circuits
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Cargo check
+        if: steps.check.outputs.has_changes == 'true'
+        run: cargo check
+
+      - name: Run unit tests
+        if: steps.check.outputs.has_changes == 'true'
+        run: cargo test --lib
+
+      - name: Generate changelog since last RC
+        id: changelog
+        if: steps.check.outputs.has_changes == 'true'
+        run: |
+          LAST_RC=$(git tag --list 'v*-rc.*' --sort=-version:refname | head -1)
+          if [ -z "$LAST_RC" ]; then
+            LAST_RC=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -v '\-rc\.' | head -1)
+          fi
+
+          if [ -z "$LAST_RC" ]; then
+            RANGE="HEAD"
+          else
+            RANGE="${LAST_RC}..HEAD"
+          fi
+
+          FEATS=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^- feat" | sed 's/^- feat[^:]*: //' || true)
+          FIXES=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep "^- fix" | sed 's/^- fix[^:]*: //' || true)
+          OTHER=$(git log $RANGE --pretty=format:"- %s (%h)" --no-merges | grep -vE "^- (feat|fix|chore|ci:)" || true)
+
+          BODY=""
+          [ -n "$FEATS" ] && BODY="${BODY}### ✨ Features\n${FEATS}\n\n"
+          [ -n "$FIXES" ] && BODY="${BODY}### 🐛 Fixes\n${FIXES}\n\n"
+          [ -n "$OTHER" ] && BODY="${BODY}### 📦 Other\n${OTHER}\n\n"
+
+          echo "body<<EOF" >> $GITHUB_OUTPUT
+          echo -e "$BODY" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create RC tag and release
+        if: steps.check.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_VERSION: ${{ steps.version.outputs.rc_version }}
+        run: |
+          # Create and push the versioned RC tag
+          git tag -a "v${RC_VERSION}" -m "RC v${RC_VERSION}"
+          git push origin "v${RC_VERSION}"
+
+          # Move the rc-latest tag
+          git tag -f rc-latest
+          git push origin rc-latest --force
+
+      - name: Trigger lez-multisig RC update
+        if: steps.check.outputs.has_changes == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RC_VERSION: ${{ steps.version.outputs.rc_version }}
+        run: |
+          gh api repos/logos-co/lez-multisig/dispatches \
+            -f event_type=spel-rc-published \
+            -f client_payload[tag]="v${RC_VERSION}" || \
+          echo "Warning: could not trigger lez-multisig (may need REPO_DISPATCH_TOKEN secret)"
+
+      - name: Create GitHub pre-release
+        if: steps.check.outputs.has_changes == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.rc_version }}
+          name: v${{ steps.version.outputs.rc_version }} (RC)
+          prerelease: true
+          body: |
+            ## Release Candidate v${{ steps.version.outputs.rc_version }}
+
+            ⚠️ This is a **release candidate** — not for production use.
+
+            ${{ steps.changelog.outputs.body }}
+
+            ---
+
+            **Installation** (Cargo.toml):
+            ```toml
+            spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v${{ steps.version.outputs.rc_version }}" }
+            ```
