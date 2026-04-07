@@ -108,19 +108,32 @@ jobs:
       - name: Create PR (new branch only)
         if: steps.pr.outputs.action == 'created'
         run: |
+          set +e
           BRANCH="${{ steps.pr.outputs.branch }}"
           LEZ="${{ steps.lez.outputs.commit }}"
           LEZ_SHORT="${LEZ:0:8}"
           gh pr create \
             --repo "$GITHUB_REPOSITORY" \
             --title "chore(bump): update LEZ to $LEZ_SHORT" \
-            --body "Automated LEZ dependency bump. LEZ: \`$LEZ\`. Actor: @$GITHUB_ACTOR. CI will run cargo check. Merge if all pass." \
+            --body "Automated LEZ dependency bump. LEZ: $LEZ. Actor: @$GITHUB_ACTOR. CI will run cargo check. Merge if all pass." \
             --head "$BRANCH" \
             --base main \
-            --label lez-bump > /tmp/pr_url.txt 2>&1
-          PR_URL=$(cat /tmp/pr_url.txt | grep '^https://' | head -1)
-          PR_NUM=$(echo "$PR_URL" | grep -o '[0-9]*$' | tail -1)
+            --label lez-bump > /tmp/pr_out.txt 2>&1
+          echo "=== gh pr create output ==="
+          cat /tmp/pr_out.txt
+          echo "=== end output ==="
+          PR_NUM=$(grep -o '[0-9]*$' /tmp/pr_out.txt | tail -1 || echo "")
+          if [ -z "$PR_NUM" ]; then
+            echo "PR not found in output, searching via gh pr list..."
+            PR_NUM=$(gh pr list \
+              --repo "$GITHUB_REPOSITORY" \
+              --head "$BRANCH" \
+              --state open \
+              --json number \
+              --jq '.[0].number' 2>/dev/null || echo "0")
+          fi
           echo "pr_number=$PR_NUM" >> "$GITHUB_OUTPUT"
+          echo "Result: PR #$PR_NUM"
 
   ci:
     name: Cargo Check
