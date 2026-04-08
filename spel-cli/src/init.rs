@@ -325,7 +325,7 @@ mod {snake_name} {{
     ) -> SpelResult {{
         // TODO: implement initialization logic
         Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone()),
+            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
             AccountPostState::new(owner.account.clone()),
         ]))
     }}

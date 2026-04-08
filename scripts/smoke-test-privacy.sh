@@ -149,7 +149,7 @@ mod privacy_test {
             data.extend_from_slice(&greeting);
             acc.data = Data::try_from(data)
                 .map_err(|_| SpelError::custom(999, "data too big"))?;
-            AccountPostState::new_claimed(acc)
+            AccountPostState::new_claimed(acc, Claim::Authorized)
         } else {
             // Already owned (e.g. by auth-transfer): return unchanged
             AccountPostState::new(acc)
