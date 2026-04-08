@@ -252,7 +252,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let main_fn = quote! {
         fn main() {
             // Read inputs from zkVM host
-            let (nssa_core::program::ProgramInput { pre_states, instruction }, instruction_words)
+            let (nssa_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
                 = nssa_core::program::read_nssa_inputs::<Instruction>();
             let pre_states_clone = pre_states.clone();
 
@@ -274,6 +274,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
             // Write outputs to zkVM host
             nssa_core::program::ProgramOutput::new(
+                self_program_id,
+                caller_program_id,
                 instruction_words,
                 pre_states_clone,
                 post_states,
