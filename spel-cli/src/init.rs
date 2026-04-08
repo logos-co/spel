@@ -284,8 +284,8 @@ name = "{snake_name}"
 path = "src/bin/{snake_name}.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -353,9 +353,9 @@ name = "{snake_name}_cli"
 path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
-spel = {{ git = "https://github.com/logos-co/spel.git" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }}
+spel = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
 tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
