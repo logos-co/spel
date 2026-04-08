@@ -16,6 +16,9 @@ SEQUENCER_PORT="${SEQUENCER_PORT:-3040}"
 SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
 PROJECT_NAME="privacy_test"
 LOG_DIR="${WORK_DIR}/logs"
+LEZ_TAG="${LEZ_TAG:-v0.2.0-rc1}"
+SPEL_TAG="${SPEL_TAG:-v0.2.0-rc.1}"
+SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,7 +39,6 @@ trap cleanup EXIT
 
 # ─── Prerequisites ─────────────────────────────────────────────────────────
 
-command -v spel >/dev/null 2>&1 || fail "spel not found"
 command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 
 LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
@@ -66,12 +68,52 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR" "$LOG_DIR"
 cd "$WORK_DIR"
 
+# Build local spel-cli from this PR instead of using the system-installed version.
+# The published spel v0.2.0-rc.1 depends on an older LEZ rev internally, which causes
+# Cargo to resolve the wrong nssa_core version in scaffolded projects.
+log "Building local spel-cli from ${SPEL_DIR}..."
+cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel --release \
+    > "$LOG_DIR/spel-build.log" 2>&1 || fail "Failed to build local spel-cli (see $LOG_DIR/spel-build.log)"
+SPEL_BIN="$SPEL_DIR/target/release/spel"
+[ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
+log "  Using local spel: $SPEL_BIN"
+
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
-log "Step 1: Creating SPEL project..."
-spel init "$PROJECT_NAME" > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed"
+log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG}, SPEL=${SPEL_TAG})..."
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-tag "$SPEL_TAG" "$PROJECT_NAME" \
+    > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✅ Project scaffolded"
+
+# ─── Patch: force nssa_core to the correct LEZ tag ────────────────────────
+# The published spel-framework may transitively pull an older nssa_core.
+# A [patch] section forces Cargo to unify all nssa_core refs to our tag.
+LEZ_GIT="https://github.com/logos-blockchain/logos-execution-zone.git"
+
+cat >> methods/guest/Cargo.toml << PATCHEOF
+
+[patch."${LEZ_GIT}"]
+nssa_core = { git = "${LEZ_GIT}", tag = "${LEZ_TAG}" }
+PATCHEOF
+
+cat >> Cargo.toml << PATCHEOF
+
+[patch."${LEZ_GIT}"]
+nssa_core = { git = "${LEZ_GIT}", tag = "${LEZ_TAG}" }
+PATCHEOF
+
+log "  ✅ Patched Cargo.toml files to pin nssa_core=${LEZ_TAG}"
+
+# Regenerate lockfiles so the patch takes effect
+(cd methods/guest && cargo generate-lockfile > "$LOG_DIR/guest-lockfile.log" 2>&1) \
+    || warn "Guest lockfile regeneration failed"
+cargo generate-lockfile > "$LOG_DIR/root-lockfile.log" 2>&1 \
+    || warn "Root lockfile regeneration failed"
+
+# Print the actual LEZ version resolved
+log "  LEZ nssa_core resolved:"
+grep -A2 'name = "nssa_core"' methods/guest/Cargo.lock 2>/dev/null | head -5 || true
 
 # ─── Step 2: Modify guest program for privacy test ────────────────────────
 
@@ -201,7 +243,7 @@ log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 log "Step 8: Testing PUBLIC transaction..."
 FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
 
-SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
@@ -223,7 +265,7 @@ sleep 20
 # ─── Step 10: Test PRIVACY-PRESERVING transaction ───────────────────────
 
 log "Step 10: Testing PRIVACY-PRESERVING transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$PRIVATE_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \

@@ -401,19 +401,6 @@ async fn main() {
         Err(e) => eprintln!("⚠️  Failed to generate Cargo.lock (cargo not found?): {}", e),
     }
 
-    // Generate Cargo.lock for the guest to pin dependency versions
-    // (prevents getrandom 0.3.x resolution issues in Docker builds)
-    let guest_dir = root.join("methods/guest");
-    let status = std::process::Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&guest_dir)
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with {}", s),
-        Err(e) => eprintln!("⚠️  Could not run cargo generate-lockfile: {}", e),
-    }
-
     println!("✅ Project '{}' created!", project_name);
     println!();
     println!("Next steps:");
