@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-pub fn init_project(name: &str) {
+pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, lez_rev: Option<&str>, spel_rev: Option<&str>) {
     let root = Path::new(name);
     if root.exists() {
         eprintln!("❌ Directory '{}' already exists", name);
@@ -271,6 +271,16 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     write_file(root, "methods/src/lib.rs", r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
 "#);
 
+    let lez_ref = match (lez_tag, lez_rev) {
+        (Some(t), _) => format!("tag = \"{}\"", t),
+        (_, Some(r)) => format!("rev = \"{}\"", r),
+        _ => "tag = \"v0.2.0-rc1\"".to_string(),
+    };
+    let spel_ref = match (spel_tag, spel_rev) {
+        (Some(t), _) => format!("tag = \"{}\"", t),
+        (_, Some(r)) => format!("rev = \"{}\"", r),
+        _ => "tag = \"v0.2.0-rc.1\"".to_string(),
+    };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
 name = "{snake_name}-guest"
@@ -284,8 +294,8 @@ name = "{snake_name}"
 path = "src/bin/{snake_name}.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -353,9 +363,9 @@ name = "{snake_name}_cli"
 path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }}
-spel = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.2.0-rc.1" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
+spel = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
 tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
