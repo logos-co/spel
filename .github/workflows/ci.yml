@@ -57,16 +57,36 @@ jobs:
 
       - name: Generate Cargo.lock
         run: cargo generate-lockfile
-      - name: Extract LEZ commit from spel-framework/Cargo.toml
+
+      - name: Extract LEZ revision from spel-framework/Cargo.toml
         id: lez-ref
         run: |
-          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -o 'rev = "[^"]*"' | cut -d'"' -f2)
+          # Support both tag = "..." and rev = "..." formats
+          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -oE '(tag|rev) = "[^"]*"' | cut -d'"' -f2)
+          if [ -z "$LEZ_REV" ]; then
+            echo "ERROR: Could not extract LEZ revision from spel-framework/Cargo.toml"
+            exit 1
+          fi
           echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
-          echo "Using LEZ commit: $LEZ_REV"
+          echo "LEZ_TAG=$LEZ_REV" >> $GITHUB_OUTPUT
+          echo "Using LEZ revision: $LEZ_REV"
+
+      - name: Determine SPEL ref for testing
+        id: spel-ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # For PRs, use the PR head commit
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+          else
+            # For pushes to main, use the current commit
+            SPEL_REF="${{ github.sha }}"
+          fi
+          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
+          echo "Using SPEL ref: $SPEL_REF"
 
       - name: Install risc0 toolchain
         run: |
-          curl -L https://risczero.com/install | bash
+          curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
@@ -81,25 +101,37 @@ jobs:
       - name: Install spel
         run: cargo install --path spel-cli --locked
 
-      - name: Clone LEZ at correct commit
+      - name: Clone LEZ at correct revision
         run: |
-          git clone --depth 1 https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa || true
+          rm -rf /tmp/lssa
+          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
           cd /tmp/lssa
+          # Fetch the specific tag/revision
           git fetch --depth 1 origin ${{ steps.lez-ref.outputs.LEZ_REV }}
           git checkout ${{ steps.lez-ref.outputs.LEZ_REV }}
 
-      - name: Cache sequencer
-        id: cache-seq
-        uses: actions/cache@v4
+      - name: Cache sequencer binary
+        id: cache-sequencer
+        uses: actions/cache/restore@v4
         with:
           path: /tmp/lssa/target/release/sequencer_service
           key: sequencer-${{ steps.lez-ref.outputs.LEZ_REV }}
+          restore-keys: |
+            sequencer-
+          fail-on-cache-miss: false
 
       - name: Build sequencer
-        if: steps.cache-seq.outputs.cache-hit != 'true'
+        if: steps.cache-sequencer.outputs.cache-hit != 'true'
         run: |
           cd /tmp/lssa
           cargo build --release --features standalone -p sequencer_service
+
+      - name: Save sequencer cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ steps.lez-ref.outputs.LEZ_REV }}
 
       - name: Build wallet
         run: |
@@ -115,6 +147,8 @@ jobs:
         env:
           NSSA_WALLET_HOME_DIR: /tmp/wallet
           LSSA_DIR: /tmp/lssa
+          LEZ_TAG: ${{ steps.lez-ref.outputs.LEZ_TAG }}
+          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/smoke-test-privacy.sh /tmp/privacy-smoke
