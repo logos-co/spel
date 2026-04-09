@@ -191,6 +191,12 @@ SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
 cd "$LSSA_DIR"
 RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
+sleep 2
+if ! kill -0 $SEQ_PID 2>/dev/null; then
+    echo "❌ Seencer failed to start. Logs:"
+    cat "$LOG_DIR/sequencer.log" | tail -30
+    exit 1
+fi
 cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
