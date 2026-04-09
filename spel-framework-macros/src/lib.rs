@@ -248,6 +248,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     // Generate validation functions
     let validation_fns = generate_validation(&instructions);
 
+    // Generate per-instruction __claims_*() functions for auto-claim
+    let claim_fns = generate_claim_fns(&instructions);
+
     // Generate main function
     let main_fn = quote! {
         fn main() {
@@ -310,6 +313,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             #(#handler_fns)*
 
             #(#validation_fns)*
+
+            #(#claim_fns)*
         }
 
         // IDL generation (available at host-side for tooling)
@@ -673,6 +678,84 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 }
             }
             quote! { #func }
+        })
+        .collect()
+}
+
+/// Generate per-instruction `__claims_{fn_name}()` functions that return
+/// `Vec<Claim>` based on account constraints. These are used by
+/// `SpelOutput::execute_with_claims()` so users don't have to manually
+/// choose `new()` vs `new_claimed()`.
+///
+/// Auto-claim rules:
+/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
+/// - `#[account(init, signer)]`    → `Claim::Authorized`
+/// - `#[account(init)]`            → `Claim::Authorized`
+/// - `#[account(mut)]`             → `Claim::None`
+/// - `#[account]`                  → `Claim::None`
+fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
+    instructions
+        .iter()
+        .map(|ix| {
+            let fn_name = format_ident!("__claims_{}", ix.fn_name);
+
+            let claim_exprs: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .map(|acc| {
+                    if acc.constraints.init && !acc.constraints.pda_seeds.is_empty() {
+                        // init + PDA → AutoClaim::Claimed(Claim::Pda(seed))
+                        // Combine PDA seeds into a single PdaSeed
+                        let seed_bytes: Vec<TokenStream2> = acc
+                            .constraints
+                            .pda_seeds
+                            .iter()
+                            .map(|seed| {
+                                let val = match seed {
+                                    PdaSeedDef::Const(v) => v.clone(),
+                                    PdaSeedDef::Account(v) => v.clone(),
+                                    PdaSeedDef::Arg(v) => v.clone(),
+                                };
+                                quote! { &spel_framework::pda::seed_from_str(#val) }
+                            })
+                            .collect();
+                        if seed_bytes.len() == 1 {
+                            let seed = &seed_bytes[0];
+                            quote! {
+                                spel_framework::spel_output::AutoClaim::Claimed(
+                                    nssa_core::program::Claim::Pda(
+                                        nssa_core::program::PdaSeed::new(*#seed)
+                                    )
+                                )
+                            }
+                        } else {
+                            // Multiple seeds: hash them together (same as compute_pda)
+                            quote! {
+                                spel_framework::spel_output::AutoClaim::pda_from_seeds(
+                                    &[#(#seed_bytes),*]
+                                )
+                            }
+                        }
+                    } else if acc.constraints.init {
+                        // init without PDA → AutoClaim::Claimed(Claim::Authorized)
+                        quote! {
+                            spel_framework::spel_output::AutoClaim::Claimed(
+                                nssa_core::program::Claim::Authorized
+                            )
+                        }
+                    } else {
+                        // mut or read-only → AutoClaim::None
+                        quote! { spel_framework::spel_output::AutoClaim::None }
+                    }
+                })
+                .collect();
+
+            quote! {
+                #[allow(dead_code)]
+                pub fn #fn_name() -> Vec<spel_framework::spel_output::AutoClaim> {
+                    vec![#(#claim_exprs),*]
+                }
+            }
         })
         .collect()
 }
