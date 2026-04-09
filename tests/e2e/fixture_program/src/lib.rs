@@ -21,11 +21,7 @@ mod treasury {
         authority: AccountWithMetadata,
         threshold: u64,
     ) -> SpelResult {
-        Ok(SpelOutput::execute_with_claims(
-            &[state.account.clone(), authority.account.clone()],
-            &__claims_initialize(),
-            vec![],
-        ))
+        Ok(SpelOutput::execute(vec![state, authority], vec![]))
     }
 
     /// Create a user vault (PDA from arg seed).
@@ -37,11 +33,7 @@ mod treasury {
         owner: AccountWithMetadata,
         owner_key: [u8; 32],
     ) -> SpelResult {
-        Ok(SpelOutput::execute_with_claims(
-            &[vault.account.clone(), owner.account.clone()],
-            &__claims_create_vault(),
-            vec![],
-        ))
+        Ok(SpelOutput::execute(vec![vault, owner], vec![]))
     }
 
     /// Create a user config (PDA from literal + arg multi-seed).
@@ -53,11 +45,7 @@ mod treasury {
         admin: AccountWithMetadata,
         user_id: [u8; 32],
     ) -> SpelResult {
-        Ok(SpelOutput::execute_with_claims(
-            &[config.account.clone(), admin.account.clone()],
-            &__claims_create_config(),
-            vec![],
-        ))
+        Ok(SpelOutput::execute(vec![config, admin], vec![]))
     }
 
     /// Transfer funds.
@@ -72,11 +60,7 @@ mod treasury {
         amount: u64,
         memo: String,
     ) -> SpelResult {
-        Ok(SpelOutput::execute_with_claims(
-            &[from.account.clone(), to.account.clone(), signer.account.clone()],
-            &__claims_transfer(),
-            vec![],
-        ))
+        Ok(SpelOutput::execute(vec![from, to, signer], vec![]))
     }
 }
 

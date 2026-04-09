@@ -36,6 +36,7 @@ use quote::{format_ident, quote};
 use syn::{
     parse::Parser,
     parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
+    visit_mut::{self, VisitMut},
 };
 
 /// Main entry point: `#[lez_program]` on a module.
@@ -666,6 +667,111 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
         .collect()
 }
 
+// ─── SpelOutput::execute() auto-claim transformer ──────────────────────
+
+/// Walks a handler function body and rewrites `SpelOutput::execute(vec![a, b], calls)`
+/// into `SpelOutput::execute(vec![(a.account.clone(), <AutoClaim>), ...], calls)`,
+/// using the `#[account(...)]` constraints from each parameter.
+struct ExecuteTransformer<'a> {
+    accounts: &'a [AccountParam],
+}
+
+impl<'a> VisitMut for ExecuteTransformer<'a> {
+    fn visit_expr_call_mut(&mut self, call: &mut syn::ExprCall) {
+        // Recurse into sub-expressions first
+        visit_mut::visit_expr_call_mut(self, call);
+
+        if !is_spel_output_execute(&call.func) {
+            return;
+        }
+        if call.args.len() != 2 {
+            return;
+        }
+
+        let account_names = match extract_vec_macro_idents(&call.args[0]) {
+            Some(names) => names,
+            None => return,
+        };
+
+        // Build replacement pairs: (name.account.clone(), AutoClaim::...)
+        let mut pairs: Vec<TokenStream2> = Vec::new();
+        for name in &account_names {
+            let acc = match self.accounts.iter().find(|a| a.name == *name) {
+                Some(a) => a,
+                None => return, // unknown account — don't transform
+            };
+            let claim_expr = build_auto_claim_expr(&acc.constraints);
+            pairs.push(quote! { (#name.account.clone(), #claim_expr) });
+        }
+
+        call.args[0] = syn::parse_quote! { vec![#(#pairs),*] };
+    }
+}
+
+fn is_spel_output_execute(func: &syn::Expr) -> bool {
+    if let syn::Expr::Path(ep) = func {
+        let segments: Vec<_> = ep.path.segments.iter().collect();
+        if segments.len() == 2 {
+            return segments[0].ident == "SpelOutput" && segments[1].ident == "execute";
+        }
+    }
+    false
+}
+
+fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
+    if let syn::Expr::Macro(em) = expr {
+        if em.mac.path.is_ident("vec") {
+            let parser =
+                syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated;
+            if let Ok(idents) = parser.parse2(em.mac.tokens.clone()) {
+                return Some(idents.into_iter().collect());
+            }
+        }
+    }
+    None
+}
+
+fn build_auto_claim_expr(constraints: &AccountConstraints) -> TokenStream2 {
+    if constraints.init && !constraints.pda_seeds.is_empty() {
+        let seed_bytes: Vec<TokenStream2> = constraints
+            .pda_seeds
+            .iter()
+            .map(|seed| {
+                let val = match seed {
+                    PdaSeedDef::Const(v) | PdaSeedDef::Account(v) | PdaSeedDef::Arg(v) => {
+                        v.clone()
+                    }
+                };
+                quote! { &spel_framework::pda::seed_from_str(#val) }
+            })
+            .collect();
+        if seed_bytes.len() == 1 {
+            let seed = &seed_bytes[0];
+            quote! {
+                spel_framework::spel_output::AutoClaim::Claimed(
+                    nssa_core::program::Claim::Pda(
+                        nssa_core::program::PdaSeed::new(*#seed)
+                    )
+                )
+            }
+        } else {
+            quote! {
+                spel_framework::spel_output::AutoClaim::pda_from_seeds(
+                    &[#(#seed_bytes),*]
+                )
+            }
+        }
+    } else if constraints.init {
+        quote! {
+            spel_framework::spel_output::AutoClaim::Claimed(
+                nssa_core::program::Claim::Authorized
+            )
+        }
+    } else {
+        quote! { spel_framework::spel_output::AutoClaim::None }
+    }
+}
+
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -677,6 +783,11 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     pat_type.attrs.retain(|a| !a.path().is_ident("account"));
                 }
             }
+            // Transform SpelOutput::execute(vec![...], calls) → auto-claim pairs
+            let mut transformer = ExecuteTransformer {
+                accounts: &ix.accounts,
+            };
+            transformer.visit_item_fn_mut(&mut func);
             quote! { #func }
         })
         .collect()
