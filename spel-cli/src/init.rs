@@ -324,10 +324,12 @@ mod {snake_name} {{
         owner: AccountWithMetadata,
     ) -> SpelResult {{
         // TODO: implement initialization logic
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        // Auto-claim: __claims_initialize() returns the correct Claim for each account
+        Ok(SpelOutput::execute_with_claims(
+            &[state.account.clone(), owner.account.clone()],
+            &__claims_initialize(),
+            vec![],
+        ))
     }}
 
     /// Example instruction — replace with your own.
@@ -340,10 +342,11 @@ mod {snake_name} {{
         amount: u64,
     ) -> SpelResult {{
         // TODO: implement your logic
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(state.account.clone()),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        Ok(SpelOutput::execute_with_claims(
+            &[state.account.clone(), owner.account.clone()],
+            &__claims_do_something(),
+            vec![],
+        ))
     }}
 }}
 "#));
