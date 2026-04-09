@@ -608,8 +608,10 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }
             };
 
-            // Check if this instruction has any validation (signer/init checks)
-            let has_validation = ix.accounts.iter().any(|a| a.constraints.signer || a.constraints.init);
+            // Check if this instruction has any validation (signer/init/pda checks)
+            let has_validation = ix.accounts.iter().any(|a| {
+                a.constraints.signer || a.constraints.init || !a.constraints.pda_seeds.is_empty()
+            });
             let validate_fn_name = format_ident!("__validate_{}", ix.fn_name);
 
             let call_args: Vec<TokenStream2> = ix
@@ -625,6 +627,24 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }))
                 .collect();
 
+            // Collect arg seed values to pass to validation
+            let arg_seed_values: Vec<TokenStream2> = {
+                let mut names = Vec::new();
+                for acc in &ix.accounts {
+                    for seed in &acc.constraints.pda_seeds {
+                        if let PdaSeedDef::Arg(name) = seed {
+                            if !names.contains(name) {
+                                names.push(name.clone());
+                            }
+                        }
+                    }
+                }
+                names.iter().map(|name| {
+                    let arg_ident = format_ident!("{}", name);
+                    quote! { &#arg_ident }
+                }).collect()
+            };
+
             let validation_call = if has_validation {
                 if has_rest {
                     // For instructions with Vec accounts, build the slice dynamically
@@ -636,7 +656,12 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     quote! {
                         let mut __all_accounts = vec![#(#fixed_refs),*];
                         __all_accounts.extend(#rest_ref.clone());
-                        #mod_name::#validate_fn_name(&__all_accounts).expect("account validation failed");
+                        #mod_name::#validate_fn_name(
+                            &__all_accounts,
+                            &self_program_id,
+                            &instruction_words,
+                            #(#arg_seed_values),*
+                        ).expect("account validation failed");
                     }
                 } else {
                     let account_refs: Vec<TokenStream2> = ix
@@ -648,7 +673,12 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                         })
                         .collect();
                     quote! {
-                        #mod_name::#validate_fn_name(&[#(#account_refs.clone()),*]).expect("account validation failed");
+                        #mod_name::#validate_fn_name(
+                            &[#(#account_refs.clone()),*],
+                            &self_program_id,
+                            &instruction_words,
+                            #(#arg_seed_values),*
+                        ).expect("account validation failed");
                     }
                 }
             } else {
@@ -876,7 +906,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .iter()
         .map(|ix| {
             let fn_name = format_ident!("__validate_{}", ix.fn_name);
-            
+
             // Generate signer checks for accounts with #[account(signer)]
             let signer_checks: Vec<TokenStream2> = ix
                 .accounts
@@ -895,15 +925,14 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     }
                 })
                 .collect();
-            
+
             // Generate init checks for accounts with #[account(init)]
             let init_checks: Vec<TokenStream2> = ix
                 .accounts
                 .iter()
                 .enumerate()
                 .filter(|(_, acc)| acc.constraints.init)
-                .map(|(i, acc)| {
-                    let acc_name = acc.name.to_string();
+                .map(|(i, _acc)| {
                     let idx = i;
                     quote! {
                         if accounts[#idx].account != nssa_core::account::Account::default() {
@@ -915,15 +944,109 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 })
                 .collect();
 
-            if signer_checks.is_empty() && init_checks.is_empty() {
+            // Collect unique arg names referenced in PDA seeds (for extra params)
+            let arg_seed_names: Vec<String> = {
+                let mut names = Vec::new();
+                for acc in &ix.accounts {
+                    for seed in &acc.constraints.pda_seeds {
+                        if let PdaSeedDef::Arg(name) = seed {
+                            if !names.contains(name) {
+                                names.push(name.clone());
+                            }
+                        }
+                    }
+                }
+                names
+            };
+
+            // Generate extra parameters for arg seeds
+            let arg_seed_params: Vec<TokenStream2> = arg_seed_names
+                .iter()
+                .map(|name| {
+                    let param_name = format_ident!("__pda_arg_{}", name);
+                    quote! { #param_name: &[u8; 32] }
+                })
+                .collect();
+
+            // Generate PDA checks for accounts with pda_seeds
+            let pda_checks: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, acc)| !acc.constraints.pda_seeds.is_empty())
+                .map(|(i, acc)| {
+                    let acc_name = acc.name.to_string();
+                    let idx = i;
+
+                    let seed_exprs: Vec<TokenStream2> = acc
+                        .constraints
+                        .pda_seeds
+                        .iter()
+                        .enumerate()
+                        .map(|(j, seed)| {
+                            let var = format_ident!("__seed_{}", j);
+                            match seed {
+                                PdaSeedDef::Const(val) => {
+                                    quote! { let #var = spel_framework::pda::seed_from_str(#val); }
+                                }
+                                PdaSeedDef::Account(path) => {
+                                    // Strip ".id" or other suffixes — we always use account_id
+                                    let account_name = path.split('.').next().unwrap_or(path);
+                                    let account_idx = ix.accounts.iter()
+                                        .position(|a| a.name == account_name)
+                                        .unwrap_or_else(|| panic!(
+                                            "PDA seed references unknown account '{}'", account_name
+                                        ));
+                                    quote! { let #var = *accounts[#account_idx].account_id.value(); }
+                                }
+                                PdaSeedDef::Arg(field_name) => {
+                                    let param_name = format_ident!("__pda_arg_{}", field_name);
+                                    quote! { let #var = *#param_name; }
+                                }
+                            }
+                        })
+                        .collect();
+
+                    let seed_refs: Vec<TokenStream2> = (0..acc.constraints.pda_seeds.len())
+                        .map(|j| {
+                            let var = format_ident!("__seed_{}", j);
+                            quote! { &#var }
+                        })
+                        .collect();
+
+                    quote! {
+                        {
+                            #(#seed_exprs)*
+                            let __expected_id = spel_framework::pda::compute_pda(
+                                self_program_id, &[#(#seed_refs),*]
+                            );
+                            if accounts[#idx].account_id != __expected_id {
+                                return Err(spel_framework::error::SpelError::PdaMismatch {
+                                    account_name: #acc_name.to_string(),
+                                    expected: format!("{:?}", __expected_id),
+                                    actual: format!("{:?}", accounts[#idx].account_id),
+                                });
+                            }
+                        }
+                    }
+                })
+                .collect();
+
+            if signer_checks.is_empty() && init_checks.is_empty() && pda_checks.is_empty() {
                 return quote! {};
             }
 
             quote! {
                 #[allow(dead_code)]
-                pub fn #fn_name(accounts: &[nssa_core::account::AccountWithMetadata]) -> Result<(), spel_framework::error::SpelError> {
+                pub fn #fn_name(
+                    accounts: &[nssa_core::account::AccountWithMetadata],
+                    self_program_id: &nssa_core::program::ProgramId,
+                    _instruction_words: &nssa_core::program::InstructionData,
+                    #(#arg_seed_params),*
+                ) -> Result<(), spel_framework::error::SpelError> {
                     #(#signer_checks)*
                     #(#init_checks)*
+                    #(#pda_checks)*
                     Ok(())
                 }
             }
