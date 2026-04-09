@@ -16,6 +16,9 @@ SEQUENCER_PORT="${SEQUENCER_PORT:-3040}"
 SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
 PROJECT_NAME="privacy_test"
 LOG_DIR="${WORK_DIR}/logs"
+LEZ_TAG="${LEZ_TAG:-v0.2.0-rc1}"
+SPEL_TAG="${SPEL_TAG:-refs/pull/122/head}"
+SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -36,7 +39,6 @@ trap cleanup EXIT
 
 # ─── Prerequisites ─────────────────────────────────────────────────────────
 
-command -v spel >/dev/null 2>&1 || fail "spel not found"
 command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 
 LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
@@ -51,6 +53,7 @@ done
 WALLET_BIN=""
 for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
     if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+        echo "Found wallet binary: $candidate"
         WALLET_BIN="$candidate"; break
     fi
 done
@@ -66,12 +69,41 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR" "$LOG_DIR"
 cd "$WORK_DIR"
 
+# Build local spel-cli from this PR instead of using the system-installed version.
+# The published spel v0.2.0-rc.1 depends on an older LEZ rev internally, which causes
+# Cargo to resolve the wrong nssa_core version in scaffolded projects.
+log "Building local spel-cli from ${SPEL_DIR}..."
+cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel --release \
+    > "$LOG_DIR/spel-build.log" 2>&1 || fail "Failed to build local spel-cli (see $LOG_DIR/spel-build.log)"
+SPEL_BIN="$SPEL_DIR/target/release/spel"
+[ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
+log "  Using local spel: $SPEL_BIN"
+
+# ─── Verify LSSA is at correct version ────────────────────────────────────
+log "Verifying LSSA at ${LEZ_TAG}..."
+cd "$LSSA_DIR"
+LSSA_CURRENT=$(git log --oneline -1 2>/dev/null || echo "unknown")
+log "  LSSA: $LSSA_CURRENT"
+cd "$WORK_DIR"
+
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
-log "Step 1: Creating SPEL project..."
-spel init "$PROJECT_NAME" > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed"
+log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG}, SPEL=${SPEL_TAG})..."
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+    > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✅ Project scaffolded"
+
+
+# Regenerate lockfiles so the patch takes effect
+(cd methods/guest && cargo generate-lockfile > "$LOG_DIR/guest-lockfile.log" 2>&1) \
+    || warn "Guest lockfile regeneration failed"
+cargo generate-lockfile > "$LOG_DIR/root-lockfile.log" 2>&1 \
+    || warn "Root lockfile regeneration failed"
+
+# Print the actual LEZ version resolved
+log "  LEZ nssa_core resolved:"
+grep -A2 'name = "nssa_core"' methods/guest/Cargo.lock 2>/dev/null | head -5 || true
 
 # ─── Step 2: Modify guest program for privacy test ────────────────────────
 
@@ -94,7 +126,7 @@ mod privacy_test {
     /// For already-owned accounts: returns unchanged (privacy TX compatible).
     #[instruction]
     pub fn greet(
-        #[account(mut)]
+        #[account(mut, signer)]
         account: AccountWithMetadata,
         greeting: Vec<u8>,
     ) -> SpelResult {
@@ -107,7 +139,7 @@ mod privacy_test {
             data.extend_from_slice(&greeting);
             acc.data = Data::try_from(data)
                 .map_err(|_| SpelError::custom(999, "data too big"))?;
-            AccountPostState::new_claimed(acc)
+            AccountPostState::new_claimed(acc, Claim::Authorized)
         } else {
             // Already owned (e.g. by auth-transfer): return unchanged
             AccountPostState::new(acc)
@@ -149,31 +181,40 @@ SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
 [ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
 cd "$LSSA_DIR"
-RUST_LOG=warn $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
+sleep 2
+if ! kill -0 $SEQ_PID 2>/dev/null; then
+    echo "❌ Seencer failed to start. Logs:"
+    cat "$LOG_DIR/sequencer.log" | tail -30
+    exit 1
+fi
 cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
 for i in $(seq 1 60); do
-    if curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
+    if [ $(curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; echo $?) -eq 0 ]; then
         log "  ✅ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
+    echo -n "."
     sleep 1
 done
 
 # Wait for first block to be produced before proceeding
 log "  Waiting for first block..."
 for i in $(seq 1 60); do
-    LAST_BLOCK=$(curl -sf -X POST "$SEQUENCER_URL" \
+    curl -sf -X POST "$SEQUENCER_URL" \
         -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null \
-        | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('result',0))" 2>/dev/null || echo 0)
-    if [ "${LAST_BLOCK:-0}" -gt 0 ] 2>/dev/null; then
-        log "  ✅ First block produced (block $LAST_BLOCK)"
+        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null
+
+    SUCCESS=$?
+    if [ $SUCCESS -eq 0 ]; then
+        log "  ✅ Sequencer producing blocks";
         break
     fi
     sleep 2
+    echo -n "."
 done
 
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
@@ -199,9 +240,11 @@ log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 # ─── Step 8: Test PUBLIC transaction ────────────────────────────────────
 
 log "Step 8: Testing PUBLIC transaction..."
-FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
+FRESH_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new public 2>&1 | grep -o "Public/[^ ]*" | head -1)
+[ -n "$FRESH_ACCOUNT" ] || fail "Could not create public account from wallet"
+log "  Fresh account: ${FRESH_ACCOUNT:0:20}..."
 
-SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$FRESH_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
@@ -223,7 +266,7 @@ sleep 20
 # ─── Step 10: Test PRIVACY-PRESERVING transaction ───────────────────────
 
 log "Step 10: Testing PRIVACY-PRESERVING transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$PRIVATE_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::Path;
 
-pub fn init_project(name: &str) {
+pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, lez_rev: Option<&str>, spel_rev: Option<&str>) {
     let root = Path::new(name);
     if root.exists() {
         eprintln!("❌ Directory '{}' already exists", name);
@@ -271,6 +271,16 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     write_file(root, "methods/src/lib.rs", r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
 "#);
 
+    let lez_ref = match (lez_tag, lez_rev) {
+        (Some(t), _) => format!("tag = \"{}\"", t),
+        (_, Some(r)) => format!("rev = \"{}\"", r),
+        _ => "tag = \"v0.2.0-rc1\"".to_string(),
+    };
+    let spel_ref = match (spel_tag, spel_rev) {
+        (Some(t), _) => format!("tag = \"{}\"", t),
+        (_, Some(r)) => format!("rev = \"{}\"", r),
+        _ => "tag = \"v0.2.0-rc.1\"".to_string(),
+    };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
 name = "{snake_name}-guest"
@@ -284,8 +294,8 @@ name = "{snake_name}"
 path = "src/bin/{snake_name}.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -315,7 +325,7 @@ mod {snake_name} {{
     ) -> SpelResult {{
         // TODO: implement initialization logic
         Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone()),
+            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
             AccountPostState::new(owner.account.clone()),
         ]))
     }}
@@ -353,9 +363,9 @@ name = "{snake_name}_cli"
 path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git" }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "ffcbc15972adbf557939bf3e2852af276422631b" }}
-spel = {{ git = "https://github.com/logos-co/spel.git" }}
+spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
+spel = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
 tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
@@ -389,19 +399,6 @@ async fn main() {
         Ok(s) if s.success() => {}
         Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with: {}", s),
         Err(e) => eprintln!("⚠️  Failed to generate Cargo.lock (cargo not found?): {}", e),
-    }
-
-    // Generate Cargo.lock for the guest to pin dependency versions
-    // (prevents getrandom 0.3.x resolution issues in Docker builds)
-    let guest_dir = root.join("methods/guest");
-    let status = std::process::Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&guest_dir)
-        .status();
-    match status {
-        Ok(s) if s.success() => {}
-        Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with {}", s),
-        Err(e) => eprintln!("⚠️  Could not run cargo generate-lockfile: {}", e),
     }
 
     println!("✅ Project '{}' created!", project_name);

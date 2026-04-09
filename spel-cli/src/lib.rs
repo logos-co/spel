@@ -90,11 +90,55 @@ pub async fn run() {
     if let Some(cmd) = remaining_args.get(1).map(|s| s.as_str()) {
         match cmd {
             "init" => {
-                let name = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} init <project-name>", args[0]);
+                // Check for help flag
+                if remaining_args.get(2) == Some(&"-h".to_string()) 
+                    || remaining_args.get(2) == Some(&"--help".to_string()) {
+                    println!("Usage: spel init <project-name> [OPTIONS]");
+                    println!();
+                    println!("Create a new SPEL project");
+                    println!();
+                    println!("Options:");
+                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.2.0-rc1)");
+                    println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
+                    println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
+                    println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
+                    println!();
+                    println!("Examples:");
+                    println!("  spel init my-project");
+                    println!("  spel init my-project --lez-tag v0.2.0-rc1 --spel-rev refs/pull/122/head");
+                    return;
+                }
+                let mut lez_tag: Option<String> = None;
+                let mut spel_tag: Option<String> = None;
+                let mut lez_rev: Option<String> = None;
+                let mut spel_rev: Option<String> = None;
+                let mut name_arg_idx = 2;
+
+                while name_arg_idx < remaining_args.len() {
+                    let arg = &remaining_args[name_arg_idx];
+                    if arg == "--lez-tag" {
+                        name_arg_idx += 1;
+                        if name_arg_idx < remaining_args.len() { lez_tag = Some(remaining_args[name_arg_idx].clone()); }
+                    } else if arg == "--spel-tag" {
+                        name_arg_idx += 1;
+                        if name_arg_idx < remaining_args.len() { spel_tag = Some(remaining_args[name_arg_idx].clone()); }
+                    } else if arg == "--lez-rev" {
+                        name_arg_idx += 1;
+                        if name_arg_idx < remaining_args.len() { lez_rev = Some(remaining_args[name_arg_idx].clone()); }
+                    } else if arg == "--spel-rev" {
+                        name_arg_idx += 1;
+                        if name_arg_idx < remaining_args.len() { spel_rev = Some(remaining_args[name_arg_idx].clone()); }
+                    } else {
+                        break;
+                    }
+                    name_arg_idx += 1;
+                }
+
+                let name = remaining_args.get(name_arg_idx).unwrap_or_else(|| {
+                    eprintln!("Usage: {} init <project-name> [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>]", args[0]);
                     process::exit(1);
                 });
-                init_project(name);
+                init_project(name, lez_tag.as_deref(), spel_tag.as_deref(), lez_rev.as_deref(), spel_rev.as_deref());
                 return;
             }
             "inspect" if type_name.is_none() && data_hex.is_none() && idl_path.is_empty() => {
