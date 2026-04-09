@@ -17,7 +17,7 @@ SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
 PROJECT_NAME="privacy_test"
 LOG_DIR="${WORK_DIR}/logs"
 LEZ_TAG="${LEZ_TAG:-v0.2.0-rc1}"
-SPEL_TAG="${SPEL_TAG:-v0.2.0-rc.1}"
+SPEL_TAG="${SPEL_TAG:-refs/pull/122/head}"
 SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RED='\033[0;31m'
@@ -53,6 +53,7 @@ done
 WALLET_BIN=""
 for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
     if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
+        echo "Found wallet binary: $candidate"
         WALLET_BIN="$candidate"; break
     fi
 done
@@ -96,29 +97,11 @@ log "  Sequencer: $("$SEQUENCER_BIN" --version 2>/dev/null || echo 'unknown')"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG}, SPEL=${SPEL_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-tag "$SPEL_TAG" "$PROJECT_NAME" \
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
     > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✅ Project scaffolded"
 
-# ─── Patch: force nssa_core to the correct LEZ tag ────────────────────────
-# The published spel-framework may transitively pull an older nssa_core.
-# A [patch] section forces Cargo to unify all nssa_core refs to our tag.
-LEZ_GIT="https://github.com/logos-blockchain/logos-execution-zone.git"
-
-cat >> methods/guest/Cargo.toml << PATCHEOF
-
-[patch."${LEZ_GIT}"]
-nssa_core = { git = "${LEZ_GIT}", tag = "${LEZ_TAG}" }
-PATCHEOF
-
-cat >> Cargo.toml << PATCHEOF
-
-[patch."${LEZ_GIT}"]
-nssa_core = { git = "${LEZ_GIT}", tag = "${LEZ_TAG}" }
-PATCHEOF
-
-log "  ✅ Patched Cargo.toml files to pin nssa_core=${LEZ_TAG}"
 
 # Regenerate lockfiles so the patch takes effect
 (cd methods/guest && cargo generate-lockfile > "$LOG_DIR/guest-lockfile.log" 2>&1) \
@@ -151,7 +134,7 @@ mod privacy_test {
     /// For already-owned accounts: returns unchanged (privacy TX compatible).
     #[instruction]
     pub fn greet(
-        #[account(mut)]
+        #[account(mut, signer)]
         account: AccountWithMetadata,
         greeting: Vec<u8>,
     ) -> SpelResult {
@@ -206,31 +189,34 @@ SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
 [ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
 cd "$LSSA_DIR"
-RUST_LOG=warn $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
 for i in $(seq 1 60); do
-    if curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
+    if [ $(curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; echo $?) -eq 0 ]; then
         log "  ✅ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
+    echo -n "."
     sleep 1
 done
 
 # Wait for first block to be produced before proceeding
 log "  Waiting for first block..."
 for i in $(seq 1 60); do
-    LAST_BLOCK=$(curl -sf -X POST "$SEQUENCER_URL" \
+    curl -sf -X POST "$SEQUENCER_URL" \
         -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null \
-        | python3 -c "import json,sys; r=json.load(sys.stdin); print(r.get('result',0))" 2>/dev/null || echo 0)
-    if [ "${LAST_BLOCK:-0}" -gt 0 ] 2>/dev/null; then
-        log "  ✅ First block produced (block $LAST_BLOCK)"
+        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null
+
+    SUCCESS=$?
+    if [ $SUCCESS -eq 0 ]; then
+        log "  ✅ Sequencer producing blocks";
         break
     fi
     sleep 2
+    echo -n "."
 done
 
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
@@ -256,7 +242,9 @@ log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 # ─── Step 8: Test PUBLIC transaction ────────────────────────────────────
 
 log "Step 8: Testing PUBLIC transaction..."
-FRESH_ACCOUNT="0x$(openssl rand -hex 32)"
+FRESH_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new public 2>&1 | grep -o "Public/[^ ]*" | head -1)
+[ -n "$FRESH_ACCOUNT" ] || fail "Could not create public account from wallet"
+log "  Fresh account: ${FRESH_ACCOUNT:0:20}..."
 
 SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
