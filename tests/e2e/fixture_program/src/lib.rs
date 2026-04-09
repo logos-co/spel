@@ -186,4 +186,134 @@ mod tests {
         assert!(result.is_ok());
     }
 
+    // ── PDA validation tests ─────────────────────────────────────────
+
+    fn make_account_with_id(id: [u8; 32], authorized: bool) -> AccountWithMetadata {
+        AccountWithMetadata {
+            account_id: nssa_core::account::AccountId::new(id),
+            account: nssa_core::account::Account::default(),
+            is_authorized: authorized,
+        }
+    }
+
+    fn test_program_id() -> nssa_core::program::ProgramId {
+        [1u32; 8]
+    }
+
+    fn empty_ix_data() -> Vec<u32> {
+        vec![]
+    }
+
+    // ── create_vault (single arg seed) ───────────────────────────────
+
+    #[test]
+    fn validate_create_vault_rejects_wrong_pda() {
+        let program_id = test_program_id();
+        let owner_key = [42u8; 32];
+
+        // Compute the correct PDA so we can supply a *different* one
+        let correct_id = spel_framework::pda::compute_pda(&program_id, &[&owner_key]);
+        let wrong_id = [0xFFu8; 32]; // definitely not the correct PDA
+        assert_ne!(
+            nssa_core::account::AccountId::new(wrong_id),
+            correct_id,
+            "test precondition: wrong_id must differ from correct PDA"
+        );
+
+        let accounts = vec![
+            make_account_with_id(wrong_id, false), // vault — wrong address
+            make_account_with_id([2u8; 32], true),  // owner — signer
+        ];
+
+        let result = treasury::__validate_create_vault(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &owner_key,
+        );
+        let err = result.expect_err("should reject wrong PDA");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_create_vault_accepts_correct_pda() {
+        let program_id = test_program_id();
+        let owner_key = [42u8; 32];
+        let correct_id = spel_framework::pda::compute_pda(&program_id, &[&owner_key]);
+
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false), // vault — correct PDA
+            make_account_with_id([2u8; 32], true),             // owner — signer
+        ];
+
+        let result = treasury::__validate_create_vault(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &owner_key,
+        );
+        assert!(result.is_ok(), "correct PDA should pass: {result:?}");
+    }
+
+    // ── create_config (multi-seed: literal + arg) ────────────────────
+
+    #[test]
+    fn validate_create_config_rejects_wrong_pda() {
+        let program_id = test_program_id();
+        let user_id = [99u8; 32];
+        let config_seed = spel_framework::pda::seed_from_str("config");
+
+        let correct_id =
+            spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
+        let wrong_id = [0xAAu8; 32];
+        assert_ne!(
+            nssa_core::account::AccountId::new(wrong_id),
+            correct_id,
+            "test precondition: wrong_id must differ from correct PDA"
+        );
+
+        let accounts = vec![
+            make_account_with_id(wrong_id, false), // config — wrong address
+            make_account_with_id([2u8; 32], true),  // admin — signer
+        ];
+
+        let result = treasury::__validate_create_config(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &user_id,
+        );
+        let err = result.expect_err("should reject wrong PDA");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_create_config_accepts_correct_pda() {
+        let program_id = test_program_id();
+        let user_id = [99u8; 32];
+        let config_seed = spel_framework::pda::seed_from_str("config");
+
+        let correct_id =
+            spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
+
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false), // config — correct PDA
+            make_account_with_id([2u8; 32], true),             // admin — signer
+        ];
+
+        let result = treasury::__validate_create_config(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &user_id,
+        );
+        assert!(result.is_ok(), "correct PDA should pass: {result:?}");
+    }
+
 }
