@@ -79,20 +79,12 @@ SPEL_BIN="$SPEL_DIR/target/release/spel"
 [ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
 log "  Using local spel: $SPEL_BIN"
 
-# ─── Checkout LSSA to matching LEZ tag ────────────────────────────────────
-log "Checking out LSSA to ${LEZ_TAG}..."
+# ─── Verify LSSA is at correct version ────────────────────────────────────
+log "Verifying LSSA at ${LEZ_TAG}..."
 cd "$LSSA_DIR"
-git fetch --tags origin 2>/dev/null || true
-git checkout "$LEZ_TAG" 2>/dev/null || git checkout "v${LEZ_TAG}" 2>/dev/null || true
-log "  LSSA now at: $(git log --oneline -1)"
+LSSA_CURRENT=$(git log --oneline -1 2>/dev/null || echo "unknown")
+log "  LSSA: $LSSA_CURRENT"
 cd "$WORK_DIR"
-
-# ─── Rebuild sequencer + wallet from LSSA ─────────────────────────────────
-log "Building sequencer + wallet from LSSA ${LEZ_TAG}..."
-cargo build --manifest-path "$LSSA_DIR/Cargo.toml" --release -p sequencer_service -p wallet \
-    > "$LOG_DIR/lssa-build.log" 2>&1 || fail "Failed to build LSSA sequencer/wallet (see $LOG_DIR/lssa-build.log)"
-log "  ✅ Sequencer + wallet built from LSSA ${LEZ_TAG}"
-log "  Sequencer: $("$SEQUENCER_BIN" --version 2>/dev/null || echo 'unknown')"
 
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 

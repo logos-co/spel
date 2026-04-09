@@ -90,6 +90,24 @@ pub async fn run() {
     if let Some(cmd) = remaining_args.get(1).map(|s| s.as_str()) {
         match cmd {
             "init" => {
+                // Check for help flag
+                if remaining_args.get(2) == Some(&"-h".to_string()) 
+                    || remaining_args.get(2) == Some(&"--help".to_string()) {
+                    println!("Usage: spel init <project-name> [OPTIONS]");
+                    println!();
+                    println!("Create a new SPEL project");
+                    println!();
+                    println!("Options:");
+                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.2.0-rc1)");
+                    println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
+                    println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
+                    println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
+                    println!();
+                    println!("Examples:");
+                    println!("  spel init my-project");
+                    println!("  spel init my-project --lez-tag v0.2.0-rc1 --spel-rev refs/pull/122/head");
+                    return;
+                }
                 let mut lez_tag: Option<String> = None;
                 let mut spel_tag: Option<String> = None;
                 let mut lez_rev: Option<String> = None;
