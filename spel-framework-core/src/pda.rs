@@ -1,8 +1,22 @@
 //! Generic PDA (Program Derived Address) computation utilities.
 
+use borsh::BorshSerialize;
 use nssa_core::account::AccountId;
 use nssa_core::program::{PdaSeed, ProgramId};
 use sha2::{Sha256, Digest};
+
+/// Convert any `BorshSerialize` value into a zero-padded 32-byte PDA seed.
+///
+/// # Panics
+///
+/// Panics if the serialized representation exceeds 32 bytes.
+pub fn arg_to_seed(val: &impl BorshSerialize) -> [u8; 32] {
+    let bytes = borsh::to_vec(val).expect("BorshSerialize failed for PDA seed arg");
+    assert!(bytes.len() <= 32, "PDA seed arg serializes to {} bytes, max is 32", bytes.len());
+    let mut seed = [0u8; 32];
+    seed[..bytes.len()].copy_from_slice(&bytes);
+    seed
+}
 
 /// Convert a string to a zero-padded 32-byte seed.
 ///
