@@ -305,7 +305,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         // Complete IDL as a const JSON string (accessible from any target)
         pub const PROGRAM_IDL_JSON: &str = #idl_json;
 
-        // The program module with handler functions and guest entry point
+        // The program module with handler functions
         pub mod #mod_name {
             use super::*;
 
@@ -316,14 +316,14 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             #(#validation_fns)*
 
             #(#claim_fns)*
-
-            // The guest binary entry point (cfg-gated so cargo test works on host)
-            #[cfg(not(test))]
-            #main_fn
         }
 
         // IDL generation (available at host-side for tooling)
         #idl_fn
+
+        // The guest binary entry point (cfg-gated so cargo test works on host)
+        #[cfg(not(test))]
+        #main_fn
     };
 
     Ok(expanded)
