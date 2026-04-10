@@ -669,11 +669,26 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
 
 // ─── SpelOutput::execute() auto-claim transformer ──────────────────────
 
-/// Walks a handler function body and rewrites `SpelOutput::execute(vec![a, b], calls)`
-/// into `SpelOutput::execute(vec![(a.account.clone(), <AutoClaim>), ...], calls)`,
-/// using the `#[account(...)]` constraints from each parameter.
+/// Walks a handler function body and rewrites `SpelOutput::execute(...)` calls:
+///
+/// - **Fixed accounts** (`vec![a, b]`):
+///   → `SpelOutput::execute_with_claims(&[a.account.clone(), ...], &__claims_fn(), calls)`
+///
+/// - **Dynamic accounts** (any expression, for instructions with `Vec<AccountWithMetadata>`):
+///   → `SpelOutput::execute_with_claims(&accounts, &__claims_fn(accounts.len() - NUM_FIXED), calls)`
 struct ExecuteTransformer<'a> {
     accounts: &'a [AccountParam],
+    fn_name: &'a Ident,
+}
+
+impl<'a> ExecuteTransformer<'a> {
+    fn has_rest(&self) -> bool {
+        self.accounts.iter().any(|a| a.is_rest)
+    }
+
+    fn num_fixed(&self) -> usize {
+        self.accounts.iter().filter(|a| !a.is_rest).count()
+    }
 }
 
 impl<'a> VisitMut for ExecuteTransformer<'a> {
@@ -688,23 +703,40 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             return;
         }
 
-        let account_names = match extract_vec_macro_idents(&call.args[0]) {
-            Some(names) => names,
-            None => return,
-        };
+        // Try vec![ident, ...] pattern first (fixed-size accounts)
+        if let Some(account_names) = extract_vec_macro_idents(&call.args[0]) {
+            // Verify all account names are known before transforming
+            let mut account_clones: Vec<TokenStream2> = Vec::new();
+            for name in &account_names {
+                if self.accounts.iter().find(|a| a.name == *name).is_none() {
+                    return; // unknown account — don't transform
+                }
+                account_clones.push(quote! { #name.account.clone() });
+            }
 
-        // Build replacement pairs: (name.account.clone(), AutoClaim::...)
-        let mut pairs: Vec<TokenStream2> = Vec::new();
-        for name in &account_names {
-            let acc = match self.accounts.iter().find(|a| a.name == *name) {
-                Some(a) => a,
-                None => return, // unknown account — don't transform
-            };
-            let claim_expr = build_auto_claim_expr(&acc.constraints);
-            pairs.push(quote! { (#name.account.clone(), #claim_expr) });
+            let claims_fn = format_ident!("__claims_{}", self.fn_name);
+            let chained = call.args[1].clone();
+            call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
+            call.args.clear();
+            call.args.push(syn::parse_quote! { &[#(#account_clones),*] });
+            call.args.push(syn::parse_quote! { &#claims_fn() });
+            call.args.push(chained);
+            return;
         }
 
-        call.args[0] = syn::parse_quote! { vec![#(#pairs),*] };
+        // For instructions with Vec<AccountWithMetadata>: handle arbitrary expression
+        if self.has_rest() {
+            let accounts_expr = call.args[0].clone();
+            let chained = call.args[1].clone();
+            let claims_fn = format_ident!("__claims_{}", self.fn_name);
+            let num_fixed = self.num_fixed();
+
+            call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
+            call.args.clear();
+            call.args.push(syn::parse_quote! { &#accounts_expr });
+            call.args.push(syn::parse_quote! { &#claims_fn(#accounts_expr.len() - #num_fixed) });
+            call.args.push(chained);
+        }
     }
 }
 
@@ -731,16 +763,41 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     None
 }
 
-fn build_auto_claim_expr(constraints: &AccountConstraints) -> TokenStream2 {
-    if constraints.init && !constraints.pda_seeds.is_empty() {
-        let seed_bytes: Vec<TokenStream2> = constraints
+
+fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
+    instructions
+        .iter()
+        .map(|ix| {
+            let mut func = ix.func.clone();
+            func.attrs.retain(|a| !a.path().is_ident("instruction"));
+            for input in &mut func.sig.inputs {
+                if let FnArg::Typed(pat_type) = input {
+                    pat_type.attrs.retain(|a| !a.path().is_ident("account"));
+                }
+            }
+            // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
+            let mut transformer = ExecuteTransformer {
+                accounts: &ix.accounts,
+                fn_name: &ix.fn_name,
+            };
+            transformer.visit_item_fn_mut(&mut func);
+            quote! { #func }
+        })
+        .collect()
+}
+
+/// Generate the `AutoClaim` token stream for a single account based on its constraints.
+fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
+    if acc.constraints.init && !acc.constraints.pda_seeds.is_empty() {
+        let seed_bytes: Vec<TokenStream2> = acc
+            .constraints
             .pda_seeds
             .iter()
             .map(|seed| {
                 let val = match seed {
-                    PdaSeedDef::Const(v) | PdaSeedDef::Account(v) | PdaSeedDef::Arg(v) => {
-                        v.clone()
-                    }
+                    PdaSeedDef::Const(v) => v.clone(),
+                    PdaSeedDef::Account(v) => v.clone(),
+                    PdaSeedDef::Arg(v) => v.clone(),
                 };
                 quote! { &spel_framework::pda::seed_from_str(#val) }
             })
@@ -761,7 +818,7 @@ fn build_auto_claim_expr(constraints: &AccountConstraints) -> TokenStream2 {
                 )
             }
         }
-    } else if constraints.init {
+    } else if acc.constraints.init {
         quote! {
             spel_framework::spel_output::AutoClaim::Claimed(
                 nssa_core::program::Claim::Authorized
@@ -772,29 +829,8 @@ fn build_auto_claim_expr(constraints: &AccountConstraints) -> TokenStream2 {
     }
 }
 
-fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
-    instructions
-        .iter()
-        .map(|ix| {
-            let mut func = ix.func.clone();
-            func.attrs.retain(|a| !a.path().is_ident("instruction"));
-            for input in &mut func.sig.inputs {
-                if let FnArg::Typed(pat_type) = input {
-                    pat_type.attrs.retain(|a| !a.path().is_ident("account"));
-                }
-            }
-            // Transform SpelOutput::execute(vec![...], calls) → auto-claim pairs
-            let mut transformer = ExecuteTransformer {
-                accounts: &ix.accounts,
-            };
-            transformer.visit_item_fn_mut(&mut func);
-            quote! { #func }
-        })
-        .collect()
-}
-
 /// Generate per-instruction `__claims_{fn_name}()` functions that return
-/// `Vec<Claim>` based on account constraints. These are used by
+/// `Vec<AutoClaim>` based on account constraints. These are used by
 /// `SpelOutput::execute_with_claims()` so users don't have to manually
 /// choose `new()` vs `new_claimed()`.
 ///
@@ -804,67 +840,52 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
 /// - `#[account(init)]`            → `Claim::Authorized`
 /// - `#[account(mut)]`             → `Claim::None`
 /// - `#[account]`                  → `Claim::None`
+///
+/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
+/// generated function takes a `rest_count: usize` parameter and repeats
+/// the rest account's claim that many times.
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
             let fn_name = format_ident!("__claims_{}", ix.fn_name);
+            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
 
-            let claim_exprs: Vec<TokenStream2> = ix
-                .accounts
-                .iter()
-                .map(|acc| {
-                    if acc.constraints.init && !acc.constraints.pda_seeds.is_empty() {
-                        // init + PDA → AutoClaim::Claimed(Claim::Pda(seed))
-                        // Combine PDA seeds into a single PdaSeed
-                        let seed_bytes: Vec<TokenStream2> = acc
-                            .constraints
-                            .pda_seeds
-                            .iter()
-                            .map(|seed| {
-                                let val = match seed {
-                                    PdaSeedDef::Const(v) => v.clone(),
-                                    PdaSeedDef::Account(v) => v.clone(),
-                                    PdaSeedDef::Arg(v) => v.clone(),
-                                };
-                                quote! { &spel_framework::pda::seed_from_str(#val) }
-                            })
-                            .collect();
-                        if seed_bytes.len() == 1 {
-                            let seed = &seed_bytes[0];
-                            quote! {
-                                spel_framework::spel_output::AutoClaim::Claimed(
-                                    nssa_core::program::Claim::Pda(
-                                        nssa_core::program::PdaSeed::new(*#seed)
-                                    )
-                                )
-                            }
-                        } else {
-                            // Multiple seeds: hash them together (same as compute_pda)
-                            quote! {
-                                spel_framework::spel_output::AutoClaim::pda_from_seeds(
-                                    &[#(#seed_bytes),*]
-                                )
-                            }
-                        }
-                    } else if acc.constraints.init {
-                        // init without PDA → AutoClaim::Claimed(Claim::Authorized)
-                        quote! {
-                            spel_framework::spel_output::AutoClaim::Claimed(
-                                nssa_core::program::Claim::Authorized
-                            )
-                        }
-                    } else {
-                        // mut or read-only → AutoClaim::None
-                        quote! { spel_framework::spel_output::AutoClaim::None }
+            if has_rest {
+                // Fixed account claims
+                let fixed_claims: Vec<TokenStream2> = ix
+                    .accounts
+                    .iter()
+                    .filter(|a| !a.is_rest)
+                    .map(|acc| generate_single_claim_expr(acc))
+                    .collect();
+
+                // Rest account claim expression (repeated rest_count times)
+                let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
+                let rest_claim = generate_single_claim_expr(rest_acc);
+
+                quote! {
+                    #[allow(dead_code)]
+                    pub fn #fn_name(rest_count: usize) -> Vec<spel_framework::spel_output::AutoClaim> {
+                        let mut claims = vec![#(#fixed_claims),*];
+                        claims.extend(
+                            std::iter::repeat(#rest_claim).take(rest_count)
+                        );
+                        claims
                     }
-                })
-                .collect();
+                }
+            } else {
+                let claim_exprs: Vec<TokenStream2> = ix
+                    .accounts
+                    .iter()
+                    .map(|acc| generate_single_claim_expr(acc))
+                    .collect();
 
-            quote! {
-                #[allow(dead_code)]
-                pub fn #fn_name() -> Vec<spel_framework::spel_output::AutoClaim> {
-                    vec![#(#claim_exprs),*]
+                quote! {
+                    #[allow(dead_code)]
+                    pub fn #fn_name() -> Vec<spel_framework::spel_output::AutoClaim> {
+                        vec![#(#claim_exprs),*]
+                    }
                 }
             }
         })
@@ -902,8 +923,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .iter()
                 .enumerate()
                 .filter(|(_, acc)| acc.constraints.init)
-                .map(|(i, acc)| {
-                    let acc_name = acc.name.to_string();
+                .map(|(i, _acc)| {
                     let idx = i;
                     quote! {
                         if accounts[#idx].account != nssa_core::account::Account::default() {
