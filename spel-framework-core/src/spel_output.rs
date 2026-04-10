@@ -64,7 +64,7 @@ impl AutoClaim {
                 let mut buf = [0u8; 32];
                 let len = seed.len().min(32);
                 buf[..len].copy_from_slice(&seed[..len]);
-                hasher.update(buf);
+                hasher.update(seed);
             }
             hasher.finalize().into()
         };
