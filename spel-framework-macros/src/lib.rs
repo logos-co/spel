@@ -964,7 +964,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .iter()
                 .map(|name| {
                     let param_name = format_ident!("__pda_arg_{}", name);
-                    quote! { #param_name: &impl spel_framework::prelude::BorshSerialize }
+                    quote! { #param_name: &impl spel_framework::pda::ToSeed }
                 })
                 .collect();
 
@@ -1001,7 +1001,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                                 }
                                 PdaSeedDef::Arg(field_name) => {
                                     let param_name = format_ident!("__pda_arg_{}", field_name);
-                                    quote! { let #var = spel_framework::pda::arg_to_seed(#param_name); }
+                                    quote! { let #var = spel_framework::pda::ToSeed::to_seed(#param_name); }
                                 }
                             }
                         })
