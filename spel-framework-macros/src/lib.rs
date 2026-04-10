@@ -306,7 +306,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         pub const PROGRAM_IDL_JSON: &str = #idl_json;
 
         // The program module with handler functions
-        mod #mod_name {
+        pub mod #mod_name {
             use super::*;
 
             #(#other_items)*
