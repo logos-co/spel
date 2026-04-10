@@ -254,7 +254,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
     // Generate main function
     let main_fn = quote! {
-        fn main() {
+        pub fn main() {
             // Read inputs from zkVM host
             let (nssa_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
                 = nssa_core::program::read_nssa_inputs::<Instruction>();
@@ -1497,7 +1497,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
 
     // Generate a main() that pretty-prints the IDL
     Ok(quote! {
-        fn main() {
+        pub fn main() {
             // Help cargo track source changes
             const _SOURCE: &str = include_str!(#resolved);
             let json: serde_json::Value = serde_json::from_str(#idl_json)
