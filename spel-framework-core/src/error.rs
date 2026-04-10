@@ -93,9 +93,11 @@ pub enum SpelError {
     },
 
     /// PDA derivation mismatch
-    #[error("PDA mismatch for account {account_index}")]
+    #[error("PDA mismatch for account '{account_name}': expected {expected}, got {actual}")]
     PdaMismatch {
-        account_index: usize,
+        account_name: String,
+        expected: String,
+        actual: String,
     },
 
     /// Custom program-specific error with code and message

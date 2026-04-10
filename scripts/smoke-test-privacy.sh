@@ -4,6 +4,16 @@
 # including auth-transfer init for the private account.
 #
 # Usage: ./smoke-test-privacy.sh [WORK_DIR]
+#
+# Required Environment Variables:
+#   LEZ_TAG     - LEZ revision/tag to test against (e.g., "v0.2.0-rc1" or a commit hash)
+#   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
+#
+# Optional Environment Variables:
+#   WORK_DIR    - Working directory (default: /tmp/spel-privacy-smoke)
+#   SEQUENCER_PORT - Sequencer port (default: 3040)
+#   SPEL_TAG    - SPEL revision for init (defaults to current repo state)
+#   WALLET_PASSWORD - Wallet password (default: test)
 
 set -euo pipefail
 
@@ -11,13 +21,21 @@ export RISC0_DEV_MODE=1
 export RISC0_SKIP_BUILD=1
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORK_DIR="${1:-/tmp/spel-privacy-smoke}"
+WORK_DIR="${1:-${WORK_DIR:-/tmp/spel-privacy-smoke}}"
 SEQUENCER_PORT="${SEQUENCER_PORT:-3040}"
 SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
 PROJECT_NAME="privacy_test"
 LOG_DIR="${WORK_DIR}/logs"
-LEZ_TAG="${LEZ_TAG:-v0.2.0-rc1}"
-SPEL_TAG="${SPEL_TAG:-refs/pull/122/head}"
+
+# LEZ_TAG is required - no default to prevent testing against wrong version
+if [ -z "${LEZ_TAG:-}" ]; then
+    echo "ERROR: LEZ_TAG environment variable is required"
+    echo "Usage: LEZ_TAG=<version> LSSA_DIR=<path> ./smoke-test-privacy.sh [WORK_DIR]"
+    exit 1
+fi
+
+# SPEL_TAG defaults to current local state (for local testing) or can be set explicitly
+SPEL_TAG="${SPEL_TAG:-local}"
 SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 RED='\033[0;31m'
@@ -41,11 +59,20 @@ trap cleanup EXIT
 
 command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 
-LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
+# LSSA_DIR is required
+if [ -z "${LSSA_DIR:-}" ]; then
+    echo "ERROR: LSSA_DIR environment variable is required"
+    echo "Usage: LEZ_TAG=<version> LSSA_DIR=<path> ./smoke-test-privacy.sh [WORK_DIR]"
+    exit 1
+fi
+
+LSSA_DIR="$(cd "$LSSA_DIR" && pwd)"
+
 SEQUENCER_BIN=""
 for candidate in sequencer_service "$HOME/bin/sequencer_service" "$LSSA_DIR/target/release/sequencer_service"; do
     if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
-        SEQUENCER_BIN="$candidate"; break
+        SEQUENCER_BIN="$candidate"
+        break
     fi
 done
 [ -n "$SEQUENCER_BIN" ] || fail "sequencer_service not found"
@@ -53,14 +80,42 @@ done
 WALLET_BIN=""
 for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
     if command -v "$candidate" >/dev/null 2>&1 || [ -x "$candidate" ]; then
-        echo "Found wallet binary: $candidate"
-        WALLET_BIN="$candidate"; break
+        log "Found wallet binary: $candidate"
+        WALLET_BIN="$candidate"
+        break
     fi
 done
 [ -n "$WALLET_BIN" ] || fail "wallet not found"
 
 export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
+
+# ─── Verify LSSA version matches LEZ_TAG ──────────────────────────────────
+
+log "Verifying LSSA is at LEZ tag: ${LEZ_TAG}..."
+cd "$LSSA_DIR"
+
+LSSA_CURRENT=$(git rev-parse HEAD 2>/dev/null || echo "unknown")
+LSSA_CURRENT_SHORT="${LSSA_CURRENT:0:7}"
+
+# Check if LEZ_TAG is a tag or commit hash
+if git rev-parse "$LEZ_TAG" >/dev/null 2>&1; then
+    LEZ_RESOLVED=$(git rev-parse "$LEZ_TAG" 2>/dev/null)
+    LEZ_RESOLVED_SHORT="${LEZ_RESOLVED:0:7}"
+    
+    if [ "$LSSA_CURRENT" != "$LEZ_RESOLVED" ]; then
+        warn "LSSA is at commit ${LSSA_CURRENT_SHORT}, but LEZ_TAG specifies ${LEZ_RESOLVED_SHORT}"
+        warn "This may cause version mismatches. Consider checking out the correct version:"
+        warn "  cd $LSSA_DIR && git checkout $LEZ_TAG"
+    else
+        log "  ✓ LSSA version matches LEZ_TAG (${LSSA_CURRENT_SHORT})"
+    fi
+else
+    warn "Could not resolve LEZ_TAG '${LEZ_TAG}' in local repo"
+    warn "LSSA is currently at: ${LSSA_CURRENT_SHORT}"
+fi
+
+cd "$SCRIPT_DIR"
 
 # ─── Setup ─────────────────────────────────────────────────────────────────
 
@@ -69,9 +124,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR" "$LOG_DIR"
 cd "$WORK_DIR"
 
-# Build local spel-cli from this PR instead of using the system-installed version.
-# The published spel v0.2.0-rc.1 depends on an older LEZ rev internally, which causes
-# Cargo to resolve the wrong nssa_core version in scaffolded projects.
+# Build local spel-cli from this repo
 log "Building local spel-cli from ${SPEL_DIR}..."
 cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel --release \
     > "$LOG_DIR/spel-build.log" 2>&1 || fail "Failed to build local spel-cli (see $LOG_DIR/spel-build.log)"
@@ -79,21 +132,13 @@ SPEL_BIN="$SPEL_DIR/target/release/spel"
 [ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
 log "  Using local spel: $SPEL_BIN"
 
-# ─── Verify LSSA is at correct version ────────────────────────────────────
-log "Verifying LSSA at ${LEZ_TAG}..."
-cd "$LSSA_DIR"
-LSSA_CURRENT=$(git log --oneline -1 2>/dev/null || echo "unknown")
-log "  LSSA: $LSSA_CURRENT"
-cd "$WORK_DIR"
-
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
-log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG}, SPEL=${SPEL_TAG})..."
+log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
 "$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
     > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
-log "  ✅ Project scaffolded"
-
+log "  ✓ Project scaffolded"
 
 # Regenerate lockfiles so the patch takes effect
 (cd methods/guest && cargo generate-lockfile > "$LOG_DIR/guest-lockfile.log" 2>&1) \
@@ -150,7 +195,7 @@ mod privacy_test {
 }
 RUSTEOF
 
-log "  ✅ Guest program configured"
+log "  ✓ Guest program configured"
 
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
 
@@ -159,7 +204,7 @@ RISC0_SKIP_BUILD= make build > "$LOG_DIR/build.log" 2>&1 || { cat "$LOG_DIR/buil
 GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
 [ -n "$GUEST_BIN" ] || fail "No guest binary found"
 GUEST_BIN_ABS="$(realpath "$GUEST_BIN")"
-log "  ✅ Built: $(basename "$GUEST_BIN")"
+log "  ✓ Built: $(basename "$GUEST_BIN")"
 
 # ─── Step 4: Generate IDL ─────────────────────────────────────────────────
 
@@ -168,7 +213,7 @@ make idl > "$LOG_DIR/idl.log" 2>&1 || fail "IDL generation failed"
 IDL_FILE=$(find . -name "*-idl.json" | head -1)
 [ -n "$IDL_FILE" ] || fail "No IDL found"
 IDL_ABS="$(realpath "$IDL_FILE")"
-log "  ✅ IDL: $(basename "$IDL_FILE")"
+log "  ✓ IDL: $(basename "$IDL_FILE")"
 
 # ─── Step 5: Start sequencer ──────────────────────────────────────────────
 
@@ -178,14 +223,14 @@ sleep 1
 rm -rf "${LSSA_DIR}/rocksdb"
 
 SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
-[ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
+[ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found at $SEQ_CONFIGS"
 
 cd "$LSSA_DIR"
 RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 sleep 2
 if ! kill -0 $SEQ_PID 2>/dev/null; then
-    echo "❌ Seencer failed to start. Logs:"
+    echo "❌ Sequencer failed to start. Logs:"
     cat "$LOG_DIR/sequencer.log" | tail -30
     exit 1
 fi
@@ -194,7 +239,7 @@ cd "$WORK_DIR/$PROJECT_NAME"
 log "  Waiting for sequencer..."
 for i in $(seq 1 60); do
     if [ $(curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; echo $?) -eq 0 ]; then
-        log "  ✅ Sequencer up"; break
+        log "  ✓ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
     echo -n "."
@@ -210,7 +255,7 @@ for i in $(seq 1 60); do
 
     SUCCESS=$?
     if [ $SUCCESS -eq 0 ]; then
-        log "  ✅ Sequencer producing blocks";
+        log "  ✓ Sequencer producing blocks";
         break
     fi
     sleep 2
@@ -222,7 +267,7 @@ done
 log "Step 6: Deploying program..."
 printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" \
     > "$LOG_DIR/deploy.log" 2>&1 || fail "Deploy failed"
-log "  ✅ Program deployed"
+log "  ✓ Program deployed"
 
 # ─── Step 7: Generate test accounts ───────────────────────────────────────
 
@@ -250,14 +295,14 @@ SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" 
     --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
     > "$LOG_DIR/public-tx.log" 2>&1 || fail "Public TX failed (see $LOG_DIR/public-tx.log)"
 
-log "  ✅ Public TX submitted and confirmed"
+log "  ✓ Public TX submitted and confirmed"
 
 # ─── Step 9: Init auth-transfer for private account ─────────────────────
 
 log "Step 9: Initializing auth-transfer for private account..."
 echo "$WALLET_PASSWORD" | $WALLET_BIN auth-transfer init --account-id "$PRIVATE_ACCOUNT" \
     > "$LOG_DIR/auth-transfer.log" 2>&1 || fail "auth-transfer init failed (see $LOG_DIR/auth-transfer.log)"
-log "  ✅ auth-transfer initialized"
+log "  ✓ auth-transfer initialized"
 
 # Wait for auth-transfer TX to be included in a block
 log "  Waiting for auth-transfer to be confirmed..."
@@ -272,7 +317,7 @@ SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" 
     --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \
     > "$LOG_DIR/private-tx.log" 2>&1 || { cat "$LOG_DIR/private-tx.log"; fail "Private TX failed"; }
 
-log "  ✅ Privacy-preserving TX submitted and confirmed"
+log "  ✓ Privacy-preserving TX submitted and confirmed"
 
 # ─── Done ─────────────────────────────────────────────────────────────────
 
