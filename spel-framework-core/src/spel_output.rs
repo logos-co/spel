@@ -92,6 +92,12 @@ impl IntoPostState for AccountPostState {
     }
 }
 
+impl IntoPostState for Account {
+    fn into_post_state(self) -> AccountPostState {
+        AccountPostState::new(self)
+    }
+}
+
 // ── SpelOutput::execute ─────────────────────────────────────────────────
 
 impl SpelOutput {
