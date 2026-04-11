@@ -243,13 +243,13 @@ mod tests {
 
     #[test]
     fn pda_from_seeds_single() {
-        let claim = AutoClaim::pda_from_seeds(&[b"treasury_state"]);
+        let claim = AutoClaim::pda_from_seeds(&[&[0u8; 32]]);
         assert!(claim.is_claimed());
     }
 
     #[test]
     fn pda_from_seeds_multi() {
-        let claim = AutoClaim::pda_from_seeds(&[b"config", b"user_123"]);
+        let claim = AutoClaim::pda_from_seeds(&[&[1u8; 32], &[2u8; 32]]);
         assert!(claim.is_claimed());
     }
 }
