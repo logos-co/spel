@@ -641,7 +641,16 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }
                 names.iter().map(|name| {
                     let arg_ident = format_ident!("{}", name);
-                    quote! { &#arg_ident }
+                    // Check if arg is already a reference - don't double-reference
+                    let is_ref = ix.args.iter()
+                        .find(|a| a.name == *name)
+                        .map(|a| matches!(a.ty, syn::Type::Reference(_)))
+                        .unwrap_or(false);
+                    if is_ref {
+                        quote! { #arg_ident }
+                    } else {
+                        quote! { &#arg_ident }
+                    }
                 }).collect()
             };
 
