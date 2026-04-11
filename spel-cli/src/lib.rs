@@ -340,14 +340,16 @@ fn compute_pda_command(idl: &SpelIdl, program_path: &str, program_id_hex: Option
         }
     };
 
-    // Find account definition with PDA seeds
-    let pda_def = idl.instructions.iter()
-        .flat_map(|ix| &ix.accounts)
-        .find(|acc| acc.name == account_name || snake_to_kebab(&acc.name) == account_name)
-        .and_then(|acc| acc.pda.as_ref());
+    // Find account definition with PDA seeds and its owning instruction
+    let found = idl.instructions.iter()
+        .find_map(|ix| {
+            ix.accounts.iter()
+                .find(|acc| acc.name == account_name || snake_to_kebab(&acc.name) == account_name)
+                .and_then(|acc| acc.pda.as_ref().map(|pda| (ix, pda)))
+        });
 
-    let pda_def = match pda_def {
-        Some(p) => p,
+    let (owning_ix, pda_def) = match found {
+        Some(pair) => pair,
         None => {
             eprintln!("❌ No PDA account named '{}' found in IDL", account_name);
             eprintln!("   Available PDAs:");
@@ -362,19 +364,30 @@ fn compute_pda_command(idl: &SpelIdl, program_path: &str, program_id_hex: Option
         }
     };
 
-    // Parse --key value pairs from remaining args
+    // Build a map from arg name to IDL type using the owning instruction's args
+    let arg_types: HashMap<&str, &spel_framework_core::idl::IdlType> = owning_ix
+        .args
+        .iter()
+        .map(|a| (a.name.as_str(), &a.type_))
+        .collect();
+
+    // Parse --key value pairs from remaining args, using IDL types when available
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
             if i + 1 < args.len() {
                 let raw = &args[i + 1];
-                // Try to parse as string (covers bytes32, u64, etc via parse_value)
-                // Use Raw as fallback — seed resolution handles Str type
-                seed_args.insert(
-                    key.replace('-', "_").to_string(),
-                    ParsedValue::Str(raw.clone()),
-                );
+                let arg_name = key.replace('-', "_");
+                let parsed = if let Some(ty) = arg_types.get(arg_name.as_str()) {
+                    parse::parse_value(raw, ty).unwrap_or_else(|e| {
+                        eprintln!("⚠️  Failed to parse --{} as {}: {}", key, format!("{:?}", ty), e);
+                        ParsedValue::Str(raw.clone())
+                    })
+                } else {
+                    ParsedValue::Str(raw.clone())
+                };
+                seed_args.insert(arg_name, parsed);
                 i += 2;
             } else {
                 eprintln!("❌ Missing value for --{}", key);
