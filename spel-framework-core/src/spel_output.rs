@@ -53,9 +53,10 @@ impl AutoClaim {
     pub fn pda_from_seeds(seeds: &[&[u8]]) -> Self {
         // Combine seeds into a single PdaSeed using the same logic as compute_pda
         let combined = if seeds.len() == 1 {
+            // Single seed: use raw 32 bytes (no padding), consistent with compute_pda
+            assert!(seeds[0].len() == 32, "pda_from_seeds: single seed must be 32 bytes");
             let mut buf = [0u8; 32];
-            let len = seeds[0].len().min(32);
-            buf[..len].copy_from_slice(&seeds[0][..len]);
+            buf.copy_from_slice(seeds[0]);
             buf
         } else {
             use sha2::{Sha256, Digest};
