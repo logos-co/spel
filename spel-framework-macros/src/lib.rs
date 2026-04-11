@@ -259,14 +259,6 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             let (nssa_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
                 = nssa_core::program::read_nssa_inputs::<Instruction>();
             let pre_states_clone = pre_states.clone();
-            // DEBUG: print self_program_id and panic
-            {
-                let pid_hex: String = self_program_id.iter()
-                    .flat_map(|w| w.to_le_bytes().to_vec())
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-                panic!("DEBUG self_program_id = {}", pid_hex);
-            }
 
             // Dispatch to instruction handler
             let result: Result<
