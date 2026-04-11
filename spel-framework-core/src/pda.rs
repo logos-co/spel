@@ -85,21 +85,6 @@ pub fn seed_from_str(s: &str) -> [u8; 32] {
 ///
 /// Panics if `seeds` is empty.
 pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
-    // DEBUG: dump inputs
-    {
-        let pid_hex: String = program_id.iter()
-            .flat_map(|w| w.to_le_bytes())
-            .map(|b| format!("{:02x}", b))
-            .collect();
-        let seeds_hex: Vec<String> = seeds.iter()
-            .map(|s| s.iter().map(|b| format!("{:02x}", b)).collect())
-            .collect();
-        panic!(
-            "DEBUG compute_pda: program_id={}, num_seeds={}, seed0={}",
-            pid_hex, seeds.len(),
-            seeds_hex.first().map(|s| s.as_str()).unwrap_or("none")
-        );
-    }
     assert!(!seeds.is_empty(), "PDA requires at least one seed");
 
     let combined = if seeds.len() == 1 {
