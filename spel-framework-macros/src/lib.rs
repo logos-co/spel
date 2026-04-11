@@ -754,40 +754,84 @@ fn to_pascal_case(ident: &Ident) -> Ident {
 
 // ─── IDL type conversion ─────────────────────────────────────────────────
 
-fn rust_type_to_idl_string(ty: &Type) -> String {
+/// Convert a Rust `syn::Type` to a `TokenStream` that constructs the correct `IdlType` variant.
+/// Used by `generate_idl_fn` to emit structured types (Array, Vec, Option) instead of
+/// flattening everything to `IdlType::Primitive(string)`.
+fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
         Type::Path(type_path) => {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => ident.to_lowercase(),
+                | "i128" | "bool" | "String" => {
+                    let name = ident.to_lowercase();
+                    quote! { spel_framework::idl::IdlType::Primitive(#name.to_string()) }
+                }
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            format!("vec<{}>", rust_type_to_idl_string(inner))
+                            let inner_tokens = rust_type_to_idl_type_tokens(inner);
+                            quote! {
+                                spel_framework::idl::IdlType::Vec {
+                                    vec: Box::new(#inner_tokens)
+                                }
+                            }
                         } else {
-                            "vec<unknown>".to_string()
+                            quote! { spel_framework::idl::IdlType::Primitive("vec<unknown>".to_string()) }
                         }
                     } else {
-                        "vec<unknown>".to_string()
+                        quote! { spel_framework::idl::IdlType::Primitive("vec<unknown>".to_string()) }
                     }
                 }
-                "ProgramId" => "program_id".to_string(),
-                "AccountId" => "account_id".to_string(),
-                other => other.to_string(),
+                "Option" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            let inner_tokens = rust_type_to_idl_type_tokens(inner);
+                            quote! {
+                                spel_framework::idl::IdlType::Option {
+                                    option: Box::new(#inner_tokens)
+                                }
+                            }
+                        } else {
+                            quote! { spel_framework::idl::IdlType::Primitive("option<unknown>".to_string()) }
+                        }
+                    } else {
+                        quote! { spel_framework::idl::IdlType::Primitive("option<unknown>".to_string()) }
+                    }
+                }
+                "ProgramId" => {
+                    quote! { spel_framework::idl::IdlType::Primitive("program_id".to_string()) }
+                }
+                "AccountId" => {
+                    quote! { spel_framework::idl::IdlType::Primitive("account_id".to_string()) }
+                }
+                other => {
+                    let name = other.to_string();
+                    quote! { spel_framework::idl::IdlType::Defined { defined: #name.to_string() } }
+                }
             }
         }
         Type::Array(arr) => {
-            let elem = rust_type_to_idl_string(&arr.elem);
+            let elem_tokens = rust_type_to_idl_type_tokens(&arr.elem);
             if let syn::Expr::Lit(lit) = &arr.len {
                 if let syn::Lit::Int(n) = &lit.lit {
-                    return format!("[{}; {}]", elem, n);
+                    let size: usize = n.base10_parse().unwrap_or(0);
+                    quote! {
+                        spel_framework::idl::IdlType::Array {
+                            array: (Box::new(#elem_tokens), #size)
+                        }
+                    }
+                } else {
+                    quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) }
                 }
+            } else {
+                quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) }
             }
-            format!("[{}; ?]", elem)
         }
-        _ => "unknown".to_string(),
+        _ => {
+            quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) }
+        }
     }
 }
 
@@ -907,11 +951,11 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
                 .iter()
                 .map(|arg| {
                     let arg_name = arg.name.to_string().trim_start_matches('_').to_string();
-                    let type_str = rust_type_to_idl_string(&arg.ty);
+                    let type_tokens = rust_type_to_idl_type_tokens(&arg.ty);
                     quote! {
                         spel_framework::idl::IdlArg {
                             name: #arg_name.to_string(),
-                            type_: spel_framework::idl::IdlType::Primitive(#type_str.to_string()),
+                            type_: #type_tokens,
                         }
                     }
                 })
