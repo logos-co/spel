@@ -120,7 +120,11 @@ pub async fn execute_instruction(
     // Build risc0 serialized data
     let ix_index = idl.instructions.iter().position(|i| i.name == ix.name).unwrap_or(0);
     let risc0_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
-    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args);
+    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args)
+        .unwrap_or_else(|e| {
+            eprintln!("❌ Serialization error: {}", e);
+            process::exit(1);
+        });
 
     // Display
     println!("Accounts:");
