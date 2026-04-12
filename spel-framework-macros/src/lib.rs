@@ -276,13 +276,41 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 }
             };
 
+            // Filter out non-program-owned, non-default-state accounts from the output.
+            //
+            // LEZ validate_execution rule 7: if post.program_owner == DEFAULT_PROGRAM_ID
+            // and pre.account != Account::default(), validation fails. This would happen
+            // for signer accounts (e.g., proposer/executor) whose nonce has been incremented
+            // by a prior transaction — they are not owned by the program and must not be
+            // returned in the program's post-states.
+            //
+            // We drop any (pre, post) pair where:
+            //   - pre.program_owner == DEFAULT_PROGRAM_ID (not owned by this program), AND
+            //   - pre.account != Account::default() (has non-trivial state), AND
+            //   - post has no claim (init accounts are fine since their pre == default)
+            let (filtered_pre, filtered_post): (
+                Vec<nssa_core::account::AccountWithMetadata>,
+                Vec<nssa_core::program::AccountPostState>,
+            ) = pre_states_clone
+                .into_iter()
+                .zip(post_states.into_iter())
+                .filter(|(pre, post)| {
+                    let is_default_owner =
+                        pre.account.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID;
+                    let pre_is_default =
+                        pre.account == nssa_core::account::Account::default();
+                    let has_claim = post.required_claim().is_some();
+                    !is_default_owner || pre_is_default || has_claim
+                })
+                .unzip();
+
             // Write outputs to zkVM host
             nssa_core::program::ProgramOutput::new(
                 self_program_id,
                 caller_program_id,
                 instruction_words,
-                pre_states_clone,
-                post_states,
+                filtered_pre,
+                filtered_post,
             )
             .with_chained_calls(chained_calls)
             .write();
