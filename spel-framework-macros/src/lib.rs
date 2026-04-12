@@ -904,15 +904,41 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
 /// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
 /// generated function takes a `rest_count: usize` parameter and repeats
 /// the rest account's claim that many times.
+/// Collect the unique PDA arg seed parameters for a given instruction as typed
+/// `__pda_arg_<name>: &<type>` token streams, used in generated function signatures.
+fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
+    let mut names: Vec<String> = Vec::new();
+    for acc in &ix.accounts {
+        for seed in &acc.constraints.pda_seeds {
+            if let PdaSeedDef::Arg(name) = seed {
+                if !names.contains(name) {
+                    names.push(name.clone());
+                }
+            }
+        }
+    }
+    names.iter().map(|name| {
+        let ident = format_ident!("__pda_arg_{}", name);
+        let actual_type = ix.args.iter()
+            .find(|a| a.name.to_string() == *name)
+            .map(|a| &a.ty);
+        if let Some(ty) = actual_type {
+            quote! { #ident: &#ty }
+        } else {
+            quote! { #ident: &[u8; 32] }
+        }
+    }).collect()
+}
+
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
             let fn_name = format_ident!("__claims_{}", ix.fn_name);
             let has_rest = ix.accounts.iter().any(|a| a.is_rest);
+            let arg_params = pda_arg_params(ix);
 
             if has_rest {
-                // Fixed account claims
                 let fixed_claims: Vec<TokenStream2> = ix
                     .accounts
                     .iter()
@@ -920,36 +946,8 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .map(|acc| generate_single_claim_expr(acc))
                     .collect();
 
-                // Rest account claim expression (repeated rest_count times)
                 let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let rest_claim = generate_single_claim_expr(rest_acc);
-
-                // Collect unique arg names from PDA seeds for function parameters
-                let arg_params: Vec<TokenStream2> = {
-                    let mut names = Vec::new();
-                    for acc in &ix.accounts {
-                        for seed in &acc.constraints.pda_seeds {
-                            if let PdaSeedDef::Arg(name) = seed {
-                                if !names.contains(name) {
-                                    names.push(name.clone());
-                                }
-                            }
-                        }
-                    }
-                    names.iter().map(|name| {
-                        let ident = format_ident!("__pda_arg_{}", name);
-                        {
-                    let actual_type = ix.args.iter()
-                        .find(|a| a.name.to_string() == *name)
-                        .map(|a| &a.ty);
-                    if let Some(ty) = actual_type {
-                        quote! { #ident: &#ty }
-                    } else {
-                        quote! { #ident: &[u8; 32] }
-                    }
-                }
-                    }).collect()
-                };
 
                 quote! {
                     #[allow(dead_code)]
@@ -967,33 +965,6 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .iter()
                     .map(|acc| generate_single_claim_expr(acc))
                     .collect();
-
-                // Collect unique arg names from PDA seeds for function parameters
-                let arg_params: Vec<TokenStream2> = {
-                    let mut names = Vec::new();
-                    for acc in &ix.accounts {
-                        for seed in &acc.constraints.pda_seeds {
-                            if let PdaSeedDef::Arg(name) = seed {
-                                if !names.contains(name) {
-                                    names.push(name.clone());
-                                }
-                            }
-                        }
-                    }
-                    names.iter().map(|name| {
-                        let ident = format_ident!("__pda_arg_{}", name);
-                        {
-                    let actual_type = ix.args.iter()
-                        .find(|a| a.name.to_string() == *name)
-                        .map(|a| &a.ty);
-                    if let Some(ty) = actual_type {
-                        quote! { #ident: &#ty }
-                    } else {
-                        quote! { #ident: &[u8; 32] }
-                    }
-                }
-                    }).collect()
-                };
 
                 quote! {
                     #[allow(dead_code)]
@@ -1049,38 +1020,8 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 })
                 .collect();
 
-            // Collect unique arg names referenced in PDA seeds (for extra params)
-            let arg_seed_names: Vec<String> = {
-                let mut names = Vec::new();
-                for acc in &ix.accounts {
-                    for seed in &acc.constraints.pda_seeds {
-                        if let PdaSeedDef::Arg(name) = seed {
-                            if !names.contains(name) {
-                                names.push(name.clone());
-                            }
-                        }
-                    }
-                }
-                names
-            };
-
-            // Generate extra parameters for arg seeds
-            let arg_seed_params: Vec<TokenStream2> = arg_seed_names
-                .iter()
-                .map(|name| {
-                    let param_name = format_ident!("__pda_arg_{}", name);
-                    {
-                    let actual_type = ix.args.iter()
-                        .find(|a| a.name.to_string() == *name)
-                        .map(|a| &a.ty);
-                    if let Some(ty) = actual_type {
-                        quote! { #param_name: &#ty }
-                    } else {
-                        quote! { #param_name: &[u8; 32] }
-                    }
-                }
-                })
-                .collect();
+            // Extra parameters for arg PDA seeds
+            let arg_seed_params = pda_arg_params(ix);
 
             // Generate PDA checks for accounts with pda_seeds
             let pda_checks: Vec<TokenStream2> = ix

@@ -7,7 +7,7 @@ use nssa_core::program::{AccountPostState, ChainedCall};
 
 /// Trait for types that can be converted into an [`AccountPostState`].
 ///
-/// Implemented for `(Account, Claim)`, `(Account, &Claim)`, and
+/// Implemented for `(Account, AutoClaim)`, `(Account, &AutoClaim)`, and
 /// `AccountPostState` itself, so [`SpelOutput::execute`] accepts any of these.
 pub trait IntoPostState {
     fn into_post_state(self) -> AccountPostState;
