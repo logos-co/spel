@@ -728,6 +728,25 @@ impl<'a> ExecuteTransformer<'a> {
     fn num_fixed(&self) -> usize {
         self.accounts.iter().filter(|a| !a.is_rest).count()
     }
+
+    /// Collect arg seed values as function call arguments for __claims_* functions.
+    /// For each unique PdaSeedDef::Arg across all accounts, generates: arg_name
+    fn arg_seed_args(&self) -> Vec<TokenStream2> {
+        let mut names: Vec<String> = Vec::new();
+        for acc in self.accounts {
+            for seed in &acc.constraints.pda_seeds {
+                if let PdaSeedDef::Arg(name) = seed {
+                    if !names.contains(name) {
+                        names.push(name.clone());
+                    }
+                }
+            }
+        }
+        names.iter().map(|name| {
+            let ident = format_ident!("{}", name);
+            quote! { #ident }
+        }).collect()
+    }
 }
 
 impl<'a> VisitMut for ExecuteTransformer<'a> {
@@ -755,10 +774,12 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
             let claims_fn = format_ident!("__claims_{}", self.fn_name);
             let chained = call.args[1].clone();
+            // Collect arg seed values to pass to claims function
+            let arg_seed_args: Vec<TokenStream2> = self.arg_seed_args();
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
             call.args.push(syn::parse_quote! { &[#(#account_clones),*] });
-            call.args.push(syn::parse_quote! { &#claims_fn() });
+            call.args.push(syn::parse_quote! { &#claims_fn(#(#arg_seed_args),*) });
             call.args.push(chained);
             return;
         }
@@ -769,11 +790,12 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             let chained = call.args[1].clone();
             let claims_fn = format_ident!("__claims_{}", self.fn_name);
             let num_fixed = self.num_fixed();
+            let arg_seed_args: Vec<TokenStream2> = self.arg_seed_args();
 
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
             call.args.push(syn::parse_quote! { &#accounts_expr });
-            call.args.push(syn::parse_quote! { &#claims_fn(#accounts_expr.len() - #num_fixed) });
+            call.args.push(syn::parse_quote! { &#claims_fn(#accounts_expr.len() - #num_fixed, #(#arg_seed_args),*) });
             call.args.push(chained);
         }
     }
@@ -843,8 +865,8 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                         quote! { &spel_framework::pda::seed_from_str(#val) }
                     }
                     PdaSeedDef::Arg(name) => {
-                        let ident = format_ident!("{}", name);
-                        quote! { #ident }
+                        let ident = format_ident!("__pda_arg_{}", name);
+                        quote! { spel_framework::pda::ToSeed::to_seed(#ident) }
                     }
                 }
             })
@@ -911,9 +933,27 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let rest_claim = generate_single_claim_expr(rest_acc);
 
+                // Collect unique arg names from PDA seeds for function parameters
+                let arg_params: Vec<TokenStream2> = {
+                    let mut names = Vec::new();
+                    for acc in &ix.accounts {
+                        for seed in &acc.constraints.pda_seeds {
+                            if let PdaSeedDef::Arg(name) = seed {
+                                if !names.contains(name) {
+                                    names.push(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    names.iter().map(|name| {
+                        let ident = format_ident!("__pda_arg_{}", name);
+                        quote! { #ident: [u8; 32] }
+                    }).collect()
+                };
+
                 quote! {
                     #[allow(dead_code)]
-                    pub fn #fn_name(rest_count: usize) -> Vec<spel_framework::spel_output::AutoClaim> {
+                    pub fn #fn_name(rest_count: usize, #(#arg_params),*) -> Vec<spel_framework::spel_output::AutoClaim> {
                         let mut claims = vec![#(#fixed_claims),*];
                         claims.extend(
                             std::iter::repeat(#rest_claim).take(rest_count)
@@ -928,9 +968,27 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .map(|acc| generate_single_claim_expr(acc))
                     .collect();
 
+                // Collect unique arg names from PDA seeds for function parameters
+                let arg_params: Vec<TokenStream2> = {
+                    let mut names = Vec::new();
+                    for acc in &ix.accounts {
+                        for seed in &acc.constraints.pda_seeds {
+                            if let PdaSeedDef::Arg(name) = seed {
+                                if !names.contains(name) {
+                                    names.push(name.clone());
+                                }
+                            }
+                        }
+                    }
+                    names.iter().map(|name| {
+                        let ident = format_ident!("__pda_arg_{}", name);
+                        quote! { #ident: [u8; 32] }
+                    }).collect()
+                };
+
                 quote! {
                     #[allow(dead_code)]
-                    pub fn #fn_name() -> Vec<spel_framework::spel_output::AutoClaim> {
+                    pub fn #fn_name(#(#arg_params),*) -> Vec<spel_framework::spel_output::AutoClaim> {
                         vec![#(#claim_exprs),*]
                     }
                 }
