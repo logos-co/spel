@@ -142,7 +142,7 @@ This provides:
 - Automatic PDA computation from IDL seeds
 - risc0-compatible serialization
 - Transaction building and submission with wallet integration
-- `--dry-run` mode for testing
+- `--dry-run` — parse, resolve, and show the full transaction summary without submitting
 - `inspect` subcommand to extract ProgramId from binaries
 
 ### Account Types
@@ -244,6 +244,33 @@ spel --idl program-idl.json -p treasury.bin --bin-token token.bin \
 # Get help for a specific instruction
 spel --idl program-idl.json create-vault --help
 ```
+
+## Dry-run: Validate Before Submitting
+
+Before committing to a 15-second block cycle, run any command with `--dry-run` to see the complete local transaction picture:
+
+```sh
+spel --idl my-program-idl.json -p target/program.bin \
+     submit-transfer --target Owner/abc123... --amount 100 \
+     --dry-run
+```
+
+This shows:
+- **Program ID** — derived from the ELF binary (or use `--program-id <hex>`)
+- **All accounts** — direct accounts and resolved PDAs
+- **Parsed arguments** — validated and formatted
+- **Serialized instruction data** — ready for the sequencer
+- **Signer nonces** — fetched from the sequencer (requires wallet connectivity)
+
+To save the dry-run output as JSON for scripting:
+
+```sh
+spel --idl my-program-idl.json -p target/program.bin \
+     submit-transfer --target Owner/abc123... --amount 100 \
+     --dry-run --dry-run-output json > dry-run.json
+```
+
+**Privacy note:** `--dry-run` makes a read-only RPC call to fetch current nonces. This reveals which accounts you intend to use. Do not use `--dry-run` on shared or public infrastructure if account unlinkability is required.
 
 ### Type Formats
 

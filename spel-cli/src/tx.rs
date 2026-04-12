@@ -26,6 +26,7 @@ pub async fn execute_instruction(
     program_path: &str,
     program_id_hex: Option<&str>,
     dry_run: bool,
+    dry_run_output: Option<&str>,
     extra_bins: &HashMap<String, String>,
 ) {
     println!("📋 Instruction: {}", ix.name);
@@ -122,60 +123,8 @@ pub async fn execute_instruction(
     let risc0_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
     let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args);
 
-    // Display
-    println!("Accounts:");
-    for acc in &ix.accounts {
-        if acc.pda.is_some() {
-            println!("  📦 {} → auto-computed (PDA)", acc.name);
-        } else if acc.rest {
-            if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
-                if entries.is_empty() {
-                    println!("  📦 {} → (none — variadic rest)", acc.name);
-                } else {
-                    for (e, _) in entries {
-                        println!("  📦 {} → 0x{}", acc.name, hex_encode(e));
-                    }
-                }
-            }
-        } else {
-            let account_bytes = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name).unwrap();
-            println!("  📦 {} → 0x{}", acc.name, hex_encode(&account_bytes.1));
-        }
-    }
-    println!();
-    println!("Arguments (parsed):");
-    for (name, _, val) in &parsed_args {
-        println!("  {} = {}", name, val);
-    }
-    println!();
-    println!("🔧 Transaction:");
-    if let Some(pid) = program_id_hex {
-        println!("  program-id: {}", pid);
-    } else {
-        println!("  program: {}", program_path);
-    }
-    println!("  instruction index: {}", ix_index);
-    println!("  instruction: {} {{", to_pascal_case(&ix.name));
-    for (name, _, val) in &parsed_args {
-        println!("    {}: {},", name, val);
-    }
-    println!("  }}");
-    println!();
-    println!("  Serialized instruction data ({} u32 words):", instruction_data.len());
-    let hex_words: Vec<String> = instruction_data.iter().map(|w| format!("{:08x}", w)).collect();
-    println!("    [{}]", hex_words.join(", "));
-    println!();
-
-    if dry_run {
-        println!("⚠️  Dry run — omit --dry-run to submit the transaction.");
-        return;
-    }
-
-    // ─── Transaction submission ──────────────────────────────────
-    println!("📤 Submitting transaction...");
-
-    // Resolve program_id: from --program-id hex flag, or by loading the binary
-    let (program_id, program_obj): (ProgramId, Option<Program>) = if let Some(hex) = program_id_hex {
+    // ─── Step 4: Load program binary or resolve program ID ───
+    let (program_id, _program_obj): (ProgramId, Option<Program>) = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
             eprintln!("❌ Invalid --program-id '{}': {}", hex, e);
             process::exit(1);
@@ -185,7 +134,7 @@ pub async fn execute_instruction(
             pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         (pid, None)
-    } else {
+    } else if !program_path.is_empty() && std::path::Path::new(program_path).exists() {
         let program_bytecode = fs::read(program_path).unwrap_or_else(|e| {
             eprintln!("❌ Failed to read program binary '{}': {}", program_path, e);
             eprintln!("   Hint: pass --program-id <hex> to skip loading the binary");
@@ -197,10 +146,12 @@ pub async fn execute_instruction(
         });
         let pid = program.id();
         (pid, Some(program))
+    } else {
+        eprintln!("❌ Program binary or --program-id required. Pass --program <path> or --program-id <hex>.");
+        process::exit(1);
     };
-    println!("  Program ID: {:?}", program_id);
 
-    // Build account map for PDA resolution
+    // ─── Step 5: Build account map ───
     let mut account_map: HashMap<String, AccountId> = HashMap::new();
     for (name, bytes, _) in &parsed_accounts {
         let mut arr = [0u8; 32];
@@ -246,7 +197,7 @@ pub async fn execute_instruction(
         parsed_arg_map.insert(name.to_string(), val.clone());
     }
 
-    // Resolve PDA accounts
+    // ─── Step 6: Resolve PDA accounts ───
     for acc in &ix.accounts {
         if let Some(pda) = &acc.pda {
             match compute_pda_from_seeds(&pda.seeds, &program_id, &account_map, &parsed_arg_map) {
@@ -262,15 +213,215 @@ pub async fn execute_instruction(
         }
     }
 
+    // Check if any account has a Private/ prefix (needed for dry-run privacy warning too)
+    let has_private = parsed_accounts.iter().any(|(_, _, is_priv)| *is_priv)
+        || rest_accounts.iter().any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
+
+    // ─── Step 7: Fetch nonces for signer accounts ───
+    let signer_accounts: Vec<(String, AccountId)> = ix.accounts.iter()
+        .filter(|a| a.signer)
+        .map(|a| {
+            let id = *account_map.get(&a.name).unwrap_or_else(|| {
+                eprintln!("❌ Signer account '{}' not resolved", a.name);
+                process::exit(1);
+            });
+            (a.name.clone(), id)
+        })
+        .collect();
+
+    let nonces: Vec<Option<u64>> = if signer_accounts.is_empty() {
+        vec![]
+    } else {
+        let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
+            eprintln!("❌ Failed to initialize wallet: {:?}", e);
+            eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
+            process::exit(1);
+        });
+        let signer_ids: Vec<AccountId> = signer_accounts.iter().map(|(_, id)| *id).collect();
+        match wallet_core.get_accounts_nonces(signer_ids).await {
+            Ok(ns) => ns.into_iter().map(Some).collect(),
+            Err(e) => {
+                eprintln!("⚠️  Could not fetch nonces: {:?}", e);
+                signer_accounts.iter().map(|_| None).collect()
+            }
+        }
+    };
+
+    // ─── Step 8 & 9: Print transaction summary (and JSON if requested) ───
+    let program_id_hex_str = {
+        let parts: Vec<String> = program_id.iter().map(|w| format!("{:08x}", w)).collect();
+        parts.join("")
+    };
+
+    if has_private {
+        println!("⚠️  Privacy-preserving transaction — dry-run fetches on-chain state which may reveal access patterns.");
+        println!();
+    }
+
+    // Build account list for display and JSON
+    let mut accounts_summary: Vec<String> = Vec::new();
+    let mut accounts_json: Vec<serde_json::Value> = Vec::new();
+    let mut raw_account_ids: Vec<String> = Vec::new();
+
+    for acc in &ix.accounts {
+        if acc.pda.is_some() {
+            let id = account_map.get(&acc.name).unwrap();
+            let id_str = format!("{}", id);
+            let flags: Vec<&str> = ["PDA"].into_iter().collect();
+            accounts_summary.push(format!("  {} → {}  [{}]", acc.name, id_str, flags.join(", ")));
+            raw_account_ids.push(id_str.clone());
+            accounts_json.push(serde_json::json!({
+                "name": acc.name,
+                "address": id_str,
+                "pda": id_str,
+                "signer": acc.signer,
+                "writable": acc.writable,
+                "rest": acc.rest,
+            }));
+        } else if acc.rest {
+            if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
+                if entries.is_empty() {
+                    accounts_summary.push(format!("  {} → (none — variadic rest)", acc.name));
+                } else {
+                    for (e, _) in entries {
+                        let id_str = format!("0x{}", hex_encode(e));
+                        accounts_summary.push(format!("  {} → {}", acc.name, id_str));
+                        raw_account_ids.push(id_str.clone());
+                    }
+                }
+            }
+        } else {
+            let (_, bytes, _) = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name).unwrap();
+            let id_str = format!("0x{}", hex_encode(bytes));
+            let mut flags = vec![];
+            if acc.signer { flags.push("signer"); }
+            if acc.writable { flags.push("writable"); }
+            accounts_summary.push(format!("  {} → {}  [{}]", acc.name, id_str, flags.join(", ")));
+            raw_account_ids.push(id_str.clone());
+            accounts_json.push(serde_json::json!({
+                "name": acc.name,
+                "address": id_str,
+                "pda": null,
+                "signer": acc.signer,
+                "writable": acc.writable,
+                "rest": acc.rest,
+            }));
+        }
+    }
+
+    // Arguments for display and JSON
+    let mut args_summary: Vec<String> = Vec::new();
+    let mut args_json: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+    for (name, _, val) in &parsed_args {
+        args_summary.push(format!("  {}: {}", name, val));
+        args_json.insert(name.to_string(), serde_json::Value::String(val.to_string()));
+    }
+
+    // Signers for display and JSON
+    let mut signers_summary: Vec<String> = Vec::new();
+    let mut signers_json: Vec<serde_json::Value> = Vec::new();
+    for (i, (name, id)) in signer_accounts.iter().enumerate() {
+        let nonce_str = match nonces.get(i) {
+            Some(Some(n)) => format!("nonce={}", n),
+            _ => "nonce=(unknown)".to_string(),
+        };
+        signers_summary.push(format!("  {}: {}", name, nonce_str));
+        signers_json.push(serde_json::json!({
+            "name": name,
+            "address": format!("{}", id),
+            "nonce": nonces.get(i).and_then(|n| *n),
+        }));
+    }
+
+    // Instruction data words
+    let hex_words: Vec<String> = instruction_data.iter().map(|w| format!("{:08x}", w)).collect();
+    let instruction_data_hex = hex_words.join("");
+
+    // JSON output
+    if let Some(output_fmt) = dry_run_output {
+        if output_fmt != "json" {
+            eprintln!("❌ --dry-run-output only supports 'json' (got '{}')", output_fmt);
+            process::exit(1);
+        }
+        let json_obj = serde_json::json!({
+            "dry_run": true,
+            "program_id": program_id_hex_str,
+            "instruction_index": ix_index,
+            "instruction_name": ix.name,
+            "accounts": accounts_json,
+            "arguments": args_json,
+            "instruction_data_hex": instruction_data_hex,
+            "instruction_data_words": instruction_data,
+            "signers": signers_json,
+            "raw_account_ids": raw_account_ids,
+        });
+        println!("{}", serde_json::to_string_pretty(&json_obj).unwrap());
+        println!();
+    }
+
+    // Human-readable summary
+    println!("━━━ Transaction Summary ━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("🔷 Program ID: {}  (derived from binary)", program_id_hex_str);
+    println!("📋 Instruction index: {}  ({})", ix_index, ix.name);
+    println!();
+    println!("📦 Accounts:");
+    for line in &accounts_summary {
+        println!("{}", line);
+    }
+    println!();
+    println!("Parsed Arguments:");
+    for line in &args_summary {
+        println!("{}", line);
+    }
+    println!();
+    println!("🔧 Serialized instruction data ({} u32 words):", instruction_data.len());
+    println!("    [{}]", hex_words.join(", "));
+    println!();
+    if signer_accounts.is_empty() {
+        println!("🔑 Signers: (none)");
+    } else {
+        println!("🔑 Signers and Nonces:");
+        for line in &signers_summary {
+            println!("{}", line);
+        }
+    }
+    println!();
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!();
+    println!("⚠️  Dry run — this is what WOULD be submitted.");
+    println!("   Remove --dry-run to send this transaction.");
+
+    // ─── Step 10: Early return for dry-run ───
+    if dry_run {
+        return;
+    }
+
+    // ─── Transaction submission ──────────────────────────────────
+    println!();
+    println!("📤 Submitting transaction...");
+    println!("  Program ID: {:?}", program_id);
+
+    // Reload program for submission (program_obj was consumed earlier; re-read if needed)
+    let program_obj = if program_id_hex.is_some() {
+        None
+    } else {
+        let program_bytecode = fs::read(program_path).unwrap_or_else(|e| {
+            eprintln!("❌ Failed to read program binary '{}': {}", program_path, e);
+            process::exit(1);
+        });
+        Some(Program::new(program_bytecode).unwrap_or_else(|e| {
+            eprintln!("❌ Failed to load program: {:?}", e);
+            process::exit(1);
+        }))
+    };
+
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
 
-    // Check if any account has a Private/ prefix
-    let has_private = parsed_accounts.iter().any(|(_, _, is_priv)| *is_priv)
-        || rest_accounts.iter().any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
+    // has_private already checked above (before Step 8)
 
     if has_private {
         // ─── Privacy-preserving transaction ──────────────────
@@ -375,28 +526,23 @@ pub async fn execute_instruction(
             }
         }
 
-        let signer_accounts: Vec<AccountId> = ix.accounts.iter()
-            .filter(|a| a.signer)
-            .map(|a| *account_map.get(&a.name).unwrap())
-            .collect();
+        let signer_ids: Vec<AccountId> = signer_accounts.iter().map(|(_, id)| *id).collect();
 
-        let nonces = if signer_accounts.is_empty() {
-            vec![]
-        } else {
-            wallet_core.get_accounts_nonces(signer_accounts.clone()).await.unwrap_or_else(|e| {
-                eprintln!("❌ Failed to fetch nonces: {:?}", e);
-                process::exit(1);
-            })
-        };
+        // Re-fetch nonces for submission (already fetched above, but need to get them again for the actual submission path)
+        // We already have nonces from the dry-run fetch, re-use them
+        let nonces_for_submit: Vec<u64> = nonces.iter().map(|n| n.unwrap_or_else(|| {
+            eprintln!("❌ Nonce unknown for signer — cannot submit. Run --dry-run to see nonces.");
+            process::exit(1);
+        })).collect();
 
-        let signing_keys: Vec<_> = signer_accounts.iter().map(|id| {
+        let signing_keys: Vec<_> = signer_ids.iter().map(|id| {
             wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
                 eprintln!("❌ Signing key not found for account {}", id);
                 process::exit(1);
             })
         }).collect();
 
-        let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
+        let message = Message::new_preserialized(program_id, account_ids, nonces_for_submit, instruction_data);
         let witness_set = WitnessSet::for_message(&message, &signing_keys);
         let tx = PublicTransaction::new(message, witness_set);
 
@@ -421,5 +567,4 @@ pub async fn execute_instruction(
             process::exit(1);
         }
     }
-}
 }
