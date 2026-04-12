@@ -788,6 +788,21 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             call.args.push(syn::parse_quote! { &#accounts_expr });
             call.args.push(syn::parse_quote! { &#claims_fn(#accounts_expr.len() - #num_fixed, #(#arg_seed_args),*) });
             call.args.push(chained);
+        } else {
+            // Fixed-account instruction where the accounts argument is an arbitrary expression
+            // (e.g. a Vec<Account> returned by a handler function). The vec![name, ...] pattern
+            // above only fires when the caller uses the exact account parameter names; this branch
+            // catches the common case of passing a handler-produced Vec<Account> variable.
+            let accounts_expr = call.args[0].clone();
+            let chained = call.args[1].clone();
+            let claims_fn = format_ident!("__claims_{}", self.fn_name);
+            let arg_seed_args: Vec<TokenStream2> = self.arg_seed_args();
+
+            call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
+            call.args.clear();
+            call.args.push(syn::parse_quote! { &#accounts_expr });
+            call.args.push(syn::parse_quote! { &#claims_fn(#(#arg_seed_args),*) });
+            call.args.push(chained);
         }
     }
 }
