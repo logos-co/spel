@@ -833,12 +833,20 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
             .pda_seeds
             .iter()
             .map(|seed| {
-                let val = match seed {
-                    PdaSeedDef::Const(v) => v.clone(),
-                    PdaSeedDef::Account(v) => v.clone(),
-                    PdaSeedDef::Arg(v) => v.clone(),
-                };
-                quote! { &spel_framework::pda::seed_from_str(#val) }
+                match seed {
+                    PdaSeedDef::Const(v) => {
+                        let val = v.clone();
+                        quote! { &spel_framework::pda::seed_from_str(#val) }
+                    }
+                    PdaSeedDef::Account(v) => {
+                        let val = v.clone();
+                        quote! { &spel_framework::pda::seed_from_str(#val) }
+                    }
+                    PdaSeedDef::Arg(name) => {
+                        let ident = format_ident!("{}", name);
+                        quote! { #ident }
+                    }
+                }
             })
             .collect();
         if seed_bytes.len() == 1 {
