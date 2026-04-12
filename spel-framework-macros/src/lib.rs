@@ -1116,7 +1116,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                                 }
                                 PdaSeedDef::Arg(field_name) => {
                                     let param_name = format_ident!("__pda_arg_{}", field_name);
-                                    quote! { let #var = spel_framework::pda::ToSeed::to_seed(#param_name); }
+                                    quote! { let #var = spel_framework::pda::ToSeed::to_seed(&#param_name); }
                                 }
                             }
                         })
