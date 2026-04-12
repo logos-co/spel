@@ -642,15 +642,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 names.iter().map(|name| {
                     let arg_ident = format_ident!("{}", name);
                     // Check if arg is already a reference - don't double-reference
-                    let is_ref = ix.args.iter()
-                        .find(|a| a.name == *name)
-                        .map(|a| matches!(a.ty, syn::Type::Reference(_)))
-                        .unwrap_or(false);
-                    if is_ref {
-                        quote! { #arg_ident }
-                    } else {
-                        quote! { &#arg_ident }
-                    }
+quote! { #arg_ident }
                 }).collect()
             };
 
@@ -866,7 +858,7 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                     }
                     PdaSeedDef::Arg(name) => {
                         let ident = format_ident!("__pda_arg_{}", name);
-                        quote! { spel_framework::pda::ToSeed::to_seed(#ident) }
+                        quote! { &spel_framework::pda::ToSeed::to_seed(&#ident) }
                     }
                 }
             })
@@ -947,7 +939,16 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     }
                     names.iter().map(|name| {
                         let ident = format_ident!("__pda_arg_{}", name);
+                        {
+                    let actual_type = ix.args.iter()
+                        .find(|a| a.name.to_string() == *name)
+                        .map(|a| &a.ty);
+                    if let Some(ty) = actual_type {
+                        quote! { #ident: #ty }
+                    } else {
                         quote! { #ident: [u8; 32] }
+                    }
+                }
                     }).collect()
                 };
 
@@ -982,7 +983,16 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     }
                     names.iter().map(|name| {
                         let ident = format_ident!("__pda_arg_{}", name);
+                        {
+                    let actual_type = ix.args.iter()
+                        .find(|a| a.name.to_string() == *name)
+                        .map(|a| &a.ty);
+                    if let Some(ty) = actual_type {
+                        quote! { #ident: #ty }
+                    } else {
                         quote! { #ident: [u8; 32] }
+                    }
+                }
                     }).collect()
                 };
 
@@ -1060,7 +1070,16 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .iter()
                 .map(|name| {
                     let param_name = format_ident!("__pda_arg_{}", name);
-                    quote! { #param_name: &impl spel_framework::pda::ToSeed }
+                    {
+                    let actual_type = ix.args.iter()
+                        .find(|a| a.name.to_string() == *name)
+                        .map(|a| &a.ty);
+                    if let Some(ty) = actual_type {
+                        quote! { #param_name: #ty }
+                    } else {
+                        quote! { #param_name: &[u8; 32] }
+                    }
+                }
                 })
                 .collect();
 
