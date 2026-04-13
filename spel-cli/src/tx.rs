@@ -7,6 +7,7 @@ use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
 use nssa_core::program::ProgramId;
+use nssa_core::account::Nonce;
 use spel_framework_core::idl::{IdlSeed, SpelIdl, IdlInstruction};
 use crate::hex::{hex_encode, decode_bytes_32, parse_account_id};
 use crate::parse::{parse_value, ParsedValue};
@@ -257,7 +258,7 @@ pub async fn execute_instruction(
         })
         .collect();
 
-    let nonces: Vec<Option<u64>> = if signer_accounts.is_empty() {
+    let nonces: Vec<Option<Nonce>> = if signer_accounts.is_empty() {
         vec![]
     } else {
         let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
@@ -348,14 +349,14 @@ pub async fn execute_instruction(
     let mut signers_json: Vec<serde_json::Value> = Vec::new();
     for (i, (name, id)) in signer_accounts.iter().enumerate() {
         let nonce_str = match nonces.get(i) {
-            Some(Some(n)) => format!("nonce={}", n),
+            Some(Some(n)) => format!("nonce={}", n.0 as u64),
             _ => "nonce=(unknown)".to_string(),
         };
         signers_summary.push(format!("  {}: {}", name, nonce_str));
         signers_json.push(serde_json::json!({
             "name": name,
             "address": format!("{}", id),
-            "nonce": nonces.get(i).and_then(|n| *n),
+            "nonce": nonces.get(i).and_then(|n| n.map(|x| x.0 as u64)),
         }));
     }
 
@@ -554,10 +555,10 @@ pub async fn execute_instruction(
 
         // Re-fetch nonces for submission (already fetched above, but need to get them again for the actual submission path)
         // We already have nonces from the dry-run fetch, re-use them
-        let nonces_for_submit: Vec<u64> = nonces.iter().map(|n| n.unwrap_or_else(|| {
+        let nonces_for_submit = nonces.iter().cloned().map(|n| n.unwrap_or_else(|| {
             eprintln!("❌ Nonce unknown for signer — cannot submit. Run --dry-run to see nonces.");
             process::exit(1);
-        })).collect();
+        })).collect::<Vec<Nonce>>();
 
         let signing_keys: Vec<_> = signer_ids.iter().map(|id| {
             wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
