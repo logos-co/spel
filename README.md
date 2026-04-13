@@ -270,8 +270,6 @@ spel --idl my-program-idl.json -p target/program.bin \
      --dry-run --dry-run-output json > dry-run.json
 ```
 
-**Privacy note:** `--dry-run` makes a read-only RPC call to fetch current nonces. This reveals which accounts you intend to use. Do not use `--dry-run` on shared or public infrastructure if account unlinkability is required.
-
 ### Type Formats
 
 | IDL Type | CLI Format |
