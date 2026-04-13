@@ -253,10 +253,6 @@ pub async fn execute_instruction(
         parts.join("")
     };
 
-    if has_private {
-        println!("⚠️  Privacy-preserving transaction — dry-run fetches on-chain state which may reveal access patterns.");
-        println!();
-    }
 
     // Build account list for display and JSON
     let mut accounts_summary: Vec<String> = Vec::new();
