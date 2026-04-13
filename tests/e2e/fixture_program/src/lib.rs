@@ -89,6 +89,19 @@ mod treasury {
         Ok(SpelOutput::execute(vec![from, to, signer], vec![]))
     }
 
+    /// Create a record whose PDA is derived from the owner's account ID.
+    /// Exercises the `account("owner")` PDA seed variant in both claim generation
+    /// and validation.
+    #[instruction]
+    pub fn create_record(
+        #[account(init, pda = account("owner"))]
+        record: AccountWithMetadata,
+        #[account(signer)]
+        owner: AccountWithMetadata,
+    ) -> SpelResult {
+        Ok(SpelOutput::execute(vec![record, owner], vec![]))
+    }
+
     /// Batch update: one fixed authority + variable-length list of target accounts.
     #[instruction]
     pub fn batch_update(
@@ -121,7 +134,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 7);
+        assert_eq!(idl.instructions.len(), 8);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -130,7 +143,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 7);
+        assert_eq!(idl.instructions.len(), 8);
     }
 
     #[test]
@@ -490,7 +503,90 @@ mod tests {
         assert!(result.is_ok(), "correct PDA should pass: {result:?}");
     }
 
-    // ── batch_update (rest accounts) ─────────────────────────────────
+    // ── create_record (account(...) PDA seed) ────────────────────────────────
+
+    #[test]
+    fn handler_create_record_callable() {
+        let acc = make_account(true);
+        let result = treasury::create_record(acc.clone(), acc.clone());
+        assert!(result.is_ok());
+    }
+
+    /// Critical regression test: __claims_create_record must encode the *owner's account ID*
+    /// as the PDA seed, not a hash of the string "owner". Before the fix, Account PDA seeds
+    /// used seed_from_str(account_name) which is always wrong.
+    #[test]
+    fn claims_create_record_encodes_owner_account_id_as_seed() {
+        let owner_id = [42u8; 32];
+        let claims = treasury::__claims_create_record(&owner_id);
+
+        assert_eq!(claims.len(), 2);
+
+        // record (index 0): must be a PDA claim — not None, not Authorized
+        assert!(
+            matches!(&claims[0], spel_framework::spel_output::AutoClaim::Claimed(_)),
+            "record claim should be Claimed(Pda(...)), got: {:?}",
+            &claims[0]
+        );
+
+        // owner (index 1): signer only, not init → no claim
+        assert!(
+            matches!(&claims[1], spel_framework::spel_output::AutoClaim::None),
+            "owner claim should be None, got: {:?}",
+            &claims[1]
+        );
+
+        // The encoded seed must be the owner_id bytes, not seed_from_str("owner").
+        let wrong_seed = spel_framework::pda::seed_from_str("owner");
+        let wrong_claim = spel_framework::spel_output::AutoClaim::Claimed(
+            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(wrong_seed))
+        );
+        assert_ne!(
+            claims[0], wrong_claim,
+            "claim must use the runtime account ID, not seed_from_str(\"owner\")"
+        );
+
+        // It must match the claim built from the actual owner_id bytes.
+        let correct_claim = spel_framework::spel_output::AutoClaim::Claimed(
+            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(owner_id))
+        );
+        assert_eq!(claims[0], correct_claim);
+    }
+
+    #[test]
+    fn validate_create_record_accepts_correct_pda() {
+        let program_id = test_program_id();
+        let owner_id = [42u8; 32];
+        let correct_pda = spel_framework::pda::compute_pda(&program_id, &[&owner_id]);
+
+        let accounts = vec![
+            make_account_with_id(*correct_pda.value(), false), // record — correct PDA
+            make_account_with_id(owner_id, true),               // owner — signer
+        ];
+
+        let result = treasury::__validate_create_record(&accounts, &program_id, &empty_ix_data());
+        assert!(result.is_ok(), "correct PDA should pass: {result:?}");
+    }
+
+    #[test]
+    fn validate_create_record_rejects_wrong_pda() {
+        let program_id = test_program_id();
+        let owner_id = [42u8; 32];
+
+        let accounts = vec![
+            make_account_with_id([0xFFu8; 32], false), // record — wrong address
+            make_account_with_id(owner_id, true),       // owner — signer
+        ];
+
+        let result = treasury::__validate_create_record(&accounts, &program_id, &empty_ix_data());
+        let err = result.expect_err("wrong PDA should fail");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
+
+    // ── batch_update (rest accounts / ExecuteTransformer arbitrary expression) ──
 
     #[test]
     fn handler_batch_update_callable() {
@@ -516,5 +612,33 @@ mod tests {
         assert_eq!(ix.args.len(), 1);
         assert_eq!(ix.args[0].name, "value");
     }
+
+    /// Tests the ExecuteTransformer rest-branch (arbitrary accounts expression):
+    /// __claims_batch_update(rest_count) must return 1 + rest_count claims.
+    #[test]
+    fn claims_batch_update_rest_count() {
+        let claims = treasury::__claims_batch_update(3);
+        assert_eq!(claims.len(), 4); // 1 fixed (authority) + 3 rest (targets)
+        assert!(matches!(&claims[0], spel_framework::spel_output::AutoClaim::None)); // authority
+        for claim in &claims[1..] {
+            assert!(matches!(claim, spel_framework::spel_output::AutoClaim::None)); // targets
+        }
+    }
+
+    /// Tests that the rest-branch ExecuteTransformer produces the correct number of
+    /// post_states, confirming the accounts expression is evaluated and extracted correctly.
+    #[test]
+    fn batch_update_post_states_match_account_count() {
+        let authority = make_account(true);
+        let targets = vec![make_account(false), make_account(false)];
+        let result = treasury::batch_update(authority, targets, 99).unwrap();
+        assert_eq!(result.post_states.len(), 3); // authority + 2 targets
+    }
+
+    // ── output filtering ─────────────────────────────────────────────────────
+    // The non-owned account filter runs inside the generated `pub fn main()` which is
+    // `#[cfg(not(test))]`. It cannot be unit-tested here without a full zkVM harness.
+    // The filter logic (pre_states_clone.zip(post_states).filter(...)) is covered by
+    // integration/e2e tests that invoke the guest binary end-to-end.
 
 }
