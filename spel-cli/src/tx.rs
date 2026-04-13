@@ -26,7 +26,7 @@ pub async fn execute_instruction(
     program_path: &str,
     program_id_hex: Option<&str>,
     dry_run: bool,
-    dry_run_output: Option<&str>,
+    dry_run_output: bool,
     extra_bins: &HashMap<String, String>,
 ) {
     println!("📋 Instruction: {}", ix.name);
@@ -338,11 +338,7 @@ pub async fn execute_instruction(
     let instruction_data_hex = hex_words.join("");
 
     // JSON output
-    if let Some(output_fmt) = dry_run_output {
-        if output_fmt != "json" {
-            eprintln!("❌ --dry-run-output only supports 'json' (got '{}')", output_fmt);
-            process::exit(1);
-        }
+    if dry_run_output {
         let json_obj = serde_json::json!({
             "dry_run": true,
             "program_id": program_id_hex_str,

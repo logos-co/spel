@@ -14,7 +14,7 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("  -i, --idl <FILE>           IDL JSON file");
     println!("  -p, --program <FILE>       Program binary");
     println!("  --dry-run                  Parse and validate locally; show full transaction summary without submitting");
-    println!("  --dry-run-output <fmt>     With --dry-run, output full transaction as JSON (fmt: json)");
+    println!("  --dry-run-output           With --dry-run, output full transaction as JSON");
     println!("  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)");
     println!();
     println!("COMMANDS:");
