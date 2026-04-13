@@ -207,3 +207,51 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
         _ => Ok(ParsedValue::Raw(raw.to_string())),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use spel_framework_core::idl::IdlType;
+
+    #[test]
+    fn pda_seed_from_bytes32_arg() {
+        // Simulate what happens when IDL has a [u8; 32] arg used as a PDA seed:
+        // 1. IDL declares arg type as Array { array: (Primitive("u8"), 32) }
+        // 2. User passes hex string on CLI
+        // 3. parse_value should produce ParsedValue::ByteArray(...)
+        // 4. PDA resolver should extract the 32 bytes as seed material
+
+        let idl_type = IdlType::Array {
+            array: (Box::new(IdlType::Primitive("u8".to_string())), 32),
+        };
+
+        let hex_input = "4343434343434343434343434343434343434343434343434343434343434343";
+        let parsed = parse_value(hex_input, &idl_type).expect("should parse [u8; 32] from hex");
+
+        // Must be ByteArray, not Raw — Raw causes PDA computation to fail
+        match &parsed {
+            ParsedValue::ByteArray(bytes) => {
+                assert_eq!(bytes.len(), 32);
+                assert_eq!(bytes[0], 0x43);
+            }
+            other => panic!("expected ByteArray, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn primitive_bytes32_string_does_not_parse_as_byte_array() {
+        // This is the bug: the macro emits Primitive("[u8; 32]") which
+        // falls through to Raw instead of being parsed as a byte array.
+        // This test documents the broken behavior that the macro fix addresses.
+        let buggy_type = IdlType::Primitive("[u8; 32]".to_string());
+
+        let hex_input = "4343434343434343434343434343434343434343434343434343434343434343";
+        let parsed = parse_value(hex_input, &buggy_type).expect("should not error");
+
+        // With Primitive("[u8; 32]"), parse_primitive doesn't recognize it → Raw
+        assert!(
+            matches!(&parsed, ParsedValue::Raw(_)),
+            "Primitive('[u8; 32]') should fall through to Raw, got {:?}", parsed
+        );
+    }
+}
