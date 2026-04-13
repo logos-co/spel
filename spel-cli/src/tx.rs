@@ -25,8 +25,7 @@ pub async fn execute_instruction(
     args: &HashMap<String, String>,
     program_path: &str,
     program_id_hex: Option<&str>,
-    dry_run: bool,
-    dry_run_output: bool,
+    dry_run_format: Option<&str>,
     extra_bins: &HashMap<String, String>,
 ) {
     println!("📋 Instruction: {}", ix.name);
@@ -334,7 +333,8 @@ pub async fn execute_instruction(
     let instruction_data_hex = hex_words.join("");
 
     // JSON output
-    if dry_run_output {
+    if let Some(fmt) = dry_run_format {
+        if fmt == "json" {
         let json_obj = serde_json::json!({
             "dry_run": true,
             "program_id": program_id_hex_str,
@@ -349,6 +349,7 @@ pub async fn execute_instruction(
         });
         println!("{}", serde_json::to_string_pretty(&json_obj).unwrap());
         println!();
+        }
     }
 
     // Human-readable summary
@@ -384,7 +385,7 @@ pub async fn execute_instruction(
     println!("   Remove --dry-run to send this transaction.");
 
     // ─── Step 10: Early return for dry-run ───
-    if dry_run {
+    if dry_run_format.is_some() {
         return;
     }
 

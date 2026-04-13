@@ -267,7 +267,7 @@ To save the dry-run output as JSON for scripting:
 ```sh
 spel --idl my-program-idl.json -p target/program.bin \
      submit-transfer --target Owner/abc123... --amount 100 \
-     --dry-run --dry-run-output json > dry-run.json
+     --dry-run json > dry-run.json
 ```
 
 ### Type Formats
