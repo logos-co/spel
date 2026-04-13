@@ -76,6 +76,15 @@ pub async fn run() {
             "--dry-run" => {
                 dry_run_format = Some("text");
             }
+            s if s.starts_with("--dry-run=") => {
+                let fmt = s.strip_prefix("--dry-run=").unwrap();
+                if fmt == "json" || fmt == "text" {
+                    dry_run_format = Some(fmt);
+                } else {
+                    eprintln!("❌ --dry-run only supports 'text' or 'json'");
+                    process::exit(1);
+                }
+            }
             s if s.starts_with("--dry-run ") => {
                 let fmt = s.strip_prefix("--dry-run ").unwrap();
                 if fmt == "json" || fmt == "text" {

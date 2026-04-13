@@ -25,7 +25,7 @@ use wallet::WalletCore;
 fn format_pda_seeds(seeds: &[IdlSeed]) -> String {
     let parts: std::vec::Vec<String> = std::iter::once("program_id".to_string())
         .chain(seeds.iter().map(|s| match s {
-            IdlSeed::Const { value } => format!("\"{{{}}}\"", value),
+            IdlSeed::Const { value } => format!("\"{}\"", value),
             IdlSeed::Account { path } => format!("Account({})", path),
             IdlSeed::Arg { path } => format!("Arg({})", path),
         }))
