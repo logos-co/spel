@@ -213,7 +213,7 @@ pub async fn execute_instruction(
         }
     }
 
-    // Check if any account has a Private/ prefix (needed for dry-run privacy warning too)
+    // Check if any account has a Private/ prefix
     let has_private = parsed_accounts.iter().any(|(_, _, is_priv)| *is_priv)
         || rest_accounts.iter().any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
 
