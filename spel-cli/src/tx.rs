@@ -592,4 +592,5 @@ pub async fn execute_instruction(
                 process::exit(1);
             }
         }
+    }
 }
