@@ -4,6 +4,50 @@ use nssa_core::account::AccountId;
 use nssa_core::program::{PdaSeed, ProgramId};
 use sha2::{Sha256, Digest};
 
+/// Trait for converting a value into a 32-byte PDA seed.
+///
+/// Provides type-specific conversions that are more predictable than
+/// generic Borsh serialization. Each type uses its natural byte
+/// representation, zero-padded to 32 bytes.
+pub trait ToSeed {
+    /// Convert this value into a zero-padded 32-byte seed.
+    fn to_seed(&self) -> [u8; 32];
+}
+
+impl ToSeed for [u8; 32] {
+    fn to_seed(&self) -> [u8; 32] {
+        *self
+    }
+}
+
+impl ToSeed for u64 {
+    fn to_seed(&self) -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        seed[..8].copy_from_slice(&self.to_le_bytes());
+        seed
+    }
+}
+
+impl ToSeed for u32 {
+    fn to_seed(&self) -> [u8; 32] {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&self.to_le_bytes());
+        seed
+    }
+}
+
+impl ToSeed for String {
+    fn to_seed(&self) -> [u8; 32] {
+        seed_from_str(self)
+    }
+}
+
+impl ToSeed for &str {
+    fn to_seed(&self) -> [u8; 32] {
+        seed_from_str(self)
+    }
+}
+
 /// Convert a string to a zero-padded 32-byte seed.
 ///
 /// # Panics
@@ -41,6 +85,20 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
 
     let pda_seed = PdaSeed::new(combined);
     AccountId::from((program_id, &pda_seed))
+}
+
+/// Compute a PDA from a program ID and multiple [`ToSeed`] values.
+///
+/// This is a convenience wrapper around [`compute_pda`] that accepts any
+/// mix of types implementing `ToSeed` (e.g. `u64`, `u32`, `String`, `[u8; 32]`).
+///
+/// # Panics
+///
+/// Panics if `seeds` is empty.
+pub fn compute_pda_multi(program_id: &ProgramId, seeds: &[&dyn ToSeed]) -> AccountId {
+    let converted: Vec<[u8; 32]> = seeds.iter().map(|s| s.to_seed()).collect();
+    let refs: Vec<&[u8; 32]> = converted.iter().collect();
+    compute_pda(program_id, &refs)
 }
 
 #[cfg(test)]
@@ -142,5 +200,106 @@ mod tests {
     fn test_compute_pda_empty_seeds() {
         let program_id: ProgramId = [1u32; 8];
         compute_pda(&program_id, &[]);
+    }
+
+    // ── ToSeed trait tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_to_seed_u8_32_identity() {
+        let val = [42u8; 32];
+        assert_eq!(val.to_seed(), val);
+    }
+
+    #[test]
+    fn test_to_seed_u64() {
+        let val: u64 = 0x0102030405060708;
+        let seed = val.to_seed();
+        assert_eq!(&seed[..8], &val.to_le_bytes());
+        assert_eq!(&seed[8..], &[0u8; 24]);
+    }
+
+    #[test]
+    fn test_to_seed_u32() {
+        let val: u32 = 0x01020304;
+        let seed = val.to_seed();
+        assert_eq!(&seed[..4], &val.to_le_bytes());
+        assert_eq!(&seed[4..], &[0u8; 28]);
+    }
+
+    #[test]
+    fn test_to_seed_string() {
+        let val = String::from("hello");
+        let seed = val.to_seed();
+        assert_eq!(&seed[..5], b"hello");
+        assert_eq!(&seed[5..], &[0u8; 27]);
+    }
+
+    #[test]
+    fn test_to_seed_str() {
+        let seed = "hello".to_seed();
+        assert_eq!(&seed[..5], b"hello");
+        assert_eq!(&seed[5..], &[0u8; 27]);
+    }
+
+    #[test]
+    fn test_to_seed_string_matches_seed_from_str() {
+        let s = "vault_prefix";
+        assert_eq!(s.to_seed(), seed_from_str(s));
+        assert_eq!(String::from(s).to_seed(), seed_from_str(s));
+    }
+
+    // ── compute_pda_multi tests ─────────────────────────────────────
+
+    #[test]
+    fn test_compute_pda_multi_matches_compute_pda() {
+        let program_id: ProgramId = [1u32; 8];
+        let seed1 = seed_from_str("config");
+        let seed2 = [99u8; 32];
+
+        let from_compute = compute_pda(&program_id, &[&seed1, &seed2]);
+        let from_multi = compute_pda_multi(&program_id, &[&seed1, &seed2]);
+        assert_eq!(from_compute, from_multi);
+    }
+
+    #[test]
+    fn test_compute_pda_multi_mixed_types() {
+        let program_id: ProgramId = [1u32; 8];
+        let id: u64 = 42;
+        let label = String::from("vault");
+
+        let pda = compute_pda_multi(&program_id, &[&label, &id]);
+
+        // Verify it matches manual computation
+        let seed1 = label.to_seed();
+        let seed2 = id.to_seed();
+        let expected = compute_pda(&program_id, &[&seed1, &seed2]);
+        assert_eq!(pda, expected);
+    }
+
+    #[test]
+    fn test_compute_pda_multi_single_u64() {
+        let program_id: ProgramId = [1u32; 8];
+        let val: u64 = 1000;
+        let pda = compute_pda_multi(&program_id, &[&val]);
+
+        let seed = val.to_seed();
+        let expected = compute_pda(&program_id, &[&seed]);
+        assert_eq!(pda, expected);
+    }
+
+    #[test]
+    fn test_compute_pda_multi_three_seeds() {
+        let program_id: ProgramId = [1u32; 8];
+        let prefix = "order";
+        let user_id: u64 = 7;
+        let seq: u32 = 100;
+
+        let pda = compute_pda_multi(&program_id, &[&prefix, &user_id, &seq]);
+
+        let s1 = prefix.to_seed();
+        let s2 = user_id.to_seed();
+        let s3 = seq.to_seed();
+        let expected = compute_pda(&program_id, &[&s1, &s2, &s3]);
+        assert_eq!(pda, expected);
     }
 }

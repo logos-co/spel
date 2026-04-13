@@ -58,7 +58,7 @@ fn e2e_idl_generation() {
     // Top-level fields
     assert_eq!(idl.version, "0.1.0");
     assert_eq!(idl.name, "treasury");
-    assert_eq!(idl.instructions.len(), 4);
+    assert_eq!(idl.instructions.len(), 8);
 
     // initialize instruction
     let init = &idl.instructions[0];
@@ -95,8 +95,34 @@ fn e2e_idl_generation() {
     assert_eq!(config.args.len(), 1);
     assert_eq!(config.args[0].name, "user_id");
 
+    // create_ledger instruction
+    let ledger = &idl.instructions[3];
+    assert_eq!(ledger.name, "create_ledger");
+    assert_eq!(ledger.accounts.len(), 2);
+    assert!(ledger.accounts[0].init, "ledger should be init");
+    assert!(ledger.accounts[0].pda.is_some(), "ledger should have PDA");
+    let ledger_pda = ledger.accounts[0].pda.as_ref().unwrap();
+    assert_eq!(ledger_pda.seeds.len(), 3); // literal + u64 arg + u32 arg
+    assert!(ledger.accounts[1].signer, "authority should be signer");
+    assert_eq!(ledger.args.len(), 2);
+    assert_eq!(ledger.args[0].name, "user_id");
+    assert_eq!(ledger.args[1].name, "seq");
+
+    // register_entity instruction
+    let entity = &idl.instructions[4];
+    assert_eq!(entity.name, "register_entity");
+    assert_eq!(entity.accounts.len(), 2);
+    assert!(entity.accounts[0].init, "entity should be init");
+    assert!(entity.accounts[0].pda.is_some(), "entity should have PDA");
+    let entity_pda = entity.accounts[0].pda.as_ref().unwrap();
+    assert_eq!(entity_pda.seeds.len(), 2); // String arg + String arg
+    assert!(entity.accounts[1].signer, "registrar should be signer");
+    assert_eq!(entity.args.len(), 2);
+    assert_eq!(entity.args[0].name, "domain");
+    assert_eq!(entity.args[1].name, "name");
+
     // transfer instruction
-    let transfer = &idl.instructions[3];
+    let transfer = &idl.instructions[5];
     assert_eq!(transfer.name, "transfer");
     assert_eq!(transfer.accounts.len(), 3);
     assert!(transfer.accounts[0].writable, "from should be writable");

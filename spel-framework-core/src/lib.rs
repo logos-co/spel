@@ -4,6 +4,7 @@
 
 pub mod error;
 pub mod types;
+pub mod spel_output;
 pub mod idl;
 pub mod pda;
 pub mod validation;
@@ -13,8 +14,9 @@ pub mod idl_gen;
 
 pub mod prelude {
     pub use crate::error::{SpelError, SpelResult};
-    pub use crate::pda::{compute_pda, seed_from_str};
-    pub use crate::types::{SpelOutput, AccountConstraint};
+    pub use crate::pda::{compute_pda, compute_pda_multi, seed_from_str, ToSeed};
+    pub use crate::spel_output::AutoClaim;
+    pub use crate::types::{IntoPostState, SpelOutput, AccountConstraint};
     pub use nssa_core::account::{Account, AccountWithMetadata};
     pub use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ProgramId};
 }
