@@ -88,6 +88,20 @@ mod treasury {
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![from, to, signer], vec![]))
     }
+
+    /// Batch update: one fixed authority + variable-length list of target accounts.
+    #[instruction]
+    pub fn batch_update(
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        #[account(mut)]
+        targets: Vec<AccountWithMetadata>,
+        value: u64,
+    ) -> SpelResult {
+        let mut accounts = vec![authority];
+        accounts.extend(targets);
+        Ok(SpelOutput::execute(accounts, vec![]))
+    }
 }
 
 #[cfg(test)]
@@ -107,7 +121,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 6);
+        assert_eq!(idl.instructions.len(), 7);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -116,7 +130,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 6);
+        assert_eq!(idl.instructions.len(), 7);
     }
 
     #[test]
@@ -474,6 +488,33 @@ mod tests {
             &name,
         );
         assert!(result.is_ok(), "correct PDA should pass: {result:?}");
+    }
+
+    // ── batch_update (rest accounts) ─────────────────────────────────
+
+    #[test]
+    fn handler_batch_update_callable() {
+        let acc = make_account(true);
+        let targets = vec![make_account(false), make_account(false), make_account(false)];
+        let result = treasury::batch_update(acc, targets, 42);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn handler_batch_update_empty_targets() {
+        let acc = make_account(true);
+        let result = treasury::batch_update(acc, vec![], 0);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().post_states.len(), 1); // only authority
+    }
+
+    #[test]
+    fn idl_has_batch_update_instruction() {
+        let idl = __program_idl();
+        let ix = idl.instructions.iter().find(|i| i.name == "batch_update")
+            .expect("batch_update instruction should be in IDL");
+        assert_eq!(ix.args.len(), 1);
+        assert_eq!(ix.args[0].name, "value");
     }
 
 }

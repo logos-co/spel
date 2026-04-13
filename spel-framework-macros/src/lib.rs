@@ -176,7 +176,8 @@ struct AccountConstraints {
 /// A PDA seed definition from the `#[account(pda = ...)]` attribute.
 #[derive(Clone)]
 enum PdaSeedDef {
-    /// `const("some_string")` — a constant string seed
+    /// `const("some_string")` — a constant string seed.
+    /// `literal("some_string")` is accepted as an alias for backwards compatibility.
     Const(String),
     /// `account("other_account_name")` — seed derived from another account's ID
     Account(String),
@@ -485,7 +486,7 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
 /// Parse PDA seed expressions.
 ///
 /// Supports:
-/// - `const("string")` — constant seed
+/// - `const("string")` — constant seed (`literal("string")` is accepted as an alias)
 /// - `account("name")` — account-derived seed
 /// - `arg("name")` — argument-derived seed
 /// - `[const("a"), account("b")]` — multiple seeds (array syntax)
@@ -810,11 +811,15 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             let claims_fn = format_ident!("__claims_{}", self.fn_name);
             let num_fixed = self.num_fixed();
             let arg_seed_args: Vec<TokenStream2> = self.arg_seed_args();
+            // Extract raw Account from each AccountWithMetadata
+            let accounts_extracted = quote! {
+                (#accounts_expr).iter().map(|__a| __a.account.clone()).collect::<Vec<_>>()
+            };
 
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
-            call.args.push(syn::parse_quote! { &#accounts_expr });
-            call.args.push(syn::parse_quote! { &#claims_fn(#accounts_expr.len() - #num_fixed, #(#arg_seed_args),*) });
+            call.args.push(syn::parse_quote! { &#accounts_extracted });
+            call.args.push(syn::parse_quote! { &#claims_fn((#accounts_expr).len() - #num_fixed, #(#arg_seed_args),*) });
             call.args.push(chained);
         } else {
             // Fixed-account instruction where the accounts argument is an arbitrary expression
