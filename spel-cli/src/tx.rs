@@ -18,6 +18,33 @@ use hex;
 use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;
 
+
+/// Format PDA seeds into a display string for human-readable output.
+/// E.g. `[program_id, "owner", Account(vault)]`
+fn format_pda_seeds(seeds: &[IdlSeed]) -> String {
+    let parts: std::vec::Vec<String> = std::iter::once("program_id".to_string())
+        .chain(seeds.iter().map(|s| match s {
+            IdlSeed::Const { value } => format!(""{}"", value),
+            IdlSeed::Account { path } => format!("Account({})", path),
+            IdlSeed::Arg { path } => format!("Arg({})", path),
+        }))
+        .collect();
+    format!("[{}]", parts.join(", "))
+}
+
+/// Format PDA seeds into a JSON array for machine-readable output.
+fn pda_seeds_json(seeds: &[IdlSeed]) -> serde_json::Value {
+    let mut arr: Vec<serde_json::Value> = vec![serde_json::json!({"type": "program_id"})];
+    for s in seeds {
+        arr.push(match s {
+            IdlSeed::Const { value } => serde_json::json!({"type": "const", "value": value}),
+            IdlSeed::Account { path } => serde_json::json!({"type": "account", "name": path}),
+            IdlSeed::Arg { path } => serde_json::json!({"type": "arg", "name": path}),
+        });
+    }
+    serde_json::Value::Array(arr)
+}
+
 /// Execute an instruction: parse args, build TX, optionally submit.
 pub async fn execute_instruction(
     idl: &SpelIdl,
@@ -201,7 +228,9 @@ pub async fn execute_instruction(
         if let Some(pda) = &acc.pda {
             match compute_pda_from_seeds(&pda.seeds, &program_id, &account_map, &parsed_arg_map) {
                 Ok(id) => {
+                    let seed_str = format_pda_seeds(&pda.seeds);
                     println!("  PDA {} → {}", acc.name, id);
+                    println!("    seeds: {}", seed_str);
                     account_map.insert(acc.name.clone(), id);
                 }
                 Err(e) => {
@@ -262,13 +291,15 @@ pub async fn execute_instruction(
         if acc.pda.is_some() {
             let id = account_map.get(&acc.name).unwrap();
             let id_str = format!("{}", id);
-            let flags: Vec<&str> = ["PDA"].into_iter().collect();
-            accounts_summary.push(format!("  {} → {}  [{}]", acc.name, id_str, flags.join(", ")));
+            let seed_str = format_pda_seeds(&acc.pda.as_ref().unwrap().seeds);
+            accounts_summary.push(format!("  {} → {}", acc.name, id_str));
+            accounts_summary.push(format!("    seeds: {}", seed_str));
             raw_account_ids.push(id_str.clone());
             accounts_json.push(serde_json::json!({
                 "name": acc.name,
                 "address": id_str,
                 "pda": id_str,
+                "pda_seeds": pda_seeds_json(&acc.pda.as_ref().unwrap().seeds),
                 "signer": acc.signer,
                 "writable": acc.writable,
                 "rest": acc.rest,
