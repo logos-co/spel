@@ -570,25 +570,25 @@ pub async fn execute_instruction(
         let witness_set = WitnessSet::for_message(&message, &signing_keys);
         let tx = PublicTransaction::new(message, witness_set);
 
-    let tx_hash = wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.unwrap_or_else(|e| {
-        eprintln!("❌ Failed to submit transaction: {:?}", e);
-        process::exit(1);
-    });
-
-    println!("📤 Transaction submitted!");
-    println!("   tx_hash: {}", tx_hash);
-    println!("   Waiting for confirmation...");
-
-    let poller = wallet::poller::TxPoller::new(
-        wallet_core.config(),
-        wallet_core.sequencer_client.clone(),
-    );
-
-    match poller.poll_tx(tx_hash).await {
-        Ok(_) => println!("✅ Transaction confirmed — included in a block."),
-        Err(e) => {
-            eprintln!("❌ Transaction NOT confirmed: {e:#}");
+        let tx_hash = wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.unwrap_or_else(|e| {
+            eprintln!("❌ Failed to submit transaction: {:?}", e);
             process::exit(1);
+        });
+
+        println!("📤 Transaction submitted!");
+        println!("   tx_hash: {}", tx_hash);
+        println!("   Waiting for confirmation...");
+
+        let poller = wallet::poller::TxPoller::new(
+            wallet_core.config(),
+            wallet_core.sequencer_client.clone(),
+        );
+
+        match poller.poll_tx(tx_hash).await {
+            Ok(_) => println!("✅ Transaction confirmed — included in a block."),
+            Err(e) => {
+                eprintln!("❌ Transaction NOT confirmed: {e:#}");
+                process::exit(1);
+            }
         }
-    }
 }
