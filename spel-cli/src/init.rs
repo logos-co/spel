@@ -324,10 +324,7 @@ mod {snake_name} {{
         owner: AccountWithMetadata,
     ) -> SpelResult {{
         // TODO: implement initialization logic
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }}
 
     /// Example instruction — replace with your own.
@@ -340,10 +337,7 @@ mod {snake_name} {{
         amount: u64,
     ) -> SpelResult {{
         // TODO: implement your logic
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(state.account.clone()),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }}
 }}
 "#));

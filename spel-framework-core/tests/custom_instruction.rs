@@ -38,6 +38,7 @@ mod simulated_external_instruction {
         if value == 0 {
             return Err(SpelError::custom(1, "value cannot be zero"));
         }
+        #[allow(deprecated)]
         Ok(SpelOutput::states_only(vec![]))
     }
 

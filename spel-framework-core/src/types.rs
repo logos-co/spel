@@ -5,6 +5,14 @@
 
 use nssa_core::program::{AccountPostState, ChainedCall};
 
+/// Trait for types that can be converted into an [`AccountPostState`].
+///
+/// Implemented for `(Account, AutoClaim)`, `(Account, &AutoClaim)`, and
+/// `AccountPostState` itself, so [`SpelOutput::execute`] accepts any of these.
+pub trait IntoPostState {
+    fn into_post_state(self) -> AccountPostState;
+}
+
 /// Output from an instruction handler.
 #[derive(Debug, Clone)]
 pub struct SpelOutput {
@@ -14,6 +22,7 @@ pub struct SpelOutput {
 
 impl SpelOutput {
     /// Create output with only post-states and no chained calls.
+    #[deprecated(note = "Use SpelOutput::execute() for auto-claim support")]
     pub fn states_only(post_states: Vec<AccountPostState>) -> Self {
         Self {
             post_states,
@@ -22,6 +31,7 @@ impl SpelOutput {
     }
 
     /// Create output with post-states and chained calls.
+    #[deprecated(note = "Use SpelOutput::execute() for auto-claim support")]
     pub fn with_chained_calls(
         post_states: Vec<AccountPostState>,
         chained_calls: Vec<ChainedCall>,
