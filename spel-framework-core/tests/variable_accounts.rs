@@ -32,7 +32,11 @@ fn test_non_rest_account_omits_rest() {
         visibility: vec![],
     };
     let json = serde_json::to_string(&acc).unwrap();
-    assert!(!json.contains("rest"), "rest=false should be omitted, JSON: {}", json);
+    assert!(
+        !json.contains("rest"),
+        "rest=false should be omitted, JSON: {}",
+        json
+    );
 }
 
 #[test]

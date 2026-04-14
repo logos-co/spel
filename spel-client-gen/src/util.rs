@@ -34,17 +34,20 @@ pub fn pascal_case(s: &str) -> String {
             upper = true;
         }
     }
-    if out.is_empty() { "Program".to_string() } else { out }
+    if out.is_empty() {
+        "Program".to_string()
+    } else {
+        out
+    }
 }
 
 /// Make a valid Rust identifier.
 pub fn rust_ident(s: &str) -> String {
     let ident = snake_case(s);
     match ident.as_str() {
-        "type" | "match" | "mod" | "enum" | "struct" | "fn" | "crate"
-        | "self" | "super" | "pub" | "use" | "impl" | "trait" | "where"
-        | "async" | "await" | "move" | "ref" | "mut" | "const" | "static"
-        | "let" | "if" | "else" | "loop" | "while" | "for" | "in"
+        "type" | "match" | "mod" | "enum" | "struct" | "fn" | "crate" | "self" | "super"
+        | "pub" | "use" | "impl" | "trait" | "where" | "async" | "await" | "move" | "ref"
+        | "mut" | "const" | "static" | "let" | "if" | "else" | "loop" | "while" | "for" | "in"
         | "return" | "break" | "continue" => format!("r#{}", ident),
         _ => ident,
     }
@@ -62,7 +65,9 @@ pub fn idl_type_to_rust(ty: &spel_framework_core::idl::IdlType) -> String {
         IdlType::Vec { vec } => format!("Vec<{}>", idl_type_to_rust(vec)),
         IdlType::Option { option } => format!("Option<{}>", idl_type_to_rust(option)),
         IdlType::Defined { defined } => defined.clone(),
-        IdlType::Array { array: (elem, size) } => {
+        IdlType::Array {
+            array: (elem, size),
+        } => {
             format!("[{}; {}]", idl_type_to_rust(elem), size)
         }
     }

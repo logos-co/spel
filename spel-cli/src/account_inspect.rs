@@ -1,8 +1,8 @@
 //! Account data inspection: fetch from sequencer, borsh-decode using IDL types,
 //! and pretty-print as JSON.
 
-use spel_framework_core::idl::{IdlEnumVariant, IdlField, IdlType, IdlTypeDef, SpelIdl};
 use serde_json::{json, Value};
+use spel_framework_core::idl::{IdlEnumVariant, IdlField, IdlType, IdlTypeDef, SpelIdl};
 use std::process;
 
 use crate::hex::{decode_bytes_32, hex_decode, hex_encode};
@@ -97,11 +97,7 @@ fn find_type_def<'a>(idl: &'a SpelIdl, name: &str) -> Option<&'a IdlTypeDef> {
 
 // ── Borsh decoding from IDL types ────────────────────────────────────
 
-fn decode_type_def(
-    cursor: &mut &[u8],
-    def: &IdlTypeDef,
-    idl: &SpelIdl,
-) -> Result<Value, String> {
+fn decode_type_def(cursor: &mut &[u8], def: &IdlTypeDef, idl: &SpelIdl) -> Result<Value, String> {
     match def.kind.as_str() {
         "struct" => decode_struct(cursor, &def.fields, idl),
         "enum" => decode_enum(cursor, &def.variants, idl),
@@ -109,11 +105,7 @@ fn decode_type_def(
     }
 }
 
-fn decode_struct(
-    cursor: &mut &[u8],
-    fields: &[IdlField],
-    idl: &SpelIdl,
-) -> Result<Value, String> {
+fn decode_struct(cursor: &mut &[u8], fields: &[IdlField], idl: &SpelIdl) -> Result<Value, String> {
     let mut map = serde_json::Map::new();
     for field in fields {
         let value = decode_borsh_value(cursor, &field.type_, idl)
@@ -149,11 +141,7 @@ fn decode_enum(
     }
 }
 
-fn decode_borsh_value(
-    cursor: &mut &[u8],
-    ty: &IdlType,
-    idl: &SpelIdl,
-) -> Result<Value, String> {
+fn decode_borsh_value(cursor: &mut &[u8], ty: &IdlType, idl: &SpelIdl) -> Result<Value, String> {
     match ty {
         IdlType::Primitive(name) => decode_primitive(cursor, name),
         IdlType::Array {

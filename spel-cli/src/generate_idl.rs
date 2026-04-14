@@ -52,16 +52,14 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
             if !sources.is_empty() {
                 return Ok(sources);
             }
-            Err(
-                "No SPEL program sources found.\n\
+            Err("No SPEL program sources found.\n\
                  Searched: ./methods/guest/src/bin/*.rs\n\
                  \n\
                  Options:\n\
                  - Run from your project root (where 'methods/' lives)\n\
                  - Pass a project directory: generate-idl <path-to-project>\n\
                  - Pass a source file:       generate-idl <path-to-program.rs>"
-                    .to_string(),
-            )
+                .to_string())
         }
     }
 }
@@ -73,8 +71,8 @@ pub fn search_methods_dir(root: &Path) -> Result<Vec<PathBuf>, String> {
     if !bin_dir.exists() {
         return Ok(vec![]);
     }
-    let entries = fs::read_dir(&bin_dir)
-        .map_err(|e| format!("Cannot read {}: {}", bin_dir.display(), e))?;
+    let entries =
+        fs::read_dir(&bin_dir).map_err(|e| format!("Cannot read {}: {}", bin_dir.display(), e))?;
     let mut sources: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -212,7 +210,10 @@ mod tests {
     fn directory_without_methods_errors() {
         let tmp = TempDir::new("dir-empty");
         let err = discover_sources(Some(tmp.path().to_str().unwrap())).unwrap_err();
-        assert!(err.contains("No .rs files found"), "unexpected error: {err}");
+        assert!(
+            err.contains("No .rs files found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

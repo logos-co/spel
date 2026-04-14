@@ -30,13 +30,14 @@
 //! ```
 
 use proc_macro::TokenStream;
-use sha2::{Sha256, Digest};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use sha2::{Digest, Sha256};
 use syn::{
     parse::Parser,
-    parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
+    parse_macro_input,
     visit_mut::{self, VisitMut},
+    Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
 };
 
 /// Main entry point: `#[lez_program]` on a module.
@@ -67,10 +68,17 @@ impl ProgramConfig {
         for meta in metas {
             if let syn::Meta::NameValue(nv) = &meta {
                 if nv.path.is_ident("instruction") {
-                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value
+                    {
                         config.external_instruction = Some(s.parse()?);
                     } else {
-                        return Err(syn::Error::new_spanned(&nv.value, "expected string literal"));
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "expected string literal",
+                        ));
                     }
                 } else {
                     return Err(syn::Error::new_spanned(&nv.path, "unknown attribute"));
@@ -766,10 +774,13 @@ impl<'a> ExecuteTransformer<'a> {
                 }
             }
         }
-        names.iter().map(|name| {
-            let ident = format_ident!("{}", name);
-            quote! { &#ident }
-        }).collect()
+        names
+            .iter()
+            .map(|name| {
+                let ident = format_ident!("{}", name);
+                quote! { &#ident }
+            })
+            .collect()
     }
 
     /// Collect account-seed arguments for the vec![ident, ...] pattern.
@@ -805,7 +816,9 @@ impl<'a> ExecuteTransformer<'a> {
                     let name = path.split('.').next().unwrap_or(path.as_str()).to_string();
                     if !seen.contains(&name) {
                         seen.push(name.clone());
-                        let idx = self.accounts.iter()
+                        let idx = self
+                            .accounts
+                            .iter()
                             .position(|a| a.name.to_string() == name)
                             .unwrap_or(0);
                         result.push(quote! { &*#binding[#idx].account_id.value() });
@@ -824,7 +837,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
         // Clone what we need before mutably borrowing expr below
         let (accounts_arg, chained_arg) = {
-            let call = if let syn::Expr::Call(c) = &*expr { c } else { return; };
+            let call = if let syn::Expr::Call(c) = &*expr {
+                c
+            } else {
+                return;
+            };
             if !is_spel_output_execute(&call.func) || call.args.len() != 2 {
                 return;
             }
@@ -845,14 +862,15 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
                 account_clones.push(quote! { #ident.account.clone() });
             }
             let account_seed_args = self.account_seed_args_from_idents(&account_idents);
-            let all_seed_args: Vec<TokenStream2> = arg_seed_args.into_iter()
-                .chain(account_seed_args)
-                .collect();
+            let all_seed_args: Vec<TokenStream2> =
+                arg_seed_args.into_iter().chain(account_seed_args).collect();
             if let syn::Expr::Call(call) = expr {
                 call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
                 call.args.clear();
-                call.args.push(syn::parse_quote! { &[#(#account_clones),*] });
-                call.args.push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+                call.args
+                    .push(syn::parse_quote! { &[#(#account_clones),*] });
+                call.args
+                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
                 call.args.push(syn::parse_quote! { #chained_arg });
             }
             return;
@@ -864,9 +882,8 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             let num_fixed = self.num_fixed();
             let accs = quote! { __accs };
             let account_seed_args = self.account_seed_args_for_rest(&accs);
-            let all_seed_args: Vec<TokenStream2> = arg_seed_args.into_iter()
-                .chain(account_seed_args)
-                .collect();
+            let all_seed_args: Vec<TokenStream2> =
+                arg_seed_args.into_iter().chain(account_seed_args).collect();
             *expr = syn::parse_quote! {
                 {
                     let __accs: ::std::vec::Vec<_> = #accounts_arg;
@@ -891,7 +908,8 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
             call.args.push(syn::parse_quote! { &#accounts_arg });
-            call.args.push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+            call.args
+                .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
             call.args.push(syn::parse_quote! { #chained_arg });
         }
     }
@@ -919,7 +937,6 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     }
     None
 }
-
 
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
@@ -965,7 +982,7 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                         // matching how generate_validation resolves account seeds.
                         let account_name = path.split('.').next().unwrap_or(path.as_str());
                         let ident = format_ident!("__account_seed_{}", account_name);
-                        quote! { #ident }  // already &[u8; 32]
+                        quote! { #ident } // already &[u8; 32]
                     }
                     PdaSeedDef::Arg(name) => {
                         let ident = format_ident!("__pda_arg_{}", name);
@@ -1034,17 +1051,22 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             }
         }
     }
-    names.iter().map(|name| {
-        let ident = format_ident!("__pda_arg_{}", name);
-        let actual_type = ix.args.iter()
-            .find(|a| a.name.to_string() == *name)
-            .map(|a| &a.ty);
-        if let Some(ty) = actual_type {
-            quote! { #ident: &#ty }
-        } else {
-            quote! { #ident: &[u8; 32] }
-        }
-    }).collect()
+    names
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("__pda_arg_{}", name);
+            let actual_type = ix
+                .args
+                .iter()
+                .find(|a| a.name.to_string() == *name)
+                .map(|a| &a.ty);
+            if let Some(ty) = actual_type {
+                quote! { #ident: &#ty }
+            } else {
+                quote! { #ident: &[u8; 32] }
+            }
+        })
+        .collect()
 }
 
 /// Collect the unique PDA account seed parameters for a given instruction as typed
@@ -1061,10 +1083,13 @@ fn pda_account_seed_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             }
         }
     }
-    names.iter().map(|name| {
-        let ident = format_ident!("__account_seed_{}", name);
-        quote! { #ident: &[u8; 32] }
-    }).collect()
+    names
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("__account_seed_{}", name);
+            quote! { #ident: &[u8; 32] }
+        })
+        .collect()
 }
 
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
@@ -1278,8 +1303,8 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => {
                     let name = ident.to_lowercase();
                     quote! { spel_framework::idl::IdlType::Primitive(#name.to_string()) }
                 }
@@ -1358,8 +1383,8 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => {
                     format!("\"{}\"", ident.to_lowercase())
                 }
                 "Vec" => {
@@ -1401,7 +1426,11 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
     result[..8].to_vec()
 }
 
-fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> TokenStream2 {
+fn generate_idl_fn(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    external_instruction: Option<&str>,
+) -> TokenStream2 {
     let program_name = mod_name.to_string();
 
     let instruction_literals: Vec<TokenStream2> = instructions
@@ -1539,7 +1568,11 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
 
 // ─── IDL generation (JSON string, for PROGRAM_IDL_JSON const) ────────────
 
-fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> String {
+fn generate_idl_json(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    external_instruction: Option<&str>,
+) -> String {
     let program_name = mod_name.to_string();
 
     let instructions_json: Vec<String> = instructions
@@ -1578,7 +1611,11 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                         format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
                     };
 
-                    let rest_json = if acc.is_rest { ",\"rest\":true".to_string() } else { String::new() };
+                    let rest_json = if acc.is_rest {
+                        ",\"rest\":true".to_string()
+                    } else {
+                        String::new()
+                    };
                     format!(
                         "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}{}}}",
                         name, writable, signer, init, pda_json, rest_json
@@ -1635,7 +1672,10 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let content = std::fs::read_to_string(&resolved_path).map_err(|e| {
         syn::Error::new_spanned(
             span_token,
-            format!("Failed to read '{}' (resolved: '{}'): {}", file_path, resolved_path, e),
+            format!(
+                "Failed to read '{}' (resolved: '{}'): {}",
+                file_path, resolved_path, e
+            ),
         )
     })?;
 
@@ -1661,18 +1701,16 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let program_mod = program_mod.ok_or_else(|| {
         syn::Error::new_spanned(
             span_token,
-            format!(
-                "No #[lez_program] module found in '{}'",
-                file_path
-            ),
+            format!("No #[lez_program] module found in '{}'", file_path),
         )
     })?;
 
     let mod_name = &program_mod.ident;
 
-    let (_, items) = program_mod.content.as_ref().ok_or_else(|| {
-        syn::Error::new_spanned(span_token, "lez_program module has no body")
-    })?;
+    let (_, items) = program_mod
+        .content
+        .as_ref()
+        .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -1692,7 +1730,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     }
 
     // Detect external instruction type from the #[lez_program(...)] attr
-    let external_instruction_str: Option<String> = program_mod.attrs.iter()
+    let external_instruction_str: Option<String> = program_mod
+        .attrs
+        .iter()
         .find(|a| a.path().is_ident("lez_program"))
         .and_then(|attr| {
             // Try to parse as lez_program(instruction = "some::Path")

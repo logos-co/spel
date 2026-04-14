@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn fixture_manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests/e2e/fixture_program/Cargo.toml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/fixture_program/Cargo.toml")
 }
 
 // ---------------------------------------------------------------------------

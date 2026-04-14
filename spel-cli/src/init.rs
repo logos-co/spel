@@ -3,7 +3,13 @@
 use std::fs;
 use std::path::Path;
 
-pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, lez_rev: Option<&str>, spel_rev: Option<&str>) {
+pub fn init_project(
+    name: &str,
+    lez_tag: Option<&str>,
+    spel_tag: Option<&str>,
+    lez_rev: Option<&str>,
+    spel_rev: Option<&str>,
+) {
     let root = Path::new(name);
     if root.exists() {
         eprintln!("❌ Directory '{}' already exists", name);
@@ -41,7 +47,11 @@ pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, l
     }
 
     // Root Cargo.toml (workspace)
-    write_file(root, "Cargo.toml", &format!(r#"[workspace]
+    write_file(
+        root,
+        "Cargo.toml",
+        &format!(
+            r#"[workspace]
 members = [
     "{snake_name}_core",
     "methods",
@@ -51,24 +61,42 @@ exclude = [
     "methods/guest",
 ]
 resolver = "2"
-"#));
+"#
+        ),
+    );
 
     // .gitignore
-    write_file(root, ".gitignore", &format!(r#"target/
+    write_file(
+        root,
+        ".gitignore",
+        &format!(
+            r#"target/
 methods/guest/target/
 *.bin
 .{snake_name}-state
 .{snake_name}-state.tmp
-"#));
+"#
+        ),
+    );
 
     // spel.toml
-    write_file(root, "spel.toml", &format!(r#"[program]
+    write_file(
+        root,
+        "spel.toml",
+        &format!(
+            r#"[program]
 idl = "{project_name}-idl.json"
 binary = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin"
-"#));
+"#
+        ),
+    );
 
     // Makefile
-    write_file(root, "Makefile", &format!(r#"# {project_name} — SPEL Program
+    write_file(
+        root,
+        "Makefile",
+        &format!(
+            r#"# {project_name} — SPEL Program
 #
 # Quick start:
 #   make build idl deploy setup
@@ -152,10 +180,16 @@ status: ## Show saved state and binary info
 clean: ## Remove saved state
 	rm -f $(STATE_FILE) $(STATE_FILE).tmp
 	@echo "✅ State cleaned"
-"#));
+"#
+        ),
+    );
 
     // README
-    write_file(root, "README.md", &format!(r#"# {project_name}
+    write_file(
+        root,
+        "README.md",
+        &format!(
+            r#"# {project_name}
 
 A SPEL program built with [spel-framework](https://github.com/logos-co/spel).
 
@@ -228,10 +262,16 @@ The framework automatically:
 3. **Provides a full CLI** for building, inspecting, and submitting transactions
 
 You write the program logic. The framework handles the rest.
-"#));
+"#
+        ),
+    );
 
     // program_core
-    write_file(root, &format!("{}_core/Cargo.toml", snake_name), &format!(r#"[package]
+    write_file(
+        root,
+        &format!("{}_core/Cargo.toml", snake_name),
+        &format!(
+            r#"[package]
 name = "{snake_name}_core"
 version = "0.1.0"
 edition = "2021"
@@ -240,9 +280,14 @@ edition = "2021"
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
 
-"#));
+"#
+        ),
+    );
 
-    write_file(root, &format!("{}_core/src/lib.rs", snake_name), r#"use serde::{Deserialize, Serialize};
+    write_file(
+        root,
+        &format!("{}_core/src/lib.rs", snake_name),
+        r#"use serde::{Deserialize, Serialize};
 
 /// Example state struct — customize for your program.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -250,10 +295,15 @@ pub struct ProgramState {
     pub initialized: bool,
     pub owner: [u8; 32],
 }
-"#);
+"#,
+    );
 
     // methods/Cargo.toml
-    write_file(root, "methods/Cargo.toml", &format!(r#"[package]
+    write_file(
+        root,
+        "methods/Cargo.toml",
+        &format!(
+            r#"[package]
 name = "{snake_name}-methods"
 version = "0.1.0"
 edition = "2021"
@@ -264,17 +314,27 @@ risc0-build = "=3.0.5"
 [dependencies]
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
-"#));
+"#
+        ),
+    );
 
     // methods/build.rs
-    write_file(root, "methods/build.rs", r#"fn main() {
+    write_file(
+        root,
+        "methods/build.rs",
+        r#"fn main() {
     risc0_build::embed_methods();
 }
-"#);
+"#,
+    );
 
     // methods/src/lib.rs
-    write_file(root, "methods/src/lib.rs", r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
-"#);
+    write_file(
+        root,
+        "methods/src/lib.rs",
+        r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
+"#,
+    );
 
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -287,7 +347,11 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
         _ => "tag = \"v0.2.0-rc.1\"".to_string(),
     };
     // methods/guest/Cargo.toml
-    write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
+    write_file(
+        root,
+        "methods/guest/Cargo.toml",
+        &format!(
+            r#"[package]
 name = "{snake_name}-guest"
 version = "0.1.0"
 edition = "2021"
@@ -306,10 +370,16 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 serde = {{ version = "1.0", features = ["derive"] }}
 borsh = "1.5"
 
-"#));
+"#
+        ),
+    );
 
     // Guest program skeleton
-    write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
+    write_file(
+        root,
+        &format!("methods/guest/src/bin/{}.rs", snake_name),
+        &format!(
+            r#"#![no_main]
 
 use spel_framework::prelude::*;
 
@@ -345,10 +415,16 @@ mod {snake_name} {{
         Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }}
 }}
-"#));
+"#
+        ),
+    );
 
     // examples/Cargo.toml
-    write_file(root, "examples/Cargo.toml", &format!(r#"[package]
+    write_file(
+        root,
+        "examples/Cargo.toml",
+        &format!(
+            r#"[package]
 name = "{snake_name}-examples"
 version = "0.1.0"
 edition = "2021"
@@ -368,23 +444,35 @@ spel = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
 tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
-"#));
+"#
+        ),
+    );
 
     // generate_idl.rs
-    write_file(root, "examples/src/bin/generate_idl.rs", &format!(r#"/// Generate IDL JSON for the {project_name} program.
+    write_file(
+        root,
+        "examples/src/bin/generate_idl.rs",
+        &format!(
+            r#"/// Generate IDL JSON for the {project_name} program.
 ///
 /// Usage:
 ///   cargo run --bin generate_idl > {project_name}-idl.json
 
 spel_framework::generate_idl!("../methods/guest/src/bin/{snake_name}.rs");
-"#));
+"#
+        ),
+    );
 
     // CLI wrapper
-    write_file(root, &format!("examples/src/bin/{}_cli.rs", snake_name), r#"#[tokio::main]
+    write_file(
+        root,
+        &format!("examples/src/bin/{}_cli.rs", snake_name),
+        r#"#[tokio::main]
 async fn main() {
     spel::run().await;
 }
-"#);
+"#,
+    );
 
     println!();
     // Generate Cargo.lock for the guest to pin dependency versions
@@ -397,14 +485,20 @@ async fn main() {
     match status {
         Ok(s) if s.success() => {}
         Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with: {}", s),
-        Err(e) => eprintln!("⚠️  Failed to generate Cargo.lock (cargo not found?): {}", e),
+        Err(e) => eprintln!(
+            "⚠️  Failed to generate Cargo.lock (cargo not found?): {}",
+            e
+        ),
     }
 
     println!("✅ Project '{}' created!", project_name);
     println!();
     println!("Next steps:");
     println!("  cd {}", name);
-    println!("  # Edit methods/guest/src/bin/{}.rs with your program logic", snake_name);
+    println!(
+        "  # Edit methods/guest/src/bin/{}.rs with your program logic",
+        snake_name
+    );
     println!("  # Edit {}_core/src/lib.rs with your types", snake_name);
     println!("  make idl        # Generate the IDL");
     println!("  make cli ARGS=\"--help\"  # See available commands");

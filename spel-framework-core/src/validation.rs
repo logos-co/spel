@@ -7,10 +7,7 @@ use crate::error::SpelError;
 use crate::types::AccountConstraint;
 
 /// Validate that the correct number of accounts was provided.
-pub fn validate_account_count(
-    actual: usize,
-    expected: usize,
-) -> Result<(), SpelError> {
+pub fn validate_account_count(actual: usize, expected: usize) -> Result<(), SpelError> {
     if actual != expected {
         return Err(SpelError::AccountCountMismatch { expected, actual });
     }
@@ -38,16 +35,16 @@ pub fn validate_accounts(
 ) -> Result<(), SpelError> {
     // First check count
     validate_account_count(account_count, constraints.len())?;
-    
+
     // In a real implementation, we would also check:
     // - ownership constraints
     // - initialization state
-    // - signer verification  
+    // - signer verification
     // - PDA derivation
     //
     // These require access to the actual AccountWithMetadata data,
     // which the proc-macro would pass in.
-    
+
     Ok(())
 }
 
@@ -73,7 +70,7 @@ pub fn verify_owner(
     Ok(())
 }
 
-// Note: hex is used for error display only. In production, 
+// Note: hex is used for error display only. In production,
 // consider base58 or the chain's preferred encoding.
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {

@@ -63,9 +63,6 @@ pub fn parse_account_id(input: &str) -> Result<([u8; 32], bool), String> {
     Ok((bytes, is_private))
 }
 
-
-
-
 #[cfg(test)]
 mod tests {
     use super::*;

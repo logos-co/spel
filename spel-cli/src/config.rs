@@ -114,9 +114,7 @@ impl SpelConfig {
 
     /// Check if a name matches a program entry in the config.
     pub fn has_program(&self, name: &str) -> bool {
-        self.programs
-            .as_ref()
-            .is_some_and(|p| p.contains_key(name))
+        self.programs.as_ref().is_some_and(|p| p.contains_key(name))
     }
 }
 
@@ -129,11 +127,15 @@ mod tests {
     fn parse_single_program() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [program]
 idl = "my-project-idl.json"
 binary = "target/my_project.bin"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         let prog = config.resolve_program(None).unwrap();
@@ -145,7 +147,9 @@ binary = "target/my_project.bin"
     fn parse_multi_program() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [programs.game]
 idl = "game-idl.json"
 binary = "target/game.bin"
@@ -153,7 +157,9 @@ binary = "target/game.bin"
 [programs.nft]
 idl = "nft-idl.json"
 binary = "target/nft.bin"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
 
@@ -168,11 +174,15 @@ binary = "target/nft.bin"
     fn multi_program_auto_select_single() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [programs.only_one]
 idl = "only.json"
 binary = "only.bin"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         let prog = config.resolve_program(None).unwrap();
@@ -183,13 +193,17 @@ binary = "only.bin"
     fn multi_program_no_name_errors() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [programs.a]
 idl = "a.json"
 
 [programs.b]
 idl = "b.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         let err = config.resolve_program(None).unwrap_err();
@@ -202,10 +216,14 @@ idl = "b.json"
     fn unknown_program_name_errors() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [programs.game]
 idl = "game.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         let err = config.resolve_program(Some("nope")).unwrap_err();
@@ -217,13 +235,17 @@ idl = "game.json"
     fn mutual_exclusion_errors() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [program]
 idl = "single.json"
 
 [programs.multi]
 idl = "multi.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let err = SpelConfig::load(&config_path).unwrap_err();
         assert!(err.contains("mutually exclusive"));
@@ -233,10 +255,14 @@ idl = "multi.json"
     fn has_program_check() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [programs.game]
 idl = "game.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         assert!(config.has_program("game"));
@@ -257,10 +283,14 @@ idl = "game.json"
     fn parse_partial_config() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [program]
 idl = "foo.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let config = SpelConfig::load(&config_path).unwrap();
         let prog = config.resolve_program(None).unwrap();
@@ -282,10 +312,14 @@ idl = "foo.json"
     fn discover_walks_up() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("spel.toml");
-        fs::write(&config_path, r#"
+        fs::write(
+            &config_path,
+            r#"
 [program]
 idl = "found.json"
-"#).unwrap();
+"#,
+        )
+        .unwrap();
 
         let subdir = dir.path().join("sub/deep");
         fs::create_dir_all(&subdir).unwrap();

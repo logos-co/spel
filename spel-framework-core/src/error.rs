@@ -36,10 +36,7 @@ pub use crate::types::SpelOutput;
 pub enum SpelError {
     /// Wrong number of accounts provided for this instruction
     #[error("Expected {expected} accounts, got {actual}")]
-    AccountCountMismatch {
-        expected: usize,
-        actual: usize,
-    },
+    AccountCountMismatch { expected: usize, actual: usize },
 
     /// Account is not owned by the expected program
     #[error("Account {account_index} has wrong owner: expected {expected_owner}")]
@@ -50,22 +47,15 @@ pub enum SpelError {
 
     /// Account should be uninitialized but contains data
     #[error("Account {account_index} is already initialized")]
-    AccountAlreadyInitialized {
-        account_index: usize,
-    },
+    AccountAlreadyInitialized { account_index: usize },
 
     /// Account should be initialized but is empty/default
     #[error("Account {account_index} is not initialized")]
-    AccountNotInitialized {
-        account_index: usize,
-    },
+    AccountNotInitialized { account_index: usize },
 
     /// Insufficient balance for transfer or burn
     #[error("Insufficient balance: have {available}, need {requested}")]
-    InsufficientBalance {
-        available: u128,
-        requested: u128,
-    },
+    InsufficientBalance { available: u128, requested: u128 },
 
     /// Failed to deserialize account data
     #[error("Failed to deserialize account data at index {account_index}: {message}")]
@@ -76,21 +66,15 @@ pub enum SpelError {
 
     /// Failed to serialize account data  
     #[error("Failed to serialize data: {message}")]
-    SerializationError {
-        message: String,
-    },
+    SerializationError { message: String },
 
     /// Arithmetic overflow
     #[error("Arithmetic overflow: {operation}")]
-    Overflow {
-        operation: String,
-    },
+    Overflow { operation: String },
 
     /// Authorization failure
     #[error("Unauthorized: {message}")]
-    Unauthorized {
-        message: String,
-    },
+    Unauthorized { message: String },
 
     /// PDA derivation mismatch
     #[error("PDA mismatch for account '{account_name}': expected {expected}, got {actual}")]
@@ -102,10 +86,7 @@ pub enum SpelError {
 
     /// Custom program-specific error with code and message
     #[error("Program error {code}: {message}")]
-    Custom {
-        code: u32,
-        message: String,
-    },
+    Custom { code: u32, message: String },
 }
 
 impl SpelError {
