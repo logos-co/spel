@@ -54,12 +54,15 @@ impl AutoClaim {
         // Combine seeds into a single PdaSeed using the same logic as compute_pda
         let combined = if seeds.len() == 1 {
             // Single seed: use raw 32 bytes (no padding), consistent with compute_pda
-            assert!(seeds[0].len() == 32, "pda_from_seeds: single seed must be 32 bytes");
+            assert!(
+                seeds[0].len() == 32,
+                "pda_from_seeds: single seed must be 32 bytes"
+            );
             let mut buf = [0u8; 32];
             buf.copy_from_slice(seeds[0]);
             buf
         } else {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             for seed in seeds {
                 hasher.update(seed);
@@ -212,10 +215,7 @@ mod tests {
 
     #[test]
     fn execute_empty() {
-        let output = SpelOutput::execute(
-            Vec::<(Account, AutoClaim)>::new(),
-            vec![],
-        );
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![]);
         assert!(output.post_states.is_empty());
         assert!(output.chained_calls.is_empty());
     }

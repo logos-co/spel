@@ -433,8 +433,8 @@ fn syn_type_to_idl_type(ty: &Type) -> IdlType {
             };
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -732,7 +732,10 @@ mod tests {
             }
         "#;
         let idl = ok(src);
-        assert_eq!(idl.instruction_type.as_deref(), Some("my_core::Instruction"));
+        assert_eq!(
+            idl.instruction_type.as_deref(),
+            Some("my_core::Instruction")
+        );
     }
 
     // ── Account constraints ───────────────────────────────────────────────────
@@ -1024,7 +1027,10 @@ mod tests {
         assert_eq!(idl.instructions[0].name, "alpha");
         assert_eq!(idl.instructions[1].name, "beta");
         // non-annotated function is excluded
-        assert!(!idl.instructions.iter().any(|i| i.name == "not_an_instruction"));
+        assert!(!idl
+            .instructions
+            .iter()
+            .any(|i| i.name == "not_an_instruction"));
     }
 
     // ── #[account_type] — basic discovery ─────────────────────────────────────
@@ -1161,8 +1167,15 @@ mod tests {
             }
         "#;
         let idl = ok(src);
-        assert_eq!(idl.accounts.len(), 2, "both annotated types should be in accounts");
-        assert!(idl.types.is_empty(), "annotated type should not also be in types");
+        assert_eq!(
+            idl.accounts.len(),
+            2,
+            "both annotated types should be in accounts"
+        );
+        assert!(
+            idl.types.is_empty(),
+            "annotated type should not also be in types"
+        );
     }
 
     #[test]

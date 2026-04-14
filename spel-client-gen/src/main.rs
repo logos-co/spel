@@ -21,11 +21,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     while i < args.len() {
         match args[i].as_str() {
             "--idl" => {
-                idl_path = Some(PathBuf::from(args.get(i + 1).ok_or("--idl requires value")?));
+                idl_path = Some(PathBuf::from(
+                    args.get(i + 1).ok_or("--idl requires value")?,
+                ));
                 i += 2;
             }
             "--out-dir" => {
-                out_dir = Some(PathBuf::from(args.get(i + 1).ok_or("--out-dir requires value")?));
+                out_dir = Some(PathBuf::from(
+                    args.get(i + 1).ok_or("--out-dir requires value")?,
+                ));
                 i += 2;
             }
             "--help" | "-h" => {

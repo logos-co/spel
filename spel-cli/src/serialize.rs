@@ -1,7 +1,7 @@
 //! risc0-compatible serialization for IDL instruction data.
 
-use spel_framework_core::idl::IdlType;
 use crate::parse::ParsedValue;
+use spel_framework_core::idl::IdlType;
 
 /// Serialize an instruction to risc0 serde format (Vec<u32>).
 ///
@@ -35,7 +35,10 @@ fn serialize_value_risc0(out: &mut Vec<u32>, ty: &IdlType, val: &ParsedValue) {
             serialize_value_risc0(out, option, val);
         }
         _ => {
-            eprintln!("⚠️  Cannot serialize Defined/Raw type in risc0 format: {:?}", val);
+            eprintln!(
+                "⚠️  Cannot serialize Defined/Raw type in risc0 format: {:?}",
+                val
+            );
         }
     }
 }
@@ -66,7 +69,10 @@ fn serialize_primitive_risc0(out: &mut Vec<u32>, prim: &str, val: &ParsedValue) 
             serialize_bytes_padded(out, bytes);
         }
         _ => {
-            eprintln!("⚠️  Type mismatch in risc0 serialization: prim={}, val={:?}", prim, val);
+            eprintln!(
+                "⚠️  Type mismatch in risc0 serialization: prim={}, val={:?}",
+                prim, val
+            );
         }
     }
 }
@@ -107,7 +113,8 @@ fn serialize_vec_risc0(out: &mut Vec<u32>, elem_type: &IdlType, val: &ParsedValu
         }
         // Vec<u32> — passed as Raw CSV string (e.g. "0,200,0,0,0")
         (IdlType::Primitive(p), ParsedValue::Raw(s)) if p == "u32" => {
-            let vals: Vec<u32> = s.split(',')
+            let vals: Vec<u32> = s
+                .split(',')
                 .filter_map(|x| x.trim().parse::<u32>().ok())
                 .collect();
             out.push(vals.len() as u32);
@@ -151,10 +158,10 @@ fn serialize_bytes_padded(out: &mut Vec<u32>, bytes: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spel_framework_core::idl::IdlType;
     use crate::parse::parse_value;
     use risc0_zkvm::serde::Deserializer;
     use serde::Deserialize;
+    use spel_framework_core::idl::IdlType;
 
     #[test]
     fn serialize_bytes32_one_word_per_byte() {
@@ -167,7 +174,8 @@ mod tests {
         let parsed = parse_value(
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             &idl_type,
-        ).unwrap();
+        )
+        .unwrap();
 
         let words = serialize_to_risc0(0, &[(&idl_type, &parsed)]);
 
@@ -183,7 +191,9 @@ mod tests {
     fn serialize_vec_u8_one_word_per_byte() {
         // Vec<u8> in risc0 serde: length prefix + one u32 word per byte.
         let elem_type = IdlType::Primitive("u8".to_string());
-        let idl_type = IdlType::Vec { vec: Box::new(elem_type) };
+        let idl_type = IdlType::Vec {
+            vec: Box::new(elem_type),
+        };
 
         let bytes = ParsedValue::ByteArray(vec![0x3b, 0x50, 0x9c, 0x40]);
 
@@ -203,7 +213,9 @@ mod tests {
         let inner = IdlType::Array {
             array: (Box::new(IdlType::Primitive("u8".to_string())), 4),
         };
-        let idl_type = IdlType::Vec { vec: Box::new(inner) };
+        let idl_type = IdlType::Vec {
+            vec: Box::new(inner),
+        };
 
         let bytes = ParsedValue::ByteArrayVec(vec![
             vec![0x3b, 0x50, 0x9c, 0x40],
@@ -224,27 +236,37 @@ mod tests {
     #[test]
     fn risc0_reference_bytes32_format() {
         let seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
 
         #[derive(serde::Serialize)]
         enum TestInstruction {
-            CommitRun { seed: [u8; 32], class: u8, strength: u32 },
+            CommitRun {
+                seed: [u8; 32],
+                class: u8,
+                strength: u32,
+            },
         }
 
-        let reference = risc0_zkvm::serde::to_vec(
-            &TestInstruction::CommitRun { seed, class: 2, strength: 42 }
-        ).unwrap();
+        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::CommitRun {
+            seed,
+            class: 2,
+            strength: 42,
+        })
+        .unwrap();
 
         // Each u8 is its own u32 word (not packed)
         // word[0] = variant index (0)
         // word[1..33] = 32 u8 values, each as u32
         // word[33] = class (2)
         // word[34] = strength (42)
-        assert_eq!(reference.len(), 35, "expected 35 words: 1 variant + 32 seed + 1 class + 1 strength");
+        assert_eq!(
+            reference.len(),
+            35,
+            "expected 35 words: 1 variant + 32 seed + 1 class + 1 strength"
+        );
         assert_eq!(reference[0], 0, "variant index");
         assert_eq!(reference[1], 0x01, "seed[0]");
         assert_eq!(reference[2], 0x02, "seed[1]");
@@ -281,11 +303,14 @@ mod tests {
         let parsed_strength = parse_value("42", &strength_type).unwrap();
 
         // 3. Serialize to u32 words (variant_index=0 for CommitRun)
-        let words = serialize_to_risc0(0, &[
-            (&seed_type, &parsed_seed),
-            (&class_type, &parsed_class),
-            (&strength_type, &parsed_strength),
-        ]);
+        let words = serialize_to_risc0(
+            0,
+            &[
+                (&seed_type, &parsed_seed),
+                (&class_type, &parsed_class),
+                (&strength_type, &parsed_strength),
+            ],
+        );
 
         // 4. Deserialize using risc0's Deserializer — the SAME code the guest runs
         let instruction: TestInstruction =
@@ -294,10 +319,9 @@ mod tests {
 
         // 5. Assert values survived the roundtrip
         let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
         assert_eq!(
             instruction,

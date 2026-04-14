@@ -36,8 +36,8 @@ pub struct CodegenOutput {
 
 /// Generate client + FFI code from an IDL JSON string.
 pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
-    let idl: SpelIdl = serde_json::from_str(json)
-        .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
+    let idl: SpelIdl =
+        serde_json::from_str(json).map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
     generate_from_idl(&idl)
 }
 
@@ -46,5 +46,9 @@ pub fn generate_from_idl(idl: &SpelIdl) -> Result<CodegenOutput, String> {
     let client_code = codegen::generate_client(idl)?;
     let ffi_code = ffi_codegen::generate_ffi(idl)?;
     let header = ffi_codegen::generate_header(idl)?;
-    Ok(CodegenOutput { client_code, ffi_code, header })
+    Ok(CodegenOutput {
+        client_code,
+        ffi_code,
+        header,
+    })
 }

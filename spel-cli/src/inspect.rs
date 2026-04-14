@@ -1,7 +1,7 @@
 //! Binary inspection — extract ProgramId from ELF binaries.
 
-use nssa::program::Program;
 use crate::hex::hex_encode;
+use nssa::program::Program;
 use std::fs;
 
 /// Inspect one or more ELF binary files and print their ProgramIds.
