@@ -1,10 +1,10 @@
 [workspace]
 members = [
-    "lez-framework",
-    "lez-framework-core",
-    "lez-framework-macros",
-    "lez-cli",
-    "lez-client-gen",
+    "spel-framework",
+    "spel-framework-core",
+    "spel-framework-macros",
+    "spel-cli",
+    "spel-client-gen",
 ]
 exclude = ["tests/e2e/fixture_program"]
 resolver = "2"

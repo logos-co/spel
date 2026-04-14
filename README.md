@@ -17,8 +17,8 @@ Write your program logic with proc macros. Get IDL generation, a full CLI with T
 ### Scaffold a new project
 
 ```bash
-cargo install --path lez-cli
-lez-cli init my-program
+cargo install --path spel-cli  # installs as "spel"
+spel init my-program
 cd my-program
 ```
 
@@ -56,7 +56,9 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 ```rust
 #![no_main]
 
-use lez_framework::prelude::*;
+use nssa_core::account::AccountWithMetadata;
+use nssa_core::program::AccountPostState;
+use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -71,10 +73,10 @@ mod my_program {
         mut state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-    ) -> LezResult {
+    ) -> SpelResult {
         // Your logic here
-        Ok(LezOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone()),
+        Ok(SpelOutput::states_only(vec![
+            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
             AccountPostState::new(owner.account.clone()),
         ]))
     }
@@ -87,9 +89,9 @@ mod my_program {
         #[account(signer)]
         sender: AccountWithMetadata,
         amount: u128,
-    ) -> LezResult {
+    ) -> SpelResult {
         // Your logic here
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(state.account.clone()),
             AccountPostState::new(recipient.account.clone()),
             AccountPostState::new(sender.account.clone()),
@@ -116,8 +118,8 @@ mod my_program {
 
 Accounts marked with `#[account(signer)]` or `#[account(init)]` get **automatic runtime checks** before your handler runs:
 
-- **Signer**: Verifies `is_authorized` is true, returns `LezError::Unauthorized` if not
-- **Init**: Verifies account is in default state, returns `LezError::AccountAlreadyInitialized` if not
+- **Signer**: Verifies `is_authorized` is true, returns `SpelError::Unauthorized` if not
+- **Init**: Verifies account is in default state, returns `SpelError::AccountAlreadyInitialized` if not
 
 No manual checking needed in your instruction handlers.
 
@@ -139,7 +141,7 @@ Every program gets a full CLI for free. The wrapper is just:
 ```rust
 #[tokio::main]
 async fn main() {
-    lez_cli::run().await;
+    spel_cli::run().await;
 }
 ```
 
@@ -152,12 +154,45 @@ This provides:
 - `--dry-run` mode for testing
 - `inspect` subcommand to extract ProgramId from binaries and decode account data
 
+### Account Types
+
+Types that represent on-chain account data can be annotated with `#[account_type]`. This causes them to appear in the generated IDL so `spel inspect` can decode raw account bytes into readable JSON.
+
+```rust
+use spel_framework::prelude::*;
+
+#[account_type]
+#[derive(BorshSerialize, BorshDeserialize)]
+pub struct VaultState {
+    pub owner: AccountId,
+    pub balance: u128,
+    pub locked: bool,
+}
+
+#[account_type]
+#[derive(BorshSerialize, BorshDeserialize)]
+pub enum TokenHolding {
+    Fungible { definition_id: AccountId, balance: u128 },
+    NftMaster { definition_id: AccountId, print_balance: u128 },
+}
+```
+
+Types referenced by an `#[account_type]` (such as helper enums or nested structs) are collected automatically — they do not need their own annotation:
+
+```rust
+// No annotation needed — picked up automatically because VaultState references it
+#[derive(BorshSerialize, BorshDeserialize)]
+pub enum VaultStatus { Active, Frozen }
+```
+
+The IDL generator embeds all annotated types in the `accounts` array and all transitively referenced helper types in the `types` array of the generated JSON. No file paths or external references — the IDL is fully self-contained.
+
 ### IDL Generation
 
 The IDL generator is also a one-liner:
 
 ```rust
-lez_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
+spel_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
 ```
 
 It reads the `#[lez_program]` annotations at compile time and generates a complete JSON IDL describing instructions, arguments, accounts, and PDA seeds.
@@ -180,39 +215,46 @@ These fields are optional and backward-compatible — existing IDL consumers tha
 
 ```bash
 # Scaffold a new project (no --idl needed)
-lez-cli init my-program
+spel init my-program
 
 # Inspect program binaries (no --idl needed)
-lez-cli inspect program.bin
+spel inspect program.bin
+
+# Generate IDL from a program source file (includes all #[account_type] definitions)
+spel generate-idl methods/guest/src/bin/my_program.rs > my_program-idl.json
+
+# Decode on-chain account data using a type from the IDL
+spel inspect <account-id> --idl my_program-idl.json --type VaultState
+
+# Same, but supply raw borsh bytes directly instead of fetching from the network
+spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
 
 # Inspect with raw data (offline, no sequencer needed)
 lez-cli inspect --data <hex-encoded-borsh> --idl program-idl.json
 
 # Show available commands
-lez-cli --idl program-idl.json --help
+spel --idl program-idl.json --help
 
 # Dry run an instruction
-lez-cli --idl program-idl.json --dry-run -p program.bin \
+spel --idl program-idl.json --dry-run -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Submit a transaction
-lez-cli --idl program-idl.json -p program.bin \
+spel --idl program-idl.json -p program.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Use --program-id instead of binary (skips loading the file)
-lez-cli --idl program-idl.json --program-id <64-char-hex> \
-  create-vault --token-name "MYTKN" --initial-supply 1000000
+spel --idl program-idl.json --program-id <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Compute a PDA from the IDL
-lez-cli --idl program-idl.json --program-id <64-char-hex> \
-  pda vault --create-key my-multisig
+spel --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
 
 # Auto-fill program IDs from binaries
-lez-cli --idl program-idl.json -p treasury.bin --bin-token token.bin \
+spel --idl program-idl.json -p treasury.bin --bin-token token.bin \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Get help for a specific instruction
-lez-cli --idl program-idl.json create-vault --help
+spel --idl program-idl.json create-vault --help
 ```
 
 ### Type Formats
@@ -229,15 +271,65 @@ lez-cli --idl program-idl.json create-vault --help
 | `Option<T>` | Value or `"none"` |
 | Account IDs | Base58 or 64-char hex |
 
+### Inspecting Account Data
+
+Once types are annotated with `#[account_type]` and the IDL is generated, you can decode any on-chain account into JSON:
+
+```bash
+# Generate the IDL (embeds all annotated account types)
+spel generate-idl methods/guest/src/bin/token.rs > token-idl.json
+
+# Fetch and decode a live account from the network
+spel inspect 3f2a...bc01 --idl token-idl.json --type TokenHolding
+```
+
+```
+Account: 3f2a...bc01
+Data:    33 bytes
+Hex:     01aabbccdd...
+
+{
+  "NftMaster": {
+    "definition_id": "aabbccddee...",
+    "print_balance": "99"
+  }
+}
+```
+
+For accounts with nested types (e.g. `TokenMetadata` referencing `MetadataStandard`), the IDL contains both and decoding works transparently:
+
+```bash
+spel inspect 9d1c...f4 --idl token-idl.json --type TokenMetadata
+```
+
+```json
+{
+  "definition_id": "aabbccddee...",
+  "standard": "Simple",
+  "uri": "https://example.com/metadata.json",
+  "creators": "Alice",
+  "primary_sale_date": "1720000000"
+}
+```
+
+You can also pass raw borsh bytes directly with `--data` to decode without a network connection — useful during development and testing:
+
+```bash
+spel inspect 0000...0000 \
+  --idl token-idl.json \
+  --type TokenHolding \
+  --data 00<32-byte-definition-id-hex>00000000000000000000000000000064
+```
+
 ## Crates
 
 | Crate | Description |
 |-------|-------------|
-| `lez-framework` | Umbrella crate — re-exports macros + core with a prelude |
-| `lez-framework-core` | IDL types, error types, `LezOutput` |
-| `lez-framework-macros` | Proc macros: `#[lez_program]`, `#[instruction]`, `generate_idl!` |
-| `lez-cli` | Generic IDL-driven CLI with TX submission + project scaffolding |
-| `lez-client-gen` | Code generator — produces typed Rust FFI clients from IDL JSON |
+| `spel-framework` | Umbrella crate — re-exports macros + core with a prelude |
+| `spel-framework-core` | IDL types, error types, `SpelOutput` |
+| `spel-framework-macros` | Proc macros: `#[lez_program]`, `#[instruction]`, `generate_idl!` |
+| `spel` | Generic IDL-driven CLI with TX submission + project scaffolding |
+| `spel-client-gen` | Code generator — produces typed Rust FFI clients from IDL JSON |
 
 ## License
 

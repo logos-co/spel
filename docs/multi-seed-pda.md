@@ -1,6 +1,6 @@
 # Multi-seed and arg-based PDA derivation
 
-GitHub Issue: https://github.com/jimmy-claw/lez-framework/issues/1
+GitHub Issue: https://github.com/jimmy-claw/spel-framework/issues/1
 
 ## Problem
 
@@ -44,9 +44,9 @@ pda = AccountId::from((program_id, &PdaSeed::new(combined_seed)))
 
 ### Changes needed:
 
-1. **Macro** (`lez-framework-macros`): Parse array syntax `pda = [...]`, support `arg("name")`
-2. **IDL** (`lez-framework-core`): `IdlSeed` already has `Const`, `Account`, `Arg` variants — just need to handle multiple seeds
-3. **CLI** (`lez-cli`): `compute_pda_from_seeds` already accepts `&[IdlSeed]` — implement multi-seed hashing
+1. **Macro** (`spel-framework-macros`): Parse array syntax `pda = [...]`, support `arg("name")`
+2. **IDL** (`spel-framework-core`): `IdlSeed` already has `Const`, `Account`, `Arg` variants — just need to handle multiple seeds
+3. **CLI** (`spel-cli`): `compute_pda_from_seeds` already accepts `&[IdlSeed]` — implement multi-seed hashing
 4. **Guest code generation**: Macro-generated `main()` needs to compute multi-seed PDAs at runtime
 
 ### Seed types:
