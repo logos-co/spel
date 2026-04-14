@@ -61,6 +61,12 @@ methods/guest/target/
 .{snake_name}-state.tmp
 "#));
 
+    // spel.toml
+    write_file(root, "spel.toml", &format!(r#"[program]
+idl = "{project_name}-idl.json"
+binary = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin"
+"#));
+
     // Makefile
     write_file(root, "Makefile", &format!(r#"# {project_name} — SPEL Program
 #
@@ -91,7 +97,7 @@ help: ## Show this help
 	@echo ""
 	@echo "  make build       Build the guest binary (needs risc0 toolchain)"
 	@echo "  make idl         Generate IDL from program source"
-	@echo "  make cli ARGS=   Run the IDL-driven CLI (pass args via ARGS=)"
+	@echo "  make cli ARGS=   Run the IDL-driven CLI (reads spel.toml for config)"
 	@echo "  make deploy      Deploy program to sequencer"
 	@echo "  make setup       Create accounts needed for the program"
 	@echo "  make inspect     Show ProgramId for built binary"
@@ -101,7 +107,7 @@ help: ## Show this help
 	@echo "Example:"
 	@echo "  make build idl deploy"
 	@echo "  make cli ARGS=\"--help\""
-	@echo "  make cli ARGS=\"-p $(PROGRAM_BIN) <command> --arg1 value1\""
+	@echo "  make cli ARGS=\"<command> --arg1 value1\""
 
 build: ## Build the guest binary
 	cargo risczero build --manifest-path methods/guest/Cargo.toml
@@ -114,7 +120,7 @@ idl: ## Generate IDL JSON from program source
 	@echo "✅ IDL written to $(IDL_FILE)"
 
 cli: ## Run the IDL-driven CLI (ARGS="...")
-	cargo run --bin {snake_name}_cli -- -i $(IDL_FILE) $(ARGS)
+	cargo run --bin {snake_name}_cli -- $(ARGS)
 
 deploy: ## Deploy program to sequencer
 	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
@@ -122,7 +128,7 @@ deploy: ## Deploy program to sequencer
 	@echo "✅ Program deployed"
 
 inspect: ## Show ProgramId for built binary
-	cargo run --bin {snake_name}_cli -- -i $(IDL_FILE) inspect $(PROGRAM_BIN)
+	cargo run --bin {snake_name}_cli -- inspect $(PROGRAM_BIN)
 
 setup: ## Create accounts needed for the program
 	@echo "Creating signer account..."
@@ -174,13 +180,11 @@ make deploy
 # 4. See available commands (auto-generated from your program)
 make cli ARGS="--help"
 
-# 5. Run an instruction
-make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
-  <command> --arg1 value1 --arg2 value2"
+# 5. Run an instruction (spel.toml provides IDL and binary paths)
+make cli ARGS="<command> --arg1 value1 --arg2 value2"
 
 # Dry run (no submission):
-make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin \\
-  <command> --arg1 value1"
+make cli ARGS="--dry-run -- <command> --arg1 value1"
 ```
 
 ## Make Targets
@@ -209,6 +213,7 @@ make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker
 │   └── src/bin/
 │       ├── generate_idl.rs    # One-liner IDL generator
 │       └── {snake_name}_cli.rs # Three-line CLI wrapper
+├── spel.toml                         # SPEL CLI config (IDL and binary paths)
 ├── Makefile
 └── {project_name}-idl.json       # Auto-generated IDL
 ```
