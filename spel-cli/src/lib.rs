@@ -116,10 +116,13 @@ pub async fn run() {
 
         if let Some(prog) = resolved_from_config {
             // Config name → set both IDL and binary from config entry
+            let config_dir = config.as_ref().unwrap().0.parent().unwrap();
             if idl_path.is_empty() {
-                if let Some(ref idl) = prog.idl { idl_path = idl.clone(); }
+                if let Some(ref idl) = prog.idl {
+                    idl_path = config_dir.join(idl).to_string_lossy().to_string();
+                }
             }
-            program_path = prog.binary.clone();
+            program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
         } else if is_hex_program_id(value) {
             program_id_hex = Some(value.clone());
         } else {
@@ -128,14 +131,17 @@ pub async fn run() {
     }
 
     // Fill gaps from config default program (when --program not given or didn't resolve IDL)
-    if let Some((_, ref cfg)) = config {
+    if let Some((ref config_path, ref cfg)) = config {
         if program_ref.is_none() {
             if let Ok(prog) = cfg.resolve_program(None) {
+                let config_dir = config_path.parent().unwrap();
                 if idl_path.is_empty() {
-                    if let Some(ref idl) = prog.idl { idl_path = idl.clone(); }
+                    if let Some(ref idl) = prog.idl {
+                        idl_path = config_dir.join(idl).to_string_lossy().to_string();
+                    }
                 }
                 if program_path.is_none() {
-                    program_path = prog.binary.clone();
+                    program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
                 }
             }
         }

@@ -31,8 +31,8 @@ impl SpelConfig {
                 match Self::load(&candidate) {
                     Ok(config) => return Some((candidate, config)),
                     Err(e) => {
-                        eprintln!("⚠️  Error reading {}: {}", candidate.display(), e);
-                        return None;
+                        eprintln!("❌ Error reading {}: {}", candidate.display(), e);
+                        std::process::exit(1);
                     }
                 }
             }

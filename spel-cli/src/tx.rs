@@ -192,7 +192,8 @@ pub async fn execute_instruction(
     } else if let Some(path) = program_path {
         let program_bytecode = fs::read(path).unwrap_or_else(|e| {
             eprintln!("❌ Failed to read program binary '{}': {}", path, e);
-            eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary");
+            eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary.");
+            eprintln!("   Or configure in spel.toml.");
             process::exit(1);
         });
         let program = Program::new(program_bytecode).unwrap_or_else(|e| {
