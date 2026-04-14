@@ -8,11 +8,14 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("🔧 {} v{} — IDL-driven CLI", idl.name, idl.version);
     println!();
     println!("USAGE:");
-    println!("  {} [OPTIONS] <COMMAND> [ARGS]", binary_name);
+    println!("  {} <COMMAND> [ARGS]                  (with spel.toml)", binary_name);
+    println!("  {} [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)", binary_name);
     println!();
     println!("OPTIONS:");
-    println!("  -i, --idl <FILE>           IDL JSON file");
-    println!("  -p, --program <FILE>       Program binary");
+    println!("  -i, --idl <FILE>           IDL JSON file (or set in spel.toml)");
+    println!("  -p, --program <NAME|HEX|FILE>");
+    println!("                             Program name from spel.toml, 64-char hex program ID,");
+    println!("                             or path to program binary (or set in spel.toml)");
     println!("  --dry-run                  Print parsed/serialized data without submitting");
     println!("  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)");
     println!();
@@ -39,6 +42,12 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("  [u8; N]               Hex string (2*N hex chars) or UTF-8 string (≤N chars, right-padded)");
     println!("  [u32; 8] / program_id Comma-separated u32s: \"0,0,0,0,0,0,0,0\"");
     println!("  Vec<[u8; 32]>         Comma-separated hex strings: \"aabb...00,ccdd...00\"");
+    println!();
+    println!("CONFIG:");
+    println!("  Create a spel.toml in your project root to avoid passing --idl and --program:");
+    println!("    [program]");
+    println!("    idl = \"my-project-idl.json\"");
+    println!("    binary = \"path/to/program.bin\"");
     println!();
     println!("Auto-generated from IDL. Accounts marked as PDA are computed automatically.");
 }

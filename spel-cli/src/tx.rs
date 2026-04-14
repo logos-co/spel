@@ -23,7 +23,7 @@ pub async fn execute_instruction(
     idl: &SpelIdl,
     ix: &IdlInstruction,
     args: &HashMap<String, String>,
-    program_path: &str,
+    program_path: Option<&str>,
     program_id_hex: Option<&str>,
     dry_run: bool,
     extra_bins: &HashMap<String, String>,
@@ -155,8 +155,8 @@ pub async fn execute_instruction(
     println!("🔧 Transaction:");
     if let Some(pid) = program_id_hex {
         println!("  program-id: {}", pid);
-    } else {
-        println!("  program: {}", program_path);
+    } else if let Some(path) = program_path {
+        println!("  program: {}", path);
     }
     println!("  instruction index: {}", ix_index);
     println!("  instruction: {} {{", to_pascal_case(&ix.name));
@@ -181,7 +181,7 @@ pub async fn execute_instruction(
     // Resolve program_id: from --program-id hex flag, or by loading the binary
     let (program_id, program_obj): (ProgramId, Option<Program>) = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid --program-id '{}': {}", hex, e);
+            eprintln!("❌ Invalid program ID '{}': {}", hex, e);
             process::exit(1);
         });
         let mut pid = [0u32; 8];
@@ -189,10 +189,10 @@ pub async fn execute_instruction(
             pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         (pid, None)
-    } else {
-        let program_bytecode = fs::read(program_path).unwrap_or_else(|e| {
-            eprintln!("❌ Failed to read program binary '{}': {}", program_path, e);
-            eprintln!("   Hint: pass --program-id <hex> to skip loading the binary");
+    } else if let Some(path) = program_path {
+        let program_bytecode = fs::read(path).unwrap_or_else(|e| {
+            eprintln!("❌ Failed to read program binary '{}': {}", path, e);
+            eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary");
             process::exit(1);
         });
         let program = Program::new(program_bytecode).unwrap_or_else(|e| {
@@ -201,6 +201,9 @@ pub async fn execute_instruction(
         });
         let pid = program.id();
         (pid, Some(program))
+    } else {
+        eprintln!("❌ No program specified. Use --program <name|hex|path> or configure in spel.toml.");
+        process::exit(1);
     };
     println!("  Program ID: {:?}", program_id);
 
