@@ -1,17 +1,17 @@
 #!/usr/bin/env bash
-# lez-framework end-to-end smoke test
+# spel-framework end-to-end smoke test
 # Tests the full pipeline: init → build guest → deploy → submit tx
 #
 # Prerequisites:
-#   - lez-cli in PATH (cargo install --path lez-cli)
+#   - spel in PATH (cargo install --path spel)
 #   - cargo-risczero installed (cargo risczero --version)
 #   - Docker running (for risc0 guest builds)
-#   - sequencer_runner in PATH or ~/bin/
+#   - sequencer_service in PATH or ~/bin/
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORK_DIR="${WORK_DIR:-/tmp/lez-smoke-test}"
+WORK_DIR="${WORK_DIR:-/tmp/spel-smoke-test}"
 SEQUENCER_PORT="${SEQUENCER_PORT:-3040}"
 SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
 PROJECT_NAME="smoke_test_program"
@@ -40,23 +40,23 @@ trap cleanup EXIT
 
 log "Checking prerequisites..."
 
-command -v lez-cli >/dev/null 2>&1 || fail "lez-cli not found in PATH"
+command -v spel >/dev/null 2>&1 || fail "spel not found in PATH"
 command -v cargo >/dev/null 2>&1 || fail "cargo not found"
 command -v cargo-risczero >/dev/null 2>&1 || warn "cargo-risczero not found — guest build may fail"
 docker info >/dev/null 2>&1 || warn "Docker not running — guest build may fail"
 
 LSSA_DIR="${LSSA_DIR:-$HOME/lssa}"
 SEQUENCER_BIN=""
-if command -v sequencer_runner >/dev/null 2>&1; then
-    SEQUENCER_BIN="sequencer_runner"
-elif [ -x "$HOME/bin/sequencer_runner" ]; then
-    SEQUENCER_BIN="$HOME/bin/sequencer_runner"
-elif [ -x "$LSSA_DIR/target/release/sequencer_runner" ]; then
-    SEQUENCER_BIN="$LSSA_DIR/target/release/sequencer_runner"
-elif [ -x "$LSSA_DIR/target/debug/sequencer_runner" ]; then
-    SEQUENCER_BIN="$LSSA_DIR/target/debug/sequencer_runner"
+if command -v sequencer_service >/dev/null 2>&1; then
+    SEQUENCER_BIN="sequencer_service"
+elif [ -x "$HOME/bin/sequencer_service" ]; then
+    SEQUENCER_BIN="$HOME/bin/sequencer_service"
+elif [ -x "$LSSA_DIR/target/release/sequencer_service" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/release/sequencer_service"
+elif [ -x "$LSSA_DIR/target/debug/sequencer_service" ]; then
+    SEQUENCER_BIN="$LSSA_DIR/target/debug/sequencer_service"
 else
-    warn "sequencer_runner not found — will skip deploy/submit steps"
+    warn "sequencer_service not found — will skip deploy/submit steps"
 fi
 
 # ─── Step 1: Scaffold project ────────────────────────────────────────────
@@ -66,7 +66,7 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR" "$LOG_DIR"
 cd "$WORK_DIR"
 
-lez-cli init "$PROJECT_NAME" > "$LOG_DIR/init.log" 2>&1 || fail "lez-cli init failed (see $LOG_DIR/init.log)"
+spel init "$PROJECT_NAME" > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 
 # Verify scaffold structure
@@ -114,20 +114,20 @@ fi
 log "Step 4: Starting sequencer and deploying..."
 
 # Kill any existing sequencer
-pgrep -f 'sequencer_runner.*configs' | xargs -r kill 2>/dev/null || true
+pgrep -f 'sequencer_service.*configs' | xargs -r kill 2>/dev/null || true
 sleep 1
 
 # Clean old state
 rm -rf "${LSSA_DIR}/.sequencer_db" "${LSSA_DIR}/rocksdb"
 
 # Start sequencer with lssa configs
-SEQ_CONFIGS="${LSSA_DIR}/sequencer_runner/configs/debug"
+SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug"
 if [ ! -d "$SEQ_CONFIGS" ]; then
     fail "Sequencer configs not found at $SEQ_CONFIGS"
 fi
 
 cd "$LSSA_DIR"
-RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS/sequencer_config.json" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 cd "$WORK_DIR/$PROJECT_NAME"
 
@@ -186,7 +186,7 @@ print(idl['instructions'][0]['name'])
 ")
 
 # Try submitting the first instruction (may fail if it needs specific args — that's OK)
-SEQUENCER_URL="$SEQUENCER_URL" lez-cli --idl "$IDL_FILE_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_FILE_ABS" -p "$GUEST_BIN_ABS" \
     "$FIRST_IX" > "$LOG_DIR/submit.log" 2>&1 \
     && log "  ✅ Transaction submitted" \
     || warn "Submit failed (may need args — see $LOG_DIR/submit.log). Deploy was successful."
