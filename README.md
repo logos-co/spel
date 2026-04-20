@@ -236,12 +236,18 @@ spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <bo
 # Show available commands
 spel --idl program-idl.json --help
 
-# Dry run an instruction
-spel --idl program-idl.json --dry-run -p program.bin \
+# Dry run an instruction — resolve everything (PDAs, accounts, serialized data,
+# signer nonces) and print without submitting. Accepts --dry-run (text default),
+# --dry-run=text, or --dry-run=json.
+spel --idl program-idl.json --dry-run -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
+# Machine-readable dry run for scripting / golden tests
+spel --idl program-idl.json --dry-run=json -p program.bin -- \
+  create-vault --token-name "MYTKN" --initial-supply 1000000 | jq .
+
 # Submit a transaction
-spel --idl program-idl.json -p program.bin \
+spel --idl program-idl.json -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Use --program-id instead of binary (skips loading the file)
