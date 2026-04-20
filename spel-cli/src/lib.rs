@@ -45,7 +45,8 @@ pub async fn run() {
 
     let mut idl_path = String::new();
     let mut program_ref: Option<String> = None; // raw --program value
-    let mut dry_run = false;
+    // None = submit, Some("text") = dry-run text summary, Some("json") = dry-run JSON
+    let mut dry_run: Option<String> = None;
     let mut type_name: Option<String> = None;
     let mut data_hex: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
@@ -82,7 +83,15 @@ pub async fn run() {
                 i += 1;
                 if i < args.len() { data_hex = Some(args[i].clone()); }
             }
-            "--dry-run" => { dry_run = true; }
+            "--dry-run" => { dry_run = Some("text".to_string()); }
+            s if s.starts_with("--dry-run=") => {
+                let fmt = &s["--dry-run=".len()..];
+                if fmt != "text" && fmt != "json" {
+                    eprintln!("❌ --dry-run=<fmt>: expected 'text' or 'json', got '{}'", fmt);
+                    process::exit(1);
+                }
+                dry_run = Some(fmt.to_string());
+            }
             s if s.starts_with("--bin-") => {
                 let name = s.strip_prefix("--bin-").unwrap().to_string();
                 i += 1;
@@ -372,7 +381,7 @@ pub async fn run() {
                     }
                     let cli_args = parse_instruction_args(&remaining_args[2..], ix);
                     execute_instruction(
-                        &idl, ix, &cli_args, program_path.as_deref(), program_id_hex.as_deref(), dry_run, &extra_bins,
+                        &idl, ix, &cli_args, program_path.as_deref(), program_id_hex.as_deref(), dry_run.as_deref(), &extra_bins,
                     ).await;
                 }
                 None => {

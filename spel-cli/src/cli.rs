@@ -16,7 +16,7 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("  -p, --program <NAME|HEX|FILE>");
     println!("                             Program name from spel.toml, 64-char hex program ID,");
     println!("                             or path to program binary (or set in spel.toml)");
-    println!("  --dry-run                  Print parsed/serialized data without submitting");
+    println!("  --dry-run[=text|json]      Resolve & print transaction without submitting (text default)");
     println!("  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)");
     println!();
     println!("COMMANDS:");
