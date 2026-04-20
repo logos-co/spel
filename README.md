@@ -105,6 +105,19 @@ mod my_program {
 | `#[account(pda = arg("create_key"))]` | PDA derived from an instruction argument |
 | `members: Vec<AccountWithMetadata>` | Variable-length trailing account list |
 
+### PDA Seed Display
+
+When the CLI derives PDA accounts during transaction execution, it prints the seed inputs used for each derivation:
+
+```
+  PDA vault → 4Lp3gkH...
+    seeds: [program_id, "state"]
+  PDA token_account → 7xQ2m...
+    seeds: [program_id, Account(owner), Arg(create_key)]
+```
+
+Seeds always start with `program_id`, followed by the seeds declared in the account attribute. Constant strings appear quoted, account references as `Account(name)`, and instruction arguments as `Arg(name)`.
+
 ### Runtime Validation
 
 Accounts marked with `#[account(signer)]` or `#[account(init)]` get **automatic runtime checks** before your handler runs:
@@ -236,6 +249,10 @@ spel --idl program-idl.json --program-id <64-char-hex>   create-vault --token-na
 
 # Compute a PDA from the IDL
 spel --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+
+# PDA derivation output shows seed inputs:
+#   PDA vault → 4Lp3gkH...
+#     seeds: [program_id, "state"]
 
 # Auto-fill program IDs from binaries
 spel --idl program-idl.json -p treasury.bin --bin-token token.bin \
