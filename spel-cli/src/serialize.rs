@@ -6,7 +6,6 @@ use crate::parse::ParsedValue;
 #[derive(Debug)]
 pub enum SerializeError {
     TypeMismatch { expected: String, got: String },
-    UnsupportedType { type_name: String },
     Risc0(String),
 }
 
@@ -15,9 +14,6 @@ impl std::fmt::Display for SerializeError {
         match self {
             SerializeError::TypeMismatch { expected, got } => {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
-            }
-            SerializeError::UnsupportedType { type_name } => {
-                write!(f, "unsupported type: {}", type_name)
             }
             SerializeError::Risc0(msg) => write!(f, "risc0 serialization error: {}", msg),
         }
@@ -92,7 +88,7 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
                 .collect();
             Ok(DynamicValue::Seq(elements?))
         }
-        (IdlType::Vec { vec: _ }, ParsedValue::Raw(s)) => {
+        (IdlType::Vec { vec }, ParsedValue::Raw(s)) if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "u32") => {
             // Fallback: parse CSV of u32 values (e.g. "0,200,0,0,0")
             let vals: Vec<u32> = s
                 .split(',')
@@ -592,167 +588,5 @@ mod tests {
 
         let result = serialize_to_risc0(0, &[(&ty, &val)]);
         assert!(result.is_err());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use spel_framework_core::idl::IdlType;
-    use crate::parse::parse_value;
-    use risc0_zkvm::serde::Deserializer;
-    use serde::Deserialize;
-
-    #[test]
-    fn serialize_bytes32_one_word_per_byte() {
-        // risc0 serde format: each u8 is its own u32 word (zero-extended).
-        // A [u8; 32] produces 32 u32 words, NOT 8 packed words.
-        let idl_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".to_string())), 32),
-        };
-
-        let parsed = parse_value(
-            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-            &idl_type,
-        ).unwrap();
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &parsed)]);
-
-        // words[0] = variant index, words[1..33] = 32 individual u8-as-u32 words
-        let payload = &words[1..];
-        assert_eq!(payload.len(), 32, "expected 32 u32 words for [u8; 32]");
-        assert_eq!(payload[0], 0x01);
-        assert_eq!(payload[1], 0x02);
-        assert_eq!(payload[31], 0x20);
-    }
-
-    #[test]
-    fn serialize_vec_u8_one_word_per_byte() {
-        // Vec<u8> in risc0 serde: length prefix + one u32 word per byte.
-        let elem_type = IdlType::Primitive("u8".to_string());
-        let idl_type = IdlType::Vec { vec: Box::new(elem_type) };
-
-        let bytes = ParsedValue::ByteArray(vec![0x3b, 0x50, 0x9c, 0x40]);
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &bytes)]);
-
-        // words[0] = variant index, words[1] = length (4), words[2..6] = bytes as u32
-        let payload = &words[1..];
-        assert_eq!(payload[0], 4, "length prefix");
-        assert_eq!(payload.len(), 5, "1 length + 4 bytes");
-        assert_eq!(payload[1], 0x3b);
-        assert_eq!(payload[2], 0x50);
-    }
-
-    #[test]
-    fn serialize_vec_byte_array_one_word_per_byte() {
-        // Vec<[u8; 4]>: vec length prefix, then each element's bytes as individual words.
-        let inner = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".to_string())), 4),
-        };
-        let idl_type = IdlType::Vec { vec: Box::new(inner) };
-
-        let bytes = ParsedValue::ByteArrayVec(vec![
-            vec![0x3b, 0x50, 0x9c, 0x40],
-            vec![0x61, 0x13, 0x01, 0xf7],
-        ]);
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &bytes)]);
-
-        // words[0] = variant, words[1] = vec len (2), words[2..6] = elem0, words[6..10] = elem1
-        let payload = &words[1..];
-        assert_eq!(payload[0], 2, "vec length");
-        assert_eq!(payload.len(), 9, "1 length + 2*4 bytes");
-        assert_eq!(payload[1], 0x3b);
-        assert_eq!(payload[5], 0x61);
-    }
-
-    /// Verify risc0's own serializer as the reference for [u8; 32] format.
-    #[test]
-    fn risc0_reference_bytes32_format() {
-        let seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
-        ];
-
-        #[derive(serde::Serialize)]
-        enum TestInstruction {
-            CommitRun { seed: [u8; 32], class: u8, strength: u32 },
-        }
-
-        let reference = risc0_zkvm::serde::to_vec(
-            &TestInstruction::CommitRun { seed, class: 2, strength: 42 }
-        ).unwrap();
-
-        // Each u8 is its own u32 word (not packed)
-        // word[0] = variant index (0)
-        // word[1..33] = 32 u8 values, each as u32
-        // word[33] = class (2)
-        // word[34] = strength (42)
-        assert_eq!(reference.len(), 35, "expected 35 words: 1 variant + 32 seed + 1 class + 1 strength");
-        assert_eq!(reference[0], 0, "variant index");
-        assert_eq!(reference[1], 0x01, "seed[0]");
-        assert_eq!(reference[2], 0x02, "seed[1]");
-        assert_eq!(reference[33], 2, "class");
-        assert_eq!(reference[34], 42, "strength");
-    }
-
-    /// Verifies spel CLI's serialization is compatible with the guest-side
-    /// Deserializer from risc0_zkvm (used by nssa_core::program::read_nssa_inputs).
-    /// This is the contract between the CLI (transaction sender) and the
-    /// on-chain program (transaction executor) at LEZ v0.2.0-rc1.
-    #[test]
-    fn serialize_deserialize_roundtrip_with_bytes32() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            CommitRun {
-                seed: [u8; 32],
-                class: u8,
-                strength: u32,
-            },
-        }
-
-        // 1. Define IDL arg types matching the enum variant fields
-        let seed_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".into())), 32),
-        };
-        let class_type = IdlType::Primitive("u8".into());
-        let strength_type = IdlType::Primitive("u32".into());
-
-        // 2. Parse CLI values exactly as spel would
-        let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let parsed_seed = parse_value(seed_hex, &seed_type).unwrap();
-        let parsed_class = parse_value("2", &class_type).unwrap();
-        let parsed_strength = parse_value("42", &strength_type).unwrap();
-
-        // 3. Serialize to u32 words (variant_index=0 for CommitRun)
-        let words = serialize_to_risc0(0, &[
-            (&seed_type, &parsed_seed),
-            (&class_type, &parsed_class),
-            (&strength_type, &parsed_strength),
-        ]);
-
-        // 4. Deserialize using risc0's Deserializer — the SAME code the guest runs
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("guest-side deserialization must succeed");
-
-        // 5. Assert values survived the roundtrip
-        let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
-        ];
-        assert_eq!(
-            instruction,
-            TestInstruction::CommitRun {
-                seed: expected_seed,
-                class: 2,
-                strength: 42,
-            }
-        );
     }
 }
