@@ -17,10 +17,12 @@ pub mod tx;
 pub mod inspect;
 pub mod account_inspect;
 pub mod cli;
+pub mod config;
 pub mod init;
 pub mod generate_idl;
 
 use cli::{print_help, parse_instruction_args, snake_to_kebab};
+use config::SpelConfig;
 use init::init_project;
 use inspect::inspect_binaries;
 use tx::execute_instruction;
@@ -42,28 +44,35 @@ pub async fn run() {
     let args: Vec<String> = env::args().collect();
 
     let mut idl_path = String::new();
-    let mut program_path = "program.bin".to_string();
-    let mut program_id_hex: Option<String> = None;
+    let mut program_ref: Option<String> = None; // raw --program value
     let mut dry_run = false;
     let mut type_name: Option<String> = None;
     let mut data_hex: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
+    let mut used_separator = false;
     let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
+            "--" => {
+                // Everything after `--` is passed through as instruction args
+                used_separator = true;
+                remaining_args.extend_from_slice(&args[i + 1..]);
+                break;
+            }
             "--idl" | "-i" => {
                 i += 1;
                 if i < args.len() { idl_path = args[i].clone(); }
             }
             "--program" | "-p" => {
                 i += 1;
-                if i < args.len() { program_path = args[i].clone(); }
+                if i < args.len() { program_ref = Some(args[i].clone()); }
             }
             "--program-id" => {
+                eprintln!("⚠️  --program-id is deprecated. Use --program <HEX> instead.");
                 i += 1;
-                if i < args.len() { program_id_hex = Some(args[i].clone()); }
+                if i < args.len() { program_ref = Some(args[i].clone()); }
             }
             "--type" | "-t" => {
                 i += 1;
@@ -84,6 +93,58 @@ pub async fn run() {
             _ => remaining_args.push(args[i].clone()),
         }
         i += 1;
+    }
+
+    // Load spel.toml config
+    let config = env::current_dir()
+        .ok()
+        .and_then(|cwd| SpelConfig::discover(&cwd));
+    let has_config = config.is_some();
+
+    // Resolve --program value: config name → 64-char hex → file path
+    let mut program_path: Option<String> = None;
+    let mut program_id_hex: Option<String> = None;
+
+    if let Some(ref value) = program_ref {
+        let resolved_from_config = config.as_ref().and_then(|(_, cfg)| {
+            if cfg.has_program(value) {
+                cfg.resolve_program(Some(value)).ok()
+            } else {
+                None
+            }
+        });
+
+        if let Some(prog) = resolved_from_config {
+            // Config name → set both IDL and binary from config entry
+            let config_dir = config.as_ref().unwrap().0.parent().unwrap();
+            if idl_path.is_empty() {
+                if let Some(ref idl) = prog.idl {
+                    idl_path = config_dir.join(idl).to_string_lossy().to_string();
+                }
+            }
+            program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
+        } else if is_hex_program_id(value) {
+            program_id_hex = Some(value.clone());
+        } else {
+            program_path = Some(value.clone());
+        }
+    }
+
+    // Fill gaps from config default program (when --program not given or didn't resolve IDL)
+    if let Some((ref config_path, ref cfg)) = config {
+        if program_ref.is_none() {
+            if let Ok(prog) = cfg.resolve_program(None) {
+                let config_dir = config_path.parent().unwrap();
+                if idl_path.is_empty() {
+                    if let Some(ref idl) = prog.idl {
+                        idl_path = config_dir.join(idl).to_string_lossy().to_string();
+                    }
+                }
+                if program_path.is_none() {
+                    program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
+                }
+            }
+        }
     }
 
     // Handle commands that don't need an IDL
@@ -223,10 +284,10 @@ pub async fn run() {
                 }
                 return;
             }
-            "pda" if program_id_hex.is_some() && remaining_args.get(2).map(|s| !s.starts_with("--")).unwrap_or(false) => {
+            "pda" if program_id_hex.is_some() && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) => {
                 // Raw PDA mode: no IDL needed
-                // Triggered when --program-id <hex> is passed as a global flag + pda command
-                // Usage: <bin> --program-id <hex> pda <seed1> [seed2] ...
+                // Triggered when --program <hex> resolves to a program ID + pda command
+                // Usage: <bin> --program <hex> pda <seed1> [seed2] ...
                 let mut raw_args = vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
                 raw_args.extend_from_slice(&remaining_args[2..]);
                 compute_pda_raw(&raw_args);
@@ -237,7 +298,9 @@ pub async fn run() {
     }
 
     if idl_path.is_empty() {
-        eprintln!("Usage: {} --idl <IDL_FILE> <COMMAND> [ARGS]", args[0]);
+        eprintln!("Usage: {} [OPTIONS] -- <COMMAND> [ARGS]", args[0]);
+        eprintln!();
+        eprintln!("Tip: create a spel.toml with [program] or [programs.<name>] to avoid passing flags.");
         eprintln!();
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new SPEL project");
@@ -246,8 +309,8 @@ pub async fn run() {
         eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
         eprintln!();
         eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
-        eprintln!("  pda --program-id <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
-        eprintln!("For all other commands, provide an IDL JSON file.");
+        eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
+        eprintln!("For all other commands, provide an IDL file via --idl or spel.toml.");
         process::exit(1);
     }
 
@@ -292,7 +355,7 @@ pub async fn run() {
             inspect_binaries(&remaining_args[2..]);
         }
         Some("pda") => {
-            compute_pda_command(&idl, &program_path, program_id_hex.as_deref(), &remaining_args[2..]);
+            compute_pda_command(&idl, program_path.as_deref(), program_id_hex.as_deref(), &remaining_args[2..]);
         }
         Some(cmd) => {
             let instruction = idl.instructions.iter().find(|ix| {
@@ -301,9 +364,15 @@ pub async fn run() {
 
             match instruction {
                 Some(ix) => {
+                    if !used_separator && !has_config {
+                        eprintln!("⚠️  Deprecation: mixing CLI and instruction args without '--' separator.");
+                        eprintln!("    Consider adding a spel.toml to your project, or use:");
+                        eprintln!("      spel --idl <FILE> -- <command> --arg1 value1");
+                        eprintln!();
+                    }
                     let cli_args = parse_instruction_args(&remaining_args[2..], ix);
                     execute_instruction(
-                        &idl, ix, &cli_args, &program_path, program_id_hex.as_deref(), dry_run, &extra_bins,
+                        &idl, ix, &cli_args, program_path.as_deref(), program_id_hex.as_deref(), dry_run, &extra_bins,
                     ).await;
                 }
                 None => {
@@ -322,7 +391,7 @@ pub async fn run() {
 ///
 /// Looks up the named account across all instructions, finds its PDA seeds,
 /// resolves them using provided args, and prints the base58 AccountId.
-fn compute_pda_command(idl: &SpelIdl, program_path: &str, program_id_hex: Option<&str>, args: &[String]) {
+fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex: Option<&str>, args: &[String]) {
     let account_name = match args.first() {
         Some(n) => n.as_str(),
         None => {
@@ -404,7 +473,7 @@ fn compute_pda_command(idl: &SpelIdl, program_path: &str, program_id_hex: Option
 
     let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid --program-id '{}': {}", hex, e);
+            eprintln!("❌ Invalid program ID '{}': {}", hex, e);
             std::process::exit(1);
         });
         let mut pid = [0u32; 8];
@@ -412,19 +481,25 @@ fn compute_pda_command(idl: &SpelIdl, program_path: &str, program_id_hex: Option
             pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         pid
-    } else if !program_path.is_empty() && std::path::Path::new(program_path).exists() {
-        let program_bytes = std::fs::read(program_path).unwrap_or_else(|e| {
-            eprintln!("❌ Cannot read program binary '{}': {}", program_path, e);
+    } else if let Some(path) = program_path {
+        if std::path::Path::new(path).exists() {
+            let program_bytes = std::fs::read(path).unwrap_or_else(|e| {
+                eprintln!("❌ Cannot read program binary '{}': {}", path, e);
+                std::process::exit(1);
+            });
+            Program::new(program_bytes).unwrap_or_else(|e| {
+                eprintln!("❌ Invalid program binary: {:?}", e);
+                std::process::exit(1);
+            }).id()
+        } else {
+            eprintln!("❌ Program binary not found: {}", path);
             std::process::exit(1);
-        });
-        Program::new(program_bytes).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid program binary: {:?}", e);
-            std::process::exit(1);
-        }).id()
+        }
     } else {
         eprintln!("❌ Program ID required to compute PDA.");
-        eprintln!("   Pass --program-id <64-char-hex>  (preferred)");
-        eprintln!("   Or  --program <path-to-binary>");
+        eprintln!("   Pass --program <name>           (from spel.toml)");
+        eprintln!("   Or   --program <64-char-hex>    (program ID)");
+        eprintln!("   Or   --program <path-to-binary>");
         std::process::exit(1);
     };
 
@@ -530,4 +605,9 @@ fn compute_pda_raw(args: &[String]) {
     let pda_seed = PdaSeed::new(combined);
     let account_id = AccountId::from((&program_id, &pda_seed));
     println!("{}", account_id);
+}
+
+/// Check if a string is a 64-character hex program ID.
+fn is_hex_program_id(s: &str) -> bool {
+    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
