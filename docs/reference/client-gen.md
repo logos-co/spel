@@ -1,15 +1,15 @@
 # Client Code Generation
 
-`lez-client-gen` generates typed Rust client code and C FFI wrappers from LEZ program IDL JSON. Useful for integrating LEZ programs into applications (e.g., C++/Qt desktop apps).
+`spel-client-gen` generates typed Rust client code and C FFI wrappers from LEZ program IDL JSON. Useful for integrating LEZ programs into applications (e.g., C++/Qt desktop apps).
 
 For a guided walkthrough, see the [Tutorial](../tutorial.md). For other reference topics, see the [Reference Index](README.md).
 
 ---
 
-## lez-client-gen CLI Usage
+## spel-client-gen CLI Usage
 
 ```bash
-lez-client-gen --idl <PATH> --out-dir <DIR>
+spel-client-gen --idl <PATH> --out-dir <DIR>
 ```
 
 | Option | Required | Description |
@@ -30,7 +30,7 @@ lez-client-gen --idl <PATH> --out-dir <DIR>
 **Example:**
 
 ```bash
-lez-client-gen --idl multisig-idl.json --out-dir generated/
+spel-client-gen --idl multisig-idl.json --out-dir generated/
 
 # Output:
 # Generated:
@@ -42,14 +42,14 @@ lez-client-gen --idl multisig-idl.json --out-dir generated/
 ## Library API
 
 ```rust
-use lez_client_gen::{generate_from_idl_json, generate_from_idl, CodegenOutput};
+use spel_client_gen::{generate_from_idl_json, generate_from_idl, CodegenOutput};
 
 // From JSON string
 let json = std::fs::read_to_string("idl.json")?;
 let output: CodegenOutput = generate_from_idl_json(&json)?;
 
 // From parsed IDL
-let idl: LezIdl = serde_json::from_str(&json)?;
+let idl: SpelIdl = serde_json::from_str(&json)?;
 let output: CodegenOutput = generate_from_idl(&idl)?;
 
 // Write output files
@@ -188,7 +188,7 @@ char* my_multisig_version(void);
 1. **Generate the FFI:**
 
 ```bash
-lez-client-gen --idl my_program-idl.json --out-dir ffi/
+spel-client-gen --idl my_program-idl.json --out-dir ffi/
 ```
 
 2. **Build as a shared library** by adding to your `Cargo.toml`:

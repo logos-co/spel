@@ -36,21 +36,21 @@ Before you begin, make sure you have:
 - **RISC Zero toolchain** — [install instructions](https://dev.risczero.com/api/zkvm/install)
 - **NSSA wallet CLI** (`wallet` binary) — for account creation and transaction signing
 - A **running sequencer** — the network node that accepts transactions
-- **lez-cli** installed:
+- **spel** installed:
 
 ```bash
 # From the SPEL repo
-cargo install --path lez-cli
+cargo install --path spel-cli   # installs as the `spel` binary
 ```
 
 ---
 
 ## Step 1: Scaffold the Project
 
-Use `lez-cli init` to create a new project:
+Use `spel init` to create a new project:
 
 ```bash
-lez-cli init my-counter
+spel init my-counter
 cd my-counter
 ```
 
@@ -117,7 +117,7 @@ This is the core of your program. Edit `methods/guest/src/bin/my_counter.rs`:
 
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::AccountPostState;
-use lez_framework::prelude::*;
+use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -136,20 +136,20 @@ mod my_counter {
         counter: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-    ) -> LezResult {
+    ) -> SpelResult {
         // Serialize initial state into the account data
         let state = my_counter_core::CounterState {
             count: 0,
             owner: *owner.account_id.value(),
         };
-        let data = borsh::to_vec(&state).map_err(|e| LezError::SerializationError {
+        let data = borsh::to_vec(&state).map_err(|e| SpelError::SerializationError {
             message: e.to_string(),
         })?;
 
         let mut new_account = counter.account.clone();
         new_account.data = data.try_into().unwrap();
 
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new_claimed(new_account),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -166,11 +166,11 @@ mod my_counter {
         #[account(signer)]
         owner: AccountWithMetadata,
         amount: u64,
-    ) -> LezResult {
+    ) -> SpelResult {
         // Deserialize current state
         let mut state: my_counter_core::CounterState =
             borsh::from_slice(&counter.account.data).map_err(|e| {
-                LezError::DeserializationError {
+                SpelError::DeserializationError {
                     account_index: 0,
                     message: e.to_string(),
                 }
@@ -178,24 +178,24 @@ mod my_counter {
 
         // Verify the signer is the owner
         if *owner.account_id.value() != state.owner {
-            return Err(LezError::Unauthorized {
+            return Err(SpelError::Unauthorized {
                 message: "Only the owner can increment".to_string(),
             });
         }
 
         // Increment with overflow check
-        state.count = state.count.checked_add(amount).ok_or(LezError::Overflow {
+        state.count = state.count.checked_add(amount).ok_or(SpelError::Overflow {
             operation: "counter increment".to_string(),
         })?;
 
         // Serialize updated state
-        let data = borsh::to_vec(&state).map_err(|e| LezError::SerializationError {
+        let data = borsh::to_vec(&state).map_err(|e| SpelError::SerializationError {
             message: e.to_string(),
         })?;
         let mut updated = counter.account.clone();
         updated.data = data.try_into().unwrap();
 
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(updated),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -209,17 +209,17 @@ mod my_counter {
     pub fn get_count(
         #[account(pda = literal("counter"))]
         counter: AccountWithMetadata,
-    ) -> LezResult {
+    ) -> SpelResult {
         let state: my_counter_core::CounterState =
             borsh::from_slice(&counter.account.data).map_err(|e| {
-                LezError::DeserializationError {
+                SpelError::DeserializationError {
                     account_index: 0,
                     message: e.to_string(),
                 }
             })?;
 
         // Return account unchanged (read-only)
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(counter.account.clone()),
         ]))
     }
@@ -232,7 +232,7 @@ Let's break down what's happening:
 
 1. **`#[lez_program]`** — wraps your module and generates the guest `main()`, instruction dispatch, and IDL.
 
-2. **`#[instruction]`** — marks each function as an on-chain instruction. The function name becomes a CLI subcommand (e.g., `increment` → `lez-cli increment`).
+2. **`#[instruction]`** — marks each function as an on-chain instruction. The function name becomes a CLI subcommand (e.g., `increment` → `spel increment`).
 
 3. **`#[account(init, pda = literal("counter"))]`** — the counter account is a PDA (Program Derived Address) derived from the string `"counter"` and the program ID. The `init` constraint means this account must not already exist.
 
@@ -254,7 +254,7 @@ The scaffold already created `examples/src/bin/generate_idl.rs`. Make sure it po
 
 ```rust
 /// Generate IDL JSON for the my-counter program.
-lez_framework::generate_idl!("../methods/guest/src/bin/my_counter.rs");
+spel_framework::generate_idl!("../methods/guest/src/bin/my_counter.rs");
 ```
 
 This reads your program source at compile time and generates a `main()` that prints the complete IDL as JSON. The IDL describes all instructions, their accounts, arguments, PDA seeds, and types.
@@ -268,7 +268,7 @@ The scaffold already created `examples/src/bin/my_counter_cli.rs`:
 ```rust
 #[tokio::main]
 async fn main() {
-    lez_cli::run().await;
+    spel_cli::run().await;
 }
 ```
 
@@ -400,10 +400,24 @@ Save the hex ImageID — you'll need it for CLI commands.
 
 ## Step 8: Interact with Your Program
 
+### Set up `spel.toml` (optional, recommended)
+
+The scaffold creates a `spel.toml` in your project root:
+
+```toml
+[program]
+idl    = "my-counter-idl.json"
+binary = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin"
+```
+
+With this file in place, `spel` auto-discovers the IDL and binary — you can drop `-i`/`-p` flags and call subcommands directly. All examples below show both variants.
+
 ### See available commands
 
 ```bash
-make cli ARGS="--help"
+spel --help                # with spel.toml
+# or
+spel --idl my-counter-idl.json --help
 ```
 
 Output:
@@ -412,7 +426,8 @@ Output:
 🔧 my_counter v0.1.0 — IDL-driven CLI
 
 USAGE:
-  my_counter_cli [OPTIONS] <COMMAND> [ARGS]
+  spel <COMMAND> [ARGS]                  (with spel.toml)
+  spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
 
 COMMANDS:
   inspect <FILE> [FILE...]   Print ProgramId for ELF binary(ies)
@@ -427,16 +442,35 @@ Notice how the CLI auto-generated commands from your IDL:
 - Instruction arguments (`amount`) are typed
 - Account arguments (`owner`) expect base58 or hex
 
-### Initialize the counter
+### The `--` separator
+
+When invoking `spel` **without** a `spel.toml`, global options (`--idl`, `--program`, `--dry-run`) must come before a `--` separator, and the instruction plus its `--arg` flags come after:
 
 ```bash
-make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin \
+spel --idl my-counter-idl.json --program ./my_counter.bin -- \
+  increment --amount 5 --owner-account <BASE58>
+```
+
+Without `--`, the first `--amount` would be consumed as a global flag and error out. With a `spel.toml`, no separator is needed because there are no global flags in play.
+
+### Initialize the counter
+
+With `spel.toml`:
+
+```bash
+spel initialize --owner-account <YOUR_SIGNER_BASE58>
+```
+
+Without `spel.toml` (via `make cli`, which forwards `ARGS`):
+
+```bash
+make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin -- \
   initialize --owner-account <YOUR_SIGNER_BASE58>"
 ```
 
 The CLI will:
-1. Load the program binary to get the ProgramId
-2. Compute the `counter` PDA from the seed `"counter"` + ProgramId
+1. Load the program binary (or resolve it from `spel.toml`) to get the ProgramId
+2. Compute the `counter` PDA from the seed `"counter"` + ProgramId (and print the seeds it used)
 3. Fetch the nonce for the signer account from the wallet
 4. Build and sign the transaction
 5. Submit to the sequencer
@@ -445,37 +479,65 @@ The CLI will:
 ### Increment the counter
 
 ```bash
-make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin \
-  increment --amount 5 --owner-account <YOUR_SIGNER_BASE58>"
+spel increment --amount 5 --owner-account <YOUR_SIGNER_BASE58>
 ```
 
-### Use `--program-id` to skip loading the binary
+### Pass a raw program ID instead of a binary
 
-If you know the program ID, you can skip loading the binary:
+`--program` accepts three forms: a name from `spel.toml`, a 64-character hex program ID, or a file path to the ELF binary. Using the hex ID skips loading the binary and is faster:
 
 ```bash
-make cli ARGS="--program-id <64-CHAR-HEX> \
-  increment --amount 10 --owner-account <YOUR_SIGNER_BASE58>"
+spel --idl my-counter-idl.json --program <64-CHAR-HEX> -- \
+  increment --amount 10 --owner-account <YOUR_SIGNER_BASE58>
 ```
 
 ### Dry run (no submission)
 
-Add `--dry-run` to see what would be submitted without actually sending:
+`--dry-run` resolves the whole transaction (PDAs, accounts, signer nonces, serialized data) and prints it without submitting:
 
 ```bash
-make cli ARGS="--dry-run -p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin \
-  increment --amount 5 --owner-account <YOUR_SIGNER_BASE58>"
+spel --dry-run increment --amount 5 --owner-account <BASE58>
 ```
 
-This prints the parsed arguments, serialized instruction data, and account IDs without submitting.
+Typical text output:
+
+```
+=== Dry Run ===
+Program ID: 3930000032920100...
+Instruction: increment
+
+Accounts:
+  PDA counter → 4Lp3gkH... [writable]
+    seeds: [program_id, "counter"]
+  owner → 0xccdd...00 [signer]
+
+Arguments:
+  --amount 5
+
+Instruction data: 0x010000000500000000000000
+
+Signers:
+  owner: nonce=42
+================
+Dry run complete — not submitted.
+```
+
+For machine-readable output (e.g. in CI golden tests or `jq` pipelines), use `--dry-run=json`:
+
+```bash
+spel --dry-run=json increment --amount 5 --owner-account <BASE58> | jq .
+```
+
+In JSON mode all human preamble is suppressed — only the JSON document goes to stdout.
 
 ### Compute the counter PDA manually
 
 ```bash
-make cli ARGS="--program-id <64-CHAR-HEX> pda counter"
+spel pda counter                                      # with spel.toml
+spel --idl my-counter-idl.json --program <HEX> pda counter
 ```
 
-This prints the base58 AccountId of the counter PDA.
+This prints the base58 AccountId of the counter PDA. The output also echoes the seed inputs used for derivation, e.g. `seeds: [program_id, "counter"]` — useful for debugging PDA mismatches across clients.
 
 ---
 
@@ -540,14 +602,14 @@ fn main() {
 **3. Validation Functions**
 
 ```rust
-pub fn __validate_initialize(accounts: &[AccountWithMetadata]) -> Result<(), LezError> {
+pub fn __validate_initialize(accounts: &[AccountWithMetadata]) -> Result<(), SpelError> {
     // init check: counter must be default
     if accounts[0].account != Account::default() {
-        return Err(LezError::AccountAlreadyInitialized { account_index: 0 });
+        return Err(SpelError::AccountAlreadyInitialized { account_index: 0 });
     }
     // signer check: owner must be authorized
     if !accounts[1].is_authorized {
-        return Err(LezError::Unauthorized {
+        return Err(SpelError::Unauthorized {
             message: "Account 'owner' (index 1) must be a signer".to_string(),
         });
     }
@@ -559,7 +621,7 @@ pub fn __validate_initialize(accounts: &[AccountWithMetadata]) -> Result<(), Lez
 
 ```rust
 pub const PROGRAM_IDL_JSON: &str = r#"{"version":"0.1.0","name":"my_counter",...}"#;
-pub fn __program_idl() -> LezIdl { ... }
+pub fn __program_idl() -> SpelIdl { ... }
 ```
 
 ### Account Validation
@@ -568,8 +630,8 @@ The framework generates automatic validation checks that run before your handler
 
 | Attribute | Check | Error |
 |-----------|-------|-------|
-| `signer` | `is_authorized == true` | `LezError::Unauthorized` |
-| `init` | `account == Account::default()` | `LezError::AccountAlreadyInitialized` |
+| `signer` | `is_authorized == true` | `SpelError::Unauthorized` |
+| `init` | `account == Account::default()` | `SpelError::AccountAlreadyInitialized` |
 
 These checks are generated per-instruction. If an instruction has no `signer` or `init` accounts, no validation function is generated.
 
@@ -633,7 +695,7 @@ mod multisig {
 }
 ```
 
-The IDL will include `"instruction_type": "multisig_core::Instruction"`, which tells `lez-client-gen` to import and use the shared type in generated FFI code.
+The IDL will include `"instruction_type": "multisig_core::Instruction"`, which tells `spel-client-gen` to import and use the shared type in generated FFI code.
 
 ### Variable-Length Accounts
 
@@ -646,7 +708,7 @@ pub fn multi_approve(
     state: AccountWithMetadata,
     #[account(signer)]
     members: Vec<AccountWithMetadata>,
-) -> LezResult {
+) -> SpelResult {
     // members can contain 0, 1, 2, ... accounts
     for member in &members {
         // validate each member
@@ -658,7 +720,7 @@ pub fn multi_approve(
 In the CLI, pass rest accounts as a comma-separated list:
 
 ```bash
-lez-cli ... multi-approve --members-account "addr1,addr2,addr3"
+spel multi-approve --members-account "addr1,addr2,addr3"
 ```
 
 Rest accounts are always optional (0 entries is valid). The macro splits `pre_states` into fixed accounts (before the rest) and the variadic tail.
@@ -672,14 +734,14 @@ Instructions can trigger calls to other programs by returning `ChainedCall`s:
 pub fn transfer_and_notify(
     // ... accounts ...
     amount: u64,
-) -> LezResult {
+) -> SpelResult {
     // ... transfer logic ...
 
     let chained_call = ChainedCall {
         // ... target program and instruction data ...
     };
 
-    Ok(LezOutput::with_chained_calls(
+    Ok(SpelOutput::with_chained_calls(
         vec![/* post states */],
         vec![chained_call],
     ))
@@ -688,10 +750,10 @@ pub fn transfer_and_notify(
 
 ### Client Code Generation
 
-For integrating LEZ programs into applications (e.g., a C++/Qt desktop app), use `lez-client-gen` to generate typed bindings:
+For integrating LEZ programs into applications (e.g., a C++/Qt desktop app), use `spel-client-gen` to generate typed bindings:
 
 ```bash
-lez-client-gen --idl my-counter-idl.json --out-dir generated/
+spel-client-gen --idl my-counter-idl.json --out-dir generated/
 ```
 
 This produces three files:
@@ -738,7 +800,7 @@ cargo build --release --lib
 
 - **Read the [Reference](reference/README.md)** for complete API documentation
 - **Study [lez-multisig](https://github.com/logos-co/lez-multisig)** for a production-quality example with multi-seed PDAs, variable-length accounts, and external instruction enums
-- **Generate client code** with `lez-client-gen` for integrating your program into applications
+- **Generate client code** with `spel-client-gen` for integrating your program into applications
 - **Write tests** — the `#[cfg(not(test))]` gate on `main()` means your handlers are directly callable in host-side tests:
 
 ```rust

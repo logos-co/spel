@@ -7,7 +7,7 @@ Full workflow for creating, building, deploying, and interacting with a LEZ prog
 ## 1. Scaffold
 
 ```bash
-lez-cli init my-program
+spel init my-program
 cd my-program
 ```
 
@@ -17,6 +17,7 @@ Generated structure:
 my-program/
 ├── Cargo.toml                          # workspace
 ├── Makefile                            # build, idl, cli, deploy, inspect, setup targets
+├── spel.toml                           # [program] config — `spel` auto-discovers idl/binary
 ├── my_program_core/src/lib.rs          # shared types
 ├── methods/guest/src/bin/my_program.rs # on-chain guest binary
 ├── examples/src/bin/
@@ -50,7 +51,7 @@ Edit `methods/guest/src/bin/my_program.rs`:
 
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::AccountPostState;
-use lez_framework::prelude::*;
+use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -65,16 +66,16 @@ mod my_program {
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-    ) -> LezResult {
+    ) -> SpelResult {
         let data = borsh::to_vec(&my_program_core::MyState {
             value: 0,
             owner: *owner.account_id.value(),
-        }).map_err(|e| LezError::SerializationError { message: e.to_string() })?;
+        }).map_err(|e| SpelError::SerializationError { message: e.to_string() })?;
 
         let mut new_account = state.account.clone();
         new_account.data = data.try_into().unwrap();
 
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new_claimed(new_account),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -87,26 +88,26 @@ mod my_program {
         #[account(signer)]
         owner: AccountWithMetadata,
         new_value: u64,
-    ) -> LezResult {
+    ) -> SpelResult {
         let mut current: my_program_core::MyState =
             borsh::from_slice(&state.account.data)
-                .map_err(|e| LezError::DeserializationError {
+                .map_err(|e| SpelError::DeserializationError {
                     account_index: 0, message: e.to_string(),
                 })?;
 
         if *owner.account_id.value() != current.owner {
-            return Err(LezError::Unauthorized {
+            return Err(SpelError::Unauthorized {
                 message: "Only the owner can update".to_string(),
             });
         }
 
         current.value = new_value;
         let data = borsh::to_vec(&current)
-            .map_err(|e| LezError::SerializationError { message: e.to_string() })?;
+            .map_err(|e| SpelError::SerializationError { message: e.to_string() })?;
         let mut updated = state.account.clone();
         updated.data = data.try_into().unwrap();
 
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(updated),
             AccountPostState::new(owner.account.clone()),
         ]))
@@ -119,7 +120,7 @@ mod my_program {
 `examples/src/bin/generate_idl.rs` (scaffold creates this):
 
 ```rust
-lez_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
+spel_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
 ```
 
 Path is relative to `CARGO_MANIFEST_DIR` (the `examples/` crate).
@@ -131,7 +132,7 @@ Path is relative to `CARGO_MANIFEST_DIR` (the `examples/` crate).
 ```rust
 #[tokio::main]
 async fn main() {
-    lez_cli::run().await;
+    spel_cli::run().await;
 }
 ```
 
@@ -159,33 +160,40 @@ Save the 64-char hex ImageID from `make inspect` output.
 
 ## 9. Call Instructions
 
+With the scaffold-generated `spel.toml` in the project root, `spel` discovers the IDL and binary automatically — no `-i`/`-p` or `--` separator needed.
+
 ```bash
 # See available commands
-make cli ARGS="--help"
+spel --help
 
 # Initialize (PDA accounts auto-computed, not passed as args)
-make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin \
-  initialize --owner-account <SIGNER_BASE58>"
+spel initialize --owner-account <SIGNER_BASE58>
 
 # Update with argument
-make cli ARGS="-p methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin \
-  update --new-value 42 --owner-account <SIGNER_BASE58>"
+spel update --new-value 42 --owner-account <SIGNER_BASE58>
 
-# Use --program-id to skip binary loading
-make cli ARGS="--program-id <64-CHAR-HEX> \
-  update --new-value 100 --owner-account <SIGNER_BASE58>"
+# Use a raw 64-char hex program ID to skip binary loading
+spel --program <64-CHAR-HEX> -- update --new-value 100 --owner-account <SIGNER_BASE58>
 
-# Dry run (no submission)
-make cli ARGS="--dry-run -p methods/guest/target/...bin update --new-value 5 --owner-account <ADDR>"
+# Dry run (text-default; add =json for machine-readable output)
+spel --dry-run update --new-value 5 --owner-account <ADDR>
+spel --dry-run=json update --new-value 5 --owner-account <ADDR> | jq .
 
-# Compute PDA manually
-make cli ARGS="--program-id <64-CHAR-HEX> pda state"
+# Compute PDA manually — output echoes seed inputs, e.g. `seeds: [program_id, "state"]`
+spel pda state
+```
+
+When running without a `spel.toml`, pass `--idl`/`--program` before a `--` separator:
+
+```bash
+spel -i my-program-idl.json -p methods/guest/target/.../my_program.bin -- \
+  update --new-value 42 --owner-account <SIGNER_BASE58>
 ```
 
 ## 10. Generate Client Code (optional)
 
 ```bash
-lez-client-gen --idl my-program-idl.json --out-dir generated/
+spel-client-gen --idl my-program-idl.json --out-dir generated/
 ```
 
 Produces:

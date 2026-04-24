@@ -1,6 +1,6 @@
 # CLI
 
-The `lez-cli` crate provides a generic, IDL-driven command-line interface for any LEZ program. Programs get a complete CLI by writing a three-line wrapper.
+The `spel-cli` crate provides a generic, IDL-driven command-line interface for any SPEL program. Programs get a complete CLI by writing a three-line wrapper — the binary is named `spel`.
 
 For a guided walkthrough, see the [Tutorial](../tutorial.md). For other reference topics, see the [Reference Index](README.md).
 
@@ -11,9 +11,58 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md). For other referenc
 ```rust
 #[tokio::main]
 async fn main() {
-    lez_cli::run().await;
+    spel_cli::run().await;
 }
 ```
+
+---
+
+## Invocation Syntax
+
+```
+spel <COMMAND> [ARGS]                  (with spel.toml)
+spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
+```
+
+The `--` separator is required whenever you pass global `OPTIONS` (like `--idl` or `--program`) together with a command that also takes its own `--`-flags. Without it, the first `--foo` after the command name would be parsed as a global flag, not an instruction argument.
+
+When a `spel.toml` is present in the current directory (or any ancestor), `--idl` and `--program` are resolved from it automatically — the `--` separator is not needed in that case.
+
+---
+
+## Configuration: `spel.toml`
+
+A `spel.toml` file in your project root lets you drop `--idl`/`--program` flags and makes multi-program projects ergonomic. `spel` walks up from the current directory until it finds one.
+
+**Single-program projects:**
+
+```toml
+[program]
+idl    = "my-program-idl.json"
+binary = "target/riscv32im-risc0-zkvm-elf/docker/my_program.bin"
+```
+
+**Multi-program projects:**
+
+```toml
+[programs.game]
+idl    = "game-idl.json"
+binary = "target/game.bin"
+
+[programs.nft]
+idl    = "nft-idl.json"
+binary = "target/nft.bin"
+```
+
+With a multi-program config, pick one with `--program <name>`:
+
+```bash
+spel --program game create --name "first-game"
+```
+
+When only one `[programs.<name>]` entry exists it is auto-selected; with multiple entries and no `--program <name>`, the CLI errors out listing the available names.
+
+`[program]` and `[programs]` are mutually exclusive. Paths inside the config are resolved relative to the `spel.toml` file, so invocations from subdirectories work.
 
 ---
 
@@ -21,20 +70,20 @@ async fn main() {
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--idl <FILE>` | `-i` | Path to the IDL JSON file. Required for most commands. |
-| `--program <FILE>` | `-p` | Path to the program ELF binary. Used to compute ProgramId and for deployment. Defaults to `program.bin`. |
-| `--program-id <HEX>` | | 64-character hex string of the program ID. Overrides `--program` for ProgramId resolution (faster, no binary loading). |
-| `--dry-run` | | Print parsed/serialized data without submitting the transaction. |
+| `--idl <FILE>` | `-i` | Path to the IDL JSON file. Required if not set in `spel.toml`. |
+| `--program <NAME\|HEX\|FILE>` | `-p` | Accepts one of three things: (a) a program **name** from `spel.toml` → resolves both IDL and binary; (b) a 64-char **hex program ID** → skips binary loading; (c) a **file path** to the program ELF binary. |
+| `--dry-run[=text\|json]` | | Resolve everything (PDAs, accounts, signer nonces, serialized data) and print without submitting. `--dry-run` and `--dry-run=text` produce a human-readable report; `--dry-run=json` emits a machine-readable document on stdout. |
 | `--bin-<NAME> <FILE>` | | Additional program binary. Auto-fills `--<NAME>-program-id` from the binary's image ID. Useful for cross-program references. |
+| `--program-id <HEX>` | | **Deprecated** — prefer `--program <HEX>`. Still accepted. |
 
 ---
 
 ## `init`
 
-Scaffold a new LEZ project.
+Scaffold a new SPEL project. This is the command that creates everything described below — "scaffolding" and `init` refer to the same operation.
 
 ```bash
-lez-cli init <project-name>
+spel init <project-name> [--lez-tag <TAG>] [--spel-tag <TAG>] [--lez-rev <REV>] [--spel-rev <REV>]
 ```
 
 **Does not require `--idl`.**
@@ -45,13 +94,23 @@ Creates a complete project structure with:
 - `methods/guest/` with a skeleton `#[lez_program]` guest binary
 - `examples/` with `generate_idl.rs` and `{name}_cli.rs`
 - `Makefile` with `build`, `idl`, `cli`, `deploy`, `inspect`, `setup`, `status`, `clean` targets
+- `spel.toml` (so you can run `spel` without `--idl`/`--program`)
 - `README.md` with quick start guide
 - `.gitignore`
+
+**Options:**
+
+| Flag | Purpose |
+|------|---------|
+| `--lez-tag <TAG>` | LEZ version tag to pin (e.g. `v0.2.0-rc1`). |
+| `--spel-tag <TAG>` | SPEL version tag to pin. |
+| `--lez-rev <REV>` | LEZ git revision (alternative to `--lez-tag`). |
+| `--spel-rev <REV>` | SPEL git revision (alternative to `--spel-tag`). |
 
 **Example:**
 
 ```bash
-lez-cli init my-token
+spel init my-token
 cd my-token
 # Edit methods/guest/src/bin/my_token.rs with your program logic
 make idl
@@ -62,10 +121,12 @@ make cli ARGS="--help"
 
 ## `inspect`
 
-Print the ProgramId for one or more ELF binaries.
+Two modes — the one you get depends on whether `--idl`/`--type` are set.
+
+### Mode 1: Print ProgramId for ELF binaries
 
 ```bash
-lez-cli inspect <FILE> [FILE...]
+spel inspect <FILE> [FILE...]
 ```
 
 **Does not require `--idl`.**
@@ -79,15 +140,27 @@ lez-cli inspect <FILE> [FILE...]
    ImageID (hex bytes): 393000009b210100...
 ```
 
-The three formats:
 - **Decimal**: comma-separated `[u32; 8]` values
 - **Hex**: comma-separated hex `[u32; 8]` values
-- **ImageID hex bytes**: 64-character hex string (little-endian byte representation)
+- **ImageID hex bytes**: 64-character hex string (little-endian byte representation). This is the value to pass to `--program <HEX>`.
 
 **Example:**
 
 ```bash
-lez-cli inspect methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin
+spel inspect methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin
+```
+
+### Mode 2: Decode account data
+
+```bash
+spel inspect <ACCOUNT-ID> --idl <IDL_FILE> --type <TYPE> [--data <BORSH_HEX>]
+```
+
+Fetches the account (or decodes supplied borsh-hex bytes) and renders the data as JSON using the IDL-declared type.
+
+```bash
+spel inspect <account-id> --idl my_program-idl.json --type VaultState
+spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
 ```
 
 ---
@@ -97,14 +170,30 @@ lez-cli inspect methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.
 Print the loaded IDL as pretty-printed JSON.
 
 ```bash
-lez-cli --idl <IDL_FILE> idl
+spel --idl <IDL_FILE> idl
 ```
 
-**Example:**
+With `spel.toml`:
 
 ```bash
-lez-cli -i my_program-idl.json idl
+spel idl
 ```
+
+---
+
+## `generate-idl`
+
+Generate IDL JSON directly from a program source file. Useful if you don't want a runtime `examples/generate_idl.rs` binary.
+
+```bash
+spel generate-idl <PATH>
+```
+
+**Does not require `--idl`.**
+
+- `<PATH>` may be a single source file, or a project directory to search for `#[lez_program]` entry points.
+- Single match → IDL JSON printed to stdout.
+- Multiple matches → one `<name>-idl.json` file written per program.
 
 ---
 
@@ -113,32 +202,32 @@ lez-cli -i my_program-idl.json idl
 Compute a PDA address from the IDL-defined seeds.
 
 ```bash
-lez-cli --idl <IDL_FILE> [-p <PROGRAM> | --program-id <HEX>] pda <ACCOUNT_NAME> [--<seed-arg> <value> ...]
+spel --idl <IDL_FILE> --program <NAME|HEX|FILE> pda <ACCOUNT_NAME> [--<seed-arg> <value> ...]
 ```
 
 Looks up the named account across all instructions in the IDL, finds its PDA seed definition, resolves all seeds, and prints the base58 AccountId.
 
 **Seed resolution:**
 - `const` seeds: resolved from the IDL definition
-- `arg` seeds: must be provided via `--<arg-name> <value>`
+- `arg` seeds: must be provided via `--<arg-name> <value>` (parsed through the IDL type of the owning instruction's argument)
 - `account` seeds: must be provided via `--<account-name>-account <hex|base58>`
 
 **ProgramId resolution** (in priority order):
-1. `--program-id <hex>` flag
-2. Load from `--program <path>` binary
+1. `--program <64-char-hex>`
+2. `--program <name-from-spel.toml>` → resolved binary loaded
+3. `--program <path>` → binary loaded
 
 **Example:**
 
 ```bash
 # Simple PDA with only const seeds
-lez-cli -i my_program-idl.json --program-id abc123...def pda counter
+spel --idl my_program-idl.json --program abc123...def pda counter
 
-# PDA with arg seed
-lez-cli -i multisig-idl.json --program-id abc123...def pda multisig_state \
-  --create-key 0a1b2c...
+# PDA with arg seed (with spel.toml set up)
+spel pda multisig_state --create-key 0a1b2c...
 
 # List available PDAs
-lez-cli -i my_program-idl.json pda
+spel --idl my_program-idl.json pda
 ```
 
 **If no account name is given**, prints all PDA accounts found in the IDL.
@@ -150,7 +239,7 @@ lez-cli -i my_program-idl.json pda
 Compute an arbitrary PDA from a program ID and raw seeds — no IDL required.
 
 ```bash
-lez-cli --program-id <64-CHAR-HEX> pda <SEED1> [SEED2] ...
+spel --program <64-CHAR-HEX> pda <SEED1> [SEED2] ...
 ```
 
 **Does not require `--idl`.**
@@ -167,10 +256,10 @@ Each seed can be:
 
 ```bash
 # Single seed
-lez-cli --program-id abc123...def pda my_state_name
+spel --program abc123...def pda my_state_name
 
 # Multiple seeds
-lez-cli --program-id abc123...def pda multisig_vault__ 0a1b2c3d...
+spel --program abc123...def pda multisig_vault__ 0a1b2c3d...
 ```
 
 ---
@@ -180,7 +269,13 @@ lez-cli --program-id abc123...def pda multisig_vault__ 0a1b2c3d...
 Execute any instruction defined in the IDL. The CLI auto-generates subcommands from the IDL.
 
 ```bash
-lez-cli --idl <IDL_FILE> [-p <PROGRAM> | --program-id <HEX>] <INSTRUCTION> [--<arg> <value> ...] [--<account>-account <hex|base58> ...]
+spel --idl <IDL_FILE> --program <NAME|HEX|FILE> -- <INSTRUCTION> [--<arg> <value> ...] [--<account>-account <hex|base58> ...]
+```
+
+With `spel.toml`:
+
+```bash
+spel <INSTRUCTION> [--<arg> <value> ...] [--<account>-account <hex|base58> ...]
 ```
 
 Instruction names are converted from `snake_case` to `kebab-case` in CLI commands (e.g., `create_proposal` → `create-proposal`).
@@ -197,7 +292,7 @@ Instruction names are converted from `snake_case` to `kebab-case` in CLI command
 1. Parse and validate all arguments
 2. Auto-fill program IDs from `--bin-*` flags
 3. Serialize instruction data in risc0 serde format
-4. Resolve PDA accounts from seeds
+4. Resolve PDA accounts from seeds (printing each seed input it used)
 5. Initialize wallet from `NSSA_WALLET_HOME_DIR` environment variable
 6. Fetch nonces for signer accounts
 7. Build, sign, and submit the transaction
@@ -206,34 +301,98 @@ Instruction names are converted from `snake_case` to `kebab-case` in CLI command
 **Per-instruction help:**
 
 ```bash
-lez-cli --idl <IDL_FILE> <INSTRUCTION> --help
+spel <INSTRUCTION> --help
 ```
 
 Shows accounts (with flags like `[mut, signer, init]`), PDA status, and argument types.
 
-**Example:**
+**Example (no spel.toml):**
 
 ```bash
 # Execute a create instruction
-lez-cli -i multisig-idl.json -p multisig.bin create \
+spel --idl multisig-idl.json --program multisig.bin -- create \
   --create-key 0a1b2c3d4e5f... \
   --threshold 2 \
   --members "aabb...00,ccdd...00" \
   --creator-account EjR7...base58
 
-# Dry run (no submission)
-lez-cli -i multisig-idl.json --program-id abc123...def --dry-run approve \
-  --proposal-id 5 \
-  --proposal-account aabb...00 \
-  --member-account ccdd...00
-
 # Auto-fill cross-program reference
-lez-cli -i treasury-idl.json -p treasury.bin \
-  --bin-token token.bin \
+spel --idl treasury-idl.json --program treasury.bin \
+  --bin-token token.bin -- \
   transfer --amount 100 \
   --from-account aabb...00 \
   --to-account ccdd...00
 ```
+
+**Example (with spel.toml in the project root):**
+
+```bash
+spel create \
+  --create-key 0a1b2c3d4e5f... \
+  --threshold 2 \
+  --members "aabb...00,ccdd...00" \
+  --creator-account EjR7...base58
+```
+
+---
+
+## Dry Run
+
+`--dry-run` resolves the entire transaction — PDAs, non-PDA account IDs, signer nonces, serialized instruction bytes — and prints it without submitting. Useful for CI golden tests, for previewing a TX before signing, and for scripting.
+
+```bash
+spel --dry-run <INSTRUCTION> --arg1 value1           # text, human-readable (default)
+spel --dry-run=text <INSTRUCTION> --arg1 value1      # same as above, explicit
+spel --dry-run=json <INSTRUCTION> --arg1 value1      # machine-readable JSON
+```
+
+**Text output:**
+
+```
+=== Dry Run ===
+Program ID: abc123...def
+Instruction: transfer
+
+Accounts:
+  PDA vault → 4Lp3gkH... [writable]
+    seeds: [program_id, "state"]
+  recipient → 0xaabb...00
+  sender → 0xccdd...00 [signer]
+
+Arguments:
+  --amount 1000
+
+Instruction data: 0x01000000e803000000000000...
+
+Signers:
+  sender: nonce=42
+================
+Dry run complete — not submitted.
+```
+
+**JSON output (shape):**
+
+```json
+{
+  "program_id": "abc123...def",
+  "instruction": "transfer",
+  "accounts": [
+    {
+      "name": "vault", "id": "4Lp3gkH...", "flags": ["writable"],
+      "is_pda": true,
+      "seeds": [{"kind": "const", "value": "state"}]
+    },
+    { "name": "sender", "id": "0xccdd...00", "flags": ["signer"] }
+  ],
+  "arguments": { "amount": 1000 },
+  "instruction_data": "01000000e803000000000000...",
+  "signers": { "sender": {"nonce": "42"} }
+}
+```
+
+Numeric values that exceed JSON's 53-bit integer precision (`u128` args and nonces) are emitted as decimal strings to avoid silent truncation.
+
+In JSON mode, all human-readable preamble is suppressed — only the JSON document goes to stdout — so it's safe to pipe through `jq`.
 
 ---
 
@@ -264,9 +423,9 @@ How to pass values for each IDL type on the command line:
 
 ---
 
-## Serialization (lez-cli internals)
+## Serialization (spel-cli internals)
 
-The CLI serializes instruction data in **risc0 serde format** (`Vec<u32>`) for submission to the zkVM guest. The format is:
+The CLI serializes instruction data using `risc0_zkvm::serde::to_vec` (risc0 serde format, `Vec<u32>`) for submission to the zkVM guest. The format is:
 
 ```
 [variant_index: u32, field1_words..., field2_words..., ...]

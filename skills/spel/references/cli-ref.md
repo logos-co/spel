@@ -1,18 +1,48 @@
 # CLI Reference
 
-Condensed cheatsheet for `lez-cli` and `lez-client-gen`.
+Condensed cheatsheet for `spel` and `spel-client-gen`.
 
 ---
 
-## lez-cli Global Options
+## Invocation syntax
+
+```
+spel <COMMAND> [ARGS]                  (with spel.toml)
+spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
+```
+
+The `--` separator is required whenever global `OPTIONS` are mixed with a command that has its own `--flags`.
+
+## spel.toml (optional)
+
+Place in project root to skip `--idl`/`--program` flags. Discovered by walking up from CWD.
+
+```toml
+[program]                 # single-program
+idl    = "my-idl.json"
+binary = "target/prog.bin"
+
+# or
+
+[programs.game]           # multi-program; select with `--program game`
+idl    = "game-idl.json"
+binary = "target/game.bin"
+[programs.nft]
+idl    = "nft-idl.json"
+binary = "target/nft.bin"
+```
+
+Paths resolve relative to the `spel.toml` itself. `[program]` and `[programs]` are mutually exclusive.
+
+## Global Options
 
 | Option | Short | Description |
 |--------|-------|-------------|
-| `--idl <FILE>` | `-i` | IDL JSON file path (required for most commands) |
-| `--program <FILE>` | `-p` | Program ELF binary (computes ProgramId) |
-| `--program-id <HEX>` | | 64-char hex ProgramId (overrides `--program`) |
-| `--dry-run` | | Print parsed data without submitting transaction |
+| `--idl <FILE>` | `-i` | IDL JSON file path (required if not in `spel.toml`) |
+| `--program <NAME\|HEX\|FILE>` | `-p` | Name from `spel.toml`, 64-char hex program ID, or path to ELF binary |
+| `--dry-run[=text\|json]` | | Resolve PDAs/accounts/nonces/ix-data and print without submitting (`text` default) |
 | `--bin-<NAME> <FILE>` | | Additional binary; auto-fills `--<NAME>-program-id` |
+| `--program-id <HEX>` | | Deprecated — use `--program <HEX>` |
 
 ---
 
@@ -21,7 +51,7 @@ Condensed cheatsheet for `lez-cli` and `lez-client-gen`.
 ### init — Scaffold New Project
 
 ```bash
-lez-cli init <project-name>
+spel init <project-name>
 ```
 
 No `--idl` required. Creates full workspace with Makefile, core crate, guest binary, IDL generator, and CLI wrapper.
@@ -29,7 +59,7 @@ No `--idl` required. Creates full workspace with Makefile, core crate, guest bin
 ### inspect — Print ProgramId
 
 ```bash
-lez-cli inspect <FILE> [FILE...]
+spel inspect <FILE> [FILE...]
 ```
 
 No `--idl` required. Outputs decimal, hex, and ImageID formats for each binary.
@@ -37,13 +67,13 @@ No `--idl` required. Outputs decimal, hex, and ImageID formats for each binary.
 ```
 ProgramId (decimal): 12345,67890,...
 ProgramId (hex):     00003039,000109b2,...
-ImageID (hex bytes): 393000009b210100...    ← use this for --program-id
+ImageID (hex bytes): 393000009b210100...    ← pass to `--program <HEX>`
 ```
 
 ### idl — Print IDL
 
 ```bash
-lez-cli -i <IDL_FILE> idl
+spel -i <IDL_FILE> idl
 ```
 
 Pretty-prints the loaded IDL JSON.
@@ -51,42 +81,45 @@ Pretty-prints the loaded IDL JSON.
 ### pda (IDL mode) — Compute PDA from IDL Seeds
 
 ```bash
-lez-cli -i <IDL> [-p <BIN> | --program-id <HEX>] pda <ACCOUNT_NAME> [--<seed-arg> <value>]
+spel -i <IDL> -p <NAME|HEX|BIN> pda <ACCOUNT_NAME> [--<seed-arg> <value>]
 ```
 
-Looks up account in IDL, resolves seeds, prints base58 address.
+Looks up account in IDL, resolves seeds, prints base58 address plus seed inputs.
 
 ```bash
-# Const-only seeds
-lez-cli -i idl.json --program-id abc...def pda counter
+# With spel.toml
+spel pda counter
+spel pda multisig_state --create-key 0a1b2c...
 
-# With arg seed
-lez-cli -i idl.json --program-id abc...def pda multisig_state --create-key 0a1b2c...
-
-# With account seed
-lez-cli -i idl.json --program-id abc...def pda vault --user-account EjR7...
+# Without spel.toml
+spel -i idl.json -p abc...def pda counter
+spel -i idl.json -p abc...def pda vault --user-account EjR7...
 
 # List all PDAs
-lez-cli -i idl.json pda
+spel -i idl.json pda
 ```
 
 ### pda (raw mode) — Compute PDA Without IDL
 
 ```bash
-lez-cli --program-id <64-CHAR-HEX> pda <SEED1> [SEED2] ...
+spel --program <64-CHAR-HEX> pda <SEED1> [SEED2] ...
 ```
 
 No `--idl` required. Each seed: 64-char hex → 32 raw bytes; otherwise UTF-8 zero-padded to 32 bytes. Multi-seed: `SHA-256(seed1 || seed2 || ...)`.
 
 ```bash
-lez-cli --program-id abc...def pda my_state
-lez-cli --program-id abc...def pda multisig_vault__ 0a1b2c3d...
+spel --program abc...def pda my_state
+spel --program abc...def pda multisig_vault__ 0a1b2c3d...
 ```
 
 ### Instruction Execution
 
 ```bash
-lez-cli -i <IDL> [-p <BIN> | --program-id <HEX>] <INSTRUCTION> [--<arg> <val>] [--<account>-account <id>]
+# With spel.toml
+spel <INSTRUCTION> [--<arg> <val>] [--<account>-account <id>]
+
+# Without spel.toml (`--` is REQUIRED when mixing global flags with instruction flags)
+spel -i <IDL> -p <NAME|HEX|BIN> -- <INSTRUCTION> [--<arg> <val>] [--<account>-account <id>]
 ```
 
 - Instruction names: `snake_case` → `kebab-case` (`create_proposal` → `create-proposal`)
@@ -95,22 +128,26 @@ lez-cli -i <IDL> [-p <BIN> | --program-id <HEX>] <INSTRUCTION> [--<arg> <val>] [
 - Rest accounts: comma-separated list
 
 ```bash
-# Execute instruction
-lez-cli -i idl.json -p prog.bin create \
-  --create-key 0a1b... --threshold 2 \
-  --members "aa...00,bb...00" \
-  --creator-account EjR7...
+# Execute instruction (with spel.toml)
+spel create --create-key 0a1b... --threshold 2 \
+  --members "aa...00,bb...00" --creator-account EjR7...
 
-# Dry run
-lez-cli -i idl.json --program-id abc...def --dry-run approve \
-  --proposal-id 5 --member-account cc...00
+# Same, without spel.toml
+spel -i idl.json -p prog.bin -- create --create-key 0a1b... --threshold 2 \
+  --members "aa...00,bb...00" --creator-account EjR7...
+
+# Dry run (text, default)
+spel --dry-run approve --proposal-id 5 --member-account cc...00
+
+# Dry run (JSON — pipe through jq in CI)
+spel --dry-run=json approve --proposal-id 5 --member-account cc...00 | jq .
 
 # Cross-program binary reference
-lez-cli -i treasury-idl.json -p treasury.bin --bin-token token.bin \
+spel -i treasury-idl.json -p treasury.bin --bin-token token.bin -- \
   transfer --amount 100 --from-account aa...00
 
 # Per-instruction help
-lez-cli -i idl.json <INSTRUCTION> --help
+spel <INSTRUCTION> --help
 ```
 
 ---
@@ -135,12 +172,12 @@ lez-cli -i idl.json <INSTRUCTION> --help
 
 ---
 
-## lez-client-gen
+## spel-client-gen
 
 Generate typed Rust client + C FFI + C header from IDL:
 
 ```bash
-lez-client-gen --idl <IDL_FILE> --out-dir <DIR>
+spel-client-gen --idl <IDL_FILE> --out-dir <DIR>
 ```
 
 | Option | Required | Description |

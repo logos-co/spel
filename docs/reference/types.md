@@ -1,17 +1,17 @@
 # Types
 
-Core types provided by `lez-framework-core` for building LEZ programs. These include return types, error types, account constraint metadata, and re-exported types from `nssa_core`.
+Core types provided by `spel-framework-core` for building LEZ programs. These include return types, error types, account constraint metadata, and re-exported types from `nssa_core`.
 
 For a guided walkthrough, see the [Tutorial](../tutorial.md). For other reference topics, see the [Reference Index](README.md).
 
 ---
 
-## `LezOutput`
+## `SpelOutput`
 
 Return value from instruction handlers. Contains post-states and optional chained calls.
 
 ```rust
-pub struct LezOutput {
+pub struct SpelOutput {
     pub post_states: Vec<AccountPostState>,
     pub chained_calls: Vec<ChainedCall>,
 }
@@ -30,13 +30,13 @@ pub struct LezOutput {
 
 ```rust
 // Most instructions: just return updated states
-Ok(LezOutput::states_only(vec![
+Ok(SpelOutput::states_only(vec![
     AccountPostState::new_claimed(new_account),  // init
     AccountPostState::new(updated_account),       // update
 ]))
 
 // Cross-program call
-Ok(LezOutput::with_chained_calls(
+Ok(SpelOutput::with_chained_calls(
     vec![AccountPostState::new(state.account.clone())],
     vec![chained_call],
 ))
@@ -44,25 +44,25 @@ Ok(LezOutput::with_chained_calls(
 
 ---
 
-## `LezResult`
+## `SpelResult`
 
 Type alias for instruction handler return types:
 
 ```rust
-pub type LezResult = Result<LezOutput, LezError>;
+pub type SpelResult = Result<SpelOutput, SpelError>;
 ```
 
-All `#[instruction]` functions must return `LezResult`.
+All `#[instruction]` functions must return `SpelResult`.
 
 ---
 
-## `LezError`
+## `SpelError`
 
 Structured error type for LEZ programs. Borsh-serializable for on-chain representation.
 
 ```rust
 #[derive(Error, Debug, BorshSerialize, BorshDeserialize)]
-pub enum LezError { /* ... */ }
+pub enum SpelError { /* ... */ }
 ```
 
 ### Variants
@@ -93,14 +93,14 @@ pub enum LezError { /* ... */ }
 ```rust
 // Using built-in variants
 if balance < amount {
-    return Err(LezError::InsufficientBalance {
+    return Err(SpelError::InsufficientBalance {
         available: balance,
         requested: amount,
     });
 }
 
 // Using custom errors
-return Err(LezError::custom(1, "Proposal already executed"));
+return Err(SpelError::custom(1, "Proposal already executed"));
 // error_code() returns 6001
 ```
 
@@ -152,14 +152,14 @@ pub struct ArgMeta {
 
 ## Re-exported nssa_core types
 
-The following types are re-exported through `lez-framework-core::prelude`:
+The following types are re-exported through `spel-framework-core::prelude`:
 
 | Type | Origin | Description |
 |------|--------|-------------|
 | `Account<T>` | `nssa_core::account` | Generic account wrapper |
 | `AccountWithMetadata` | `nssa_core::account` | Account data plus `account_id` and `is_authorized` flag. Primary type used in instruction handlers. |
 | `AccountPostState` | `nssa_core::program` | Represents the state of an account after instruction execution. Use `new()` for existing accounts, `new_claimed()` for newly initialized accounts. |
-| `ChainedCall` | `nssa_core::program` | Cross-program invocation data. Returned in `LezOutput::with_chained_calls()`. |
+| `ChainedCall` | `nssa_core::program` | Cross-program invocation data. Returned in `SpelOutput::with_chained_calls()`. |
 | `PdaSeed` | `nssa_core::program` | A 32-byte PDA seed. Constructed via `PdaSeed::new(bytes)`. |
 | `ProgramId` | `nssa_core::program` | Type alias for `[u32; 8]`. Identifies a program by its RISC Zero image ID. |
 
@@ -170,14 +170,14 @@ The following types are re-exported through `lez-framework-core::prelude`:
 Import the prelude for convenient access to common types:
 
 ```rust
-use lez_framework::prelude::*;
+use spel_framework::prelude::*;
 ```
 
 This imports:
 - `lez_program` (macro)
 - `instruction` (macro)
-- `LezOutput`
-- `LezError`, `LezResult`
+- `SpelOutput`
+- `SpelError`, `SpelResult`
 - `AccountConstraint`
 - `Account`, `AccountWithMetadata`
 - `AccountPostState`, `ChainedCall`, `PdaSeed`, `ProgramId`

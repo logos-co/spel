@@ -12,12 +12,12 @@ Every account passed to an instruction must appear in the `post_states` vector, 
 
 ```rust
 // WRONG — forgot to return owner
-Ok(LezOutput::states_only(vec![
+Ok(SpelOutput::states_only(vec![
     AccountPostState::new(updated_state),
 ]))
 
 // RIGHT — return all accounts
-Ok(LezOutput::states_only(vec![
+Ok(SpelOutput::states_only(vec![
     AccountPostState::new(updated_state),
     AccountPostState::new(owner.account.clone()),
 ]))
@@ -67,7 +67,7 @@ When using multiple seeds (`pda = [literal("a"), account("b")]`), they are combi
 
 ### Program ID is [u32; 8], not [u8; 32]
 
-The Program ID is the RISC Zero ImageID — an array of 8 u32 values. When converting from hex, use `from_le_bytes` for each u32 chunk (little-endian byte order). The 64-char hex ImageID from `lez-cli inspect` is the little-endian byte representation.
+The Program ID is the RISC Zero ImageID — an array of 8 u32 values. When converting from hex, use `from_le_bytes` for each u32 chunk (little-endian byte order). The 64-char hex ImageID from `spel inspect` is the little-endian byte representation.
 
 ### bytemuck for raw PDA mode
 
@@ -96,11 +96,11 @@ In `#[instruction]` function signatures, all `AccountWithMetadata` / `Vec<Accoun
 ```rust
 // WRONG — argument before account
 #[instruction]
-pub fn bad(amount: u64, #[account(signer)] user: AccountWithMetadata) -> LezResult { ... }
+pub fn bad(amount: u64, #[account(signer)] user: AccountWithMetadata) -> SpelResult { ... }
 
 // RIGHT — accounts first, then arguments
 #[instruction]
-pub fn good(#[account(signer)] user: AccountWithMetadata, amount: u64) -> LezResult { ... }
+pub fn good(#[account(signer)] user: AccountWithMetadata, amount: u64) -> SpelResult { ... }
 ```
 
 ### Vec<AccountWithMetadata> must be the last account parameter
@@ -125,9 +125,28 @@ If you pass an empty string `""` as an instruction argument, logoscore may silen
 
 `create_proposal` in Rust becomes `create-proposal` in the CLI. Account flags use `--{name}-account` suffix.
 
-### --program-id expects 64-char hex (ImageID format)
+### `--program` accepts name, hex, or file path
 
-The `--program-id` flag expects the 64-character hex string from `lez-cli inspect` (ImageID hex bytes), not the decimal or comma-separated format.
+`--program <value>` resolves in three ways:
+1. If `<value>` matches a name in `spel.toml`'s `[programs.<name>]`, the IDL and binary are loaded from that entry.
+2. Else, if `<value>` is a 64-character hex string, it's used directly as the program ID (no binary load).
+3. Else, `<value>` is treated as a file path to the ELF binary.
+
+The hex form replaces the deprecated `--program-id <HEX>`. The 64-char hex comes from `spel inspect` (ImageID hex bytes row), not the decimal or comma-separated format.
+
+### Mix global and instruction flags with `--`
+
+Without a `spel.toml`, global options (`--idl`, `--program`, `--dry-run`) come before a `--` separator; the instruction and its `--arg` flags come after. Without `--`, the first instruction `--flag` is swallowed by the global parser and the command errors out.
+
+```bash
+spel -i idl.json -p prog.bin -- increment --amount 5 --owner-account <BASE58>
+```
+
+With `spel.toml` there are no global flags in play, so `--` is not needed.
+
+### `--dry-run` has two formats
+
+`--dry-run` and `--dry-run=text` print a human-readable summary (accounts, arguments, instruction data, signer nonces). `--dry-run=json` emits a JSON document with the same data — in JSON mode, all human output is suppressed so the result is pipeable to `jq`. Numeric values over 53 bits (`u128`, nonces) are emitted as decimal strings to avoid precision loss.
 
 ### Account IDs accept both base58 and hex
 

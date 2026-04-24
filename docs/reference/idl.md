@@ -245,7 +245,7 @@ Error definitions:
 }
 ```
 
-Currently generated as an empty array by the macro. The built-in `LezError` variants have fixed codes (see [Types — LezError](types.md#lezerror)).
+Currently generated as an empty array by the macro. The built-in `SpelError` variants have fixed codes (see [Types — SpelError](types.md#lezerror)).
 
 ---
 
@@ -264,7 +264,7 @@ This matches the lssa-lang convention. The discriminator is computed at macro ex
 SHA-256("global:create")[0..8] = [72, 137, 94, 219, 188, 57, 3, 12]
 ```
 
-The `compute_discriminator()` function in `lez-framework-core/src/idl.rs` and `lez-framework-macros/src/lib.rs` implements this.
+The `compute_discriminator()` function in `spel-framework-core/src/idl.rs` and `spel-framework-macros/src/lib.rs` implements this.
 
 ---
 
@@ -296,7 +296,7 @@ When `#[lez_program(instruction = "my_crate::Instruction")]` is used, the IDL in
 }
 ```
 
-This tells `lez-client-gen` to import and use the external type in generated FFI code (instead of generating a local `#[derive(Serialize, Deserialize)]` enum), ensuring correct serialization for the zkVM guest.
+This tells `spel-client-gen` to import and use the external type in generated FFI code (instead of generating a local `#[derive(Serialize, Deserialize)]` enum), ensuring correct serialization for the zkVM guest.
 
 ---
 

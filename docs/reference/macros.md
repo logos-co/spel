@@ -8,7 +8,7 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md). For other referenc
 
 ## `#[lez_program]`
 
-**Crate:** `lez-framework-macros` (re-exported by `lez-framework`)
+**Crate:** `spel-framework-macros` (re-exported by `spel-framework`)
 
 Attribute macro applied to a module. Transforms a module of `#[instruction]` functions into a complete LEZ guest binary with dispatch, validation, and IDL generation.
 
@@ -18,7 +18,7 @@ Attribute macro applied to a module. Transforms a module of `#[instruction]` fun
 #[lez_program]
 mod my_program {
     #[instruction]
-    pub fn my_instruction(/* ... */) -> LezResult { /* ... */ }
+    pub fn my_instruction(/* ... */) -> SpelResult { /* ... */ }
 }
 ```
 
@@ -28,7 +28,7 @@ With external instruction enum:
 #[lez_program(instruction = "my_crate::Instruction")]
 mod my_program {
     #[instruction]
-    pub fn my_instruction(/* ... */) -> LezResult { /* ... */ }
+    pub fn my_instruction(/* ... */) -> SpelResult { /* ... */ }
 }
 ```
 
@@ -44,11 +44,11 @@ mod my_program {
 
 2. **`fn main()`** — the zkVM guest entry point (gated by `#[cfg(not(test))]`). Reads `ProgramInput` from the host, dispatches to the correct handler via `match`, and writes outputs via `write_nssa_outputs_with_chained_call`. Account destructuring from `pre_states` is generated per-instruction.
 
-3. **Validation functions** — one `__validate_{fn_name}()` function per instruction that has `signer` or `init` constraints. These run before the handler and return `LezError` on failure.
+3. **Validation functions** — one `__validate_{fn_name}()` function per instruction that has `signer` or `init` constraints. These run before the handler and return `SpelError` on failure.
 
 4. **`PROGRAM_IDL_JSON`** — a `pub const &str` containing the complete IDL as JSON. Available at compile time in any build target.
 
-5. **`__program_idl()`** — a function returning a constructed `LezIdl` struct (with discriminators, execution metadata, etc.).
+5. **`__program_idl()`** — a function returning a constructed `SpelIdl` struct (with discriminators, execution metadata, etc.).
 
 ### Constraints
 
@@ -60,7 +60,7 @@ mod my_program {
 ### Example
 
 ```rust
-use lez_framework::prelude::*;
+use spel_framework::prelude::*;
 use nssa_core::account::AccountWithMetadata;
 use nssa_core::program::AccountPostState;
 
@@ -75,9 +75,9 @@ mod treasury {
         #[account(signer)]
         depositor: AccountWithMetadata,
         amount: u128,
-    ) -> LezResult {
+    ) -> SpelResult {
         // ... business logic ...
-        Ok(LezOutput::states_only(vec![
+        Ok(SpelOutput::states_only(vec![
             AccountPostState::new(vault.account.clone()),
             AccountPostState::new(depositor.account.clone()),
         ]))
@@ -98,7 +98,7 @@ pub enum Instruction {
 
 ## `#[instruction]`
 
-**Crate:** `lez-framework-macros` (re-exported by `lez-framework`)
+**Crate:** `spel-framework-macros` (re-exported by `spel-framework`)
 
 Marker attribute for functions inside an `#[lez_program]` module. This attribute is processed by `#[lez_program]` — it is a no-op when used standalone.
 
@@ -118,12 +118,12 @@ pub fn instruction_name(
     // Instruction arguments — after all account params
     arg1: u64,
     arg2: String,
-) -> LezResult {
+) -> SpelResult {
     // ...
 }
 ```
 
-- **Return type** must be `LezResult` (alias for `Result<LezOutput, LezError>`).
+- **Return type** must be `SpelResult` (alias for `Result<SpelOutput, SpelError>`).
 - **Account parameters** are identified by type: `AccountWithMetadata` for single accounts, `Vec<AccountWithMetadata>` for variable-length.
 - **All other parameters** are instruction arguments and become fields in the generated `Instruction` enum variant.
 - Function names use `snake_case`; generated enum variants use `PascalCase`.
@@ -185,14 +185,14 @@ The `pda` attribute specifies how the account address is derived. Seed types:
 
 ## `generate_idl!`
 
-**Crate:** `lez-framework-macros` (re-exported by `lez-framework`)
+**Crate:** `spel-framework-macros` (re-exported by `spel-framework`)
 
 Proc macro that reads a Rust source file at compile time, finds the `#[lez_program]` module, and generates a `fn main()` that prints the complete IDL as JSON.
 
 ### Syntax
 
 ```rust
-lez_framework::generate_idl!("path/to/program.rs");
+spel_framework::generate_idl!("path/to/program.rs");
 ```
 
 The path is resolved relative to `CARGO_MANIFEST_DIR`. The file must contain exactly one `#[lez_program]` module.
@@ -213,7 +213,7 @@ Create a binary crate (e.g., `examples/src/bin/generate_idl.rs`):
 ///
 /// Usage:
 ///   cargo run --bin generate_idl > my_program-idl.json
-lez_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
+spel_framework::generate_idl!("../methods/guest/src/bin/my_program.rs");
 ```
 
 Then run:
@@ -237,7 +237,7 @@ The `#[lez_program]` macro generates validation functions for instructions that 
 ```rust
 pub fn __validate_{instruction_name}(
     accounts: &[AccountWithMetadata]
-) -> Result<(), LezError>
+) -> Result<(), SpelError>
 ```
 
 **Checks performed (in order):**
@@ -245,7 +245,7 @@ pub fn __validate_{instruction_name}(
 1. **Signer checks** — for each `#[account(signer)]`:
    ```rust
    if !accounts[idx].is_authorized {
-       return Err(LezError::Unauthorized {
+       return Err(SpelError::Unauthorized {
            message: "Account '{name}' (index {idx}) must be a signer",
        });
    }
@@ -254,7 +254,7 @@ pub fn __validate_{instruction_name}(
 2. **Init checks** — for each `#[account(init)]`:
    ```rust
    if accounts[idx].account != Account::default() {
-       return Err(LezError::AccountAlreadyInitialized {
+       return Err(SpelError::AccountAlreadyInitialized {
            account_index: idx,
        });
    }
@@ -266,11 +266,11 @@ If an instruction has no `signer` or `init` constraints, no validation function 
 
 ### Validation Helpers
 
-The `lez-framework-core::validation` module provides helper functions used by generated code:
+The `spel-framework-core::validation` module provides helper functions used by generated code:
 
 | Function | Signature | Description |
 |----------|-----------|-------------|
-| `validate_account_count` | `fn(actual: usize, expected: usize) -> Result<(), LezError>` | Check that the correct number of accounts was provided. Returns `AccountCountMismatch` on failure. |
-| `validate_accounts` | `fn(account_count: usize, constraints: &[AccountConstraint]) -> Result<(), LezError>` | Validate accounts against constraints. Currently checks count; ownership, init state, signer, and PDA checks are delegated to the macro-generated code. |
+| `validate_account_count` | `fn(actual: usize, expected: usize) -> Result<(), SpelError>` | Check that the correct number of accounts was provided. Returns `AccountCountMismatch` on failure. |
+| `validate_accounts` | `fn(account_count: usize, constraints: &[AccountConstraint]) -> Result<(), SpelError>` | Validate accounts against constraints. Currently checks count; ownership, init state, signer, and PDA checks are delegated to the macro-generated code. |
 | `is_default_account` | `fn(data: &[u8]) -> bool` | Check if account data is empty or all zeros. Used for `init` constraint. |
-| `verify_owner` | `fn(account_owner: &[u8; 32], expected_owner: &[u8; 32], account_index: usize) -> Result<(), LezError>` | Verify account ownership. Returns `InvalidAccountOwner` on mismatch. |
+| `verify_owner` | `fn(account_owner: &[u8; 32], expected_owner: &[u8; 32], account_index: usize) -> Result<(), SpelError>` | Verify account ownership. Returns `InvalidAccountOwner` on mismatch. |
