@@ -28,19 +28,7 @@ my-program/
 
 ## 2. Define State
 
-Edit `my_program_core/src/lib.rs`:
-
-```rust
-use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct MyState {
-    pub value: u64,
-    pub owner: [u8; 32],
-}
-```
-
-State structs live in the `_core` crate so they can be shared between on-chain and off-chain code.
+Put state structs in `methods/guest/src/bin/my_program.rs` directly, annotated with `#[account_type]` at file top level — see the next step. The `_core` crate is optional and only needed when a type must be consumed by off-chain code (e.g. an external `Instruction` enum for an FFI client).
 
 ## 3. Write Instructions
 
@@ -49,11 +37,18 @@ Edit `methods/guest/src/bin/my_program.rs`:
 ```rust
 #![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
 use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
+
+/// State stored on-chain. `#[account_type]` MUST live at file top-level
+/// (not inside the #[lez_program] module) so the IDL generator picks it up.
+#[account_type]
+#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
+pub struct MyState {
+    pub value: u64,
+    pub owner: [u8; 32],
+}
 
 #[lez_program]
 mod my_program {
@@ -63,37 +58,34 @@ mod my_program {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = literal("state"))]
-        state: AccountWithMetadata,
+        mut state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {
-        let data = borsh::to_vec(&my_program_core::MyState {
+        let data = borsh::to_vec(&MyState {
             value: 0,
             owner: *owner.account_id.value(),
-        }).map_err(|e| SpelError::SerializationError { message: e.to_string() })?;
+        })
+        .map_err(|e| SpelError::SerializationError { message: e.to_string() })?;
+        state.account.data = data.try_into().unwrap();
 
-        let mut new_account = state.account.clone();
-        new_account.data = data.try_into().unwrap();
-
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(new_account),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }
 
     #[instruction]
     pub fn update(
         #[account(mut, pda = literal("state"))]
-        state: AccountWithMetadata,
+        mut state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
         new_value: u64,
     ) -> SpelResult {
-        let mut current: my_program_core::MyState =
-            borsh::from_slice(&state.account.data)
-                .map_err(|e| SpelError::DeserializationError {
-                    account_index: 0, message: e.to_string(),
-                })?;
+        let data: Vec<u8> = state.account.data.clone().into();
+        let mut current: MyState = borsh::from_slice(&data)
+            .map_err(|e| SpelError::DeserializationError {
+                account_index: 0,
+                message: e.to_string(),
+            })?;
 
         if *owner.account_id.value() != current.owner {
             return Err(SpelError::Unauthorized {
@@ -104,16 +96,14 @@ mod my_program {
         current.value = new_value;
         let data = borsh::to_vec(&current)
             .map_err(|e| SpelError::SerializationError { message: e.to_string() })?;
-        let mut updated = state.account.clone();
-        updated.data = data.try_into().unwrap();
+        state.account.data = data.try_into().unwrap();
 
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(updated),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }
 }
 ```
+
+The `#[lez_program]` macro reads the `#[account(…)]` attributes on each handler's parameters and generates the correct `AutoClaim` for every entry in the `vec![…]` you pass to `SpelOutput::execute(…)`. You never construct `AccountPostState` values by hand.
 
 ## 4. Set Up IDL Generator
 
@@ -132,7 +122,7 @@ Path is relative to `CARGO_MANIFEST_DIR` (the `examples/` crate).
 ```rust
 #[tokio::main]
 async fn main() {
-    spel_cli::run().await;
+    spel::run().await;
 }
 ```
 
@@ -167,27 +157,32 @@ With the scaffold-generated `spel.toml` in the project root, `spel` discovers th
 spel --help
 
 # Initialize (PDA accounts auto-computed, not passed as args)
-spel initialize --owner-account <SIGNER_BASE58>
+spel initialize --owner <SIGNER_BASE58>
 
 # Update with argument
-spel update --new-value 42 --owner-account <SIGNER_BASE58>
+spel update --new-value 42 --owner <SIGNER_BASE58>
 
 # Use a raw 64-char hex program ID to skip binary loading
-spel --program <64-CHAR-HEX> -- update --new-value 100 --owner-account <SIGNER_BASE58>
+spel --program <64-CHAR-HEX> -- update --new-value 100 --owner <SIGNER_BASE58>
 
 # Dry run (text-default; add =json for machine-readable output)
-spel --dry-run update --new-value 5 --owner-account <ADDR>
-spel --dry-run=json update --new-value 5 --owner-account <ADDR> | jq .
+spel --dry-run update --new-value 5 --owner <ADDR>
+spel --dry-run=json update --new-value 5 --owner <ADDR> | jq .
 
-# Compute PDA manually — output echoes seed inputs, e.g. `seeds: [program_id, "state"]`
+# Compute PDA manually — prints base58 address only.
+# (Dry-run / transaction output additionally echoes `seeds: [program_id, "state"]`.)
 spel pda state
+
+# Decode a stored account's data via the IDL (requires #[account_type] on the struct
+# AND an IDL generated with `spel generate-idl`, not `make idl`)
+spel inspect "$(spel pda state)" --type MyState
 ```
 
 When running without a `spel.toml`, pass `--idl`/`--program` before a `--` separator:
 
 ```bash
 spel -i my-program-idl.json -p methods/guest/target/.../my_program.bin -- \
-  update --new-value 42 --owner-account <SIGNER_BASE58>
+  update --new-value 42 --owner <SIGNER_BASE58>
 ```
 
 ## 10. Generate Client Code (optional)

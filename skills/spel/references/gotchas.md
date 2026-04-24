@@ -6,42 +6,28 @@ Hard-won lessons from building SPEL programs. Read this before writing or debugg
 
 ## Account Handling
 
-### Return ALL accounts in post_states
+### Return ALL accounts in the `execute(vec![…])` list
 
-Every account passed to an instruction must appear in the `post_states` vector, even if unchanged. Forgetting an account causes a runtime error.
-
-```rust
-// WRONG — forgot to return owner
-Ok(SpelOutput::states_only(vec![
-    AccountPostState::new(updated_state),
-]))
-
-// RIGHT — return all accounts
-Ok(SpelOutput::states_only(vec![
-    AccountPostState::new(updated_state),
-    AccountPostState::new(owner.account.clone()),
-]))
-```
-
-### new_claimed vs new
-
-- `AccountPostState::new_claimed(account)` — for `init` accounts only (claims a new account)
-- `AccountPostState::new(account)` — for existing accounts (updates)
-
-Using `new()` on an init account or `new_claimed()` on an existing account will fail at runtime.
-
-### new_claimed_if_default() pattern
-
-When an account might or might not already exist, use the conditional pattern:
+Every account passed to a handler must appear in the vector you return via `SpelOutput::execute(…)` — even if you didn't mutate it. Dropping an account from the list is a runtime error.
 
 ```rust
-// Claims if account is default (uninitialized), updates otherwise
-if account.account == Account::default() {
-    AccountPostState::new_claimed(account)
-} else {
-    AccountPostState::new(account)
-}
+// WRONG — forgot to include owner
+Ok(SpelOutput::execute(vec![state], vec![]))
+
+// RIGHT — every handler parameter (except `Vec<AccountWithMetadata>` rest lists,
+// which you extend into the vec) must appear once.
+Ok(SpelOutput::execute(vec![state, owner], vec![]))
 ```
+
+### Let the macro derive claims — don't write `AccountPostState` by hand
+
+`SpelOutput::execute(vec![a, b, c], vec![])` passes each `AccountWithMetadata` ident through. The `#[lez_program]` macro reads each parameter's `#[account(init/mut/…)]` constraints and emits the correct `AutoClaim` automatically:
+
+- `#[account(init, …)]` → `AutoClaim::Claimed(Claim::Authorized)` for non-PDA, `Claim::Pda(…)` for PDAs.
+- `#[account(mut, …)]` or `#[account(signer)]` without `init` → `AutoClaim::None`.
+- Read-only accounts → `AutoClaim::None`.
+
+The legacy `SpelOutput::states_only(…)` / `SpelOutput::with_chained_calls(…)` constructors plus hand-built `AccountPostState::new_claimed(acc, Claim::Authorized)` / `AccountPostState::new(acc)` still compile but carry a `#[deprecated]` note. Use them only when you need a shape `execute` can't produce (which is rare).
 
 ### Account ownership rules
 
@@ -139,7 +125,7 @@ The hex form replaces the deprecated `--program-id <HEX>`. The 64-char hex comes
 Without a `spel.toml`, global options (`--idl`, `--program`, `--dry-run`) come before a `--` separator; the instruction and its `--arg` flags come after. Without `--`, the first instruction `--flag` is swallowed by the global parser and the command errors out.
 
 ```bash
-spel -i idl.json -p prog.bin -- increment --amount 5 --owner-account <BASE58>
+spel -i idl.json -p prog.bin -- increment --amount 5 --owner <BASE58>
 ```
 
 With `spel.toml` there are no global flags in play, so `--` is not needed.

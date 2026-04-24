@@ -7,7 +7,7 @@ description: "Build, deploy, and interact with LEZ on-chain programs using the S
 
 SPEL is a Rust framework for building on-chain programs that run on LEZ (the NSSA execution layer). It provides attribute macros (`#[lez_program]`, `#[instruction]`) that generate zkVM guest binaries, instruction dispatch, account validation, IDL, and CLI tooling from annotated Rust modules.
 
-Programs compile to RISC Zero zkVM guests. The framework auto-generates an `Instruction` enum, `main()` dispatch, validation functions, and a full IDL (JSON). The `spel` CLI reads the IDL at runtime to provide a complete CLI for any program — with a `spel.toml` in the project root, flags are optional and instructions can be invoked as bare subcommands (`spel initialize --owner-account …`).
+Programs compile to RISC Zero zkVM guests. The framework auto-generates an `Instruction` enum, `main()` dispatch, validation functions, and a full IDL (JSON). The `spel` CLI reads the IDL at runtime to provide a complete CLI for any program — with a `spel.toml` in the project root, flags are optional and instructions can be invoked as bare subcommands (`spel initialize --owner …`).
 
 ## References
 
@@ -46,17 +46,19 @@ Read these files as needed:
 ### Return values
 
 ```rust
-// New account (init)
-AccountPostState::new_claimed(account)
+// Idiomatic: let the macro derive claims from #[account(…)] attributes.
+// Accounts passed to execute() must be AccountWithMetadata idents; mutate
+// `account.account.data` first if the handler writes state.
+Ok(SpelOutput::execute(vec![state, owner], vec![]))
 
-// Updated existing account
-AccountPostState::new(account)
+// With chained cross-program calls:
+Ok(SpelOutput::execute(vec![state, owner], vec![chained_call]))
 
-// Return with no chained calls (most common)
-Ok(SpelOutput::states_only(vec![...]))
-
-// Return with cross-program calls
-Ok(SpelOutput::with_chained_calls(vec![...], vec![chained_call]))
+// Legacy API (deprecated, still compiles) — explicit AccountPostState values:
+// Ok(SpelOutput::states_only(vec![
+//     AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
+//     AccountPostState::new(owner.account.clone()),
+// ]))
 ```
 
 ### Variable-length accounts
@@ -77,7 +79,7 @@ mod my_program { ... }
 
 1. **Never edit IDL JSON by hand** — always regenerate via `generate_idl!` / `make idl`.
 2. **PDA accounts are auto-computed** — never pass them as CLI arguments; the CLI derives them from seeds + program ID.
-3. **`init` implies `mut`** — do not add both; use `AccountPostState::new_claimed()` for init accounts.
+3. **`init` implies `mut`** — do not add both; the macro emits an `AutoClaim::Claimed(Claim::Authorized)` (or `Claim::Pda(..)` for PDAs) automatically when you return `SpelOutput::execute(vec![account, …], vec![])`.
 4. **Account parameters must come before instruction arguments** in function signatures.
 5. **Return ALL accounts** in `post_states` — every account passed to the instruction must appear in the output (even unchanged ones).
 6. **Only the owning program can decrease an account's balance** — this is enforced by the runtime.

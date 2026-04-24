@@ -48,7 +48,7 @@ make build        # Build the guest binary (risc0)
 make idl          # Generate IDL from #[lez_program] annotations
 make deploy       # Deploy to sequencer
 make cli ARGS="--help"   # See auto-generated commands
-make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
+make cli ARGS="-p <binary> -- initialize --owner <BASE58>"
 ```
 
 ## Writing Programs
@@ -56,8 +56,6 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 ```rust
 #![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
 use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
@@ -70,44 +68,39 @@ mod my_program {
     #[instruction]
     pub fn initialize(
         #[account(init, pda = literal("state"))]
-        mut state: AccountWithMetadata,
+        state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {
-        // Your logic here
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        // Your logic here — mutate state.account.data if you need to write state.
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }
 
     #[instruction]
     pub fn transfer(
         #[account(mut, pda = literal("state"))]
-        mut state: AccountWithMetadata,
+        state: AccountWithMetadata,
         recipient: AccountWithMetadata,
         #[account(signer)]
         sender: AccountWithMetadata,
         amount: u128,
     ) -> SpelResult {
         // Your logic here
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(state.account.clone()),
-            AccountPostState::new(recipient.account.clone()),
-            AccountPostState::new(sender.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, recipient, sender], vec![]))
     }
 }
 ```
 
-> **Note:** Import everything from `lez_framework::prelude::*` — this provides `AccountWithMetadata`, `AccountPostState`, `LezOutput`, `LezResult`, `LezError`, `BorshSerialize`, `BorshDeserialize`, and more. Do not import from `nssa_core` directly to avoid version conflicts.
+> **Note:** Import everything from `spel_framework::prelude::*` — this provides `AccountWithMetadata`, `SpelOutput`, `SpelResult`, `SpelError`, `AccountPostState`, `Claim`, `AutoClaim`, `BorshSerialize`, `BorshDeserialize`, and more. Do not import from `nssa_core` directly to avoid version conflicts.
+>
+> The `#[lez_program]` macro reads each handler's `#[account(…)]` attributes and generates the correct claim metadata for every entry in the `vec![…]` passed to `SpelOutput::execute(…)` — you never write `AccountPostState::new_claimed(…, Claim::Authorized)` by hand. (That legacy API is still available via the `#[deprecated]` `SpelOutput::states_only` / `with_chained_calls` constructors.)
 
 ### Account Attributes
 
 | Attribute | Description |
 |-----------|-------------|
 | `#[account(mut)]` | Account is writable |
-| `#[account(init)]` | Account is being created (use `new_claimed`) |
+| `#[account(init)]` | Account is being created; the macro emits the correct `AutoClaim::Claimed(…)` automatically when you return `SpelOutput::execute(…)` |
 | `#[account(signer)]` | Account must sign the transaction |
 | `#[account(pda = literal("seed"))]` | PDA derived from a constant string |
 | `#[account(pda = account("other"))]` | PDA derived from another account's ID |
@@ -154,7 +147,7 @@ Every program gets a full CLI for free. The wrapper is just:
 ```rust
 #[tokio::main]
 async fn main() {
-    spel_cli::run().await;
+    spel::run().await;
 }
 ```
 

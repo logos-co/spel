@@ -76,11 +76,8 @@ mod treasury {
         depositor: AccountWithMetadata,
         amount: u128,
     ) -> SpelResult {
-        // ... business logic ...
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(vault.account.clone()),
-            AccountPostState::new(depositor.account.clone()),
-        ]))
+        // ... business logic (mutate vault.account.data as needed) ...
+        Ok(SpelOutput::execute(vec![vault, depositor], vec![]))
     }
 }
 ```
@@ -135,7 +132,7 @@ Applied via `#[account(...)]` on account parameters:
 | Constraint | Syntax | Description |
 |------------|--------|-------------|
 | `signer` | `#[account(signer)]` | Requires `is_authorized == true`. Generates a runtime check before the handler runs. |
-| `init` | `#[account(init)]` | Account must be uninitialized (`== Account::default()`). **Implies `mut`**. Used with `AccountPostState::new_claimed()`. |
+| `init` | `#[account(init)]` | Account must be uninitialized (`== Account::default()`). **Implies `mut`**. The macro emits an `AutoClaim::Claimed(…)` for the account automatically when you return via `SpelOutput::execute(…)`. |
 | `mut` | `#[account(mut)]` | Account is writable. Sets `writable: true` in the IDL. |
 | `owner` | `#[account(owner = EXPR)]` | Account must be owned by the given program ID. The expression should resolve to `[u8; 32]`. |
 | `pda` | `#[account(pda = SEED)]` | Account address is a PDA derived from the program ID and seed(s). See [PDA Seeds](#pda-seeds) below. Sets the `pda` field in the IDL. |

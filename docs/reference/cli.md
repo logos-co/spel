@@ -11,7 +11,7 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md). For other referenc
 ```rust
 #[tokio::main]
 async fn main() {
-    spel_cli::run().await;
+    spel::run().await;
 }
 ```
 
@@ -210,7 +210,7 @@ Looks up the named account across all instructions in the IDL, finds its PDA see
 **Seed resolution:**
 - `const` seeds: resolved from the IDL definition
 - `arg` seeds: must be provided via `--<arg-name> <value>` (parsed through the IDL type of the owning instruction's argument)
-- `account` seeds: must be provided via `--<account-name>-account <hex|base58>`
+- `account` seeds: must be provided via `--<account-name> <hex|base58>`
 
 **ProgramId resolution** (in priority order):
 1. `--program <64-char-hex>`
@@ -269,20 +269,20 @@ spel --program abc123...def pda multisig_vault__ 0a1b2c3d...
 Execute any instruction defined in the IDL. The CLI auto-generates subcommands from the IDL.
 
 ```bash
-spel --idl <IDL_FILE> --program <NAME|HEX|FILE> -- <INSTRUCTION> [--<arg> <value> ...] [--<account>-account <hex|base58> ...]
+spel --idl <IDL_FILE> --program <NAME|HEX|FILE> -- <INSTRUCTION> [--<arg> <value> ...] [--<account> <hex|base58> ...]
 ```
 
 With `spel.toml`:
 
 ```bash
-spel <INSTRUCTION> [--<arg> <value> ...] [--<account>-account <hex|base58> ...]
+spel <INSTRUCTION> [--<arg> <value> ...] [--<account> <hex|base58> ...]
 ```
 
 Instruction names are converted from `snake_case` to `kebab-case` in CLI commands (e.g., `create_proposal` → `create-proposal`).
 
 **Arguments:**
 - Instruction args: `--<arg-name> <value>` (type-aware parsing from IDL)
-- Non-PDA accounts: `--<account-name>-account <base58|hex>` (64 hex chars or base58 string)
+- Non-PDA accounts: `--<account-name> <base58|hex>` (64 hex chars or base58 string) — the flag is just the account's parameter name, no suffix
 - PDA accounts: **auto-computed** from seeds — not passed as arguments
 - Rest (variadic) accounts: optional, comma-separated list of account IDs
 
@@ -314,14 +314,14 @@ spel --idl multisig-idl.json --program multisig.bin -- create \
   --create-key 0a1b2c3d4e5f... \
   --threshold 2 \
   --members "aabb...00,ccdd...00" \
-  --creator-account EjR7...base58
+  --creator EjR7...base58
 
 # Auto-fill cross-program reference
 spel --idl treasury-idl.json --program treasury.bin \
   --bin-token token.bin -- \
   transfer --amount 100 \
-  --from-account aabb...00 \
-  --to-account ccdd...00
+  --from aabb...00 \
+  --to ccdd...00
 ```
 
 **Example (with spel.toml in the project root):**
@@ -331,7 +331,7 @@ spel create \
   --create-key 0a1b2c3d4e5f... \
   --threshold 2 \
   --members "aabb...00,ccdd...00" \
-  --creator-account EjR7...base58
+  --creator EjR7...base58
 ```
 
 ---

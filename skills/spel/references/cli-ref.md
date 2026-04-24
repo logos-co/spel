@@ -84,7 +84,7 @@ Pretty-prints the loaded IDL JSON.
 spel -i <IDL> -p <NAME|HEX|BIN> pda <ACCOUNT_NAME> [--<seed-arg> <value>]
 ```
 
-Looks up account in IDL, resolves seeds, prints base58 address plus seed inputs.
+Looks up account in IDL, resolves seeds, prints base58 address. (Dry-run / transaction output echoes the seed inputs on separate lines; the standalone `pda` subcommand does not.)
 
 ```bash
 # With spel.toml
@@ -116,10 +116,10 @@ spel --program abc...def pda multisig_vault__ 0a1b2c3d...
 
 ```bash
 # With spel.toml
-spel <INSTRUCTION> [--<arg> <val>] [--<account>-account <id>]
+spel <INSTRUCTION> [--<arg> <val>] [--<account> <id>]
 
 # Without spel.toml (`--` is REQUIRED when mixing global flags with instruction flags)
-spel -i <IDL> -p <NAME|HEX|BIN> -- <INSTRUCTION> [--<arg> <val>] [--<account>-account <id>]
+spel -i <IDL> -p <NAME|HEX|BIN> -- <INSTRUCTION> [--<arg> <val>] [--<account> <id>]
 ```
 
 - Instruction names: `snake_case` → `kebab-case` (`create_proposal` → `create-proposal`)
@@ -130,21 +130,21 @@ spel -i <IDL> -p <NAME|HEX|BIN> -- <INSTRUCTION> [--<arg> <val>] [--<account>-ac
 ```bash
 # Execute instruction (with spel.toml)
 spel create --create-key 0a1b... --threshold 2 \
-  --members "aa...00,bb...00" --creator-account EjR7...
+  --members "aa...00,bb...00" --creator EjR7...
 
 # Same, without spel.toml
 spel -i idl.json -p prog.bin -- create --create-key 0a1b... --threshold 2 \
-  --members "aa...00,bb...00" --creator-account EjR7...
+  --members "aa...00,bb...00" --creator EjR7...
 
 # Dry run (text, default)
-spel --dry-run approve --proposal-id 5 --member-account cc...00
+spel --dry-run approve --proposal-id 5 --member cc...00
 
 # Dry run (JSON — pipe through jq in CI)
-spel --dry-run=json approve --proposal-id 5 --member-account cc...00 | jq .
+spel --dry-run=json approve --proposal-id 5 --member cc...00 | jq .
 
 # Cross-program binary reference
 spel -i treasury-idl.json -p treasury.bin --bin-token token.bin -- \
-  transfer --amount 100 --from-account aa...00
+  transfer --amount 100 --from aa...00 --to bb...00
 
 # Per-instruction help
 spel <INSTRUCTION> --help
