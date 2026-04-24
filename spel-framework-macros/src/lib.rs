@@ -329,25 +329,33 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     });
 
     // Collect #[account_type] annotated types from the source file's top-level items.
-    // We try to read the source file using the module's path as a hint.
-    let mut accounts = Vec::new();
-    let mut types = Vec::new();
-    {
+    // Path convention: the #[lez_program] module is expected to live at
+    // `$CARGO_MANIFEST_DIR/src/bin/{module_name}.rs`. This mirrors the standard
+    // binary layout used by SPEL guest programs. Falls back gracefully if not found.
+    let (accounts, types) = {
         let module_path = mod_name.to_string();
+        let mut result = (Vec::new(), Vec::new());
 
-        // The #[lez_program] module is typically defined in a file like src/bin/prog.rs
-        // We try to derive the source path from the module name and common conventions
         if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let guest_path = std::path::Path::new(&manifest_dir).join("src/bin").join(format!("{}.rs", module_path));
-            if let Ok(content_str) = std::fs::read_to_string(&guest_path) {
-                if let Ok(parsed_file) = syn::parse_file(&content_str) {
-                    let (a, t) = account_types::collect_account_types(&parsed_file.items);
-                    accounts = a;
-                    types = t;
+            let manifest = std::path::Path::new(&manifest_dir);
+            // Try common locations in order of preference
+            let candidate_paths = [
+                manifest.join("src/bin").join(format!("{}.rs", module_path)),     // src/bin/{name}.rs (preferred)
+                manifest.join("src").join(format!("{}.rs", module_path)),         // src/{name}.rs
+                manifest.join("src").join("lib.rs"),                             // src/lib.rs (for lib modules)
+            ];
+
+            for guest_path in &candidate_paths {
+                if let Ok(content_str) = std::fs::read_to_string(guest_path) {
+                    if let Ok(parsed_file) = syn::parse_file(&content_str) {
+                        result = account_types::collect_account_types(&parsed_file.items);
+                        break;
+                    }
                 }
             }
         }
-    }
+        result
+    };
 
     let idl_fn = generate_idl_fn(mod_name, &instructions, ext_instr_str.as_deref(), accounts.clone(), types.clone());
     let idl_json = generate_idl_json(mod_name, &instructions, ext_instr_str.as_deref(), accounts, types);
