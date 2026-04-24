@@ -49,6 +49,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa_core::program::PdaSeed;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
+    writeln!(out, "use std::panic::UnwindSafe;").unwrap();
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -93,6 +94,16 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    let v = serde_json::json!(msg).to_string();").unwrap();
     writeln!(out, "    let body = format!(\"{{{{\\\"success\\\":false,\\\"error\\\":{{}}}}}}\", v);").unwrap();
     writeln!(out, "    to_cstring(body)").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Panic-safe FFI wrapper — catches panics and returns error JSON instead of aborting.
+    writeln!(out, "fn ffi_call(f: impl FnOnce() -> Result<String, String> + UnwindSafe) -> *mut c_char {{").unwrap();
+    writeln!(out, "    match std::panic::catch_unwind(f) {{").unwrap();
+    writeln!(out, "        Ok(Ok(r))  => to_cstring(r),").unwrap();
+    writeln!(out, "        Ok(Err(e)) => error_json(&e),").unwrap();
+    writeln!(out, "        Err(_)     => error_json(\"internal panic in FFI\"),").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -212,9 +223,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "    let args = match cstr_to_str(args_json) {{").unwrap();
         writeln!(out, "        Ok(s) => s, Err(e) => return error_json(&e),").unwrap();
         writeln!(out, "    }};").unwrap();
-        writeln!(out, "    match {fn_name}_impl(args) {{").unwrap();
-        writeln!(out, "        Ok(r) => to_cstring(r), Err(e) => error_json(&e),").unwrap();
-        writeln!(out, "    }}").unwrap();
+        writeln!(out, "    ffi_call(move || {fn_name}_impl(args))").unwrap();
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
 
