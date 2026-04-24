@@ -267,14 +267,19 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
             // Dispatch to instruction handler
             let result: Result<
-                (Vec<nssa_core::program::AccountPostState>, Vec<nssa_core::program::ChainedCall>),
+                (
+                    Vec<nssa_core::program::AccountPostState>,
+                    Vec<nssa_core::program::ChainedCall>,
+                    nssa_core::program::BlockValidityWindow,
+                    nssa_core::program::TimestampValidityWindow,
+                ),
                 spel_framework::error::SpelError
             > = match instruction {
                 #(#match_arms)*
             };
 
             // Handle result
-            let (post_states, chained_calls) = match result {
+            let (post_states, chained_calls, block_validity_window, timestamp_validity_window) = match result {
                 Ok(output) => output,
                 Err(e) => {
                     panic!("Program error [{}]: {}", e.error_code(), e);
@@ -318,6 +323,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 filtered_post,
             )
             .with_chained_calls(chained_calls)
+            .with_block_validity_window(block_validity_window)
+            .with_timestamp_validity_window(timestamp_validity_window)
             .write();
         }
     };
@@ -801,7 +808,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     #account_destructure
                     #validation_call
                     #mod_name::#fn_name(#(#call_args),*)
-                        .map(|output| (output.post_states, output.chained_calls))
+                        .map(|output| output.into_parts_with_windows())
                 }
             }
         })

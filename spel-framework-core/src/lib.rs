@@ -18,5 +18,9 @@ pub mod prelude {
     pub use crate::spel_output::AutoClaim;
     pub use crate::types::{IntoPostState, SpelOutput, AccountConstraint};
     pub use nssa_core::account::{Account, AccountWithMetadata};
-    pub use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ProgramId};
+    pub use nssa_core::program::{
+        AccountPostState, BlockValidityWindow, ChainedCall, Claim, InvalidWindow, PdaSeed,
+        ProgramId, TimestampValidityWindow, ValidityWindow,
+    };
+    pub use nssa_core::{BlockId, Timestamp};
 }
