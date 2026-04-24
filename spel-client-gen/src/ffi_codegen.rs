@@ -102,7 +102,12 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    match std::panic::catch_unwind(f) {{").unwrap();
     writeln!(out, "        Ok(Ok(r))  => to_cstring(r),").unwrap();
     writeln!(out, "        Ok(Err(e)) => error_json(&e),").unwrap();
-    writeln!(out, "        Err(_)     => error_json(\"internal panic in FFI\"),").unwrap();
+    writeln!(out, "        Err(e) => {{").unwrap();
+    writeln!(out, "            let msg = e.downcast_ref::<&str>().copied()").unwrap();
+    writeln!(out, "                .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))").unwrap();
+    writeln!(out, "                .unwrap_or(\"<unknown panic>\");").unwrap();
+    writeln!(out, "            error_json(&format!(\"panic: {{}}\", msg))").unwrap();
+    writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -373,7 +378,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
     writeln!(out, "#[no_mangle]").unwrap();
     writeln!(out, "pub extern \"C\" fn {prefix}_version() -> *mut c_char {{").unwrap();
-    writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
+    writeln!(out, "    ffi_call(move || Ok(\"{}\".to_string()))", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
 
     // PDA compute helpers
