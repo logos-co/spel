@@ -114,6 +114,19 @@ mod my_program {
 | `#[account(pda = arg("create_key"))]` | PDA derived from an instruction argument |
 | `members: Vec<AccountWithMetadata>` | Variable-length trailing account list |
 
+### PDA Seed Display
+
+When the CLI derives PDA accounts during transaction execution, it prints the seed inputs used for each derivation:
+
+```
+  PDA vault → 4Lp3gkH...
+    seeds: [program_id, "state"]
+  PDA token_account → 7xQ2m...
+    seeds: [program_id, Account(owner), Arg(create_key)]
+```
+
+Seeds always start with `program_id`, followed by the seeds declared in the account attribute. Constant strings appear quoted, account references as `Account(name)`, and instruction arguments as `Arg(name)`.
+
 ### Runtime Validation
 
 Accounts marked with `#[account(signer)]` or `#[account(init)]` get **automatic runtime checks** before your handler runs:
@@ -235,12 +248,18 @@ lez-cli inspect --data <hex-encoded-borsh> --idl program-idl.json
 # Show available commands
 spel --idl program-idl.json --help
 
-# Dry run an instruction
-spel --idl program-idl.json --dry-run -p program.bin \
+# Dry run an instruction — resolve everything (PDAs, accounts, serialized data,
+# signer nonces) and print without submitting. Accepts --dry-run (text default),
+# --dry-run=text, or --dry-run=json.
+spel --idl program-idl.json --dry-run -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
+# Machine-readable dry run for scripting / golden tests
+spel --idl program-idl.json --dry-run=json -p program.bin -- \
+  create-vault --token-name "MYTKN" --initial-supply 1000000 | jq .
+
 # Submit a transaction
-spel --idl program-idl.json -p program.bin \
+spel --idl program-idl.json -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Use --program-id instead of binary (skips loading the file)
@@ -248,6 +267,10 @@ spel --idl program-idl.json --program-id <64-char-hex>   create-vault --token-na
 
 # Compute a PDA from the IDL
 spel --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+
+# PDA derivation output shows seed inputs:
+#   PDA vault → 4Lp3gkH...
+#     seeds: [program_id, "state"]
 
 # Auto-fill program IDs from binaries
 spel --idl program-idl.json -p treasury.bin --bin-token token.bin \
