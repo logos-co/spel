@@ -702,7 +702,7 @@ fn test_ffi_has_catch_unwind() {
     // FFI code should include catch_unwind wrapping
     assert!(output.ffi_code.contains("catch_unwind"), "should contain catch_unwind: {}", output.ffi_code);
     assert!(output.ffi_code.contains("ffi_call(move || my_multisig_create_impl(args))"), "should use ffi_call for create: {}", output.ffi_code);
-    assert!(output.ffi_code.contains("internal panic in FFI"), "should have panic error message");
+    assert!(output.ffi_code.contains("downcast_ref::<&str>()"), "should have panic error message");
     assert!(output.ffi_code.contains("UnwindSafe"), "should import UnwindSafe");
 
     // Verify the helper function signature
