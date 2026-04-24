@@ -39,6 +39,8 @@ use syn::{
     visit_mut::{self, VisitMut},
 };
 
+mod account_types;
+
 /// Main entry point: `#[lez_program]` on a module.
 ///
 /// This macro:
@@ -325,8 +327,30 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         let segments: Vec<String> = p.segments.iter().map(|s| s.ident.to_string()).collect();
         segments.join("::")
     });
-    let idl_fn = generate_idl_fn(mod_name, &instructions, ext_instr_str.as_deref());
-    let idl_json = generate_idl_json(mod_name, &instructions, ext_instr_str.as_deref());
+
+    // Collect #[account_type] annotated types from the source file's top-level items.
+    // We try to read the source file using the module's path as a hint.
+    let mut accounts = Vec::new();
+    let mut types = Vec::new();
+    {
+        let module_path = mod_name.to_string();
+
+        // The #[lez_program] module is typically defined in a file like src/bin/prog.rs
+        // We try to derive the source path from the module name and common conventions
+        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+            let guest_path = std::path::Path::new(&manifest_dir).join("src/bin").join(format!("{}.rs", module_path));
+            if let Ok(content_str) = std::fs::read_to_string(&guest_path) {
+                if let Ok(parsed_file) = syn::parse_file(&content_str) {
+                    let (a, t) = account_types::collect_account_types(&parsed_file.items);
+                    accounts = a;
+                    types = t;
+                }
+            }
+        }
+    }
+
+    let idl_fn = generate_idl_fn(mod_name, &instructions, ext_instr_str.as_deref(), accounts.clone(), types.clone());
+    let idl_json = generate_idl_json(mod_name, &instructions, ext_instr_str.as_deref(), accounts, types);
 
     // Assemble everything
     let expanded = quote! {
@@ -1401,8 +1425,12 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
     result[..8].to_vec()
 }
 
-fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> TokenStream2 {
+fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>, accounts: Vec<spel_framework_core::idl::IdlAccountType>, types: Vec<spel_framework_core::idl::IdlTypeDef>) -> TokenStream2 {
     let program_name = mod_name.to_string();
+
+    // Serialize accounts and types to JSON for embedding in generated code
+    let accounts_json = serde_json::to_string(&accounts).unwrap_or_default();
+    let types_json = serde_json::to_string(&types).unwrap_or_default();
 
     let instruction_literals: Vec<TokenStream2> = instructions
         .iter()
@@ -1519,12 +1547,14 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
     quote! {
         #[allow(dead_code)]
         pub fn __program_idl() -> spel_framework::idl::SpelIdl {
+            let accounts: Vec<spel_framework::idl::IdlAccountType> = serde_json::from_str(#accounts_json).expect("accounts JSON is valid");
+            let types: Vec<spel_framework::idl::IdlTypeDef> = serde_json::from_str(#types_json).expect("types JSON is valid");
             spel_framework::idl::SpelIdl {
                 version: "0.1.0".to_string(),
                 name: #program_name.to_string(),
                 instructions: vec![#(#instruction_literals),*],
-                accounts: vec![],
-                types: vec![],
+                accounts,
+                types,
                 errors: vec![],
                 spec: Some("0.1.0".to_string()),
                 instruction_type: #instruction_type_expr,
@@ -1539,8 +1569,12 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
 
 // ─── IDL generation (JSON string, for PROGRAM_IDL_JSON const) ────────────
 
-fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>) -> String {
+fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>, accounts: Vec<spel_framework_core::idl::IdlAccountType>, types: Vec<spel_framework_core::idl::IdlTypeDef>) -> String {
     let program_name = mod_name.to_string();
+
+    // Serialize accounts and types to JSON
+    let accounts_json_str = serde_json::to_string(&accounts).unwrap_or_default();
+    let types_json_str = serde_json::to_string(&types).unwrap_or_default();
 
     let instructions_json: Vec<String> = instructions
         .iter()
@@ -1611,9 +1645,11 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
         String::new()
     };
     format!(
-        "{{\"version\":\"0.1.0\",\"name\":\"{}\",\"instructions\":[{}],\"accounts\":[],\"types\":[],\"errors\":[]{}}}"    ,
+        "{{\"version\":\"0.1.0\",\"name\":\"{}\",\"instructions\":[{}],\"accounts\":{},\"types\":{},\"errors\":[]{}}}",
         program_name,
         instructions_json.join(","),
+        accounts_json_str,
+        types_json_str,
         instruction_type_suffix
     )
 }
@@ -1710,8 +1746,11 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             ext
         });
 
+    // Collect #[account_type] annotated types from the file's top-level items
+    let (accounts, types) = account_types::collect_account_types(&file.items);
+
     // Generate the IDL JSON
-    let idl_json = generate_idl_json(mod_name, &instructions, external_instruction_str.as_deref());
+    let idl_json = generate_idl_json(mod_name, &instructions, external_instruction_str.as_deref(), accounts, types);
 
     // Embed the resolved path for cargo tracking
     let resolved = resolved_path.clone();
