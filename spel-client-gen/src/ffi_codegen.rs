@@ -47,7 +47,6 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa::public_transaction::{{Message, WitnessSet}};").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
-    writeln!(out, "use std::panic::UnwindSafe;").unwrap();
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -95,21 +94,6 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // Panic-safe FFI wrapper — catches panics and returns error JSON instead of aborting.
-    writeln!(out, "fn ffi_call(f: impl FnOnce() -> Result<String, String> + UnwindSafe) -> *mut c_char {{").unwrap();
-    writeln!(out, "    match std::panic::catch_unwind(f) {{").unwrap();
-    writeln!(out, "        Ok(Ok(r))  => to_cstring(r),").unwrap();
-    writeln!(out, "        Ok(Err(e)) => error_json(&e),").unwrap();
-    writeln!(out, "        Err(e) => {{").unwrap();
-    writeln!(out, "            let msg = e.downcast_ref::<&str>().copied()").unwrap();
-    writeln!(out, "                .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))").unwrap();
-    writeln!(out, "                .unwrap_or(\"<unknown panic>\");").unwrap();
-    writeln!(out, "            error_json(&format!(\"panic: {{}}\", msg))").unwrap();
-    writeln!(out, "        }}").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "}}").unwrap();
-    writeln!(out).unwrap();
-
     // PDA helper
     writeln!(out, "fn compute_pda(seeds: &[&[u8]]) -> AccountId {{").unwrap();
     writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
@@ -145,6 +129,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
 
     // parse_account_id
     writeln!(out, "fn parse_account_id(s: &str) -> Result<AccountId, String> {{").unwrap();
+    writeln!(out, "    let raw = s;\n    let s = s.strip_prefix(\"Public/\").or_else(|| s.strip_prefix(\"Private/\")).unwrap_or(s);").unwrap();
     writeln!(out, "    if let Ok(id) = s.parse() {{ return Ok(id); }}").unwrap();
     writeln!(out, "    let s = s.trim_start_matches(\"0x\");").unwrap();
     writeln!(out, "    if s.len() == 64 {{").unwrap();
@@ -152,7 +137,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);").unwrap();
     writeln!(out, "        return Ok(AccountId::new(arr));").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out, "    Err(format!(\"invalid AccountId: {{}}\", s))").unwrap();
+    writeln!(out, "    Err(format!(\"invalid AccountId: {{}}\", raw))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -177,7 +162,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "    let args = match cstr_to_str(args_json) {{").unwrap();
         writeln!(out, "        Ok(s) => s, Err(e) => return error_json(&e),").unwrap();
         writeln!(out, "    }};").unwrap();
-        writeln!(out, "    ffi_call(move || {fn_name}_impl(args))").unwrap();
+        writeln!(out, "    match {fn_name}_impl(args) {{").unwrap();
+        writeln!(out, "        Ok(r) => to_cstring(r), Err(e) => error_json(&e),").unwrap();
+        writeln!(out, "    }}").unwrap();
         writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
 
@@ -298,7 +285,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
     writeln!(out, "#[no_mangle]").unwrap();
     writeln!(out, "pub extern \"C\" fn {prefix}_version() -> *mut c_char {{").unwrap();
-    writeln!(out, "    ffi_call(move || Ok(\"{}\".to_string()))", idl.version).unwrap();
+    writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
 
     // PDA compute helpers
