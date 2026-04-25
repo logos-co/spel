@@ -1555,8 +1555,8 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
     quote! {
         #[allow(dead_code)]
         pub fn __program_idl() -> spel_framework::idl::SpelIdl {
-            let accounts: Vec<spel_framework::idl::IdlAccountType> = serde_json::from_str(#accounts_json).expect("accounts JSON is valid");
-            let types: Vec<spel_framework::idl::IdlTypeDef> = serde_json::from_str(#types_json).expect("types JSON is valid");
+            let accounts: Vec<spel_framework::idl::IdlAccountType> = spel_framework::serde_json::from_str(#accounts_json).expect("accounts JSON is valid");
+            let types: Vec<spel_framework::idl::IdlTypeDef> = spel_framework::serde_json::from_str(#types_json).expect("types JSON is valid");
             spel_framework::idl::SpelIdl {
                 version: "0.1.0".to_string(),
                 name: #program_name.to_string(),
@@ -1768,9 +1768,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         pub fn main() {
             // Help cargo track source changes
             const _SOURCE: &str = include_str!(#resolved);
-            let json: serde_json::Value = serde_json::from_str(#idl_json)
+            let json: spel_framework::serde_json::Value = spel_framework::serde_json::from_str(#idl_json)
                 .expect("Generated IDL JSON is invalid");
-            println!("{}", serde_json::to_string_pretty(&json).unwrap());
+            println!("{}", spel_framework::serde_json::to_string_pretty(&json).unwrap());
         }
     })
 }
