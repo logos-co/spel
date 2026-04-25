@@ -76,18 +76,20 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => {
-                format!("parse_account_id({var}.as_str().ok_or(\"expected string for AccountId\")?)?")
+                format!("{var}.as_str().ok_or(format!(\"{} - expected string for AccountId\", \"{var}\"))?)?", var)
             }
             "ProgramId" | "[u32; 8]" | "[u32;8]" => {
-                format!("parse_program_id({var}.as_str().ok_or(\"expected string for ProgramId\")?)?")
+                format!("{var}.as_str().ok_or(format!(\"{} - expected string for ProgramId\", \"{var}\"))?)?", var)
             }
-            "string" | "String" => format!("{var}.as_str().ok_or(\"expected string\")?.to_string()"),
-            "bool" => format!("{var}.as_bool().ok_or(\"expected bool\")?"),
+            "string" | "String" => format!("{var}.as_str().ok_or(format!(\"{} - expected string\", \"{var}\"))?.to_string()", var),
+            "bool" => format!("{var}.as_bool().ok_or(format!(\"{} - expected bool\", \"{var}\"))?", var),
+            "String" => format!("{var}.as_str().ok_or(format!(\"{} - expected string\", \"{var}\"))?.to_string()", var),
+            "bool" => format!("{var}.as_bool().ok_or(format!(\"{} - expected bool\", \"{var}\"))?", var),
             "u8" | "u16" | "u32" | "u64" | "u128" => {
-                format!("{var}.as_u64().ok_or(\"expected number\")? as {p}")
+                format!("{var}.as_u64().ok_or(format!(\"{} - expected number\", \"{var}\"))? as {p}", var)
             }
             "i8" | "i16" | "i32" | "i64" | "i128" => {
-                format!("{var}.as_i64().ok_or(\"expected number\")? as {p}")
+                format!("{var}.as_i64().ok_or(format!(\"{} - expected number\", \"{var}\"))? as {p}", var)
             }
             _ => format!("serde_json::from_value({var}.clone()).map_err(|e| format!(\"parse error: {{}}\", e))?"),
         },
