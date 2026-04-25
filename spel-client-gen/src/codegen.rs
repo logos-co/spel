@@ -265,7 +265,7 @@ fn collect_pda_helpers(idl: &SpelIdl) -> Vec<PdaHelper> {
 
 /// Generate codegen expressions for a seed argument based on its Rust type.
 /// Returns (param_type, optional_let_binding, seed_expression).
-fn seed_arg_codegen(name: &str, rust_type: &str) -> (String, Option<String>, String) {
+pub(crate) fn seed_arg_codegen(name: &str, rust_type: &str) -> (String, Option<String>, String) {
     match rust_type {
         "AccountId" => (
             "&AccountId".to_string(),
