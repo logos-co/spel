@@ -57,6 +57,7 @@ pub fn idl_type_to_rust(ty: &spel_framework_core::idl::IdlType) -> String {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => "AccountId".to_string(),
             "ProgramId" | "[u32; 8]" | "[u32;8]" => "ProgramId".to_string(),
+            "string" => "String".to_string(),
             s => s.to_string(),
         },
         IdlType::Vec { vec } => format!("Vec<{}>", idl_type_to_rust(vec)),
@@ -80,7 +81,7 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
             "ProgramId" | "[u32; 8]" | "[u32;8]" => {
                 format!("parse_program_id({var}.as_str().ok_or(\"expected string for ProgramId\")?)?")
             }
-            "String" => format!("{var}.as_str().ok_or(\"expected string\")?.to_string()"),
+            "string" | "String" => format!("{var}.as_str().ok_or(\"expected string\")?.to_string()"),
             "bool" => format!("{var}.as_bool().ok_or(\"expected bool\")?"),
             "u8" | "u16" | "u32" | "u64" | "u128" => {
                 format!("{var}.as_u64().ok_or(\"expected number\")? as {p}")

@@ -694,3 +694,33 @@ fn test_no_pda_no_helpers() {
         "should not generate fetch helpers when no PDAs"
     );
 }
+
+#[test]
+fn test_string_type_lowercased() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "whisper_wall",
+        "instructions": [{
+            "name": "whisper",
+            "accounts": [
+                {"name": "user", "writable": true, "signer": true, "init": false}
+            ],
+            "args": [{"name": "msg", "type": "string"}]
+        }]
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+    
+    // Client code should use `String` (uppercase), not `string` (lowercase)
+    assert!(
+        output.client_code.contains("msg: String"),
+        "client code should have msg: String, got:\n{}",
+        output.client_code
+    );
+    
+    // FFI code should also use `String`
+    assert!(
+        output.ffi_code.contains("msg: String"),
+        "ffi code should have msg: String, got:\n{}",
+        output.ffi_code
+    );
+}
