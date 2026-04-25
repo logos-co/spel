@@ -17,10 +17,23 @@ pub mod prelude {
     pub use crate::pda::{compute_pda, compute_pda_multi, seed_from_str, ToSeed};
     pub use crate::spel_output::AutoClaim;
     pub use crate::types::{IntoPostState, SpelOutput, AccountConstraint};
-    pub use nssa_core::account::{Account, AccountWithMetadata};
+
+    // nssa_core::account
+    pub use nssa_core::account::{Account, AccountId, AccountWithMetadata};
+
+    // nssa_core::program
     pub use nssa_core::program::{
         AccountPostState, BlockValidityWindow, ChainedCall, Claim, InvalidWindow, PdaSeed,
         ProgramId, TimestampValidityWindow, ValidityWindow,
     };
+
+    // nssa_core extras
     pub use nssa_core::{BlockId, Timestamp};
+
+    // spel-framework additional re-exports
+    pub use nssa_core::program::{InstructionData, ProgramInput, ProgramOutput, read_nssa_inputs};
+
+    // nssa::public_transaction (host-only)
+    #[cfg(feature = "host")]
+    pub use nssa::public_transaction::{Message, WitnessSet};
 }
