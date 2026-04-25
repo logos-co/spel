@@ -27,6 +27,7 @@ pub mod prelude {
         ProgramOutput, read_nssa_inputs,
     };
 
-    // nssa::public_transaction
+    // nssa::public_transaction (host-only)
+    #[cfg(feature = "host")]
     pub use nssa::public_transaction::{Message, WitnessSet};
 }
