@@ -589,7 +589,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
                             seed_expressions.push(format!("&{}_seed", name));
                         }
                         _ => {
-                            seed_expressions.push(format!("{}", name));
+                            seed_expressions.push(name.to_string());
                         }
                     }
                 }

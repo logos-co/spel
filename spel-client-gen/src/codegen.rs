@@ -275,7 +275,7 @@ pub(crate) fn seed_arg_codegen(name: &str, rust_type: &str) -> (String, Option<S
         "[u8; 32]" | "[u8;32]" => (
             format!("&{}", rust_type),
             None,
-            format!("{}", name),
+            name.to_string(),
         ),
         "ProgramId" | "[u32; 8]" | "[u32;8]" => (
             "&ProgramId".to_string(),
