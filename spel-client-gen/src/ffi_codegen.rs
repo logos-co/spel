@@ -479,12 +479,22 @@ fn collect_account_fetch_info(idl: &SpelIdl) -> Vec<AccountFetchInfo> {
                     continue;
                 }
 
-                // Look up by PascalCase of the instruction account name.
-                let account_type_name = pascal_case(&acc.name);
-                let fields = type_map
-                    .get(&account_type_name)
+                // Look up by PascalCase of the instruction account name first,
+                // then try matching by snake_case of the IDL account type names.
+                let mut fields = type_map
+                    .get(&pascal_case(&acc.name))
                     .cloned()
                     .unwrap_or_default();
+                let mut account_type_name = pascal_case(&acc.name);
+                if fields.is_empty() {
+                    for idl_acc in &idl.accounts {
+                        if snake_case(&idl_acc.name) == snake_case(&acc.name) {
+                            account_type_name = pascal_case(&idl_acc.name);
+                            fields = idl_acc.type_.fields.clone();
+                            break;
+                        }
+                    }
+                }
 
                 infos.push(AccountFetchInfo {
                     account_name,
@@ -632,11 +642,11 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
         writeln!(out, ") -> *mut c_char {{").unwrap();
 
         writeln!(out, "    unsafe {{").unwrap();
-        writeln!(out, "        let args_json = cstr_to_str(args_json);").unwrap();
+        writeln!(out, "        let args_str = cstr_to_str(args_json).map_err(|e| format!(\"invalid UTF-8: {{}}\", e))?;").unwrap();
         writeln!(out, "        match ({{").unwrap();
 
         // Parse JSON args.
-        writeln!(out, "            let args: serde_json::Value = serde_json::from_str(args_json).map_err(|e| format!(\"parse error: {{}}\", e))?;").unwrap();
+        writeln!(out, "            let args: serde_json::Value = serde_json::from_str(args_str).map_err(|e| format!(\"parse error: {{}}\", e))?;").unwrap();
 
         // Standard fields.
         body_lines.push("let wallet_path = args.get(\"wallet_path\").and_then(|v| v.as_str()).ok_or(\"missing wallet_path\")?;".to_string());
@@ -650,7 +660,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
 
         // Compute PDA.
         let pda_args = seed_expressions.join(", ");
-        writeln!(out, "            let account_id = compute_{}_pda(program_id, {});", info.account_name, pda_args).unwrap();
+        writeln!(out, "            let account_id = compute_{}_pda(&program_id, {});", info.account_name, pda_args).unwrap();
 
         // Fetch and decode.
         writeln!(out, "            let wallet = WalletCore::from_path(wallet_path).map_err(|e| format!(\"wallet: {{}}\", e))?;").unwrap();
@@ -661,7 +671,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
         writeln!(out, "            }});").unwrap();
         writeln!(out, "            let account = response.map_err(|e| format!(\"fetch {{}}: {{}}\", \"{}\", e))?;", info.account_type_name).unwrap();
         writeln!(out, "            let state = <{}>::try_from_slice(&account.data).map_err(|e| format!(\"decode {{}}: {{}}\", \"{}\", e))?;", rust_type, info.account_type_name).unwrap();
-        writeln!(out, "            to_cstring({}).to_string())", json_body).unwrap();
+        writeln!(out, "            {};", json_body).unwrap();
 
         // Error handling.
         writeln!(out, "        }}) {{").unwrap();

@@ -83,8 +83,6 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
             }
             "string" | "String" => format!("{var}.as_str().ok_or(format!(\"{} - expected string\", \"{var}\"))?.to_string()", var),
             "bool" => format!("{var}.as_bool().ok_or(format!(\"{} - expected bool\", \"{var}\"))?", var),
-            "String" => format!("{var}.as_str().ok_or(format!(\"{} - expected string\", \"{var}\"))?.to_string()", var),
-            "bool" => format!("{var}.as_bool().ok_or(format!(\"{} - expected bool\", \"{var}\"))?", var),
             "u8" | "u16" | "u32" | "u64" | "u128" => {
                 format!("{var}.as_u64().ok_or(format!(\"{} - expected number\", \"{var}\"))? as {p}", var)
             }
