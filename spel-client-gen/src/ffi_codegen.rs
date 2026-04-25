@@ -636,7 +636,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
         writeln!(out, "        match ({{").unwrap();
 
         // Parse JSON args.
-        writeln!(out, "            let args: serde_json::Value = serde_json::from_value(serde_json::json!({})).map_err(|e| format!(\"parse error: {{}}\", e))?;", "{}").unwrap();
+        writeln!(out, "            let args: serde_json::Value = serde_json::from_str(args_json).map_err(|e| format!(\"parse error: {{}}\", e))?;").unwrap();
 
         // Standard fields.
         body_lines.push("let wallet_path = args.get(\"wallet_path\").and_then(|v| v.as_str()).ok_or(\"missing wallet_path\")?;".to_string());
