@@ -9,7 +9,7 @@ spel-framework-core = { path = "../spel-framework-core" }
 spel-framework-macros = { path = "../spel-framework-macros" }
 nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
+serde_json = "1"
 
 [dev-dependencies]
 spel-client-gen = { path = "../spel-client-gen" }
-serde_json = "1"
