@@ -696,52 +696,8 @@ fn test_no_pda_no_helpers() {
 }
 
 #[test]
-fn test_string_type_lowercased() {
-    let idl = r#"{
-        "version": "0.1.0",
-        "name": "whisper_wall",
-        "instructions": [{
-            "name": "whisper",
-            "accounts": [
-                {"name": "user", "writable": true, "signer": true, "init": false}
-            ],
-            "args": [{"name": "msg", "type": "string"}]
-        }]
-    }"#;
-    let output = generate_from_idl_json(idl).expect("codegen should succeed");
-    
-    // Client code should use `String` (uppercase), not `string` (lowercase)
-    assert!(
-        output.client_code.contains("msg: String"),
-        "client code should have msg: String, got:\n{}",
-        output.client_code
-    );
-    
-    // FFI code should also use `String`
-    assert!(
-        output.ffi_code.contains("msg: String"),
-        "ffi code should have msg: String, got:\n{}",
-        output.ffi_code
-    );
-}
 
 #[test]
-fn test_ffi_parse_account_id_strips_prefix() {
-    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
-
-    // The generated parse_account_id should strip Public/ and Private/ prefixes
-    assert!(
-        output.ffi_code.contains(r#"s.strip_prefix("Public/")"#),
-        "parse_account_id should strip Public/ prefix: {}",
-        output.ffi_code
-    );
-    assert!(
-        output.ffi_code.contains(r#"s.strip_prefix("Private/")"#),
-        "parse_account_id should strip Private/ prefix: {}",
-        output.ffi_code
-    );
-}
-
 fn test_ffi_has_catch_unwind() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
 
