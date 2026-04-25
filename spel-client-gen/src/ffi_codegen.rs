@@ -13,6 +13,7 @@
 use spel_framework_core::idl::*;
 use std::fmt::Write;
 use crate::util::*;
+use crate::codegen::seed_arg_codegen;
 
 /// Generate C FFI wrapper source code from an IDL.
 pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
@@ -47,6 +48,11 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa::public_transaction::{{Message, WitnessSet}};").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
+
+    // BorshDeserialize is needed for account fetch functions.
+    if !collect_account_fetch_info(idl).is_empty() {
+        writeln!(out, "use borsh::BorshDeserialize;").unwrap();
+    }
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -290,6 +296,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
 
     // PDA compute helpers
     out.push_str(&generate_pda_helpers(idl));
+
+    // Account fetch functions
+    out.push_str(&generate_account_fetch_functions(idl));
     Ok(out)
 }
 
@@ -435,6 +444,250 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
     out
 }
 
+
+/// Information about an account type that needs a fetch function.
+struct AccountFetchInfo {
+    /// Account name (snake_case, e.g. "whisper_state").
+    account_name: String,
+    /// PascalCase account type name from IDL (e.g. "WhisperState").
+    account_type_name: String,
+    /// PDA seeds for computing the account address.
+    pda_seeds: Vec<IdlSeed>,
+    /// Fields of the account type for JSON serialization in the response.
+    fields: Vec<IdlField>,
+}
+
+/// Collect account types that have PDAs across all instructions, deduplicating by name.
+fn collect_account_fetch_info(idl: &SpelIdl) -> Vec<AccountFetchInfo> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut infos = Vec::new();
+
+    // Build a map from PascalCase type name to its field schema.
+    let type_map: std::collections::HashMap<String, Vec<IdlField>> = idl
+        .accounts
+        .iter()
+        .filter(|a| !a.type_.fields.is_empty())
+        .map(|a| (pascal_case(&a.name), a.type_.fields.clone()))
+        .collect();
+
+    for ix in &idl.instructions {
+        for acc in &ix.accounts {
+            if let Some(pda) = &acc.pda {
+                let account_name = snake_case(&acc.name);
+                if !seen.insert(account_name.clone()) {
+                    continue;
+                }
+
+                // Look up by PascalCase of the instruction account name.
+                let account_type_name = pascal_case(&acc.name);
+                let fields = type_map
+                    .get(&account_type_name)
+                    .cloned()
+                    .unwrap_or_default();
+
+                infos.push(AccountFetchInfo {
+                    account_name,
+                    account_type_name,
+                    pda_seeds: pda.seeds.clone(),
+                    fields,
+                });
+            }
+        }
+    }
+
+    infos
+}
+
+/// Generate `extern "C"` fetch functions for account types that have PDAs.
+pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
+    use std::fmt::Write;
+    let mut out = String::new();
+    let prefix = snake_case(&idl.name);
+
+    let fetch_infos = collect_account_fetch_info(idl);
+
+    for info in &fetch_infos {
+        let fn_name = format!("{}_fetch_{}", prefix, info.account_name);
+        let rust_type = pascal_case(&info.account_type_name);
+
+        // Build the function signature parameters (after the standard args_json).
+        let mut sig_params = Vec::new();
+        let mut body_lines = Vec::new();
+
+        for seed in &info.pda_seeds {
+            match seed {
+                IdlSeed::Const { value: _ } => {
+                    // Will be defined as a local var inside the function body.
+                }
+                IdlSeed::Account { path } => {
+                    let name = snake_case(path);
+                    sig_params.push(format!("{}: &AccountId", name));
+                    body_lines.push(format!(
+                        "let {} = parse_account_id(args.get(\"{}\").ok_or(\"expected string for AccountId\")?)?;",
+                        name, name
+                    ));
+                }
+                IdlSeed::Arg { path } => {
+                    let name = snake_case(path);
+                    let ty = idl.instructions.iter().flat_map(|ix| &ix.args)
+                        .find(|a| a.name == *path)
+                        .map(|a| idl_type_to_rust(&a.type_))
+                        .unwrap_or_else(|| "String".to_string());
+
+                    let (param_ty, binding, _expr) = seed_arg_codegen(&name, &ty);
+                    sig_params.push(format!("{}: {}", name, param_ty));
+                    if let Some(b) = binding {
+                        body_lines.push(b);
+                    }
+                    let parse_expr = idl_type_to_json_parse(&parse_rust_type_as_idl(&ty), &name);
+                    body_lines.push(format!("let {} = {};", name, parse_expr));
+                }
+            }
+        }
+
+        // Build the seeds expressions for use in compute_pda call.
+        let mut seed_expressions = Vec::new();
+        for (idx, seed) in info.pda_seeds.iter().enumerate() {
+            match seed {
+                IdlSeed::Const { value } => {
+                    let var = format!("seed_const_{}", idx);
+                    body_lines.insert(0, format!(
+                        "let {} = spel_framework_core::pda::seed_from_str(\"{}\");",
+                        var, value
+                    ));
+                    seed_expressions.push(format!("&{}", var));
+                }
+                IdlSeed::Account { path } => {
+                    seed_expressions.push(format!("{}.value()", snake_case(path)));
+                }
+                IdlSeed::Arg { path } => {
+                    let name = snake_case(path);
+                    let ty = idl.instructions.iter().flat_map(|ix| &ix.args)
+                        .find(|a| a.name == *path)
+                        .map(|a| idl_type_to_rust(&a.type_))
+                        .unwrap_or_else(|| "String".to_string());
+
+                    match ty.as_str() {
+                        "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "i128" => {
+                            seed_expressions.push(format!("&{}_seed", name));
+                        }
+                        "String" => {
+                            seed_expressions.push(format!("&{}_seed", name));
+                        }
+                        "[u32; 8]" | "ProgramId" => {
+                            seed_expressions.push(format!("&{}_seed", name));
+                        }
+                        _ => {
+                            seed_expressions.push(format!("{}", name));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Build the JSON response from account fields.
+        let mut json_fields = Vec::new();
+        for field in &info.fields {
+            let field_name = &field.name;
+            let json_key = snake_case(field_name);
+
+            let json_expr = match &field.type_ {
+                IdlType::Primitive(p) if p == "string" => {
+                    format!("\"{}\": state.{}.clone()", json_key, field_name)
+                }
+                IdlType::Primitive(p) if p == "bool" => {
+                    format!("\"{}\": state.{}", json_key, field_name)
+                }
+                IdlType::Primitive(p) if p.starts_with('u') || p.starts_with('i') => {
+                    format!("\"{}\": state.{}", json_key, field_name)
+                }
+                IdlType::Array { .. } | IdlType::Vec { .. } => {
+                    format!("\"{}\": hex::encode(&state.{})", json_key, field_name)
+                }
+                _ => {
+                    format!("\"{}\": serde_json::to_value(&state.{})? ", json_key, field_name)
+                }
+            };
+            json_fields.push(json_expr);
+        }
+
+        let json_body = if json_fields.is_empty() {
+            "serde_json::json!({})".to_string()
+        } else {
+            format!("serde_json::json!({{ {} }})", json_fields.join(", "))
+        };
+
+        // Build the full function.
+        writeln!(out).unwrap();
+        writeln!(out, "/// Fetch and decode the `{}` account state.", info.account_type_name).unwrap();
+        writeln!(out, "/// Required JSON fields: wallet_path, sequencer_url, program_id_hex").unwrap();
+
+        writeln!(out, "#[no_mangle]").unwrap();
+        write!(out, "pub extern \"C\" fn {}(", fn_name).unwrap();
+        write!(out, "args_json: *const c_char").unwrap();
+        for param in &sig_params {
+            write!(out, ", {}", param).unwrap();
+        }
+        writeln!(out, ") -> *mut c_char {{").unwrap();
+
+        writeln!(out, "    unsafe {{").unwrap();
+        writeln!(out, "        let args_json = cstr_to_str(args_json);").unwrap();
+        writeln!(out, "        match ({{").unwrap();
+
+        // Parse JSON args.
+        writeln!(out, "            let args: serde_json::Value = serde_json::from_value(serde_json::json!({})).map_err(|e| format!(\"parse error: {{}}\", e))?;", "{}").unwrap();
+
+        // Standard fields.
+        body_lines.push("let wallet_path = args.get(\"wallet_path\").and_then(|v| v.as_str()).ok_or(\"missing wallet_path\")?;".to_string());
+        body_lines.push("let sequencer_url = args.get(\"sequencer_url\").and_then(|v| v.as_str()).ok_or(\"missing sequencer_url\")?;".to_string());
+        body_lines.push("let program_id_hex = args.get(\"program_id_hex\").and_then(|v| v.as_str()).ok_or(\"missing program_id_hex\")?;".to_string());
+        body_lines.push("let program_id = parse_program_id_hex(program_id_hex)?;".to_string());
+
+        for line in &body_lines {
+            writeln!(out, "            {}", line).unwrap();
+        }
+
+        // Compute PDA.
+        let pda_args = seed_expressions.join(", ");
+        writeln!(out, "            let account_id = compute_{}_pda(program_id, {});", info.account_name, pda_args).unwrap();
+
+        // Fetch and decode.
+        writeln!(out, "            let wallet = WalletCore::from_path(wallet_path).map_err(|e| format!(\"wallet: {{}}\", e))?;").unwrap();
+        writeln!(out, "            let rt = tokio::runtime::Runtime::new().map_err(|e| format!(\"rt: {{}}\", e))?;").unwrap();
+        writeln!(out, "            let response = rt.block_on(async {{").unwrap();
+        writeln!(out, "                use sequencer_service_rpc::RpcClient as _;").unwrap();
+        writeln!(out, "                wallet.sequencer_client.get_account(account_id).await").unwrap();
+        writeln!(out, "            }});").unwrap();
+        writeln!(out, "            let account = response.map_err(|e| format!(\"fetch {{}}: {{}}\", \"{}\", e))?;", info.account_type_name).unwrap();
+        writeln!(out, "            let state = <{}>::try_from_slice(&account.data).map_err(|e| format!(\"decode {{}}: {{}}\", \"{}\", e))?;", rust_type, info.account_type_name).unwrap();
+        writeln!(out, "            to_cstring({}).to_string())", json_body).unwrap();
+
+        // Error handling.
+        writeln!(out, "        }}) {{").unwrap();
+        writeln!(out, "            Ok(v) => {{ let s = format!(\"{{{{\\\"success\\\":true,\\\"state\\\":{{}}}}}}\", v); to_cstring(s) }}").unwrap();
+        writeln!(out, "            Err(e) => error_json(&format!(\"fetch {}: {{}}\", e))", info.account_type_name).unwrap();
+        writeln!(out, "        }}").unwrap();
+        writeln!(out, "    }}").unwrap();
+        writeln!(out, "}}").unwrap();
+    }
+
+    out
+}
+
+/// Helper to convert a Rust type string back to an IdlType for JSON parsing.
+fn parse_rust_type_as_idl(ty: &str) -> IdlType {
+    match ty {
+        "String" => IdlType::Primitive("string".to_string()),
+        "bool" => IdlType::Primitive("bool".to_string()),
+        "u8" | "u16" | "u32" | "u64" | "u128" => IdlType::Primitive(ty.to_string()),
+        "i8" | "i16" | "i32" | "i64" | "i128" => IdlType::Primitive(ty.to_string()),
+        "AccountId" => IdlType::Primitive("[u8; 32]".to_string()),
+        "ProgramId" => IdlType::Primitive("[u32; 8]".to_string()),
+        _ => IdlType::Defined { defined: ty.to_string() },
+    }
+}
+
 /// Generate a C header file from an IDL.
 pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
     let mut out = String::new();
@@ -453,6 +706,16 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
     for ix in &idl.instructions {
         let fn_name = format!("{}_{}", prefix, snake_case(&ix.name));
         writeln!(out, "/* {} instruction */", ix.name).unwrap();
+        writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
+        writeln!(out).unwrap();
+    }
+
+
+    // Fetch functions for account types with PDAs.
+    let fetch_infos = collect_account_fetch_info(idl);
+    for info in &fetch_infos {
+        let fn_name = format!("{}_fetch_{}", prefix, info.account_name);
+        writeln!(out, "/* Fetch {} account state */", info.account_type_name).unwrap();
         writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
         writeln!(out).unwrap();
     }

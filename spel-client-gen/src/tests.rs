@@ -741,3 +741,271 @@ fn test_ffi_parse_account_id_strips_prefix() {
         output.ffi_code
     );
 }
+
+#[test]
+fn test_ffi_fetch_function_generation() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "whisper_wall",
+        "instructions": [
+            {
+                "name": "initialize",
+                "accounts": [
+                    {
+                        "name": "whisper_state",
+                        "writable": true,
+                        "signer": false,
+                        "init": true,
+                        "pda": {
+                            "seeds": [
+                                {"kind": "const", "value": "whisper_state__"}
+                            ]
+                        }
+                    },
+                    {
+                        "name": "admin",
+                        "writable": false,
+                        "signer": true,
+                        "init": false
+                    }
+                ],
+                "args": []
+            }
+        ],
+        "accounts": [
+            {
+                "name": "WhisperState",
+                "type": {
+                    "kind": "struct",
+                    "fields": [
+                        {"name": "admin", "type": {"array": ["u8", 32]}},
+                        {"name": "latest_whisper", "type": "string"},
+                        {"name": "last_tip", "type": "u128"},
+                        {"name": "whisper_count", "type": "u64"},
+                        {"name": "total_tips", "type": "u128"}
+                    ]
+                }
+            }
+        ],
+        "types": [],
+        "errors": []
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+
+    // FFI should contain fetch function for WhisperState
+    assert!(
+        output.ffi_code.contains("pub extern \"C\" fn whisper_wall_fetch_whisper_state"),
+        "should generate fetch function in FFI: {}",
+        output.ffi_code
+    );
+
+    // Header should contain fetch function declaration
+    assert!(
+        output.header.contains("char* whisper_wall_fetch_whisper_state(const char* args_json)"),
+        "should declare fetch function in header"
+    );
+
+    // FFI should use BorshDeserialize for decoding
+    assert!(
+        output.ffi_code.contains("BorshDeserialize"),
+        "should import BorshDeserialize for decoding"
+    );
+
+    // FFI should compute PDA and fetch account
+    assert!(
+        output.ffi_code.contains("get_account"),
+        "should call get_account to fetch state"
+    );
+
+    // FFI should return JSON with success/state structure
+    assert!(
+        output.ffi_code.contains("{{\\\"success\\\":true"),
+        "should return JSON with success field"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_with_arg_seed() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "token_vault",
+        "instructions": [
+            {
+                "name": "create_vault",
+                "accounts": [
+                    {
+                        "name": "vault_state",
+                        "writable": true,
+                        "signer": false,
+                        "init": true,
+                        "pda": {
+                            "seeds": [
+                                {"kind": "const", "value": "vault"},
+                                {"kind": "arg", "path": "owner"}
+                            ]
+                        }
+                    },
+                    {
+                        "name": "owner",
+                        "writable": false,
+                        "signer": true,
+                        "init": false
+                    }
+                ],
+                "args": [
+                    {"name": "owner", "type": "[u8; 32]"}
+                ]
+            }
+        ],
+        "accounts": [
+            {
+                "name": "VaultState",
+                "type": {
+                    "kind": "struct",
+                    "fields": [
+                        {"name": "owner_id", "type": "[u8; 32]"},
+                        {"name": "balance", "type": "u64"}
+                    ]
+                }
+            }
+        ],
+        "types": [],
+        "errors": []
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+
+    // FFI should contain fetch function for vault_state
+    assert!(
+        output.ffi_code.contains("pub extern \"C\" fn token_vault_fetch_vault_state"),
+        "should generate fetch function with arg seed"
+    );
+
+    // Header should declare it
+    assert!(
+        output.header.contains("char* token_vault_fetch_vault_state(const char* args_json)"),
+        "should declare fetch function in header"
+    );
+
+    // Should include owner parameter for PDA computation
+    assert!(
+        output.ffi_code.contains("owner: &AccountId") || output.ffi_code.contains("owner_seed"),
+        "should handle arg seed for PDA computation"
+    );
+}
+
+#[test]
+fn test_ffi_no_fetch_without_accounts() {
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "no_account_program",
+        "instructions": [
+            {
+                "name": "do_thing",
+                "accounts": [
+                    {"name": "signer", "writable": false, "signer": true, "init": false}
+                ],
+                "args": [{"name": "value", "type": "u64"}]
+            }
+        ],
+        "accounts": [],
+        "types": [],
+        "errors": []
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+
+    // No fetch functions should be generated when there are no account types with PDAs
+    assert!(
+        !output.ffi_code.contains("fetch_"),
+        "should not generate fetch functions when no accounts"
+    );
+    assert!(
+        !output.header.contains("fetch_"),
+        "header should not contain fetch declarations when no accounts"
+    );
+}
+
+#[test]
+fn test_fetch_deduplication() {
+    // Same account type referenced by multiple instructions should only get one fetch function
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "multi_ix_program",
+        "instructions": [
+            {
+                "name": "set_value",
+                "accounts": [
+                    {
+                        "name": "state",
+                        "writable": true,
+                        "signer": false,
+                        "init": false,
+                        "pda": {
+                            "seeds": [
+                                {"kind": "const", "value": "state__"},
+                                {"kind": "arg", "path": "owner"}
+                            ]
+                        }
+                    },
+                    {
+                        "name": "owner",
+                        "writable": false,
+                        "signer": true,
+                        "init": false
+                    }
+                ],
+                "args": [
+                    {"name": "owner", "type": "[u8; 32]"},
+                    {"name": "value", "type": "u64"}
+                ]
+            },
+            {
+                "name": "get_value",
+                "accounts": [
+                    {
+                        "name": "state",
+                        "writable": false,
+                        "signer": false,
+                        "init": false,
+                        "pda": {
+                            "seeds": [
+                                {"kind": "const", "value": "state__"},
+                                {"kind": "arg", "path": "owner"}
+                            ]
+                        }
+                    },
+                    {
+                        "name": "owner",
+                        "writable": false,
+                        "signer": false,
+                        "init": false
+                    }
+                ],
+                "args": [
+                    {"name": "owner", "type": "[u8; 32]"}
+                ]
+            }
+        ],
+        "accounts": [
+            {
+                "name": "StateAccount",
+                "type": {
+                    "kind": "struct",
+                    "fields": [
+                        {"name": "owner_id", "type": "[u8; 32]"},
+                        {"name": "value", "type": "u64"}
+                    ]
+                }
+            }
+        ],
+        "types": [],
+        "errors": []
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+
+    // Only one fetch function should be generated despite two instructions referencing the same account
+    let count = output.ffi_code.matches("pub extern \"C\" fn multi_ix_program_fetch_state").count();
+    assert_eq!(count, 1, "should deduplicate fetch functions: found {} occurrences", count);
+
+    let header_count = output.header.matches("char* multi_ix_program_fetch_state").count();
+    assert_eq!(header_count, 1, "header should have one fetch declaration");
+}
