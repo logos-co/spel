@@ -724,3 +724,20 @@ fn test_string_type_lowercased() {
         output.ffi_code
     );
 }
+
+#[test]
+fn test_ffi_parse_account_id_strips_prefix() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+
+    // The generated parse_account_id should strip Public/ and Private/ prefixes
+    assert!(
+        output.ffi_code.contains(r#"s.strip_prefix("Public/")"#),
+        "parse_account_id should strip Public/ prefix: {}",
+        output.ffi_code
+    );
+    assert!(
+        output.ffi_code.contains(r#"s.strip_prefix("Private/")"#),
+        "parse_account_id should strip Private/ prefix: {}",
+        output.ffi_code
+    );
+}

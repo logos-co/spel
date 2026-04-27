@@ -129,6 +129,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
 
     // parse_account_id
     writeln!(out, "fn parse_account_id(s: &str) -> Result<AccountId, String> {{").unwrap();
+    writeln!(out, "    let raw = s;\n    let s = s.strip_prefix(\"Public/\").or_else(|| s.strip_prefix(\"Private/\")).unwrap_or(s);").unwrap();
     writeln!(out, "    if let Ok(id) = s.parse() {{ return Ok(id); }}").unwrap();
     writeln!(out, "    let s = s.trim_start_matches(\"0x\");").unwrap();
     writeln!(out, "    if s.len() == 64 {{").unwrap();
@@ -136,7 +137,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);").unwrap();
     writeln!(out, "        return Ok(AccountId::new(arr));").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out, "    Err(format!(\"invalid AccountId: {{}}\", s))").unwrap();
+    writeln!(out, "    Err(format!(\"invalid AccountId: {{}}\", raw))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
