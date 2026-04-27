@@ -531,7 +531,8 @@ fn generate_account_types(idl: &SpelIdl) -> String {
                 spel_framework_core::idl::IdlType::Primitive(p) if p == "[u32; 8]" || p == "[u32;8]" => "[u32; 8]".to_string(),
                 _ => idl_type_to_rust(&field.type_),
             };
-            writeln!(out, "    pub {}: {},", snake_case(&field.name), rust_ty).unwrap();
+            // Use raw IDL field name so struct field matches JSON access (state.{field.name})
+            writeln!(out, "    pub {}: {},", field.name, rust_ty).unwrap();
         }
         writeln!(out, "}}").unwrap();
     }
