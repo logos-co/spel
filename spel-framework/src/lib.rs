@@ -9,6 +9,9 @@ pub use spel_framework_macros::{lez_program, instruction, account_type, generate
 // Re-export core types
 pub use spel_framework_core::*;
 
+// Re-export serde_json for use in generated code
+pub use serde_json;
+
 pub mod prelude {
     pub use crate::lez_program;
     pub use crate::instruction;
