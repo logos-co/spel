@@ -183,7 +183,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         // Parse args
         for arg in &ix.args {
             let name = rust_ident(&arg.name);
-            let parse_expr = idl_type_to_json_parse(&arg.type_, &format!("v[\"{}\"]", arg.name));
+            let parse_expr = idl_type_to_json_parse(&arg.type_, &format!("v[\"{}\"]", arg.name), &arg.name);
             writeln!(out, "    let {name} = {parse_expr};").unwrap();
         }
         writeln!(out).unwrap();
@@ -550,7 +550,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
                     if let Some(b) = binding {
                         body_lines.push(b);
                     }
-                    let parse_expr = idl_type_to_json_parse(&parse_rust_type_as_idl(&ty), &name);
+                    let parse_expr = idl_type_to_json_parse(&parse_rust_type_as_idl(&ty), &name, &name);
                     body_lines.push(format!("let {} = {};", name, parse_expr));
                 }
             }

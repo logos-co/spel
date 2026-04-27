@@ -71,28 +71,28 @@ pub fn idl_type_to_rust(ty: &spel_framework_core::idl::IdlType) -> String {
 
 /// Map IDL type to a JSON parsing expression for FFI.
 /// `var` is the expression to parse from (serde_json::Value).
-pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str) -> String {
+pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str, key: &str) -> String {
     use spel_framework_core::idl::IdlType;
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => {
-                format!("{var}.as_str().ok_or(format!(\"{} - expected string for AccountId\", \"{var}\"))?)?", var)
+                format!("{}{}.as_str().ok_or(\"{} - expected string for AccountId\")?", "", var, key)
             }
             "ProgramId" | "[u32; 8]" | "[u32;8]" => {
-                format!("{var}.as_str().ok_or(format!(\"{} - expected string for ProgramId\", \"{var}\"))?)?", var)
+                format!("{}{}.as_str().ok_or(\"{} - expected string for ProgramId\")?", "", var, key)
             }
-            "string" | "String" => format!("{var}.as_str().ok_or(format!(\"{} - expected string\", \"{var}\"))?.to_string()", var),
-            "bool" => format!("{var}.as_bool().ok_or(format!(\"{} - expected bool\", \"{var}\"))?", var),
+            "string" | "String" => format!("{}{}.as_str().ok_or(\"{} - expected string\")?.to_string()", "", var, key),
+            "bool" => format!("{}{}.as_bool().ok_or(\"{} - expected bool\")?", "", var, key),
             "u8" | "u16" | "u32" | "u64" | "u128" => {
-                format!("{var}.as_u64().ok_or(format!(\"{} - expected number\", \"{var}\"))? as {p}", var)
+                format!("{}{}.as_u64().ok_or(\"{} - expected number\")? as {p}", "", var, key)
             }
             "i8" | "i16" | "i32" | "i64" | "i128" => {
-                format!("{var}.as_i64().ok_or(format!(\"{} - expected number\", \"{var}\"))? as {p}", var)
+                format!("{}{}.as_i64().ok_or(\"{} - expected number\")? as {p}", "", var, key)
             }
             _ => format!("serde_json::from_value({var}.clone()).map_err(|e| format!(\"parse error: {{}}\", e))?"),
         },
         IdlType::Vec { vec } => {
-            let inner = idl_type_to_json_parse(vec, "item");
+            let inner = idl_type_to_json_parse(vec, "item", "item");
             format!(
                 "{var}.as_array().ok_or(\"expected array\")?.iter().map(|item| Ok({inner})).collect::<Result<Vec<_>, String>>()?"
             )
