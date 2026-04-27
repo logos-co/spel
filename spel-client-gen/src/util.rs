@@ -76,10 +76,10 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str,
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => {
-                format!("{}{}.as_str().ok_or(\"{} - expected string for AccountId\")?", "", var, key)
+                format!("parse_account_id({}.as_str().ok_or(\"{} - expected string for AccountId\")?)?", var, key)
             }
             "ProgramId" | "[u32; 8]" | "[u32;8]" => {
-                format!("{}{}.as_str().ok_or(\"{} - expected string for ProgramId\")?", "", var, key)
+                format!("parse_program_id({}.as_str().ok_or(\"{} - expected string for ProgramId\")?)?", var, key)
             }
             "string" | "String" => format!("{}{}.as_str().ok_or(\"{} - expected string\")?.to_string()", "", var, key),
             "bool" => format!("{}{}.as_bool().ok_or(\"{} - expected bool\")?", "", var, key),
