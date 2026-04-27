@@ -886,10 +886,16 @@ fn test_ffi_fetch_with_arg_seed() {
         "should declare fetch function in header"
     );
 
-    // Should include owner parameter for PDA computation
+    // Should parse owner from args_json and use it for PDA computation
+    // (no extra function parameters — all seeds come from JSON)
     assert!(
-        output.ffi_code.contains("owner: &AccountId") || output.ffi_code.contains("owner_seed"),
-        "should handle arg seed for PDA computation"
+        output.ffi_code.contains("owner") && output.ffi_code.contains("compute_vault_state_pda"),
+        "should parse owner from args_json and use it for PDA computation"
+    );
+    // No non-C-callable parameters on the extern "C" function
+    assert!(
+        !output.ffi_code.contains("owner: &AccountId"),
+        "should not have non-C-callable parameters on fetch function"
     );
 }
 

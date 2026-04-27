@@ -13,7 +13,6 @@
 use spel_framework_core::idl::*;
 use std::fmt::Write;
 use crate::util::*;
-use crate::codegen::seed_arg_codegen;
 
 /// Generate C FFI wrapper source code from an IDL.
 pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
@@ -514,7 +513,6 @@ fn collect_account_fetch_info(idl: &SpelIdl) -> Vec<AccountFetchInfo> {
     infos
 }
 
-/// Generate `extern "C"` fetch functions for account types that have PDAs.
 /// Generate Borsh-deserializable account struct types from IDL accounts.
 /// These structs are needed by account fetch functions to decode account data.
 fn generate_account_types(idl: &SpelIdl) -> String {
@@ -552,20 +550,22 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
         let fn_name = format!("{}_fetch_{}", prefix, info.account_name);
         let rust_type = pascal_case(&info.account_type_name);
 
-        // Build the function signature parameters (after the standard args_json).
-        let mut sig_params = Vec::new();
+        // Build the function body — all seed args are parsed from args_json.
+        // The extern "C" function always takes only args_json.
         let mut body_lines = Vec::new();
 
         for seed in &info.pda_seeds {
             match seed {
                 IdlSeed::Const { value } => {
-                    // Will be defined as a local var inside the function body.
+                    body_lines.insert(0, format!(
+                        "let {} = spel_framework_core::pda::seed_from_str(\"{}\");",
+                        format!("seed_const_0"), value
+                    ));
                 }
                 IdlSeed::Account { path } => {
                     let name = snake_case(path);
-                    sig_params.push(format!("{}: &AccountId", name));
                     body_lines.push(format!(
-                        "let {} = parse_account_id(args.get(\"{}\").ok_or(\"expected string for AccountId\")?)?;",
+                        "let {} = parse_account_id(args.get(\"{}\").and_then(|v| v.as_str()).ok_or(\"expected string for AccountId\")?)?;",
                         name, name
                     ));
                 }
@@ -576,15 +576,29 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
                         .map(|a| idl_type_to_rust(&a.type_))
                         .unwrap_or_else(|| "String".to_string());
 
-                    let (param_ty, binding, _expr) = seed_arg_codegen(&name, &ty);
-                    sig_params.push(format!("{}: {}", name, param_ty));
-                    let has_binding = binding.is_some();
+                    // Use idl_type_to_json_parse which now wraps AccountId/ProgramId in parse_account_id/parse_program_id
+                    let parse_expr = idl_type_to_json_parse(&parse_rust_type_as_idl(&ty), &name, &name);
+                    body_lines.push(format!("let {} = {};", name, parse_expr));
+
+                    // For types that need seed conversion (not AccountId/ProgramId), add the binding
+                    let binding = match ty.as_str() {
+                        "u64" | "u32" | "u16" | "u8" | "u128" | "i64" | "i32" | "i16" | "i8" | "i128" => {
+                            Some(format!("let {}_be = {}.to_be_bytes();\n    let mut {}_seed = [0u8; 32];\n    {}_seed[..{}_be.len()].copy_from_slice(&{}_be);", name, name, name, name, name, name))
+                        }
+                        "String" | "&str" => {
+                            Some(format!("let {}_seed = spel_framework_core::pda::seed_from_str(&{});", name, name))
+                        }
+                        "[u32; 8]" | "[u32;8]" | "ProgramId" => {
+                            Some(format!("let {}_seed: [u8; 32] = {}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>().try_into().unwrap();", name, name))
+                        }
+                        "[u8; 32]" | "[u8;32]" | "AccountId" => {
+                            // AccountId is already [u8; 32], no seed conversion needed
+                            None
+                        }
+                        _ => Some(format!("let {}_seed = spel_framework_core::pda::seed_from_str(&{}.to_string());", name, name)),
+                    };
                     if let Some(b) = binding {
-                        body_lines.push(b);
-                    }
-                    if has_binding {
-                        let parse_expr = idl_type_to_json_parse(&parse_rust_type_as_idl(&ty), &name, &name);
-                        body_lines.push(format!("let {} = {};", name, parse_expr));
+                        body_lines.insert(body_lines.len() - 1, b);
                     }
                 }
             }
@@ -663,12 +677,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl) -> String {
         writeln!(out, "/// Required JSON fields: wallet_path, sequencer_url, program_id_hex").unwrap();
 
         writeln!(out, "#[no_mangle]").unwrap();
-        write!(out, "pub extern \"C\" fn {}(", fn_name).unwrap();
-        write!(out, "args_json: *const c_char").unwrap();
-        for param in &sig_params {
-            write!(out, ", {}", param).unwrap();
-        }
-        writeln!(out, ") -> *mut c_char {{").unwrap();
+        writeln!(out, "pub extern \"C\" fn {}(args_json: *const c_char) -> *mut c_char {{", fn_name).unwrap();
 
         writeln!(out, "    let result = (|| -> Result<String, String> {{").unwrap();
 
