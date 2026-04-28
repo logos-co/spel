@@ -177,6 +177,13 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
+    // Shared async runtime — created once per process, reused across all FFI calls.
+    writeln!(out, "static ASYNC_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();").unwrap();
+    writeln!(out, "fn get_runtime() -> &'static tokio::runtime::Runtime {{").unwrap();
+    writeln!(out, "    ASYNC_RUNTIME.get_or_init(|| tokio::runtime::Runtime::new().expect(\"failed to create Tokio runtime\"))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
     // Global mutex to serialise env-var mutation + wallet init across FFI threads.
     // std::env::set_var is not thread-safe on its own; all FFI entry points that
     // call init_wallet hold this lock for the duration of the mutation + WalletCore
@@ -185,12 +192,10 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
     writeln!(out, "fn init_wallet(v: &Value) -> Result<WalletCore, String> {{").unwrap();
     writeln!(out, "    let _guard = WALLET_INIT_LOCK.lock().map_err(|_| \"wallet lock poisoned\".to_string())?;").unwrap();
-    writeln!(out, "    if let Some(p) = v[\"wallet_path\"].as_str() {{").unwrap();
-    writeln!(out, "        std::env::set_var(\"NSSA_WALLET_HOME_DIR\", p);").unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "    if let Some(u) = v[\"sequencer_url\"].as_str() {{").unwrap();
-    writeln!(out, "        std::env::set_var(\"NSSA_SEQUENCER_URL\", u);").unwrap();
-    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    let wallet_path = v[\"wallet_path\"].as_str().ok_or(\"missing required field: wallet_path\")?;").unwrap();
+    writeln!(out, "    let sequencer_url = v[\"sequencer_url\"].as_str().ok_or(\"missing required field: sequencer_url\")?;").unwrap();
+    writeln!(out, "    std::env::set_var(\"NSSA_WALLET_HOME_DIR\", wallet_path);").unwrap();
+    writeln!(out, "    std::env::set_var(\"NSSA_SEQUENCER_URL\", sequencer_url);").unwrap();
     writeln!(out, "    WalletCore::from_env().map_err(|e| format!(\"wallet init: {{}}\", e))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -319,8 +324,8 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         }
         writeln!(out).unwrap();
 
-        // Submit via tokio block_on
-        writeln!(out, "    let rt = tokio::runtime::Runtime::new().map_err(|e| format!(\"tokio: {{}}\", e))?;").unwrap();
+        // Submit via the shared runtime
+        writeln!(out, "    let rt = get_runtime();").unwrap();
         writeln!(out, "    let tx_hash = rt.block_on(async {{").unwrap();
         writeln!(out, "        let nonces = wallet.get_accounts_nonces(signer_ids.clone()).await").unwrap();
         writeln!(out, "            .map_err(|e| format!(\"nonces: {{}}\", e))?;").unwrap();
@@ -550,6 +555,21 @@ fn has_defined_type(ty: &IdlType) -> bool {
     }
 }
 
+/// Returns true if `acc_name` (snake_case) qualifies for fetch function generation:
+/// it must have a matching struct entry in `idl.accounts` with non-empty fields and
+/// no `Defined` field types. Used by both `generate_account_fetch_functions` and
+/// `generate_header` to keep their filtering logic in sync.
+fn is_fetch_eligible(idl: &SpelIdl, acc_name: &str) -> bool {
+    match idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name) {
+        None => false,
+        Some(t) => {
+            t.type_.kind == "struct"
+                && !t.type_.fields.is_empty()
+                && !t.type_.fields.iter().any(|f| has_defined_type(&f.type_))
+        }
+    }
+}
+
 /// Emit the Rust type for a struct field that will be BorshDeserialize'd.
 fn idl_type_to_borsh_rust(ty: &IdlType) -> String {
     use spel_framework_core::idl::IdlType;
@@ -581,18 +601,8 @@ pub fn generate_account_types(idl: &SpelIdl, out: &mut String) {
             let acc_name = snake_case(&acc.name);
             if !seen.insert(acc_name.clone()) { continue; }
 
-            // Find the matching account type definition.
-            // IDL account types have PascalCase names; account items use snake_case.
-            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name);
-            let type_def = match type_def {
-                Some(t) => t,
-                None => continue, // no type info available — skip
-            };
-
-            if type_def.type_.kind != "struct" { continue; } // only structs supported for now
-            if type_def.type_.fields.is_empty() { continue; }
-            // Skip if any field references a Defined type — no definition is emitted for it.
-            if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
+            if !is_fetch_eligible(idl, &acc_name) { continue; }
+            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name).unwrap();
 
             let pascal_name = pascal_case(&acc_name);
             writeln!(out).unwrap();
@@ -624,16 +634,9 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             let acc_name = snake_case(&acc.name);
             if !seen.insert(acc_name.clone()) { continue; }
 
-            // Only generate fetch functions when we have type information.
-            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name);
-            let type_def = match type_def {
-                Some(t) => t,
-                None => continue,
-            };
-            if type_def.type_.kind != "struct" { continue; }
-            if type_def.type_.fields.is_empty() { continue; }
-            // Skip if any field references a Defined type — no definition is emitted for it.
-            if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
+            // Only generate fetch functions when we have qualifying type information.
+            if !is_fetch_eligible(idl, &acc_name) { continue; }
+            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name).unwrap();
 
             let pascal_name = pascal_case(&acc_name);
             let fn_name = format!("{prefix}_fetch_{acc_name}");
@@ -723,7 +726,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "    ])?;").unwrap();
 
             // Fetch and decode
-            writeln!(out, "    let rt = tokio::runtime::Runtime::new().map_err(|e| format!(\"tokio: {{e}}\"))?;").unwrap();
+            writeln!(out, "    let rt = get_runtime();").unwrap();
             writeln!(out, "    let account = rt.block_on(async {{").unwrap();
             writeln!(out, "        wallet.sequencer_client.get_account(pda).await.map_err(|e| format!(\"get_account: {{e}}\"))").unwrap();
             writeln!(out, "    }})?;").unwrap();
@@ -780,15 +783,7 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
                     if !seen.insert(acc_name.clone()) {
                         continue;
                     }
-                    // Mirror the same guard as generate_account_fetch_functions
-                    let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name);
-                    let type_def = match type_def {
-                        Some(t) => t,
-                        None => continue,
-                    };
-                    if type_def.type_.kind != "struct" { continue; }
-                    if type_def.type_.fields.is_empty() { continue; }
-                    if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
+                    if !is_fetch_eligible(idl, &acc_name) { continue; }
 
                     let fn_name = format!("{}_fetch_{}", prefix, acc_name);
                     writeln!(out, "/* fetch {} account state */", acc.name).unwrap();
