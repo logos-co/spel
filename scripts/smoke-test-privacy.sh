@@ -135,8 +135,7 @@ log "  Using local spel: $SPEL_BIN"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
-    > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" 2>&1 | tee "$LOG_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$LOG_DIR/init.log"; echo '================='; fail "spel init failed"; }
 cd "$PROJECT_NAME"
 log "  ✓ Project scaffolded"
 
@@ -200,7 +199,7 @@ log "  ✓ Guest program configured"
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
 
 log "Step 3: Building guest binary (RISC0_DEV_MODE=1)..."
-RISC0_SKIP_BUILD= make build > "$LOG_DIR/build.log" 2>&1 || { cat "$LOG_DIR/build.log"; fail "Build failed"; }
+RISC0_SKIP_BUILD= make build 2>&1 | tee "$LOG_DIR/build.log" || { echo ''; echo '=== BUILD LOG ==='; cat "$LOG_DIR/build.log"; echo '================='; fail 'Guest binary build failed'; }
 GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
 [ -n "$GUEST_BIN" ] || fail "No guest binary found"
 GUEST_BIN_ABS="$(realpath "$GUEST_BIN")"
@@ -209,7 +208,7 @@ log "  ✓ Built: $(basename "$GUEST_BIN")"
 # ─── Step 4: Generate IDL ─────────────────────────────────────────────────
 
 log "Step 4: Generating IDL..."
-make idl > "$LOG_DIR/idl.log" 2>&1 || fail "IDL generation failed"
+make idl 2>&1 | tee "$LOG_DIR/idl.log" > /dev/null || { echo ''; echo '=== IDL LOG ==='; cat "$LOG_DIR/idl.log"; echo '================='; fail 'IDL generation failed'; }
 IDL_FILE=$(find . -name "*-idl.json" | head -1)
 [ -n "$IDL_FILE" ] || fail "No IDL found"
 IDL_ABS="$(realpath "$IDL_FILE")"
@@ -265,8 +264,7 @@ done
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" \
-    > "$LOG_DIR/deploy.log" 2>&1 || fail "Deploy failed"
+printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" 2>&1 | tee "$LOG_DIR/deploy.log" || { echo ''; echo '=== DEPLOY LOG ==='; cat "$LOG_DIR/deploy.log"; echo '==================='; fail 'Deploy failed'; }
 log "  ✓ Program deployed"
 
 # ─── Step 7: Generate test accounts ───────────────────────────────────────

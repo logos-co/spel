@@ -12,7 +12,7 @@
 set -euo pipefail
 
 export RISC0_DEV_MODE=1
-export RISC0_SKIP_BUILD=1
+
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 WORK_DIR="${1:-${WORK_DIR:-/tmp/spel-ffi-call-test}}"
@@ -98,8 +98,7 @@ CLIENT_GEN_BIN="$SPEL_DIR/target/release/spel-client-gen"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_REF" "$PROJECT_NAME" \
-    > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_REF" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
 cd "$PROJECT_NAME"
 
 # Regenerate lockfiles so the patch takes effect
@@ -165,7 +164,7 @@ log "  ✓ Guest program configured with #[account_type]"
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
 
 log "Step 3: Building guest binary..."
-RISC0_SKIP_BUILD=1 make build > "$WORK_DIR/build.log" 2>&1 || { cat "$WORK_DIR/build.log"; fail "Build failed"; }
+RISC0_SKIP_BUILD= make build 2>&1 | tee "$WORK_DIR/build.log" || { echo ''; echo '=== BUILD LOG ==='; cat "$WORK_DIR/build.log"; echo '================='; fail 'Guest binary build failed'; }
 GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
 [ -n "$GUEST_BIN" ] || fail "No guest binary found"
 GUEST_BIN_ABS="$(realpath "$GUEST_BIN")"
@@ -174,7 +173,7 @@ log "  ✓ Built: $(basename "$GUEST_BIN")"
 # ─── Step 4: Generate IDL ─────────────────────────────────────────────────
 
 log "Step 4: Generating IDL..."
-make idl > "$WORK_DIR/idl.log" 2>&1 || fail "IDL generation failed"
+make idl 2>&1 | tee "$WORK_DIR/idl.log" > /dev/null || { echo ''; echo '=== IDL LOG ==='; cat "$WORK_DIR/idl.log"; echo '================='; fail 'IDL generation failed'; }
 IDL_FILE=$(find . -name "*-idl.json" | head -1)
 [ -n "$IDL_FILE" ] || fail "No IDL found"
 log "  ✓ IDL: $(basename "$IDL_FILE")"
@@ -229,8 +228,7 @@ done
 # ─── Step 6: Deploy program ───────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" \
-    > "$WORK_DIR/deploy.log" 2>&1 || fail "Deploy failed"
+printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" 2>&1 | tee "$WORK_DIR/deploy.log" || { echo ''; echo '=== DEPLOY LOG ==='; cat "$WORK_DIR/deploy.log"; echo '==================='; fail 'Deploy failed'; }
 log "  ✓ Program deployed"
 
 # ─── Step 7: Generate FFI code ────────────────────────────────────────────
