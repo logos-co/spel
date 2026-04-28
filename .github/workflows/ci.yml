@@ -215,7 +215,7 @@ jobs:
         env:
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
-          SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
+          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/smoke-test-privacy.sh /tmp/privacy-smoke
@@ -277,7 +277,7 @@ jobs:
         env:
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
-          SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
+          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/ffi-call-test.sh /tmp/ffi-call-test

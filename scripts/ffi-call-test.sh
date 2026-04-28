@@ -76,7 +76,7 @@ export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # Determine SPEL ref for testing (PR head or commit SHA)
-SPEL_REF="${SPEL_REF:-local}"
+SPEL_TAG="${SPEL_TAG:-local}"
 
 # ─── Setup ─────────────────────────────────────────────────────────────────
 
@@ -98,7 +98,7 @@ CLIENT_GEN_BIN="$SPEL_DIR/target/release/spel-client-gen"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_REF" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
 cd "$PROJECT_NAME"
 
 # Regenerate lockfiles so the patch takes effect
@@ -111,20 +111,21 @@ log "  ✓ Project scaffolded"
 
 # ─── Step 2: Modify guest program with #[account_type] and setter ──────────
 
-log "Step 2: Adding #[account_type] structs and setter instruction..."
+log "Step 2: Writing guest program with #[account_type]..."
 
 GUEST_SRC="methods/guest/src/bin/${PROJECT_NAME}.rs"
 
-# Read the existing guest source
-EXISTING=$(cat "$GUEST_SRC")
+cat > "$GUEST_SRC" << 'RUSTEOF'
+#![no_main]
+use spel_framework::prelude::*;
+use nssa_core::account::AccountWithMetadata;
+use nssa_core::program::AccountPostState;
 
-# Extract everything up to the last closing brace of the mod block
-head -n -1 "$GUEST_SRC" > "${GUEST_SRC}.patched"
+risc0_zkvm::guest::entry!(main);
 
-# Append account_type structs and setter instruction
-cat >> "${GUEST_SRC}.patched" << 'RUSTEOF'
-
-    // ── Account types for FFI testing ────────────────────────────────────
+#[lez_program]
+mod ffi_test {
+    use super::*;
 
     /// State stored in a PDA, accessible via generated fetch_* FFI.
     #[account_type]
@@ -157,8 +158,6 @@ cat >> "${GUEST_SRC}.patched" << 'RUSTEOF'
 }
 RUSTEOF
 
-# Replace the guest source with the patched version
-mv "${GUEST_SRC}.patched" "$GUEST_SRC"
 log "  ✓ Guest program configured with #[account_type]"
 
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
