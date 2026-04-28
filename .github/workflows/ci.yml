@@ -150,7 +150,7 @@ jobs:
           NSSA_WALLET_HOME_DIR: /tmp/wallet
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ steps.lez-ref.outputs.LEZ_TAG }}
-          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
+          SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/smoke-test-privacy.sh /tmp/privacy-smoke
@@ -182,6 +182,16 @@ jobs:
           echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
           echo "LEZ_TAG=$LEZ_REV" >> $GITHUB_OUTPUT
           echo "Using LEZ revision: $LEZ_REV"
+
+      - name: Determine SPEL ref for testing
+        id: spel-ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+          else
+            SPEL_REF="${{ github.sha }}"
+          fi
+          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
         run: |
@@ -243,6 +253,7 @@ jobs:
           NSSA_WALLET_HOME_DIR: /tmp/wallet
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ steps.lez-ref.outputs.LEZ_TAG }}
+          SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/ffi-call-test.sh /tmp/ffi-call-test

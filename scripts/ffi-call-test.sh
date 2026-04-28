@@ -75,6 +75,9 @@ done
 export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
+# Determine SPEL ref for testing (PR head or commit SHA)
+SPEL_REF="${SPEL_REF:-local}"
+
 # ─── Setup ─────────────────────────────────────────────────────────────────
 
 log "Setting up in ${WORK_DIR}..."
@@ -97,13 +100,15 @@ CLIENT_GEN_BIN="$SPEL_DIR/target/release/spel-client-gen"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev local "$PROJECT_NAME" \
-    > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed"
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_REF" "$PROJECT_NAME" \
+    > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
 cd "$PROJECT_NAME"
 
-# Regenerate lockfiles
-(cd methods/guest && cargo generate-lockfile 2>&1) || warn "Guest lockfile regen failed"
-cargo generate-lockfile 2>&1 || warn "Root lockfile regen failed"
+# Regenerate lockfiles so the patch takes effect
+(cd methods/guest && cargo generate-lockfile > "$WORK_DIR/guest-lockfile.log" 2>&1) \
+    || warn "Guest lockfile regeneration failed"
+cargo generate-lockfile > "$WORK_DIR/root-lockfile.log" 2>&1 \
+    || warn "Root lockfile regeneration failed"
 
 log "  ✓ Project scaffolded"
 
@@ -116,16 +121,11 @@ GUEST_SRC="methods/guest/src/bin/${PROJECT_NAME}.rs"
 # Read the existing guest source
 EXISTING=$(cat "$GUEST_SRC")
 
-# Append account_type structs and setter instruction before the closing brace of the program module
-# Find the last } of the program module and insert our code before it
-cat > "$GUEST_SRC.patched" << 'RUSTEOF'
-RUSTEOF
-
 # Extract everything up to the last closing brace of the mod block
-head -n -1 "$GUEST_SRC" > "$GUEST_SRC.patched"
+head -n -1 "$GUEST_SRC" > "${GUEST_SRC}.patched"
 
 # Append account_type structs and setter instruction
-cat >> "$GUEST_SRC.patched" << 'RUSTEOF'
+cat >> "${GUEST_SRC}.patched" << 'RUSTEOF'
 
     // ── Account types for FFI testing ────────────────────────────────────
 
@@ -161,7 +161,7 @@ cat >> "$GUEST_SRC.patched" << 'RUSTEOF'
 RUSTEOF
 
 # Replace the guest source with the patched version
-mv "$GUEST_SRC.patched" "$GUEST_SRC"
+mv "${GUEST_SRC}.patched" "$GUEST_SRC"
 log "  ✓ Guest program configured with #[account_type]"
 
 # ─── Step 3: Build guest binary ───────────────────────────────────────────
@@ -190,12 +190,10 @@ rm -rf "${LSSA_DIR}/rocksdb-${SEQUENCER_PORT}"
 
 SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
 if [ ! -f "$SEQ_CONFIGS" ]; then
-    # Try alternative config path
     SEQ_CONFIGS=$(find "$LSSA_DIR" -name "sequencer_config.json" 2>/dev/null | head -1)
 fi
 [ -n "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
-# Start sequencer with a different data dir to avoid conflicts
 cd "$LSSA_DIR"
 RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$WORK_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
@@ -244,136 +242,13 @@ FFI_OUT="$WORK_DIR/ffi_generated"
 mkdir -p "$FFI_OUT"
 
 "$CLIENT_GEN_BIN" --idl "$IDL_FILE" --out-dir "$FFI_OUT" \
-    > "$WORK_DIR/client-gen.log" 2>&1 || fail "FFI generation failed"
+    > "$WORK_DIR/client-gen.log" 2>&1 || fail "FFI generation failed (see $WORK_DIR/client-gen.log)"
 log "  ✓ Generated client + FFI code"
 
-# ─── Step 8: Call fetch function via generated Rust client ────────────────
+# ─── Step 8: Verify generated FFI code structure ──────────────────────────
 
-log "Step 8: Testing fetch_* FFI call against live sequencer..."
+log "Step 8: Verifying generated FFI code..."
 
-# Create a small test program that uses the generated client code
-TEST_DIR="$WORK_DIR/ffi_test_runner"
-mkdir -p "$TEST_DIR/src"
-
-cat > "$TEST_DIR/Cargo.toml" << 'TOMLEOF'
-[package]
-name = "ffi-test-runner"
-version = "0.1.0"
-edition = "2021"
-
-[[bin]]
-name = "ffi-test-runner"
-path = "src/main.rs"
-
-[dependencies]
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", branch = "main", package = "nssa" }
-sequencer-service-rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", branch = "main" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", branch = "main" }
-borsh = "1"
-serde_json = "1"
-TOMLEOF
-
-# Copy generated files
-cp "$FFI_OUT/"*_ffi.rs "$TEST_DIR/src/generated_ffi.rs"
-cp "$FFI_OUT/"*_client.rs "$TEST_DIR/src/generated_client.rs"
-
-cat > "$TEST_DIR/src/main.rs" << 'MAINEOF'
-//! Test runner that calls the generated fetch_* function against a live sequencer.
-
-mod generated_client;
-mod generated_ffi;
-
-use std::env;
-use std::fs;
-
-fn main() {
-    // Read program ID from the IDL file (first arg)
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        eprintln!("Usage: ffi-test-runner <idl_path> <sequencer_url>");
-        std::process::exit(1);
-    }
-
-    let idl_path = &args[1];
-    let sequencer_url = &args[2];
-
-    // Read IDL JSON to get program name and accounts
-    let idl_json = fs::read_to_string(idl_path)
-        .expect("Failed to read IDL file");
-    let idl_value: serde_json::Value = serde_json::from_str(&idl_json)
-        .expect("Failed to parse IDL JSON");
-
-    let program_name = idl_value["name"].as_str().unwrap_or("program");
-    let accounts = &idl_value["accounts"];
-
-    println!("Program: {}", program_name);
-    println!("Accounts in IDL:");
-
-    // Check that we have account types defined
-    if !accounts.is_array() || accounts.as_array().unwrap().is_empty() {
-        eprintln!("ERROR: No account types found in IDL");
-        std::process::exit(1);
-    }
-
-    for acc in accounts.as_array().unwrap() {
-        let name = acc["name"].as_str().unwrap_or("unknown");
-        let ty = acc["type"].as_str().unwrap_or("unknown");
-        println!("  - {} ({})", name, ty);
-    }
-
-    // Verify that GreetState (or similar) account type is present
-    let has_account_type = accounts.as_array().unwrap().iter().any(|acc| {
-        acc["type"].as_str().map_or(false, |t| t.contains("struct") || t.contains("enum"))
-    });
-
-    if !has_account_type {
-        eprintln!("ERROR: No #[account_type] annotated types found in IDL");
-        std::process::exit(1);
-    }
-
-    println!("\n✅ FFI code generation test PASSED!");
-    println!("  - Program '{}' has {} account type(s)", program_name, accounts.as_array().unwrap().len());
-    println!("  - Generated FFI code is syntactically valid");
-    println!("  - Account types are properly encoded in the IDL");
-
-    // Verify FFI file contains fetch function declarations
-    let ffi_path = format!("{}/src/generated_ffi.rs", env::var("TEST_DIR").unwrap_or_else(|_| ".".to_string()));
-    if let Ok(ffi_content) = fs::read_to_string(&ffi_path) {
-        let has_fetch = ffi_content.contains("fetch_") || ffi_content.contains("compute_");
-        if has_fetch {
-            println!("  - FFI code contains fetch/compute helpers ✓");
-        } else {
-            println!("  - Note: No fetch helpers in generated FFI (expected for programs without PDA accounts)");
-        }
-    }
-
-    // Verify header file contains fetch declarations
-    let header_files: Vec<_> = std::fs::read_dir(format!("{}/src", env::var("TEST_DIR").unwrap_or_else(|_| ".".to_string())))
-        .map(|r| r.ok().and_then(|e| e.path().file_name().map(|n| n.to_string_lossy().to_string())))
-        .flatten()
-        .filter(|f| f.ends_with(".h"))
-        .collect();
-
-    if !header_files.is_empty() {
-        for hf in &header_files {
-            let header_path = format!("{}/src/{}", env::var("TEST_DIR").unwrap_or_else(|_| ".".to_string()), hf);
-            if let Ok(header_content) = fs::read_to_string(&header_path) {
-                println!("  - Header '{}' generated ✓", hf);
-            }
-        }
-    }
-}
-MAINEOF
-
-# Run the test runner (verifies FFI code generation correctness)
-export TEST_DIR="$TEST_DIR"
-cd "$TEST_DIR"
-
-# We need to resolve dependencies - use the LEZ workspace for nssa/wallet
-# Since this is a CI test, we verify the generated code structure
-log "  Verifying generated FFI code structure..."
-
-# Check that the FFI file contains expected patterns
 FFI_FILE="$FFI_OUT/"*_ffi.rs
 HEADER_FILE="$FFI_OUT/"*.h
 
@@ -389,7 +264,7 @@ fi
 if grep -q 'extern "C"' "$FFI_FILE"; then
     log "  ✓ FFI code contains extern \"C\" declarations"
 else
-    warn "  ⚠ No extern \"C\" declarations in FFI (may be expected for this program)"
+    warn "  ⚠ No extern \"C\" declarations in FFI"
 fi
 
 # Verify header contains function declarations
@@ -403,7 +278,7 @@ fi
 FN_COUNT=$(grep -c 'char\* ' "$HEADER_FILE" 2>/dev/null || echo "0")
 log "  ✓ Generated ${FN_COUNT} FFI function declaration(s) in header"
 
-# Verify account types are in the IDL and can be used for fetch generation
+# Verify account types are in the IDL
 ACCOUNT_COUNT=$(python3 -c "import json; d=json.load(open('$IDL_FILE')); print(len(d.get('accounts', [])))")
 log "  ✓ IDL contains ${ACCOUNT_COUNT} account type(s)"
 
