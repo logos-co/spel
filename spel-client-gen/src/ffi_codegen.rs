@@ -451,8 +451,10 @@ fn idl_type_to_json_field(ty: &IdlType, field_name: &str) -> String {
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "u128" | "i128" => format!("state.{field_name}.to_string()"),
-            "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]"
-            | "ProgramId" | "[u32; 8]" | "[u32;8]" => format!("hex::encode(&state.{field_name})"),
+            "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => format!("hex::encode(&state.{field_name})"),
+            "ProgramId" | "[u32; 8]" | "[u32;8]" => format!(
+                "hex::encode(state.{field_name}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>())"
+            ),
             _ => format!("state.{field_name}"),
         },
         IdlType::Array { array: (elem, _) } => {
@@ -574,12 +576,23 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
                             .unwrap_or(spel_framework_core::idl::IdlType::Primitive("String".to_string())),
                             &format!("args[\"{path}\"]"));
                         seed_parse_lines.push(format!("        let {pname} = {parse_expr};"));
-                        // Seed usage in compute_pda
-                        if arg_ty == "u64" {
-                            pda_seeds_code.push(format!("        &{pname}.to_le_bytes(),"));
-                        } else {
-                            pda_seeds_code.push(format!("        &{pname} as &[u8],"));
-                        }
+                        // Seed usage in compute_pda — emit the right bytes expression per type
+                        let seed_expr = match arg_ty.as_str() {
+                            "[u8; 32]" | "[u8;32]" | "AccountId" | "account_id" => {
+                                format!("        &{pname}[..],")
+                            }
+                            "[u32; 8]" | "[u32;8]" | "ProgramId" => {
+                                format!("        &{pname}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),")
+                            }
+                            "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128" => {
+                                format!("        &{pname}.to_be_bytes(),")
+                            }
+                            "String" | "string" | "&str" => {
+                                format!("        {pname}.as_bytes(),")
+                            }
+                            _ => format!("        &{pname} as &[u8],"),
+                        };
+                        pda_seeds_code.push(seed_expr);
                     }
                     IdlSeed::Account { path } => {
                         let pname = rust_ident(path);
@@ -626,7 +639,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "    let account = rt.block_on(async {{").unwrap();
             writeln!(out, "        wallet.sequencer_client.get_account(pda).await.map_err(|e| format!(\"get_account: {{e}}\"))").unwrap();
             writeln!(out, "    }})?;").unwrap();
-            writeln!(out, "    let state = {pascal_name}State::try_from_slice(&account.data).map_err(|e| format!(\"decode: {{e}}\"))?;").unwrap();
+            writeln!(out, "    let state = <{pascal_name}State as borsh::BorshDeserialize>::try_from_slice(&account.data).map_err(|e| format!(\"decode: {{e}}\"))?;").unwrap();
 
             // Build JSON response
             writeln!(out, "    Ok(serde_json::json!({{").unwrap();
@@ -666,7 +679,9 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out).unwrap();
     }
 
-    // Fetch function declarations for PDA-backed accounts
+    // Fetch function declarations for PDA-backed accounts.
+    // Only emit a declaration if there is a matching accounts[] entry with kind == "struct"
+    // and non-empty fields — mirroring the guard used in generate_account_fetch_functions.
     {
         use std::collections::HashSet;
         let mut seen: HashSet<String> = HashSet::new();
@@ -674,12 +689,22 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
             for acc in &ix.accounts {
                 if acc.pda.is_some() {
                     let acc_name = snake_case(&acc.name);
-                    if seen.insert(acc_name.clone()) {
-                        let fn_name = format!("{}_fetch_{}", prefix, acc_name);
-                        writeln!(out, "/* fetch {} account state */", acc.name).unwrap();
-                        writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
-                        writeln!(out).unwrap();
+                    if !seen.insert(acc_name.clone()) {
+                        continue;
                     }
+                    // Mirror the same guard as generate_account_fetch_functions
+                    let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name);
+                    let type_def = match type_def {
+                        Some(t) => t,
+                        None => continue,
+                    };
+                    if type_def.type_.kind != "struct" { continue; }
+                    if type_def.type_.fields.is_empty() { continue; }
+
+                    let fn_name = format!("{}_fetch_{}", prefix, acc_name);
+                    writeln!(out, "/* fetch {} account state */", acc.name).unwrap();
+                    writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
+                    writeln!(out).unwrap();
                 }
             }
         }

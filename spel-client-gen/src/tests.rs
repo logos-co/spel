@@ -1114,10 +1114,10 @@ fn test_ffi_fetch_borsh_decode_in_function() {
     let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
     let ffi = &output.ffi_code;
 
-    // Must call try_from_slice on the state struct
+    // Must call try_from_slice on the state struct via the fully-qualified trait path
     assert!(
-        ffi.contains("WallStateState::try_from_slice("),
-        "fetch function must decode via BorshDeserialize::try_from_slice: {ffi}"
+        ffi.contains("<WallStateState as borsh::BorshDeserialize>::try_from_slice("),
+        "fetch function must decode via <WallStateState as borsh::BorshDeserialize>::try_from_slice: {ffi}"
     );
 
     // Must call get_account
@@ -1150,8 +1150,7 @@ fn test_ffi_fetch_borsh_decode_in_function() {
 //   - `[u32;8].as_bytes()` call expressions that are syntactically invalid (Bug 6)
 
 fn assert_parses_as_rust(label: &str, src: &str) {
-    // Strip #[no_mangle] and extern "C" so syn doesn't need the ABI rules.
-    // We're testing expression-level syntax, not item-level validity.
+    // Parse the source as-is; syn validates full Rust item-level syntax.
     match syn::parse_str::<syn::File>(src) {
         Ok(_) => {}
         Err(e) => panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}"),
