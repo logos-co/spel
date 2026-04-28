@@ -1136,3 +1136,48 @@ fn test_ffi_fetch_borsh_decode_in_function() {
         "fetch function must return state field: {ffi}"
     );
 }
+
+// ── Syntax validity tests ─────────────────────────────────────────────────────
+//
+// Parse the generated FFI code as a syn::File to catch syntax errors
+// (trailing commas, malformed expressions, bad types) without needing
+// the full nssa/wallet/tokio dependency tree available at test time.
+//
+// This catches bugs like:
+//   - `compute_pda(&program_id, )` — trailing comma (Bug 3 from PR #147)
+//   - bare undefined variables in PDA seed expressions (Bug 1)
+//   - `body_lines` ordering inversions that reference variables before they're bound (Bug 2)
+//   - `[u32;8].as_bytes()` call expressions that are syntactically invalid (Bug 6)
+
+fn assert_parses_as_rust(label: &str, src: &str) {
+    // Strip #[no_mangle] and extern "C" so syn doesn't need the ABI rules.
+    // We're testing expression-level syntax, not item-level validity.
+    match syn::parse_str::<syn::File>(src) {
+        Ok(_) => {}
+        Err(e) => panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}"),
+    }
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_const_pda() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("WHISPER_WALL_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_arg_seed() {
+    let output = generate_from_idl_json(ARG_SEED_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("ARG_SEED_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_account_seed() {
+    let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("ACCOUNT_SEED_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_sample_idl() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("SAMPLE_IDL ffi_code", &output.ffi_code);
+}
