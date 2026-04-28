@@ -177,8 +177,14 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // init_wallet
+    // Global mutex to serialise env-var mutation + wallet init across FFI threads.
+    // std::env::set_var is not thread-safe on its own; all FFI entry points that
+    // call init_wallet hold this lock for the duration of the mutation + WalletCore
+    // construction so they cannot race on NSSA_WALLET_HOME_DIR / NSSA_SEQUENCER_URL.
+    writeln!(out, "static WALLET_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());").unwrap();
+    writeln!(out).unwrap();
     writeln!(out, "fn init_wallet(v: &Value) -> Result<WalletCore, String> {{").unwrap();
+    writeln!(out, "    let _guard = WALLET_INIT_LOCK.lock().map_err(|_| \"wallet lock poisoned\".to_string())?;").unwrap();
     writeln!(out, "    if let Some(p) = v[\"wallet_path\"].as_str() {{").unwrap();
     writeln!(out, "        std::env::set_var(\"NSSA_WALLET_HOME_DIR\", p);").unwrap();
     writeln!(out, "    }}").unwrap();
