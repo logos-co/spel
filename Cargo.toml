@@ -5,6 +5,7 @@ members = [
     "spel-framework-macros",
     "spel-cli",
     "spel-client-gen",
+    "spel-ffi-compile-test",
 ]
 exclude = ["tests/e2e/fixture_program"]
 resolver = "2"
