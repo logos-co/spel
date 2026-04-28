@@ -85,12 +85,10 @@ rm -rf "$WORK_DIR"
 mkdir -p "$WORK_DIR"
 cd "$WORK_DIR"
 
-# Build local spel-cli from this repo
-log "Building local spel-cli..."
-cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel --release \
-    > "$WORK_DIR/spel-build.log" 2>&1 || fail "Failed to build spel-cli"
-SPEL_BIN="$SPEL_DIR/target/release/spel"
+# Use spel-cli from shared artifacts
+SPEL_BIN="/tmp/lssa/target/release/spel"
 
+    
 # Build spel-client-gen CLI
 log "Building spel-client-gen..."
 cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel-client-gen --release \

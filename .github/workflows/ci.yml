@@ -121,6 +121,9 @@ jobs:
           cd /tmp/lssa
           cargo build --release -p wallet
 
+      - name: Build spel CLI
+        run: cargo build --manifest-path . -p spel --release
+
       - name: Setup default wallet (port 3040)
         run: |
           mkdir -p /tmp/wallet
@@ -138,6 +141,7 @@ jobs:
           path: |
             /tmp/lssa/target/release/sequencer_service
             /tmp/lssa/target/release/wallet
+            target/release/spel
             /tmp/lssa
           retention-days: 1
 
@@ -197,8 +201,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install spel
-        run: cargo install --path spel-cli --locked
 
       - name: Run privacy smoke test
         env:
