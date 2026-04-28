@@ -46,6 +46,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use sha2::{{Sha256, Digest}};").unwrap();
     writeln!(out, "use nssa::{{AccountId, ProgramId, PublicTransaction}};").unwrap();
     writeln!(out, "use nssa::public_transaction::{{Message, WitnessSet}};").unwrap();
+    writeln!(out, "use nssa_core::program::PdaSeed;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
 
@@ -106,6 +107,20 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "    let hash: [u8; 32] = hasher.finalize().into();").unwrap();
     writeln!(out, "    AccountId::new(hash)").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    // compute_pda_with_program: canonical PDA derivation used by fetch functions.
+    // Incorporates program_id so PDAs are program-specific, matching the framework.
+    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> AccountId {{").unwrap();
+    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
+    writeln!(out, "    for seed in seeds {{").unwrap();
+    writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
+    writeln!(out, "        let len = seed.len().min(32);").unwrap();
+    writeln!(out, "        padded[..len].copy_from_slice(&seed[..len]);").unwrap();
+    writeln!(out, "        hasher.update(&padded);").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    let seed_hash: [u8; 32] = hasher.finalize().into();").unwrap();
+    writeln!(out, "    AccountId::from((program_id, &PdaSeed::new(seed_hash)))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -214,7 +229,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                                     format!("        &{pname}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),")
                                 }
                                 "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128" => {
-                                    format!("        &{pname}.to_be_bytes(),")
+                                    format!("        &{pname}.to_le_bytes(),")
                                 }
                                 "String" | "string" | "&str" => {
                                     format!("        {pname}.as_bytes(),")
@@ -600,7 +615,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
                                 format!("        &{pname}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),")
                             }
                             "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128" => {
-                                format!("        &{pname}.to_be_bytes(),")
+                                format!("        &{pname}.to_le_bytes(),")
                             }
                             "String" | "string" | "&str" => {
                                 format!("        {pname}.as_bytes(),")
@@ -642,8 +657,8 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
                 writeln!(out, "{line}").unwrap();
             }
 
-            // Compute PDA
-            writeln!(out, "    let pda = compute_pda(&[").unwrap();
+            // Compute PDA — use program_id so PDAs are program-specific.
+            writeln!(out, "    let pda = compute_pda_with_program(&program_id, &[").unwrap();
             for seed_line in &pda_seeds_code {
                 writeln!(out, "{seed_line}").unwrap();
             }
