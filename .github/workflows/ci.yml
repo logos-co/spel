@@ -121,6 +121,28 @@ jobs:
           cd /tmp/lssa
           cargo build --release -p wallet
 
+      - name: Cache & build wallet
+        id: cache-wallet
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/wallet
+          key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
+          restore-keys: |
+            wallet-
+
+      - name: Build wallet (cache miss)
+        if: steps.cache-wallet.outputs.cache-hit != 'true'
+        run: |
+          cd /tmp/lssa
+          cargo build --release -p wallet
+
+      - name: Save wallet cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/lssa/target/release/wallet
+          key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
+
       - name: Build spel CLI
         run: cargo build -p spel --release
 
@@ -140,6 +162,12 @@ jobs:
         with:
           path: /tmp/lssa/target/release/sequencer_service
           key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Restore wallet cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/wallet
+          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -190,6 +218,12 @@ jobs:
         with:
           path: /tmp/lssa/target/release/sequencer_service
           key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Restore wallet cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/wallet
+          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
