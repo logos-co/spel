@@ -96,7 +96,8 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // PDA helper
+    // PDA helper — kept for potential use; all current call sites use compute_pda_with_program.
+    writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn compute_pda(seeds: &[&[u8]]) -> AccountId {{").unwrap();
     writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
     writeln!(out, "    for seed in seeds {{").unwrap();
@@ -115,30 +116,31 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     //   multi-seed   → SHA-256 of each padded 32-byte seed
     // Then derives AccountId from (program_id, PdaSeed) so PDAs are program-specific.
     writeln!(out, "#[allow(dead_code)]").unwrap();
-    writeln!(out, "fn pda_seed_bytes(seeds: &[&[u8]]) -> [u8; 32] {{").unwrap();
-    writeln!(out, "    // Empty-seeds guard: return a zero PDA rather than panicking across FFI.").unwrap();
-    writeln!(out, "    if seeds.is_empty() {{ return [0u8; 32]; }}").unwrap();
+    writeln!(out, "fn pda_seed_bytes(seeds: &[&[u8]]) -> Result<[u8; 32], String> {{").unwrap();
+    writeln!(out, "    if seeds.is_empty() {{").unwrap();
+    writeln!(out, "        return Err(\"PDA requires at least one seed\".into());").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "    if seeds.len() == 1 {{").unwrap();
     writeln!(out, "        let len = seeds[0].len();").unwrap();
-    writeln!(out, "        assert!(len <= 32, \"PDA seed exceeds 32 bytes ({{}})\", len);").unwrap();
+    writeln!(out, "        if len > 32 {{ return Err(format!(\"PDA seed exceeds 32 bytes ({{len}})\")); }}").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
     writeln!(out, "        padded[..len].copy_from_slice(&seeds[0][..len]);").unwrap();
-    writeln!(out, "        padded").unwrap();
+    writeln!(out, "        Ok(padded)").unwrap();
     writeln!(out, "    }} else {{").unwrap();
     writeln!(out, "        let mut hasher = Sha256::new();").unwrap();
     writeln!(out, "        for seed in seeds {{").unwrap();
     writeln!(out, "            let len = seed.len();").unwrap();
-    writeln!(out, "            assert!(len <= 32, \"PDA seed exceeds 32 bytes ({{}})\", len);").unwrap();
+    writeln!(out, "            if len > 32 {{ return Err(format!(\"PDA seed exceeds 32 bytes ({{len}})\")); }}").unwrap();
     writeln!(out, "            let mut padded = [0u8; 32];").unwrap();
     writeln!(out, "            padded[..len].copy_from_slice(&seed[..len]);").unwrap();
     writeln!(out, "            hasher.update(&padded);").unwrap();
     writeln!(out, "        }}").unwrap();
-    writeln!(out, "        hasher.finalize().into()").unwrap();
+    writeln!(out, "        Ok(hasher.finalize().into())").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out, "#[allow(dead_code)]").unwrap();
-    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> AccountId {{").unwrap();
-    writeln!(out, "    AccountId::from((program_id, &PdaSeed::new(pda_seed_bytes(seeds))))").unwrap();
+    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
+    writeln!(out, "    Ok(AccountId::from((program_id, &PdaSeed::new(pda_seed_bytes(seeds)?))))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -272,7 +274,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                 for entry in &seed_entries {
                     writeln!(out, "{entry}").unwrap();
                 }
-                writeln!(out, "    ]);").unwrap();
+                writeln!(out, "    ])?;").unwrap();
             } else {
                 writeln!(out, "    let {name} = parse_account_id(v[\"{}\"].as_str().ok_or(\"missing {}\")?)?;",
                     acc.name, acc.name).unwrap();
@@ -714,7 +716,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             for seed_line in &pda_seeds_code {
                 writeln!(out, "{seed_line}").unwrap();
             }
-            writeln!(out, "    ]);").unwrap();
+            writeln!(out, "    ])?;").unwrap();
 
             // Fetch and decode
             writeln!(out, "    let rt = tokio::runtime::Runtime::new().map_err(|e| format!(\"tokio: {{e}}\"))?;").unwrap();
