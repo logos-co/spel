@@ -110,17 +110,29 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
     // compute_pda_with_program: canonical PDA derivation used by fetch functions.
-    // Incorporates program_id so PDAs are program-specific, matching the framework.
-    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> AccountId {{").unwrap();
-    writeln!(out, "    let mut hasher = Sha256::new();").unwrap();
-    writeln!(out, "    for seed in seeds {{").unwrap();
+    // Matches spel_framework_core::pda::compute_pda exactly:
+    //   single seed  → use padded 32-byte seed directly (no SHA-256)
+    //   multi-seed   → SHA-256 of each padded 32-byte seed
+    // Then derives AccountId from (program_id, PdaSeed) so PDAs are program-specific.
+    writeln!(out, "fn pda_seed_bytes(seeds: &[&[u8]]) -> [u8; 32] {{").unwrap();
+    writeln!(out, "    if seeds.len() == 1 {{").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
-    writeln!(out, "        let len = seed.len().min(32);").unwrap();
-    writeln!(out, "        padded[..len].copy_from_slice(&seed[..len]);").unwrap();
-    writeln!(out, "        hasher.update(&padded);").unwrap();
+    writeln!(out, "        let len = seeds[0].len().min(32);").unwrap();
+    writeln!(out, "        padded[..len].copy_from_slice(&seeds[0][..len]);").unwrap();
+    writeln!(out, "        padded").unwrap();
+    writeln!(out, "    }} else {{").unwrap();
+    writeln!(out, "        let mut hasher = Sha256::new();").unwrap();
+    writeln!(out, "        for seed in seeds {{").unwrap();
+    writeln!(out, "            let mut padded = [0u8; 32];").unwrap();
+    writeln!(out, "            let len = seed.len().min(32);").unwrap();
+    writeln!(out, "            padded[..len].copy_from_slice(&seed[..len]);").unwrap();
+    writeln!(out, "            hasher.update(&padded);").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        hasher.finalize().into()").unwrap();
     writeln!(out, "    }}").unwrap();
-    writeln!(out, "    let seed_hash: [u8; 32] = hasher.finalize().into();").unwrap();
-    writeln!(out, "    AccountId::from((program_id, &PdaSeed::new(seed_hash)))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> AccountId {{").unwrap();
+    writeln!(out, "    AccountId::from((program_id, &PdaSeed::new(pda_seed_bytes(seeds))))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
