@@ -737,9 +737,10 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "        \"success\": true,").unwrap();
             writeln!(out, "        \"state\": {{").unwrap();
             for field in &type_def.type_.fields {
-                let fname = rust_ident(&field.name);
-                let expr = idl_type_to_json_field(&field.type_, &fname);
-                writeln!(out, "            \"{fname}\": {expr},").unwrap();
+                let json_key = &field.name;
+                let field_ident = rust_ident(&field.name);
+                let expr = idl_type_to_json_field(&field.type_, &field_ident);
+                writeln!(out, "            \"{json_key}\": {expr},").unwrap();
             }
             writeln!(out, "        }}").unwrap();
             writeln!(out, "    }}).to_string())").unwrap();
