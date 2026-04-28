@@ -900,17 +900,20 @@ fn test_ffi_fetch_const_pda_no_trailing_comma() {
         "missing fetch function: {ffi}"
     );
 
-    // Const-only PDA: compute_pda call must not have a trailing comma after closing ]
-    // i.e. the pattern `compute_pda(&[` ... `]);` with no extra args after the seeds
+    // Const-only PDA: compute_pda_with_program must be called with program_id + seed slice
     assert!(
-        !ffi.contains("compute_pda(&program_id, )"),
-        "must not generate compute_pda with trailing comma"
+        ffi.contains("compute_pda_with_program(&program_id, &["),
+        "must use compute_pda_with_program with program_id: {ffi}"
     );
 
-    // The PDA computation should use inline compute_pda with const seed only
+    // The PDA computation should use inline const seed only (no trailing comma after slice)
     assert!(
         ffi.contains(r#"b"wall_v2","#),
         "const seed must be inlined: {ffi}"
+    );
+    assert!(
+        !ffi.contains(r#"b"wall_v2", )"#),
+        "must not generate trailing comma after seed slice: {ffi}"
     );
 }
 
@@ -971,7 +974,7 @@ fn test_ffi_fetch_arg_seeded_pda_uses_args_accessor() {
     let fetch_impl_start = ffi.find("fn vault_prog_fetch_vault_state_impl").unwrap_or(0);
     let fetch_section = &ffi[fetch_impl_start..];
     let args_access_pos = fetch_section.find(r#"args["vault_id"]"#).unwrap_or(usize::MAX);
-    let vault_id_in_pda_pos = fetch_section.find("&vault_id as &[u8]").unwrap_or(usize::MAX);
+    let vault_id_in_pda_pos = fetch_section.find("vault_id.as_ref()").unwrap_or(usize::MAX);
     assert!(
         args_access_pos < vault_id_in_pda_pos,
         "args[\"vault_id\"] parse must come before vault_id use in PDA: {ffi}"
