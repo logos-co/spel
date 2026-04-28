@@ -116,17 +116,20 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     // Then derives AccountId from (program_id, PdaSeed) so PDAs are program-specific.
     writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn pda_seed_bytes(seeds: &[&[u8]]) -> [u8; 32] {{").unwrap();
-    writeln!(out, "    assert!(!seeds.is_empty(), \"PDA requires at least one seed\");").unwrap();
+    writeln!(out, "    // Empty-seeds guard: return a zero PDA rather than panicking across FFI.").unwrap();
+    writeln!(out, "    if seeds.is_empty() {{ return [0u8; 32]; }}").unwrap();
     writeln!(out, "    if seeds.len() == 1 {{").unwrap();
+    writeln!(out, "        let len = seeds[0].len();").unwrap();
+    writeln!(out, "        assert!(len <= 32, \"PDA seed exceeds 32 bytes ({{}})\", len);").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
-    writeln!(out, "        let len = seeds[0].len().min(32);").unwrap();
     writeln!(out, "        padded[..len].copy_from_slice(&seeds[0][..len]);").unwrap();
     writeln!(out, "        padded").unwrap();
     writeln!(out, "    }} else {{").unwrap();
     writeln!(out, "        let mut hasher = Sha256::new();").unwrap();
     writeln!(out, "        for seed in seeds {{").unwrap();
+    writeln!(out, "            let len = seed.len();").unwrap();
+    writeln!(out, "            assert!(len <= 32, \"PDA seed exceeds 32 bytes ({{}})\", len);").unwrap();
     writeln!(out, "            let mut padded = [0u8; 32];").unwrap();
-    writeln!(out, "            let len = seed.len().min(32);").unwrap();
     writeln!(out, "            padded[..len].copy_from_slice(&seed[..len]);").unwrap();
     writeln!(out, "            hasher.update(&padded);").unwrap();
     writeln!(out, "        }}").unwrap();
@@ -176,6 +179,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "fn init_wallet(v: &Value) -> Result<WalletCore, String> {{").unwrap();
     writeln!(out, "    if let Some(p) = v[\"wallet_path\"].as_str() {{").unwrap();
     writeln!(out, "        std::env::set_var(\"NSSA_WALLET_HOME_DIR\", p);").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    if let Some(u) = v[\"sequencer_url\"].as_str() {{").unwrap();
+    writeln!(out, "        std::env::set_var(\"NSSA_SEQUENCER_URL\", u);").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "    WalletCore::from_env().map_err(|e| format!(\"wallet init: {{}}\", e))").unwrap();
     writeln!(out, "}}").unwrap();
@@ -262,7 +268,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                 for binding in &seed_pre_bindings {
                     writeln!(out, "{binding}").unwrap();
                 }
-                writeln!(out, "    let {name} = compute_pda(&[").unwrap();
+                writeln!(out, "    let {name} = compute_pda_with_program(&program_id, &[").unwrap();
                 for entry in &seed_entries {
                     writeln!(out, "{entry}").unwrap();
                 }
@@ -776,6 +782,7 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
                     };
                     if type_def.type_.kind != "struct" { continue; }
                     if type_def.type_.fields.is_empty() { continue; }
+                    if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
 
                     let fn_name = format!("{}_fetch_{}", prefix, acc_name);
                     writeln!(out, "/* fetch {} account state */", acc.name).unwrap();
