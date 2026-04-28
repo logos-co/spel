@@ -701,10 +701,8 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out).unwrap();
             writeln!(out, "fn {fn_name}_impl(args_str: &str) -> Result<String, String> {{").unwrap();
             writeln!(out, "    let args: serde_json::Value = serde_json::from_str(args_str).map_err(|e| format!(\"invalid JSON: {{e}}\"))?;").unwrap();
-            writeln!(out, "    if let Some(p) = args[\"wallet_path\"].as_str() {{ std::env::set_var(\"NSSA_WALLET_HOME_DIR\", p); }}").unwrap();
-            writeln!(out, "    if let Some(u) = args[\"sequencer_url\"].as_str() {{ std::env::set_var(\"NSSA_SEQUENCER_URL\", u); }}").unwrap();
             writeln!(out, "    let program_id = parse_program_id_hex(args[\"program_id_hex\"].as_str().ok_or(\"missing program_id_hex\")?)?;").unwrap();
-            writeln!(out, "    let wallet = WalletCore::from_env().map_err(|e| format!(\"wallet init: {{e}}\"))?;").unwrap();
+            writeln!(out, "    let wallet = init_wallet(&args)?;").unwrap();
 
             // Emit seed parse lines (arg and account seeds)
             for line in &seed_parse_lines {
