@@ -1181,6 +1181,25 @@ fn test_ffi_code_is_valid_rust_syntax_account_seed() {
 }
 
 #[test]
+fn test_account_seed_pda_binding_order() {
+    // ACCOUNT_SEED_IDL lists pool_state (PDA) before creator (plain account) in ix.accounts.
+    // The two-pass resolver must emit `let creator = ...` before `let pool_state = ...` so
+    // that `creator.as_ref()` in the PDA seed slice references an already-bound variable.
+    let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    let pos_creator = ffi.find("let creator = parse_account_id")
+        .expect("must bind creator from JSON args");
+    let pos_pool_state = ffi.find("let pool_state = compute_pda_with_program")
+        .expect("must compute pool_state PDA");
+
+    assert!(
+        pos_creator < pos_pool_state,
+        "plain account binding (creator) must appear before PDA binding (pool_state) in generated code"
+    );
+}
+
+#[test]
 fn test_ffi_code_is_valid_rust_syntax_sample_idl() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
     assert_parses_as_rust("SAMPLE_IDL ffi_code", &output.ffi_code);
