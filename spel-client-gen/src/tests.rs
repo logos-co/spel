@@ -1153,7 +1153,9 @@ fn test_ffi_fetch_borsh_decode_in_function() {
 //   - `[u32;8].as_bytes()` call expressions that are syntactically invalid (Bug 6)
 
 fn assert_parses_as_rust(label: &str, src: &str) {
-    // Parse the source as-is; syn validates full Rust item-level syntax.
+    // Parse the source as-is as a full Rust file.
+    // This validates syntax structure without requiring the full dependency tree
+    // or successful type checking during tests.
     match syn::parse_str::<syn::File>(src) {
         Ok(_) => {}
         Err(e) => panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}"),

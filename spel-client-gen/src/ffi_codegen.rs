@@ -114,7 +114,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     //   single seed  → use padded 32-byte seed directly (no SHA-256)
     //   multi-seed   → SHA-256 of each padded 32-byte seed
     // Then derives AccountId from (program_id, PdaSeed) so PDAs are program-specific.
+    writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn pda_seed_bytes(seeds: &[&[u8]]) -> [u8; 32] {{").unwrap();
+    writeln!(out, "    assert!(!seeds.is_empty(), \"PDA requires at least one seed\");").unwrap();
     writeln!(out, "    if seeds.len() == 1 {{").unwrap();
     writeln!(out, "        let mut padded = [0u8; 32];").unwrap();
     writeln!(out, "        let len = seeds[0].len().min(32);").unwrap();
@@ -131,6 +133,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "        hasher.finalize().into()").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
+    writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> AccountId {{").unwrap();
     writeln!(out, "    AccountId::from((program_id, &PdaSeed::new(pda_seed_bytes(seeds))))").unwrap();
     writeln!(out, "}}").unwrap();
@@ -224,33 +227,44 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                 writeln!(out, "        .ok_or(\"missing {}\")?", acc.name).unwrap();
                 writeln!(out, "        .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?;").unwrap();
             } else if let Some(pda) = &acc.pda {
-                writeln!(out, "    let {name} = compute_pda(&[").unwrap();
+                // Collect pre-bindings (stable buffers for types that can't be borrowed
+                // as a slice element inline) and seed entries separately, then emit.
+                let mut seed_pre_bindings: Vec<String> = Vec::new();
+                let mut seed_entries: Vec<String> = Vec::new();
                 for seed in &pda.seeds {
                     match seed {
-                        IdlSeed::Const { value } => writeln!(out, "        b\"{value}\",").unwrap(),
-                        IdlSeed::Account { path } => writeln!(out, "        {}.as_ref(),", rust_ident(path)).unwrap(),
+                        IdlSeed::Const { value } => seed_entries.push(format!("        b\"{value}\",")),
+                        IdlSeed::Account { path } => seed_entries.push(format!("        {}.as_ref(),", rust_ident(path))),
                         IdlSeed::Arg { path } => {
                             let pname = rust_ident(path);
                             let arg_ty = param_type_map.get(&pname).map(|s| s.as_str()).unwrap_or("");
-                            let seed_line = match arg_ty {
-                                // AccountId / [u8;32]: parsed as AccountId, use .as_ref() → &[u8]
+                            match arg_ty {
                                 "[u8; 32]" | "[u8;32]" | "AccountId" | "account_id" => {
-                                    format!("        {pname}.as_ref(),")
+                                    seed_entries.push(format!("        {pname}.as_ref(),"));
                                 }
                                 "[u32; 8]" | "[u32;8]" | "ProgramId" => {
-                                    format!("        &{pname}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),")
+                                    // collect() into a Vec to avoid a reference to a temporary
+                                    seed_pre_bindings.push(format!("    let {pname}_seed_bytes: Vec<u8> = {pname}.iter().flat_map(|w| w.to_le_bytes()).collect();"));
+                                    seed_entries.push(format!("        &{pname}_seed_bytes,"));
                                 }
                                 "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128" => {
-                                    format!("        &{pname}.to_le_bytes(),")
+                                    seed_pre_bindings.push(format!("    let {pname}_seed_bytes = {pname}.to_le_bytes();"));
+                                    seed_entries.push(format!("        &{pname}_seed_bytes,"));
                                 }
                                 "String" | "string" | "&str" => {
-                                    format!("        {pname}.as_bytes(),")
+                                    seed_entries.push(format!("        {pname}.as_bytes(),"));
                                 }
-                                _ => format!("        &{pname} as &[u8],"),
-                            };
-                            writeln!(out, "{seed_line}").unwrap();
+                                _ => seed_entries.push(format!("        {pname}.as_ref(),")),
+                            }
                         }
                     }
+                }
+                for binding in &seed_pre_bindings {
+                    writeln!(out, "{binding}").unwrap();
+                }
+                writeln!(out, "    let {name} = compute_pda(&[").unwrap();
+                for entry in &seed_entries {
+                    writeln!(out, "{entry}").unwrap();
                 }
                 writeln!(out, "    ]);").unwrap();
             } else {
@@ -508,6 +522,20 @@ fn idl_type_to_json_field(ty: &IdlType, field_name: &str) -> String {
     }
 }
 
+/// Returns true if the type (or any nested type) contains a `Defined` reference.
+/// Such types have no generated Rust definition in the FFI output, so fetch
+/// generation must be skipped for account structs that contain them.
+fn has_defined_type(ty: &IdlType) -> bool {
+    use spel_framework_core::idl::IdlType;
+    match ty {
+        IdlType::Defined { .. } => true,
+        IdlType::Vec { vec } => has_defined_type(vec),
+        IdlType::Option { option } => has_defined_type(option),
+        IdlType::Array { array: (elem, _) } => has_defined_type(elem),
+        _ => false,
+    }
+}
+
 /// Emit the Rust type for a struct field that will be BorshDeserialize'd.
 fn idl_type_to_borsh_rust(ty: &IdlType) -> String {
     use spel_framework_core::idl::IdlType;
@@ -549,6 +577,8 @@ pub fn generate_account_types(idl: &SpelIdl, out: &mut String) {
 
             if type_def.type_.kind != "struct" { continue; } // only structs supported for now
             if type_def.type_.fields.is_empty() { continue; }
+            // Skip if any field references a Defined type — no definition is emitted for it.
+            if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
 
             let pascal_name = pascal_case(&acc_name);
             writeln!(out).unwrap();
@@ -588,6 +618,8 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             };
             if type_def.type_.kind != "struct" { continue; }
             if type_def.type_.fields.is_empty() { continue; }
+            // Skip if any field references a Defined type — no definition is emitted for it.
+            if type_def.type_.fields.iter().any(|f| has_defined_type(&f.type_)) { continue; }
 
             let pascal_name = pascal_case(&acc_name);
             let fn_name = format!("{prefix}_fetch_{acc_name}");
@@ -616,25 +648,27 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
                             .unwrap_or(spel_framework_core::idl::IdlType::Primitive("String".to_string())),
                             &format!("args[\"{path}\"]"));
                         seed_parse_lines.push(format!("        let {pname} = {parse_expr};"));
-                        // Seed usage in compute_pda — emit the right bytes expression per type.
-                        // Note: [u8;32]/AccountId args are parsed as AccountId by idl_type_to_json_parse,
-                        // so we use .as_ref() (implements AsRef<[u8]>) to get the byte slice.
-                        let seed_expr = match arg_ty.as_str() {
+                        // Seed bytes expression: pre-bind types that can't be safely
+                        // borrowed inline (ProgramId → Vec, scalars → fixed-size array).
+                        // Note: [u8;32]/AccountId args are parsed as AccountId by
+                        // idl_type_to_json_parse, so .as_ref() gives a valid &[u8].
+                        match arg_ty.as_str() {
                             "[u8; 32]" | "[u8;32]" | "AccountId" | "account_id" => {
-                                format!("        {pname}.as_ref(),")
+                                pda_seeds_code.push(format!("        {pname}.as_ref(),"));
                             }
                             "[u32; 8]" | "[u32;8]" | "ProgramId" => {
-                                format!("        &{pname}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>(),")
+                                seed_parse_lines.push(format!("        let {pname}_seed_bytes: Vec<u8> = {pname}.iter().flat_map(|w| w.to_le_bytes()).collect();"));
+                                pda_seeds_code.push(format!("        &{pname}_seed_bytes,"));
                             }
                             "u64" | "u32" | "u16" | "u8" | "i64" | "i32" | "i16" | "i8" | "u128" | "i128" => {
-                                format!("        &{pname}.to_le_bytes(),")
+                                seed_parse_lines.push(format!("        let {pname}_seed_bytes = {pname}.to_le_bytes();"));
+                                pda_seeds_code.push(format!("        &{pname}_seed_bytes,"));
                             }
                             "String" | "string" | "&str" => {
-                                format!("        {pname}.as_bytes(),")
+                                pda_seeds_code.push(format!("        {pname}.as_bytes(),"));
                             }
-                            _ => format!("        &{pname} as &[u8],"),
-                        };
-                        pda_seeds_code.push(seed_expr);
+                            _ => pda_seeds_code.push(format!("        {pname}.as_ref(),")),
+                        }
                     }
                     IdlSeed::Account { path } => {
                         let pname = rust_ident(path);

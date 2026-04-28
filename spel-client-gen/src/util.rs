@@ -83,11 +83,19 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
             }
             "string" | "String" => format!("{var}.as_str().ok_or(\"expected string\")?.to_string()"),
             "bool" => format!("{var}.as_bool().ok_or(\"expected bool\")?"),
-            "u8" | "u16" | "u32" | "u64" | "u128" => {
+            "u8" | "u16" | "u32" | "u64" => {
                 format!("{var}.as_u64().ok_or(\"expected number\")? as {p}")
             }
-            "i8" | "i16" | "i32" | "i64" | "i128" => {
+            "u128" => {
+                // Accept either a JSON string (for values > u64::MAX) or a JSON number.
+                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<u128>().map_err(|_| format!(\"invalid u128: {{}}\", _s))? }} else {{ _v.as_u64().ok_or(\"expected u128\")? as u128 }} }}")
+            }
+            "i8" | "i16" | "i32" | "i64" => {
                 format!("{var}.as_i64().ok_or(\"expected number\")? as {p}")
+            }
+            "i128" => {
+                // Accept either a JSON string (for values outside i64 range) or a JSON number.
+                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<i128>().map_err(|_| format!(\"invalid i128: {{}}\", _s))? }} else if let Some(_n) = _v.as_i64() {{ _n as i128 }} else {{ _v.as_u64().ok_or(\"expected i128\")? as i128 }} }}")
             }
             _ => format!("serde_json::from_value({var}.clone()).map_err(|e| format!(\"parse error: {{}}\", e))?"),
         },
