@@ -124,36 +124,6 @@ jobs:
       - name: Build spel CLI
         run: cargo build -p spel --release
 
-      - name: Setup default wallet (port 3040)
-        run: |
-          mkdir -p /tmp/wallet
-          echo '{"sequencer_addr":"http://127.0.0.1:3040","seq_poll_timeout":"30s","seq_tx_poll_max_blocks":15,"seq_poll_max_retries":10,"seq_block_poll_max_amount":100,"initial_accounts":[{"Public":{"account_id":"CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r","pub_sign_key":"7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb"}},{"Public":{"account_id":"2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2","pub_sign_key":"f434f8741720014586ae43356d2aec6257da086222f604ddb75d69733b86fc4c"}}]}' > /tmp/wallet/wallet_config.json
-
-      - name: Setup FFI wallet (port 3041)
-        run: |
-          mkdir -p /tmp/wallet-ffi
-          echo '{"sequencer_addr":"http://127.0.0.1:3041","seq_poll_timeout":"30s","seq_tx_poll_max_blocks":15,"seq_poll_max_retries":10,"seq_block_poll_max_amount":100,"initial_accounts":[{"Public":{"account_id":"CbgR6tj5kWx5oziiFptM7jMvrQeYY3Mzaao6ciuhSr2r","pub_sign_key":"7f273098f25b71e6c005a9519f2678da8d1c7f01f6a27778e2d9948abdf901fb"}},{"Public":{"account_id":"2RHZhw9h534Zr3eq2RGhQete2Hh667foECzXPmSkGni2","pub_sign_key":"f434f8741720014586ae43356d2aec6257da086222f604ddb75d69733b86fc4c"}}]}' > /tmp/wallet-ffi/wallet_config.json
-
-      - name: Upload sequencer artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: sequencer-binaries
-          path: |
-            /tmp/lssa/target/release/sequencer_service
-            /tmp/lssa/target/release/wallet
-            target/release/spel
-            /tmp/lssa
-          retention-days: 1
-
-      - name: Upload wallet configs
-        uses: actions/upload-artifact@v4
-        with:
-          name: wallet-configs
-          path: |
-            /tmp/wallet/
-            /tmp/wallet-ffi/
-          retention-days: 1
-
   privacy-smoke-test:
     name: Privacy Smoke Test
     needs: [sequencer-setup]
@@ -165,17 +135,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Download sequencer artifacts
-        uses: actions/download-artifact@v4
+      - name: Restore sequencer cache
+        uses: actions/cache@v4
         with:
-          name: sequencer-binaries
-          path: /tmp/lssa
-
-      - name: Download wallet configs
-        uses: actions/download-artifact@v4
-        with:
-          name: wallet-configs
-          path: /tmp
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -201,10 +165,8 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-
       - name: Run privacy smoke test
         env:
-          NSSA_WALLET_HOME_DIR: /tmp/wallet
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
           SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
@@ -223,17 +185,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
 
-      - name: Download sequencer artifacts
-        uses: actions/download-artifact@v4
+      - name: Restore sequencer cache
+        uses: actions/cache@v4
         with:
-          name: sequencer-binaries
-          path: /tmp/lssa
-
-      - name: Download wallet configs
-        uses: actions/download-artifact@v4
-        with:
-          name: wallet-configs
-          path: /tmp
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -261,7 +217,6 @@ jobs:
 
       - name: Run FFI call test
         env:
-          NSSA_WALLET_HOME_DIR: /tmp/wallet-ffi
           LSSA_DIR: /tmp/lssa
           LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
           SPEL_REF: ${{ steps.spel-ref.outputs.SPEL_REF }}
