@@ -237,15 +237,24 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
             .map(|a| (rust_ident(&a.name), idl_type_to_rust(&a.type_)))
             .collect();
 
-        // Resolve accounts
+        // Resolve accounts in two passes so that PDA accounts whose seeds reference
+        // other accounts (IdlSeed::Account) always find those accounts already bound.
+        // Pass 1: non-PDA accounts (plain addresses and rest arrays).
         for acc in &ix.accounts {
             let name = rust_ident(&acc.name);
             if acc.rest {
-                // rest accounts parsed from JSON array
                 writeln!(out, "    let {name}: Vec<AccountId> = v[\"{}\"].as_array()", acc.name).unwrap();
                 writeln!(out, "        .ok_or(\"missing {}\")?", acc.name).unwrap();
                 writeln!(out, "        .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?;").unwrap();
-            } else if let Some(pda) = &acc.pda {
+            } else if acc.pda.is_none() {
+                writeln!(out, "    let {name} = parse_account_id(v[\"{}\"].as_str().ok_or(\"missing {}\")?)?;",
+                    acc.name, acc.name).unwrap();
+            }
+        }
+        // Pass 2: PDA accounts (may reference accounts bound in pass 1).
+        for acc in &ix.accounts {
+            let name = rust_ident(&acc.name);
+            if let Some(pda) = &acc.pda {
                 // Collect pre-bindings (stable buffers for types that can't be borrowed
                 // as a slice element inline) and seed entries separately, then emit.
                 let mut seed_pre_bindings: Vec<String> = Vec::new();
@@ -286,9 +295,6 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                     writeln!(out, "{entry}").unwrap();
                 }
                 writeln!(out, "    ])?;").unwrap();
-            } else {
-                writeln!(out, "    let {name} = parse_account_id(v[\"{}\"].as_str().ok_or(\"missing {}\")?)?;",
-                    acc.name, acc.name).unwrap();
             }
         }
         writeln!(out).unwrap();
