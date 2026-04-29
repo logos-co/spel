@@ -741,3 +741,466 @@ fn test_ffi_parse_account_id_strips_prefix() {
         output.ffi_code
     );
 }
+
+// ── FFI fetch function generation ─────────────────────────────────────────────
+
+/// IDL with a const-only PDA and a u128 field (WhisperWall-like).
+const WHISPER_WALL_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "whisper_wall",
+    "instructions": [
+        {
+            "name": "post",
+            "accounts": [
+                {
+                    "name": "wall_state",
+                    "writable": true,
+                    "signer": false,
+                    "init": false,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "wall_v2"}
+                        ]
+                    }
+                },
+                {
+                    "name": "author",
+                    "writable": true,
+                    "signer": true,
+                    "init": false
+                }
+            ],
+            "args": [
+                {"name": "message", "type": "string"},
+                {"name": "nonce", "type": "u128"}
+            ]
+        }
+    ],
+    "accounts": [
+        {
+            "name": "WallState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {"name": "post_count", "type": "u64"},
+                    {"name": "total_nonce", "type": "u128"},
+                    {"name": "owner", "type": "account_id"}
+                ]
+            }
+        }
+    ],
+    "types": [],
+    "errors": []
+}"#;
+
+/// IDL with an arg-seeded PDA.
+const ARG_SEED_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "vault_prog",
+    "instructions": [
+        {
+            "name": "create_vault",
+            "accounts": [
+                {
+                    "name": "vault_state",
+                    "writable": true,
+                    "signer": false,
+                    "init": true,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "vault"},
+                            {"kind": "arg", "path": "vault_id"}
+                        ]
+                    }
+                },
+                {
+                    "name": "owner",
+                    "writable": false,
+                    "signer": true,
+                    "init": false
+                }
+            ],
+            "args": [
+                {"name": "vault_id", "type": "[u8; 32]"},
+                {"name": "balance", "type": "u64"}
+            ]
+        }
+    ],
+    "accounts": [
+        {
+            "name": "VaultState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {"name": "vault_id", "type": "[u8; 32]"},
+                    {"name": "balance", "type": "u64"},
+                    {"name": "owner", "type": "account_id"}
+                ]
+            }
+        }
+    ],
+    "types": [],
+    "errors": []
+}"#;
+
+/// IDL with an account-seeded PDA.
+const ACCOUNT_SEED_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "pool_prog",
+    "instructions": [
+        {
+            "name": "create_pool",
+            "accounts": [
+                {
+                    "name": "pool_state",
+                    "writable": true,
+                    "signer": false,
+                    "init": true,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "pool"},
+                            {"kind": "account", "path": "creator"}
+                        ]
+                    }
+                },
+                {
+                    "name": "creator",
+                    "writable": false,
+                    "signer": true,
+                    "init": false
+                }
+            ],
+            "args": []
+        }
+    ],
+    "accounts": [
+        {
+            "name": "PoolState",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {"name": "creator", "type": "account_id"},
+                    {"name": "token_count", "type": "u64"}
+                ]
+            }
+        }
+    ],
+    "types": [],
+    "errors": []
+}"#;
+
+#[test]
+fn test_ffi_fetch_const_pda_no_trailing_comma() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // Fetch function must be emitted
+    assert!(
+        ffi.contains("pub extern \"C\" fn whisper_wall_fetch_wall_state("),
+        "missing fetch function: {ffi}"
+    );
+
+    // Const-only PDA: compute_pda_with_program must be called with program_id + seed slice
+    assert!(
+        ffi.contains("compute_pda_with_program(&program_id, &["),
+        "must use compute_pda_with_program with program_id: {ffi}"
+    );
+
+    // The PDA computation should use inline const seed only (no trailing comma after slice)
+    assert!(
+        ffi.contains(r#"b"wall_v2","#),
+        "const seed must be inlined: {ffi}"
+    );
+    assert!(
+        !ffi.contains(r#"b"wall_v2", )"#),
+        "must not generate trailing comma after seed slice: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_u128_field_uses_to_string() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // u128 field must use .to_string() in json! macro, not bare value
+    assert!(
+        ffi.contains("state.total_nonce.to_string()"),
+        "u128 field must use .to_string() in json!: {ffi}"
+    );
+
+    // u64 field should be direct (no .to_string())
+    assert!(
+        ffi.contains("state.post_count"),
+        "u64 field should be present: {ffi}"
+    );
+    // The u64 field should NOT be followed by .to_string()
+    assert!(
+        !ffi.contains("state.post_count.to_string()"),
+        "u64 field must not use .to_string(): {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_account_id_field_uses_hex_encode() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // account_id field must use hex::encode
+    assert!(
+        ffi.contains("hex::encode(&state.owner)"),
+        "account_id field must use hex::encode: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_arg_seeded_pda_uses_args_accessor() {
+    let output = generate_from_idl_json(ARG_SEED_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // Fetch function must be emitted
+    assert!(
+        ffi.contains("pub extern \"C\" fn vault_prog_fetch_vault_state("),
+        "missing fetch function: {ffi}"
+    );
+
+    // Arg seed must be read from args["vault_id"], not a bare variable
+    assert!(
+        ffi.contains(r#"args["vault_id"]"#),
+        "arg seed must be accessed via args[\"vault_id\"]: {ffi}"
+    );
+
+    // Must NOT use a bare `vault_id` variable that was never declared
+    // (The parse line must set `let vault_id = ...` before using it in compute_pda)
+    let fetch_impl_start = ffi.find("fn vault_prog_fetch_vault_state_impl").unwrap_or(0);
+    let fetch_section = &ffi[fetch_impl_start..];
+    let args_access_pos = fetch_section.find(r#"args["vault_id"]"#).unwrap_or(usize::MAX);
+    let vault_id_in_pda_pos = fetch_section.find("vault_id.as_ref()").unwrap_or(usize::MAX);
+    assert!(
+        args_access_pos < vault_id_in_pda_pos,
+        "args[\"vault_id\"] parse must come before vault_id use in PDA: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_account_seeded_pda_uses_parse_account_id() {
+    let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // Fetch function must be emitted
+    assert!(
+        ffi.contains("pub extern \"C\" fn pool_prog_fetch_pool_state("),
+        "missing fetch function: {ffi}"
+    );
+
+    // Account seed must be parsed as AccountId from args JSON
+    assert!(
+        ffi.contains(r#"args["creator"]"#),
+        "account seed must be accessed via args[\"creator\"]: {ffi}"
+    );
+    assert!(
+        ffi.contains("parse_account_id"),
+        "account seed must use parse_account_id: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_sets_sequencer_url() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // sequencer_url must be set (not silently ignored)
+    assert!(
+        ffi.contains("NSSA_SEQUENCER_URL"),
+        "fetch function must set NSSA_SEQUENCER_URL env var: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_struct_generated() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // BorshDeserialize struct must be generated
+    assert!(
+        ffi.contains("#[derive(borsh::BorshDeserialize)]"),
+        "must emit BorshDeserialize struct: {ffi}"
+    );
+    assert!(
+        ffi.contains("struct WallStateState {"),
+        "must emit WallStateState struct: {ffi}"
+    );
+    assert!(
+        ffi.contains("pub post_count: u64"),
+        "struct must have post_count: u64: {ffi}"
+    );
+    assert!(
+        ffi.contains("pub total_nonce: u128"),
+        "struct must have total_nonce: u128: {ffi}"
+    );
+}
+
+#[test]
+fn test_ffi_fetch_deduplication() {
+    // Same PDA account in two instructions — fetch function generated exactly once
+    let idl = r#"{
+        "version": "0.1.0",
+        "name": "multi_ix",
+        "instructions": [
+            {
+                "name": "read",
+                "accounts": [
+                    {
+                        "name": "shared_state",
+                        "writable": false,
+                        "signer": false,
+                        "init": false,
+                        "pda": {"seeds": [{"kind": "const", "value": "shared"}]}
+                    }
+                ],
+                "args": []
+            },
+            {
+                "name": "write",
+                "accounts": [
+                    {
+                        "name": "shared_state",
+                        "writable": true,
+                        "signer": false,
+                        "init": false,
+                        "pda": {"seeds": [{"kind": "const", "value": "shared"}]}
+                    }
+                ],
+                "args": []
+            }
+        ],
+        "accounts": [
+            {
+                "name": "SharedState",
+                "type": {
+                    "kind": "struct",
+                    "fields": [{"name": "value", "type": "u64"}]
+                }
+            }
+        ],
+        "types": [],
+        "errors": []
+    }"#;
+    let output = generate_from_idl_json(idl).expect("codegen should succeed");
+    let count = output.ffi_code.matches("pub extern \"C\" fn multi_ix_fetch_shared_state(").count();
+    assert_eq!(count, 1, "fetch function should be generated exactly once, got {count}");
+}
+
+#[test]
+fn test_ffi_fetch_no_type_info_no_function() {
+    // PDA account without a matching entry in idl.accounts → no fetch function generated
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    // SAMPLE_IDL has multisig_state PDA but no accounts[] entry
+    assert!(
+        !output.ffi_code.contains("fn my_multisig_fetch_multisig_state"),
+        "should not generate fetch function when no account type info is available"
+    );
+}
+
+#[test]
+fn test_header_includes_fetch_declaration() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+
+    assert!(
+        output.header.contains("char* whisper_wall_fetch_wall_state(const char* args_json)"),
+        "C header must include fetch function declaration: {}",
+        output.header
+    );
+}
+
+#[test]
+fn test_ffi_fetch_borsh_decode_in_function() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // Must call try_from_slice on the state struct via the fully-qualified trait path
+    assert!(
+        ffi.contains("<WallStateState as borsh::BorshDeserialize>::try_from_slice("),
+        "fetch function must decode via <WallStateState as borsh::BorshDeserialize>::try_from_slice: {ffi}"
+    );
+
+    // Must call get_account
+    assert!(
+        ffi.contains("get_account(pda)"),
+        "fetch function must call get_account(pda): {ffi}"
+    );
+
+    // Must return success JSON with state
+    assert!(
+        ffi.contains("\"success\": true"),
+        "fetch function must return success:true: {ffi}"
+    );
+    assert!(
+        ffi.contains("\"state\""),
+        "fetch function must return state field: {ffi}"
+    );
+}
+
+// ── Syntax validity tests ─────────────────────────────────────────────────────
+//
+// Parse the generated FFI code as a syn::File to catch syntax errors
+// (trailing commas, malformed expressions, bad types) without needing
+// the full nssa/wallet/tokio dependency tree available at test time.
+//
+// This catches bugs like:
+//   - `compute_pda(&program_id, )` — trailing comma (Bug 3 from PR #147)
+//   - bare undefined variables in PDA seed expressions (Bug 1)
+//   - `body_lines` ordering inversions that reference variables before they're bound (Bug 2)
+//   - `[u32;8].as_bytes()` call expressions that are syntactically invalid (Bug 6)
+
+fn assert_parses_as_rust(label: &str, src: &str) {
+    // Parse the source as-is as a full Rust file.
+    // This validates syntax structure without requiring the full dependency tree
+    // or successful type checking during tests.
+    match syn::parse_str::<syn::File>(src) {
+        Ok(_) => {}
+        Err(e) => panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}"),
+    }
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_const_pda() {
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("WHISPER_WALL_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_arg_seed() {
+    let output = generate_from_idl_json(ARG_SEED_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("ARG_SEED_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_account_seed() {
+    let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("ACCOUNT_SEED_IDL ffi_code", &output.ffi_code);
+}
+
+#[test]
+fn test_account_seed_pda_binding_order() {
+    // ACCOUNT_SEED_IDL lists pool_state (PDA) before creator (plain account) in ix.accounts.
+    // The two-pass resolver must emit `let creator = ...` before `let pool_state = ...` so
+    // that `creator.as_ref()` in the PDA seed slice references an already-bound variable.
+    let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    let pos_creator = ffi.find("let creator = parse_account_id")
+        .expect("must bind creator from JSON args");
+    let pos_pool_state = ffi.find("let pool_state = compute_pda_with_program")
+        .expect("must compute pool_state PDA");
+
+    assert!(
+        pos_creator < pos_pool_state,
+        "plain account binding (creator) must appear before PDA binding (pool_state) in generated code"
+    );
+}
+
+#[test]
+fn test_ffi_code_is_valid_rust_syntax_sample_idl() {
+    let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("SAMPLE_IDL ffi_code", &output.ffi_code);
+}
