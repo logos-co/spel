@@ -3,7 +3,7 @@
 //! These are thin wrappers/adapters that bridge framework ergonomics
 //! with real SPEL core types.
 
-use nssa_core::program::{AccountPostState, ChainedCall};
+use nssa_core::program::{AccountPostState, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow, ValidityWindow};
 
 /// Trait for types that can be converted into an [`AccountPostState`].
 ///
@@ -18,6 +18,8 @@ pub trait IntoPostState {
 pub struct SpelOutput {
     pub post_states: Vec<AccountPostState>,
     pub chained_calls: Vec<ChainedCall>,
+    pub block_validity_window: BlockValidityWindow,
+    pub timestamp_validity_window: TimestampValidityWindow,
 }
 
 impl SpelOutput {
@@ -27,6 +29,8 @@ impl SpelOutput {
         Self {
             post_states,
             chained_calls: vec![],
+            block_validity_window: ValidityWindow::new_unbounded(),
+            timestamp_validity_window: ValidityWindow::new_unbounded(),
         }
     }
 
@@ -39,6 +43,8 @@ impl SpelOutput {
         Self {
             post_states,
             chained_calls,
+            block_validity_window: ValidityWindow::new_unbounded(),
+            timestamp_validity_window: ValidityWindow::new_unbounded(),
         }
     }
 
@@ -47,12 +53,75 @@ impl SpelOutput {
         Self {
             post_states: vec![],
             chained_calls: vec![],
+            block_validity_window: ValidityWindow::new_unbounded(),
+            timestamp_validity_window: ValidityWindow::new_unbounded(),
         }
     }
 
-    /// Convert to the tuple form expected by `write_nssa_outputs_with_chained_call`.
+    /// Restrict the block range in which the transaction is valid.
+    ///
+    /// Accepts any infallible range conversion: `1..`, `..100`, or `..` (unbounded).
+    pub fn with_block_validity_window<W: Into<BlockValidityWindow>>(mut self, window: W) -> Self {
+        self.block_validity_window = window.into();
+        self
+    }
+
+    /// Restrict the block range in which the transaction is valid.
+    ///
+    /// Returns `Err` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    pub fn try_with_block_validity_window<W: TryInto<BlockValidityWindow, Error = InvalidWindow>>(
+        mut self,
+        window: W,
+    ) -> Result<Self, InvalidWindow> {
+        self.block_validity_window = window.try_into()?;
+        Ok(self)
+    }
+
+    /// Restrict the timestamp range in which the transaction is valid.
+    ///
+    /// Accepts any infallible range conversion: `1..`, `..100`, or `..` (unbounded).
+    pub fn with_timestamp_validity_window<W: Into<TimestampValidityWindow>>(
+        mut self,
+        window: W,
+    ) -> Self {
+        self.timestamp_validity_window = window.into();
+        self
+    }
+
+    /// Restrict the timestamp range in which the transaction is valid.
+    ///
+    /// Returns `Err` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    pub fn try_with_timestamp_validity_window<
+        W: TryInto<TimestampValidityWindow, Error = InvalidWindow>,
+    >(
+        mut self,
+        window: W,
+    ) -> Result<Self, InvalidWindow> {
+        self.timestamp_validity_window = window.try_into()?;
+        Ok(self)
+    }
+
+    /// Convert to the original tuple form of post-states and chained calls.
+    #[deprecated(note = "Use SpelOutput::into_parts_with_windows() to also retrieve validity windows")]
     pub fn into_parts(self) -> (Vec<AccountPostState>, Vec<ChainedCall>) {
         (self.post_states, self.chained_calls)
+    }
+
+    /// Convert to the tuple form including validity windows.
+    pub fn into_parts_with_windows(
+        self,
+    ) -> (
+        Vec<AccountPostState>,
+        Vec<ChainedCall>,
+        BlockValidityWindow,
+        TimestampValidityWindow,
+    ) {
+        (
+            self.post_states,
+            self.chained_calls,
+            self.block_validity_window,
+            self.timestamp_validity_window,
+        )
     }
 }
 
