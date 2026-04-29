@@ -341,7 +341,7 @@ mod {snake_name} {{
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,
-            owner: owner.account_id.value(),
+            owner: *owner.account_id.value(),
         }};
         let bytes = borsh::to_vec(&ps).map_err(|e| SpelError::custom(999, format!("borsh error: {{e}}")))?;
         acc.data = Data::try_from(bytes).map_err(|_| SpelError::custom(999, "data too big"))?;
