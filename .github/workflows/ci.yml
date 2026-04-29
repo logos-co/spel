@@ -55,6 +55,8 @@ jobs:
       lez-rev: ${{ steps.lez-ref.outputs.LEZ_REV }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Generate Cargo.lock
@@ -138,6 +140,20 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
 
+      - name: Build spel CLI
+        run: cargo build -p spel --release
+
+      - name: Copy spel CLI to LEZ dir
+        run: |
+          mkdir -p /tmp/lssa/target/release
+          cp target/release/spel /tmp/lssa/target/release/spel
+
+      - name: Save spel CLI cache (PR-specific key)
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}-pr${{ github.event.pull_request.number || 'main' }}
+
   privacy-smoke-test:
     name: Privacy Smoke Test
     needs: [sequencer-setup]
@@ -147,6 +163,8 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clone LEZ at correct revision
@@ -169,11 +187,11 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Build spel CLI
-        run: |
-          cargo build -p spel --release
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
+      - name: Restore spel CLI cache (PR-specific)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -217,6 +235,8 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clone LEZ at correct revision
@@ -239,11 +259,11 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Build spel CLI
-        run: |
-          cargo build -p spel --release
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
+      - name: Restore spel CLI cache (PR-specific)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
