@@ -138,21 +138,6 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
 
-      - name: Build spel CLI
-        run: cargo build -p spel --release
-
-      - name: Copy spel CLI to LEZ dir
-        run: |
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
-
-      - name: Save spel CLI cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}
-
   privacy-smoke-test:
     name: Privacy Smoke Test
     needs: [sequencer-setup]
@@ -184,11 +169,11 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Restore spel CLI cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}
+      - name: Build spel CLI
+        run: |
+          cargo build -p spel --release
+          mkdir -p /tmp/lssa/target/release
+          cp target/release/spel /tmp/lssa/target/release/spel
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -254,11 +239,11 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Restore spel CLI cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}
+      - name: Build spel CLI
+        run: |
+          cargo build -p spel --release
+          mkdir -p /tmp/lssa/target/release
+          cp target/release/spel /tmp/lssa/target/release/spel
 
       - name: Determine SPEL ref for testing
         id: spel-ref
