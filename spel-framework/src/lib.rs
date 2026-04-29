@@ -21,4 +21,8 @@ pub mod prelude {
     pub use spel_framework_core::spel_output::AutoClaim;
     pub use spel_framework_core::error::{SpelError, SpelResult};
     pub use borsh::{BorshSerialize, BorshDeserialize};
+
+    // nssa::public_transaction (host-only)
+    #[cfg(feature = "host")]
+    pub use spel_framework_core::prelude::{Message, WitnessSet};
 }
