@@ -174,9 +174,27 @@ for i in $(seq 1 60); do
     echo -n "."
 done
 
-# ─── Step 5: Deploy program ───────────────────────────────────────────────
+# ─── Step 5: Update wallet config for correct port ────────────────────────
 
-log "Step 5: Deploying program..."
+log "Step 5: Updating wallet config for port ${SEQUENCER_PORT}..."
+WALLET_CONFIG="${NSSA_WALLET_HOME_DIR}/wallet_config.json"
+if [ -f "$WALLET_CONFIG" ]; then
+    python3 -c "
+import json
+with open('$WALLET_CONFIG', 'r') as f:
+    config = json.load(f)
+config['sequencer_addr'] = '$SEQUENCER_URL'
+with open('$WALLET_CONFIG', 'w') as f:
+    json.dump(config, f, indent=4)
+print('  ✓ Updated wallet config to use $SEQUENCER_URL')
+" || warn "Failed to update wallet config"
+else
+    warn "Wallet config not found at $WALLET_CONFIG"
+fi
+
+# ─── Step 6: Deploy program ───────────────────────────────────────────────
+
+log "Step 6: Deploying program..."
 printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" 2>&1 | tee "$WORK_DIR/deploy.log" || { echo ''; echo '=== DEPLOY LOG ==='; cat "$WORK_DIR/deploy.log"; echo '==================='; fail 'Deploy failed'; }
 log "  ✓ Program deployed"
 
