@@ -313,7 +313,7 @@ ruint = "=1.17.0"
     write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
 
 use spel_framework::prelude::*;
-use nssa_core::account::Data;
+use nssa_core::account::{AccountId, Data};
 
 risc0_zkvm::guest::entry!(main);
 
