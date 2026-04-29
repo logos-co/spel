@@ -248,7 +248,7 @@ borsh = "1.5"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramState {
     pub initialized: bool,
-    pub owner: [u8; 32],
+    pub owner: AccountId,
 }
 "#);
 
@@ -327,7 +327,7 @@ mod {snake_name} {{
     #[account_type]
     pub struct ProgramState {{
         pub initialized: bool,
-        pub owner: [u8; 32],
+        pub owner: AccountId,
     }}
 
     /// Initialize the program state.
@@ -341,7 +341,7 @@ mod {snake_name} {{
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,
-            owner: AccountId::from(owner.account),
+            owner: owner.account_id,
         }};
         let bytes = borsh::to_vec(&ps).map_err(|e| SpelError::custom(999, format!("borsh error: {{e}}")))?;
         acc.data = Data::try_from(bytes).map_err(|_| SpelError::custom(999, "data too big"))?;
