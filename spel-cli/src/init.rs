@@ -248,7 +248,7 @@ borsh = "1.5"
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProgramState {
     pub initialized: bool,
-    pub owner: AccountId,
+    pub owner: [u8; 32],
 }
 "#);
 
@@ -313,7 +313,7 @@ ruint = "=1.17.0"
     write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
 
 use spel_framework::prelude::*;
-use nssa_core::account::{AccountId, Data};
+use nssa_core::account::Data;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -327,7 +327,7 @@ mod {snake_name} {{
     #[account_type]
     pub struct ProgramState {{
         pub initialized: bool,
-        pub owner: AccountId,
+        pub owner: [u8; 32],
     }}
 
     /// Initialize the program state.
@@ -341,7 +341,7 @@ mod {snake_name} {{
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,
-            owner: owner.account_id,
+            owner: owner.account_id.value(),
         }};
         let bytes = borsh::to_vec(&ps).map_err(|e| SpelError::custom(999, format!("borsh error: {{e}}")))?;
         acc.data = Data::try_from(bytes).map_err(|_| SpelError::custom(999, "data too big"))?;
