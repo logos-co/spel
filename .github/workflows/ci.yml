@@ -148,6 +148,12 @@ jobs:
           mkdir -p /tmp/lssa/target/release
           cp target/release/spel /tmp/lssa/target/release/spel
 
+      - name: Save spel CLI cache (PR-specific key)
+        uses: actions/cache/save@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
+
   privacy-smoke-test:
     name: Privacy Smoke Test
     needs: [sequencer-setup]
@@ -181,11 +187,23 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Build spel CLI
+      - name: Install logos-blockchain-circuits
         run: |
-          cargo build -p spel --release
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore spel CLI cache (PR-specific)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -253,11 +271,23 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Build spel CLI
+      - name: Install logos-blockchain-circuits
         run: |
-          cargo build -p spel --release
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore spel CLI cache (PR-specific)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
