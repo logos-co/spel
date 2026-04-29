@@ -313,6 +313,7 @@ ruint = "=1.17.0"
     write_file(root, &format!("methods/guest/src/bin/{}.rs", snake_name), &format!(r#"#![no_main]
 
 use spel_framework::prelude::*;
+use nssa_core::account::Data;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -320,6 +321,14 @@ risc0_zkvm::guest::entry!(main);
 mod {snake_name} {{
     #[allow(unused_imports)]
     use super::*;
+
+    /// Program state stored in a PDA account.
+    #[derive(BorshSerialize, BorshDeserialize)]
+    #[account_type]
+    pub struct ProgramState {{
+        pub initialized: bool,
+        pub owner: [u8; 32],
+    }}
 
     /// Initialize the program state.
     #[instruction]
@@ -329,8 +338,15 @@ mod {snake_name} {{
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {{
-        // TODO: implement initialization logic
-        Ok(SpelOutput::execute(vec![state, owner], vec![]))
+        let mut acc = state.account.clone();
+        let ps = ProgramState {{
+            initialized: true,
+            owner: acc.owner,
+        }};
+        let bytes = borsh::to_vec(&ps).map_err(|e| SpelError::custom(999, format!("borsh error: {{e}}")))?;
+        acc.data = Data::try_from(bytes).map_err(|_| SpelError::custom(999, "data too big"))?;
+        let owner_post = AccountPostState::new(owner.account.clone());
+        Ok(SpelOutput::states_only(vec![AccountPostState::new_claimed(acc, Claim::Authorized), owner_post]))
     }}
 
     /// Example instruction — replace with your own.
