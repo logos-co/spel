@@ -5,7 +5,7 @@
 //! `(Account, AutoClaim)` pairs into the correct `AccountPostState` values.
 
 use nssa_core::account::Account;
-use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed};
+use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
 
 use crate::types::{IntoPostState, SpelOutput};
 
@@ -128,6 +128,8 @@ impl SpelOutput {
         Self {
             post_states,
             chained_calls: calls,
+            block_validity_window: ValidityWindow::new_unbounded(),
+            timestamp_validity_window: ValidityWindow::new_unbounded(),
         }
     }
 
@@ -159,6 +161,8 @@ impl SpelOutput {
         Self {
             post_states,
             chained_calls: calls,
+            block_validity_window: ValidityWindow::new_unbounded(),
+            timestamp_validity_window: ValidityWindow::new_unbounded(),
         }
     }
 }
@@ -248,5 +252,112 @@ mod tests {
     fn pda_from_seeds_multi() {
         let claim = AutoClaim::pda_from_seeds(&[&[1u8; 32], &[2u8; 32]]);
         assert!(claim.is_claimed());
+    }
+
+    // ── Validity window tests ────────────────────────────────────────────
+
+    /// Existing programs that don't call any validity window builder get unbounded
+    /// windows, which matches the prior hard-coded behavior.
+    #[test]
+    fn default_output_has_unbounded_windows() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![]);
+        assert_eq!(output.block_validity_window.start(), None);
+        assert_eq!(output.block_validity_window.end(), None);
+        assert_eq!(output.timestamp_validity_window.start(), None);
+        assert_eq!(output.timestamp_validity_window.end(), None);
+    }
+
+    #[test]
+    fn execute_with_claims_default_windows_unbounded() {
+        let output = SpelOutput::execute_with_claims(&[], &[], vec![]);
+        assert_eq!(output.block_validity_window.start(), None);
+        assert_eq!(output.block_validity_window.end(), None);
+    }
+
+    #[test]
+    fn with_block_validity_window_range_from() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .with_block_validity_window(42u64..);
+        assert_eq!(output.block_validity_window.start(), Some(42));
+        assert_eq!(output.block_validity_window.end(), None);
+    }
+
+    #[test]
+    fn with_block_validity_window_range_to() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .with_block_validity_window(..100u64);
+        assert_eq!(output.block_validity_window.start(), None);
+        assert_eq!(output.block_validity_window.end(), Some(100));
+    }
+
+    #[test]
+    fn with_block_validity_window_unbounded() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .with_block_validity_window(..);
+        assert_eq!(output.block_validity_window.start(), None);
+        assert_eq!(output.block_validity_window.end(), None);
+    }
+
+    #[test]
+    fn try_with_block_validity_window_valid_range() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .try_with_block_validity_window(10u64..20)
+            .expect("10..20 is a valid range");
+        assert_eq!(output.block_validity_window.start(), Some(10));
+        assert_eq!(output.block_validity_window.end(), Some(20));
+    }
+
+    #[test]
+    fn try_with_block_validity_window_empty_range_errors() {
+        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .try_with_block_validity_window(5u64..5);
+        assert!(result.is_err(), "empty range should return Err");
+    }
+
+    #[test]
+    fn try_with_block_validity_window_inverted_range_errors() {
+        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .try_with_block_validity_window(10u64..5);
+        assert!(result.is_err(), "inverted range should return Err");
+    }
+
+    #[test]
+    fn with_timestamp_validity_window_range_from() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .with_timestamp_validity_window(1_700_000_000u64..);
+        assert_eq!(output.timestamp_validity_window.start(), Some(1_700_000_000));
+        assert_eq!(output.timestamp_validity_window.end(), None);
+    }
+
+    #[test]
+    fn try_with_timestamp_validity_window_valid_range() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .try_with_timestamp_validity_window(1_000u64..2_000)
+            .expect("1000..2000 is a valid range");
+        assert_eq!(output.timestamp_validity_window.start(), Some(1_000));
+        assert_eq!(output.timestamp_validity_window.end(), Some(2_000));
+    }
+
+    #[test]
+    fn try_with_timestamp_validity_window_empty_range_errors() {
+        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .try_with_timestamp_validity_window(99u64..99);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn into_parts_includes_windows() {
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+            .with_block_validity_window(5u64..)
+            .try_with_timestamp_validity_window(100u64..200)
+            .unwrap();
+
+        let (post_states, chained_calls, block_window, ts_window) = output.into_parts_with_windows();
+        assert!(post_states.is_empty());
+        assert!(chained_calls.is_empty());
+        assert_eq!(block_window.start(), Some(5));
+        assert_eq!(block_window.end(), None);
+        assert_eq!(ts_window.start(), Some(100));
+        assert_eq!(ts_window.end(), Some(200));
     }
 }
