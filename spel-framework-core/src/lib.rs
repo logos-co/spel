@@ -11,6 +11,7 @@ pub mod validation;
 
 #[cfg(feature = "idl-gen")]
 pub mod account_types;
+#[cfg(feature = "idl-gen")]
 pub mod idl_gen;
 
 pub mod prelude {
