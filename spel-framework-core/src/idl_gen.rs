@@ -184,7 +184,9 @@ fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, I
         })
         .collect();
 
-    let (accounts, types) = collect_account_types(&file.items);
+    let mut all_items: Vec<syn::Item> = file.items.clone();
+    all_items.extend(items.clone());
+    let (accounts, types) = collect_account_types(&all_items);
 
     Ok(SpelIdl {
         version: "0.1.0".to_string(),
