@@ -227,7 +227,7 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
         .iter()
         .flat_map(|a| collect_defined_refs(&a.type_))
         .filter(|n| !visited.contains(n))
-        .collect::<HashSet<_>>() // dedup without extra alloc
+        .collect::<HashSet<_>>() // deduplicate the initial queue
         .into_iter()
         .collect();
 
