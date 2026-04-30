@@ -55,6 +55,8 @@ jobs:
       lez-rev: ${{ steps.lez-ref.outputs.LEZ_REV }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Generate Cargo.lock
@@ -146,12 +148,11 @@ jobs:
           mkdir -p /tmp/lssa/target/release
           cp target/release/spel /tmp/lssa/target/release/spel
 
-      - name: Save spel CLI cache
-        if: always()
+      - name: Save spel CLI cache (PR-specific key)
         uses: actions/cache/save@v4
         with:
           path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}
+          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
 
   privacy-smoke-test:
     name: Privacy Smoke Test
@@ -162,6 +163,8 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clone LEZ at correct revision
@@ -184,11 +187,23 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Restore spel CLI cache
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore spel CLI cache (PR-specific)
         uses: actions/cache@v4
         with:
           path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
@@ -232,6 +247,8 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
 
       - name: Clone LEZ at correct revision
@@ -254,11 +271,23 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
-      - name: Restore spel CLI cache
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore spel CLI cache (PR-specific)
         uses: actions/cache@v4
         with:
           path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
 
       - name: Determine SPEL ref for testing
         id: spel-ref
