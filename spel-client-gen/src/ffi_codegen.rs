@@ -49,7 +49,6 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa_core::program::PdaSeed;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
-    writeln!(out, "use std::panic::UnwindSafe;").unwrap();
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -98,12 +97,16 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
 
     // Panic-safe FFI wrapper — catches panics and returns error JSON instead of aborting.
-    writeln!(out, "fn ffi_call(f: impl FnOnce() -> Result<String, String> + UnwindSafe) -> *mut c_char {{").unwrap();
-    writeln!(out, "    match std::panic::catch_unwind(f) {{").unwrap();
+    // AssertUnwindSafe is sound here: we consume the closure and never resume after a panic.
+    writeln!(out, "fn ffi_call(f: impl FnOnce() -> Result<String, String>) -> *mut c_char {{").unwrap();
+    writeln!(out, "    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {{").unwrap();
     writeln!(out, "        Ok(Ok(r))  => to_cstring(r),").unwrap();
     writeln!(out, "        Ok(Err(e)) => error_json(&e),").unwrap();
-    writeln!(out, "        Err(e) => {{").unwrap();
-    writeln!(out, "            error_json(\"internal panic in FFI\")").unwrap();
+    writeln!(out, "        Err(payload) => {{").unwrap();
+    writeln!(out, "            let msg = payload.downcast_ref::<&str>().copied()").unwrap();
+    writeln!(out, "                .or_else(|| payload.downcast_ref::<String>().map(|s| s.as_str()))").unwrap();
+    writeln!(out, "                .unwrap_or(\"<unknown panic>\");").unwrap();
+    writeln!(out, "            error_json(&format!(\"panic: {{}}\", msg))").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
@@ -375,7 +378,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out).unwrap();
     writeln!(out, "#[no_mangle]").unwrap();
     writeln!(out, "pub extern \"C\" fn {prefix}_version() -> *mut c_char {{").unwrap();
-    writeln!(out, "    ffi_call(move || Ok(\"{}\".to_string()))", idl.version).unwrap();
+    writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
 
     // PDA compute helpers

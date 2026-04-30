@@ -695,7 +695,6 @@ fn test_no_pda_no_helpers() {
     );
 }
 
-
 #[test]
 fn test_string_type_lowercased() {
     let idl = r#"{
@@ -729,15 +728,26 @@ fn test_string_type_lowercased() {
 #[test]
 fn test_ffi_has_catch_unwind() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
 
-    // FFI code should include catch_unwind wrapping
-    assert!(output.ffi_code.contains("catch_unwind"), "should contain catch_unwind: {}", output.ffi_code);
-    assert!(output.ffi_code.contains("ffi_call(move || my_multisig_create_impl(args))"), "should use ffi_call for create: {}", output.ffi_code);
-    assert!(output.ffi_code.contains("internal panic in FFI"), "should have generic panic error: {}", output.ffi_code);
-    assert!(output.ffi_code.contains("UnwindSafe"), "should import UnwindSafe");
+    // ffi_call helper must be present and use AssertUnwindSafe (no UnwindSafe bound on caller)
+    assert!(ffi.contains("catch_unwind"), "must use catch_unwind: {ffi}");
+    assert!(ffi.contains("AssertUnwindSafe"), "must wrap with AssertUnwindSafe, not require UnwindSafe bound: {ffi}");
+    // The import `use std::panic::UnwindSafe` must not appear; AssertUnwindSafe is fine.
+    assert!(!ffi.contains("use std::panic::UnwindSafe"), "must not import UnwindSafe as a bound: {ffi}");
 
-    // Verify the helper function signature
-    assert!(output.ffi_code.contains("fn ffi_call(f: impl FnOnce() -> Result<String, String> + UnwindSafe)"), "ffi_call signature");
+    // Helper signature takes a plain FnOnce — no UnwindSafe bound on f
+    assert!(ffi.contains("fn ffi_call(f: impl FnOnce() -> Result<String, String>)"), "ffi_call must not have UnwindSafe bound: {ffi}");
+
+    // All instruction entry points must delegate through ffi_call
+    assert!(ffi.contains("ffi_call(move || my_multisig_create_impl(args))"), "create must use ffi_call: {ffi}");
+
+    // Panic payload must be extracted and surfaced, not swallowed
+    assert!(ffi.contains("downcast_ref::<&str>"), "must attempt to extract panic message: {ffi}");
+    assert!(ffi.contains("downcast_ref::<String>"), "must attempt to extract String panic message: {ffi}");
+
+    // _version is a static string — must NOT go through ffi_call
+    assert!(!ffi.contains("ffi_call(move || Ok("), "_version must not use ffi_call: {ffi}");
 }
 
 #[test]
