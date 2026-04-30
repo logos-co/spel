@@ -103,10 +103,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "        Ok(Ok(r))  => to_cstring(r),").unwrap();
     writeln!(out, "        Ok(Err(e)) => error_json(&e),").unwrap();
     writeln!(out, "        Err(e) => {{").unwrap();
-    writeln!(out, "            let msg = e.downcast_ref::<&str>().copied()").unwrap();
-    writeln!(out, "                .or_else(|| e.downcast_ref::<String>().map(|s| s.as_str()))").unwrap();
-    writeln!(out, "                .unwrap_or(\"<unknown panic>\");").unwrap();
-    writeln!(out, "            error_json(&format!(\"panic: {{}}\", msg))").unwrap();
+    writeln!(out, "            error_json(\"internal panic in FFI\")").unwrap();
     writeln!(out, "        }}").unwrap();
     writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
@@ -722,10 +719,10 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "/// FFI: fetch and decode `{acc_name}` account state.").unwrap();
             writeln!(out, "#[no_mangle]").unwrap();
             writeln!(out, "pub extern \"C\" fn {fn_name}(args_json: *const c_char) -> *mut c_char {{").unwrap();
-            writeln!(out, "    let args_str = match cstr_to_str(args_json) {{ Ok(s) => s.to_owned(), Err(e) => return error_json(&e) }};").unwrap();
-            writeln!(out, "    match {fn_name}_impl(&args_str) {{").unwrap();
-            writeln!(out, "        Ok(r) => to_cstring(r), Err(e) => error_json(&e),").unwrap();
-            writeln!(out, "    }}").unwrap();
+            writeln!(out, "    ffi_call(move || {{").unwrap();
+            writeln!(out, "        let args_str = match cstr_to_str(args_json) {{ Ok(s) => s.to_owned(), Err(e) => return Err(e) }};").unwrap();
+            writeln!(out, "        {fn_name}_impl(&args_str)").unwrap();
+            writeln!(out, "    }})").unwrap();
             writeln!(out, "}}").unwrap();
             writeln!(out).unwrap();
             writeln!(out, "fn {fn_name}_impl(args_str: &str) -> Result<String, String> {{").unwrap();
