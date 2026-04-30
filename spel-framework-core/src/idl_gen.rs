@@ -7,8 +7,9 @@
 //! `spel-framework-macros`, but operates at runtime on a file path
 //! rather than at compile time.
 
+use std::collections::HashSet;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use syn::{Attribute, FnArg, Ident, ItemFn, Pat, PatType, Type};
 
@@ -60,14 +61,43 @@ impl From<syn::Error> for IdlGenError {
 /// The path is resolved relative to the current working directory,
 /// which is the natural behavior for a CLI tool.
 pub fn generate_idl_from_file(source_path: &Path) -> Result<SpelIdl, IdlGenError> {
+    generate_idl_from_file_with_deps(source_path, &[])
+}
+
+/// Parse a SPEL program source file and return its [`SpelIdl`], also scanning
+/// the library source of each crate directory in `dep_source_dirs` for
+/// `#[account_type]`-annotated types.
+///
+/// Each entry in `dep_source_dirs` should be a Rust crate root (the directory
+/// that contains `src/lib.rs`).  Only local path-dependencies should be passed
+/// here — third-party registry or git crates are intentionally excluded to
+/// avoid pulling in unrelated type definitions.
+pub fn generate_idl_from_file_with_deps(
+    source_path: &Path,
+    dep_source_dirs: &[PathBuf],
+) -> Result<SpelIdl, IdlGenError> {
     let content = std::fs::read_to_string(source_path)?;
-    generate_idl_from_str(&content, &source_path.display().to_string())
+    let extra_items = collect_items_from_crate_dirs(dep_source_dirs);
+    generate_idl_inner(&content, &source_path.display().to_string(), &extra_items)
 }
 
 /// Parse a SPEL program from source text and return its [`SpelIdl`].
 ///
-/// `source_label` is used only in error messages.
+/// `source_label` is used only in error messages. Used exclusively in tests;
+/// production code goes through `generate_idl_from_file_with_deps`.
+#[cfg(test)]
 fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, IdlGenError> {
+    generate_idl_inner(content, source_label, &[])
+}
+
+/// Core IDL generation logic. `extra_items` are synthetic items collected from
+/// dependency crate sources and merged with the program file's own items before
+/// account-type scanning.
+fn generate_idl_inner(
+    content: &str,
+    source_label: &str,
+    extra_items: &[syn::Item],
+) -> Result<SpelIdl, IdlGenError> {
     let path_str = source_label.to_string();
 
     let file = syn::parse_file(content)?;
@@ -186,6 +216,7 @@ fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, I
 
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
+    all_items.extend_from_slice(extra_items);
     let (accounts, types) = collect_account_types(&all_items);
 
     Ok(SpelIdl {
@@ -199,6 +230,124 @@ fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, I
         metadata: None,
         instruction_type: external_instruction,
     })
+}
+
+// ─── Dependency source collection ────────────────────────────────────────
+
+/// Parse the library source of each crate directory and return all `syn::Item`s
+/// found, following `mod` declarations recursively.
+fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
+    let mut items = Vec::new();
+    let mut visited: HashSet<PathBuf> = HashSet::new();
+    for dir in dirs {
+        let lib_rs = dir.join("src").join("lib.rs");
+        if lib_rs.exists() {
+            collect_items_from_source_file(&lib_rs, &mut items, &mut visited);
+        }
+    }
+    items
+}
+
+/// Parse a single Rust source file and append its items to `out`, following
+/// external `mod` declarations to their corresponding files.
+fn collect_items_from_source_file(
+    path: &Path,
+    out: &mut Vec<syn::Item>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let canonical = match path.canonicalize() {
+        Ok(p) => p,
+        Err(_) => path.to_path_buf(),
+    };
+    if !visited.insert(canonical) {
+        return; // already processed
+    }
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let file = match syn::parse_file(&content) {
+        Ok(f) => f,
+        Err(_) => return,
+    };
+
+    // Sub-module files for `lib.rs` / `mod.rs` live alongside the file;
+    // for `foo.rs` they live in a `foo/` directory next to the file.
+    let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    let sub_base = if file_name == "lib.rs" || file_name == "mod.rs" {
+        path.parent().map(|p| p.to_path_buf())
+    } else {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        path.parent().map(|p| p.join(stem))
+    };
+
+    collect_items_recursive(&file.items, sub_base.as_deref(), out, visited);
+}
+
+/// Resolve the on-disk path for an external `mod` declaration.
+///
+/// Resolution order:
+/// 1. `#[path = "..."]` attribute on the mod item — resolved relative to `base_dir`.
+/// 2. `<base_dir>/<mod_name>.rs`
+/// 3. `<base_dir>/<mod_name>/mod.rs`
+///
+/// Returns `None` if no candidate file exists.
+fn mod_file_path(m: &syn::ItemMod, base_dir: &Path) -> Option<PathBuf> {
+    // Check for explicit #[path = "..."] override first.
+    for attr in &m.attrs {
+        if attr.path().is_ident("path") {
+            if let Ok(syn::MetaNameValue {
+                value: syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }),
+                ..
+            }) = attr.meta.require_name_value()
+            {
+                let p = base_dir.join(s.value());
+                if p.exists() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+
+    // Standard two-candidate resolution.
+    let mod_name = m.ident.to_string();
+    let flat = base_dir.join(format!("{mod_name}.rs"));
+    if flat.exists() {
+        return Some(flat);
+    }
+    let nested = base_dir.join(&mod_name).join("mod.rs");
+    if nested.exists() {
+        return Some(nested);
+    }
+    None
+}
+
+fn collect_items_recursive(
+    items: &[syn::Item],
+    base_dir: Option<&Path>,
+    out: &mut Vec<syn::Item>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    for item in items {
+        match item {
+            syn::Item::Mod(m) => {
+                if let Some((_, inner)) = &m.content {
+                    // Inline module — recurse into its body with an updated base_dir
+                    // so that any file-backed `mod` declarations inside it resolve
+                    // relative to `base_dir/<mod_name>/` rather than `base_dir/`.
+                    let inner_base = base_dir.map(|d| d.join(m.ident.to_string()));
+                    collect_items_recursive(inner, inner_base.as_deref(), out, visited);
+                } else if let Some(dir) = base_dir {
+                    // External module file — locate and parse it.
+                    if let Some(p) = mod_file_path(m, dir) {
+                        collect_items_from_source_file(&p, out, visited);
+                    }
+                }
+            }
+            _ => out.push(item.clone()),
+        }
+    }
 }
 
 // ─── Internal parsing types ───────────────────────────────────────────────

@@ -250,8 +250,8 @@ pub async fn run() {
                 return;
             }
             "generate-idl" => {
-                use spel_framework_core::idl_gen::generate_idl_from_file;
-                use generate_idl::discover_sources;
+                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+                use generate_idl::{discover_sources, find_path_dep_dirs};
 
                 let arg = remaining_args.get(2).map(|s| s.as_str());
                 let sources = discover_sources(arg).unwrap_or_else(|e| {
@@ -260,7 +260,8 @@ pub async fn run() {
                 });
 
                 if sources.len() == 1 {
-                    match generate_idl_from_file(&sources[0]) {
+                    let dep_dirs = find_path_dep_dirs(&sources[0]);
+                    match generate_idl_from_file_with_deps(&sources[0], &dep_dirs) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -271,7 +272,8 @@ pub async fn run() {
                     // Multiple programs: write <name>-idl.json for each
                     let mut had_error = false;
                     for source in &sources {
-                        match generate_idl_from_file(source) {
+                        let dep_dirs = find_path_dep_dirs(source);
+                        match generate_idl_from_file_with_deps(source, &dep_dirs) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
                                 match fs::write(&out_name, serde_json::to_string_pretty(&idl).unwrap()) {
