@@ -401,7 +401,20 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 if let Ok(content_str) = std::fs::read_to_string(guest_path) {
                     if let Ok(parsed_file) = syn::parse_file(&content_str) {
                         if file_matches_module(&parsed_file) {
-                            result = account_types::collect_account_types(&parsed_file.items);
+                            // Collect from top-level items AND from inside the
+                            // #[lez_program] module body (account types are often
+                            // defined inside the module).
+                            let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
+                            for item in &parsed_file.items {
+                                if let syn::Item::Mod(m) = item {
+                                    if m.ident == *mod_name {
+                                        if let Some((_, mod_items)) = &m.content {
+                                            all_items.extend(mod_items.clone());
+                                        }
+                                    }
+                                }
+                            }
+                            result = account_types::collect_account_types(&all_items);
                             break;
                         }
                     }
@@ -1808,8 +1821,12 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             ext
         });
 
-    // Collect #[account_type] annotated types from the file's top-level items
-    let (accounts, types) = account_types::collect_account_types(&file.items);
+    // Collect #[account_type] annotated types: search both the file's top-level
+    // items and the items inside the #[lez_program] module body, since user code
+    // commonly defines account structs inside the program module.
+    let mut all_items: Vec<syn::Item> = file.items.clone();
+    all_items.extend(items.clone());
+    let (accounts, types) = account_types::collect_account_types(&all_items);
 
     // Generate the IDL JSON
     let idl_json = generate_idl_json(mod_name, &instructions, external_instruction_str.as_deref(), accounts, types);
