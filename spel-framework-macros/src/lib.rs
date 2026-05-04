@@ -606,6 +606,35 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
         }
     }
 
+    // Validate constraint consistency
+    if constraints.private_pda {
+        if constraints.pda_seeds.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`private_pda` requires `pda = ...` seeds",
+            ));
+        }
+        if constraints.npk_arg.is_none() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`private_pda` requires `npk = arg(\"arg_name\")`",
+            ));
+        }
+        // Validate the npk arg name is a valid Rust identifier
+        let npk_name = constraints.npk_arg.as_deref().unwrap();
+        if syn::parse_str::<syn::Ident>(npk_name).is_err() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("`npk` arg name `{npk_name}` is not a valid Rust identifier"),
+            ));
+        }
+    } else if constraints.npk_arg.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`npk` can only be used together with `private_pda`",
+        ));
+    }
+
     Ok(constraints)
 }
 
@@ -1372,7 +1401,8 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
 
                     if acc.constraints.private_pda {
                         // Private PDA: address = for_private_pda(program_id, seed, npk)
-                        let npk_name = acc.constraints.npk_arg.as_deref().unwrap_or("");
+                        let npk_name = acc.constraints.npk_arg.as_deref()
+                            .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
                         let npk_param = format_ident!("__npk_arg_{}", npk_name);
                         quote! {
                             {
