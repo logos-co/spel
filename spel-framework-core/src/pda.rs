@@ -84,7 +84,7 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
     };
 
     let pda_seed = PdaSeed::new(combined);
-    AccountId::from((program_id, &pda_seed))
+    AccountId::for_public_pda(program_id, &pda_seed)
 }
 
 /// Compute a PDA from a program ID and multiple [`ToSeed`] values.
