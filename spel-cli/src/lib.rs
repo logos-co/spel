@@ -613,7 +613,7 @@ fn compute_pda_raw(args: &[String]) {
     };
 
     let pda_seed = PdaSeed::new(combined);
-    let account_id = AccountId::from((&program_id, &pda_seed));
+    let account_id = AccountId::for_public_pda(&program_id, &pda_seed);
     println!("{}", account_id);
 }
 
