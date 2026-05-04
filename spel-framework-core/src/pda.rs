@@ -61,7 +61,7 @@ pub fn seed_from_str(s: &str) -> [u8; 32] {
     bytes
 }
 
-/// Compute a PDA `AccountId` from a program ID and one or more 32-byte seeds.
+/// Derive a **public** PDA `AccountId` from a program ID and one or more 32-byte seeds.
 ///
 /// - Single seed: used directly as the PDA seed.
 /// - Multiple seeds: combined via SHA-256(seed1 || seed2 || ...) into a single
