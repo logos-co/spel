@@ -217,7 +217,7 @@ fn test_pda_helpers_single_arg_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda {
+                pda: Some(IdlPda { private: false,
                     seeds: vec![IdlSeed::Arg { path: "create_key".to_string() }],
                 }),
                 rest: false,
@@ -272,7 +272,7 @@ fn test_pda_helpers_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda {
+                pda: Some(IdlPda { private: false,
                     seeds: vec![
                         IdlSeed::Const { value: "multisig_state__".to_string() },
                         IdlSeed::Arg { path: "create_key".to_string() },
@@ -328,7 +328,7 @@ fn test_pda_helpers_deduplication() {
             signer: false,
             init: false,
             owner: None,
-            pda: Some(IdlPda {
+            pda: Some(IdlPda { private: false,
                 seeds: vec![IdlSeed::Arg { path: "my_key".to_string() }],
             }),
             rest: false,
@@ -399,7 +399,7 @@ fn test_pda_helpers_u64_single_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda {
+                pda: Some(IdlPda { private: false,
                     seeds: vec![IdlSeed::Arg { path: "proposal_index".to_string() }],
                 }),
                 rest: false,
@@ -452,7 +452,7 @@ fn test_pda_helpers_u64_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda {
+                pda: Some(IdlPda { private: false,
                     seeds: vec![
                         IdlSeed::Arg { path: "create_key".to_string() },
                         IdlSeed::Arg { path: "proposal_index".to_string() },
