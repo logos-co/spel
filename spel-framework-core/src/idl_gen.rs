@@ -148,7 +148,7 @@ fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, I
                                 PdaSeedDef::Arg(p) => IdlSeed::Arg { path: p.clone() },
                             })
                             .collect();
-                        Some(IdlPda { seeds })
+                        Some(IdlPda { seeds, private: false })
                     };
 
                     IdlAccountItem {

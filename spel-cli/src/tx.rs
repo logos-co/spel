@@ -245,7 +245,7 @@ pub async fn execute_instruction(
     // Compute PDAs
     for acc in &ix.accounts {
         if let Some(pda) = &acc.pda {
-            match compute_pda_from_seeds(&pda.seeds, &program_id, &account_map, &parsed_arg_map) {
+            match compute_pda_from_seeds(&pda.seeds, &program_id, &account_map, &parsed_arg_map, None) {
                 Ok(id) => {
                     account_map.insert(acc.name.clone(), id);
                 }
