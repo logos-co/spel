@@ -156,7 +156,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
-    writeln!(out, "    Ok(AccountId::from((program_id, &PdaSeed::new(pda_seed_bytes(seeds)?))))").unwrap();
+    writeln!(out, "    Ok(AccountId::for_public_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?)))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -491,7 +491,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                         }
                     }
                     writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(seed_bytes);").unwrap();
-                    writeln!(out, "    AccountId::from((program_id, &pda_seed))").unwrap();
+                    writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
                 } else {
                     // Multi-seed: SHA-256(seed1 || seed2 || ...) — matches spel-cli/src/pda.rs
                     writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
@@ -525,7 +525,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     }
                     writeln!(out, "    let combined: [u8; 32] = hasher.finalize().into();").unwrap();
                     writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(combined);").unwrap();
-                    writeln!(out, "    AccountId::from((program_id, &pda_seed))").unwrap();
+                    writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
                 }
                 writeln!(out, "}}").unwrap();
             }

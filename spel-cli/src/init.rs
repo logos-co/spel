@@ -279,7 +279,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0-rc1\"".to_string(),
+        _ => "tag = \"v0.2.0-rc3\"".to_string(),
     };
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),

@@ -250,7 +250,7 @@ fn test_pda_helpers_single_arg_seed() {
 
     // Single-seed: use directly (no SHA256)
     assert!(output.contains("PdaSeed::new(seed_bytes)"), "missing PdaSeed::new: {}", output);
-    assert!(output.contains("AccountId::from((program_id, &pda_seed))"), "missing AccountId::from: {}", output);
+    assert!(output.contains("AccountId::for_public_pda(program_id, &pda_seed)"), "missing AccountId::for_public_pda: {}", output);
 
     // Single seed means no SHA256 hasher
     assert!(!output.contains("Sha256"), "single-seed should not use SHA256: {}", output);

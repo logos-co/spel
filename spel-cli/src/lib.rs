@@ -169,14 +169,14 @@ pub async fn run() {
                     println!("Create a new SPEL project");
                     println!();
                     println!("Options:");
-                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.2.0-rc1)");
+                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.2.0-rc3)");
                     println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
                     println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
                     println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
                     println!();
                     println!("Examples:");
                     println!("  spel init my-project");
-                    println!("  spel init my-project --lez-tag v0.2.0-rc1 --spel-rev refs/pull/122/head");
+                    println!("  spel init my-project --lez-tag v0.2.0-rc3 --spel-rev refs/pull/122/head");
                     return;
                 }
                 let mut lez_tag: Option<String> = None;
@@ -613,7 +613,7 @@ fn compute_pda_raw(args: &[String]) {
     };
 
     let pda_seed = PdaSeed::new(combined);
-    let account_id = AccountId::from((&program_id, &pda_seed));
+    let account_id = AccountId::for_public_pda(&program_id, &pda_seed);
     println!("{}", account_id);
 }
 

@@ -129,7 +129,7 @@ pub fn compute_pda_from_seeds(
     };
 
     let pda_seed = PdaSeed::new(combined);
-    Ok(AccountId::from((program_id, &pda_seed)))
+    Ok(AccountId::for_public_pda(program_id, &pda_seed))
 }
 
 #[cfg(test)]

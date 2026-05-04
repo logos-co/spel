@@ -8,11 +8,11 @@ publish = false
 spel-client-gen = { path = "../spel-client-gen" }
 
 [dependencies]
-nssa        = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }
-nssa_core   = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }
-common      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1", features = ["client"] }
-wallet      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc1" }
+nssa        = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+nssa_core   = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+common      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3", features = ["client"] }
+wallet      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
 serde_json  = "1"
 serde       = { version = "1", features = ["derive"] }
 borsh       = "1.5"
