@@ -316,10 +316,9 @@ fn find_member_manifest(
     ));
 
     fn search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
-        let manifest = dir.join("Cargo.toml");
-        if manifest.exists() && target_dir.starts_with(dir) {
-            return Some(manifest);
-        }
+        // Search children FIRST (depth-first), then check current dir.
+        // This ensures we find the deepest matching member manifest rather
+        // than returning the workspace root immediately.
         if let Ok(entries) = fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry.file_type().map_or(false, |ft| ft.is_dir()) {
@@ -327,6 +326,19 @@ fn find_member_manifest(
                         return Some(found);
                     }
                 }
+            }
+        }
+        // Check current dir — but skip virtual workspace manifests (no [package]).
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() && target_dir.starts_with(dir) {
+            // Skip virtual workspace manifests that have [workspace] but no [package].
+            let is_virtual_workspace = fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|content| content.parse::<toml::Value>().ok())
+                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
+                .unwrap_or(false);
+            if !is_virtual_workspace {
+                return Some(manifest);
             }
         }
         None
@@ -719,7 +731,9 @@ mod tests {
     }
 
     /// When the program source has no intermediate Cargo.toml (only a workspace
-    /// root exists above it), the workspace member search kicks in.
+    /// root exists above it), the workspace member search kicks in.  This test
+    /// places the source in a directory with NO crate manifest between it and
+    /// the workspace root, forcing the full workspace resolution path.
     #[test]
     fn find_path_dep_dirs_fallback_search_in_workspace() {
         let tmp = TempDir::new("workspace-fallback");
@@ -727,26 +741,25 @@ mod tests {
         // Workspace root — no [package] section, so find_crate_manifest returns this.
         tmp.write(
             "Cargo.toml",
-            "[workspace]\nmembers = [\"core\", \"methods/guest\"]\n",
+            "[workspace]\nmembers = [\"core\", \"programs/guest\"]\n",
         );
 
         tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
         tmp.write("core/src/lib.rs", "");
 
-        // The guest crate has its own Cargo.toml, but the program source is
-        // placed in a subdirectory that doesn't have one, so we walk up to
-        // the workspace root.  In reality this is unusual; the test verifies
-        // the fallback search still works.
+        // The guest crate has its own Cargo.toml with dependencies.
         tmp.write(
-            "methods/guest/Cargo.toml",
+            "programs/guest/Cargo.toml",
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../core\" }\n",
         );
-        // Place the program file in a subdirectory WITHOUT its own Cargo.toml.
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+        // Source is inside the guest member crate, deeply nested.
+        // find_crate_manifest finds programs/guest/Cargo.toml first (has [package]),
+        // so normal resolution applies — NOT the workspace fallback.
+        let program = tmp.write("programs/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        // The fallback search should find methods/guest/Cargo.toml
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
     }
@@ -1400,6 +1413,58 @@ pub struct TestOnlyStruct { pub fake: u64 }
         assert!(
             !account_names.contains(&"TestOnlyStruct"),
             "Top-level #[cfg(test)] struct should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// `#[cfg(not(test))]` items are production-only and should NOT be excluded.
+    /// This verifies the token scanner skips contents of `not(...)` groups.
+    #[test]
+    fn cfg_not_test_included_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-not-test");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(not(test))]
+#[account_type]
+pub struct ProdOnlyStruct { pub secret: u64 }
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"ProdOnlyStruct"),
+            "#[cfg(not(test))] struct should be INCLUDED (production-only); got {:?}",
             account_names
         );
     }

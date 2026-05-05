@@ -387,12 +387,12 @@ fn collect_items_recursive(
 ///   if *any* alternative references `test` or `feature`.
 ///
 /// Does **not** handle:
-/// - `#[cfg(not(test))]` — negation is rare for test-gating; items gated by
-///   `not(test)` are included (conservative: better to over-include than
-///   drop production types).
 /// - `#[cfg(all(...))]` — compound expressions requiring all conditions.
 /// - Target-triple cfgs (`target_os`, `windows`, etc.) — unresolvable at
 ///   IDL-gen time without knowing the build target.
+///
+/// Note: `#[cfg(not(test))]` is handled correctly — the token scanner skips
+/// contents of `not(...)` groups, so production-only items are included.
 ///
 /// Note: `#[cfg_attr(test, ...)]` is **not** treated as exclusion because it
 /// only conditionally applies attributes — it does not remove the item from
@@ -434,9 +434,17 @@ fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
 }
 
 /// Recursively scan a token stream for `test` or `feature` identifiers.
+/// Skips tokens inside `not(...)` groups so `#[cfg(not(test))]` is not excluded.
 fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream) -> bool {
-    for token in tokens.clone() {
+    let mut iter = tokens.clone().into_iter().peekable();
+    while let Some(token) = iter.next() {
         match token {
+            proc_macro2::TokenTree::Ident(ident) if ident == "not" => {
+                // Skip the next group (parentheses) — `not(test)` should not exclude.
+                if let Some(proc_macro2::TokenTree::Group(_)) = iter.peek() {
+                    iter.next(); // consume the group
+                }
+            }
             proc_macro2::TokenTree::Ident(ident) => {
                 if ident == "test" || ident == "feature" {
                     return true;
