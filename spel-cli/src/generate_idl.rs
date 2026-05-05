@@ -14,6 +14,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use toml::Value;
+
 /// Resolve the list of SPEL program source files for IDL generation.
 ///
 /// `arg` is the optional positional argument passed to `generate-idl`:
@@ -63,6 +65,49 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
                     .to_string(),
             )
         }
+    }
+}
+
+/// Return the crate-root directories of all `path = "..."` entries in the
+/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+///
+/// Only runtime dependencies are considered.  `[dev-dependencies]` and
+/// `[build-dependencies]` are deliberately excluded: types defined in those
+/// crates are not part of the program's on-chain interface and must not appear
+/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
+/// are also excluded so that only project-local crates are scanned.
+pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
+    (|| -> Option<Vec<PathBuf>> {
+        let manifest = find_crate_manifest(source_path)?;
+        let content = fs::read_to_string(&manifest).ok()?;
+        let value: Value = toml::from_str(&content).ok()?;
+        let manifest_dir = manifest.parent()?;
+
+        let mut dirs = Vec::new();
+        if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
+            for (_name, dep) in table {
+                if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+                    let dep_dir = manifest_dir.join(rel);
+                    if dep_dir.is_dir() {
+                        dirs.push(dep_dir);
+                    }
+                }
+            }
+        }
+        Some(dirs)
+    })()
+    .unwrap_or_default()
+}
+
+/// Walk up from `start` to find the nearest `Cargo.toml`.
+fn find_crate_manifest(start: &Path) -> Option<PathBuf> {
+    let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
+    loop {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
     }
 }
 
@@ -290,5 +335,404 @@ mod tests {
         assert!(idl.instructions[0].accounts[0].writable);
         assert!(idl.instructions[0].accounts[0].pda.is_some());
         assert!(idl.instructions[0].accounts[1].signer);
+    }
+
+    // ── find_path_dep_dirs ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_path_dep_dirs_returns_local_path_deps() {
+        let tmp = TempDir::new("find-path-deps");
+
+        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].ends_with("core"), "expected core dir, got {:?}", dirs[0]);
+    }
+
+    #[test]
+    fn find_path_dep_dirs_ignores_registry_and_git_deps() {
+        let tmp = TempDir::new("find-path-deps-filter");
+
+        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\n\
+             token_core = { path = \"../../core\" }\n\
+             serde = { version = \"1.0\" }\n\
+             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        // Only the path dep (core) should be returned, not serde or nssa_core
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].ends_with("core"));
+    }
+
+    #[test]
+    fn find_path_dep_dirs_ignores_dev_and_build_deps() {
+        let tmp = TempDir::new("find-path-deps-dev-build");
+
+        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("core/src/lib.rs", "");
+        tmp.write("test_helpers/Cargo.toml", "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("test_helpers/src/lib.rs", "");
+        tmp.write("build_support/Cargo.toml", "[package]\nname = \"build_support\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("build_support/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\n\
+             token_core = { path = \"../../core\" }\n\n\
+             [dev-dependencies]\n\
+             test_helpers = { path = \"../../test_helpers\" }\n\n\
+             [build-dependencies]\n\
+             build_support = { path = \"../../build_support\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        // Only runtime path dep (core) should be returned
+        assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
+        assert!(dirs[0].ends_with("core"));
+    }
+
+    // ── account types from path-dep crates ────────────────────────────────
+
+    /// Mirrors the real token program structure:
+    ///   core/src/lib.rs          — TokenDefinition, TokenHolding, TokenMetadata (#[account_type])
+    ///   methods/guest/Cargo.toml — depends on core via path = "../../core"
+    ///   methods/guest/src/bin/token.rs — #[lez_program], no #[account_type] here
+    #[test]
+    fn account_types_from_path_dep_lib_appear_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("path-dep-lib");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+use nssa_core::account::AccountId;
+
+#[account_type]
+pub enum TokenDefinition {
+    Fungible {
+        name: String,
+        total_supply: u128,
+        metadata_id: Option<AccountId>,
+    },
+    NonFungible {
+        name: String,
+        printable_supply: u128,
+        metadata_id: AccountId,
+    },
+}
+
+#[account_type]
+pub enum TokenHolding {
+    Fungible {
+        definition_id: AccountId,
+        balance: u128,
+    },
+    NftMaster {
+        definition_id: AccountId,
+        print_balance: u128,
+    },
+    NftPrintedCopy {
+        definition_id: AccountId,
+        owned: bool,
+    },
+}
+
+#[account_type]
+pub struct TokenMetadata {
+    pub definition_id: AccountId,
+    pub uri: String,
+    pub primary_sale_date: u64,
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            r#"
+#[lez_program(instruction = "token_core::Instruction")]
+pub mod token {
+    use super::*;
+
+    #[instruction]
+    pub fn transfer(
+        sender: AccountWithMetadata,
+        recipient: AccountWithMetadata,
+        amount_to_transfer: u128,
+    ) -> SpelResult { todo!() }
+
+    #[instruction]
+    pub fn initialize_account(
+        definition_account: AccountWithMetadata,
+        account_to_initialize: AccountWithMetadata,
+    ) -> SpelResult { todo!() }
+
+    #[instruction]
+    pub fn mint(
+        definition_account: AccountWithMetadata,
+        user_holding_account: AccountWithMetadata,
+        amount_to_mint: u128,
+    ) -> SpelResult { todo!() }
+
+    #[instruction]
+    pub fn burn(
+        definition_account: AccountWithMetadata,
+        user_holding_account: AccountWithMetadata,
+        amount_to_burn: u128,
+    ) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let dep_dirs = find_path_dep_dirs(&program);
+        assert_eq!(dep_dirs.len(), 1);
+
+        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+
+        assert_eq!(idl.name, "token");
+        assert_eq!(idl.instructions.len(), 4);
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"TokenDefinition"),
+            "TokenDefinition missing; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"TokenHolding"),
+            "TokenHolding missing; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"TokenMetadata"),
+            "TokenMetadata missing; got {:?}",
+            account_names
+        );
+    }
+
+    /// Account types split across sub-modules of a path-dep crate are also found.
+    /// lib.rs declares `pub mod types;` and the types live in types.rs.
+    #[test]
+    fn account_types_in_submodule_of_path_dep_appear_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("path-dep-submodule");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        // lib.rs re-exports from a sub-module; account types live in types.rs
+        tmp.write("core/src/lib.rs", "pub mod types;\n");
+        tmp.write(
+            "core/src/types.rs",
+            r#"
+use nssa_core::account::AccountId;
+
+#[account_type]
+pub enum TokenHolding {
+    Fungible {
+        definition_id: AccountId,
+        balance: u128,
+    },
+}
+
+#[account_type]
+pub struct TokenMetadata {
+    pub uri: String,
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            r#"
+#[lez_program]
+pub mod token {
+    #[instruction]
+    pub fn transfer(
+        sender: AccountWithMetadata,
+        recipient: AccountWithMetadata,
+        amount: u128,
+    ) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let dep_dirs = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"TokenHolding"),
+            "TokenHolding in sub-module not found; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"TokenMetadata"),
+            "TokenMetadata in sub-module not found; got {:?}",
+            account_names
+        );
+    }
+
+    /// Account type inside a file-backed module that is itself declared inside an
+    /// inline module: `mod outer { mod inner; }` in lib.rs, where `inner` resolves
+    /// to `outer/inner.rs`.  Verifies that base_dir is advanced when recursing into
+    /// inline module bodies.
+    #[test]
+    fn account_type_in_nested_file_module_appears_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("nested-file-mod");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        // lib.rs has an inline `mod outer` whose body declares an external `mod inner`
+        tmp.write("core/src/lib.rs", "pub mod outer {\n    pub mod inner;\n}\n");
+        // inner.rs lives at core/src/outer/inner.rs
+        tmp.write(
+            "core/src/outer/inner.rs",
+            "#[account_type]\npub struct VaultAccount { pub balance: u128 }\n",
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn deposit(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_dirs = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"VaultAccount"),
+            "VaultAccount in outer/inner.rs not found; got {:?}",
+            account_names
+        );
+    }
+
+    /// A `mod` declaration with a `#[path = "..."]` override is resolved to the
+    /// explicitly given file rather than the default `<mod>.rs` / `<mod>/mod.rs`.
+    #[test]
+    fn account_type_behind_path_attribute_appears_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("path-attr-mod");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        // lib.rs uses #[path] to point at a non-standard file name.
+        tmp.write(
+            "core/src/lib.rs",
+            "#[path = \"account_types.rs\"]\npub mod types;\n",
+        );
+        tmp.write(
+            "core/src/account_types.rs",
+            "#[account_type]\npub struct StakeAccount { pub amount: u64 }\n",
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn stake(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_dirs = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"StakeAccount"),
+            "StakeAccount behind #[path] not found; got {:?}",
+            account_names
+        );
+    }
+
+    /// Without dep dirs, #[account_type] types from external crates are absent.
+    /// This is the regression guard — the old behaviour that the fix addresses.
+    #[test]
+    fn without_dep_dirs_external_account_types_are_missing() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("path-dep-no-scan");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            "#[account_type]\npub struct TokenHolding { pub balance: u128 }\n",
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        // Passing no dep dirs replicates the old single-file behaviour
+        let idl = generate_idl_from_file_with_deps(&program, &[]).unwrap();
+        assert!(
+            idl.accounts.is_empty(),
+            "expected no accounts without dep scanning, got {:?}",
+            idl.accounts.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
     }
 }
