@@ -66,6 +66,14 @@ pub fn parse_value(raw: &str, ty: &IdlType) -> Result<ParsedValue, String> {
                 Ok(ParsedValue::Some(Box::new(parse_value(raw, option)?)))
             }
         }
+        IdlType::Defined { defined } if defined == "NullifierPublicKey" => {
+            let bytes = hex_decode(raw)
+                .map_err(|e| format!("Invalid NullifierPublicKey hex '{}': {}", raw, e))?;
+            if bytes.len() != 32 {
+                return Err(format!("NullifierPublicKey must be 32 bytes (64 hex chars), got {}", bytes.len()));
+            }
+            Ok(ParsedValue::ByteArray(bytes))
+        }
         IdlType::Defined { defined } => Ok(ParsedValue::Raw(format!("{}({})", defined, raw))),
     }
 }
