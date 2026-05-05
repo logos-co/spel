@@ -173,6 +173,10 @@ struct AccountConstraints {
     owner: Option<syn::Expr>,
     signer: bool,
     pda_seeds: Vec<PdaSeedDef>,
+    /// True when `private_pda` keyword is present — address includes the caller's npk.
+    private_pda: bool,
+    /// Name of the instruction arg supplying the `NullifierPublicKey` for derivation.
+    npk_arg: Option<String>,
 }
 
 /// A PDA seed definition from the `#[account(pda = ...)]` attribute.
@@ -575,11 +579,60 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                     let expr: syn::Expr = value.parse()?;
                     constraints.pda_seeds = parse_pda_expr(&expr)?;
                     Ok(())
+                } else if meta.path.is_ident("private_pda") {
+                    constraints.private_pda = true;
+                    Ok(())
+                } else if meta.path.is_ident("npk") {
+                    // npk = arg("arg_name") — instruction arg supplying the NullifierPublicKey
+                    let value = meta.value()?;
+                    let expr: syn::Expr = value.parse()?;
+                    if let syn::Expr::Call(call) = &expr {
+                        if let syn::Expr::Path(path) = &*call.func {
+                            if path.path.is_ident("arg") {
+                                if let Some(syn::Expr::Lit(lit)) = call.args.first() {
+                                    if let syn::Lit::Str(s) = &lit.lit {
+                                        constraints.npk_arg = Some(s.value());
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(meta.error("npk must be npk = arg(\"arg_name\")"))
                 } else {
                     Err(meta.error("unknown account constraint"))
                 }
             })?;
         }
+    }
+
+    // Validate constraint consistency
+    if constraints.private_pda {
+        if constraints.pda_seeds.is_empty() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`private_pda` requires `pda = ...` seeds",
+            ));
+        }
+        if constraints.npk_arg.is_none() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`private_pda` requires `npk = arg(\"arg_name\")`",
+            ));
+        }
+        // Validate the npk arg name is a valid Rust identifier
+        let npk_name = constraints.npk_arg.as_deref().unwrap();
+        if syn::parse_str::<syn::Ident>(npk_name).is_err() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("`npk` arg name `{npk_name}` is not a valid Rust identifier"),
+            ));
+        }
+    } else if constraints.npk_arg.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`npk` can only be used together with `private_pda`",
+        ));
     }
 
     Ok(constraints)
@@ -776,6 +829,27 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }).collect()
             };
 
+            // Collect npk arg values for private PDA accounts
+            let npk_arg_values: Vec<TokenStream2> = {
+                let mut names = Vec::new();
+                for acc in &ix.accounts {
+                    if let Some(ref npk) = acc.constraints.npk_arg {
+                        if !names.contains(npk) {
+                            names.push(npk.clone());
+                        }
+                    }
+                }
+                names.iter().map(|name| {
+                    let arg_ident = format_ident!("{}", name);
+                    quote! { &#arg_ident }
+                }).collect()
+            };
+
+            let all_extra_args: Vec<TokenStream2> = arg_seed_values.iter()
+                .chain(npk_arg_values.iter())
+                .cloned()
+                .collect();
+
             let validation_call = if has_validation {
                 if has_rest {
                     // For instructions with Vec accounts, build the slice dynamically
@@ -791,7 +865,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                             &__all_accounts,
                             &self_program_id,
                             &instruction_words,
-                            #(#arg_seed_values),*
+                            #(#all_extra_args),*
                         ).expect("account validation failed");
                     }
                 } else {
@@ -808,7 +882,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                             &[#(#account_refs.clone()),*],
                             &self_program_id,
                             &instruction_words,
-                            #(#arg_seed_values),*
+                            #(#all_extra_args),*
                         ).expect("account validation failed");
                     }
                 }
@@ -1263,6 +1337,22 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             // Extra parameters for arg PDA seeds
             let arg_seed_params = pda_arg_params(ix);
 
+            // Extra parameters for private PDA npk args: __npk_arg_<name>: &nssa_core::NullifierPublicKey
+            let npk_params: Vec<TokenStream2> = {
+                let mut seen: Vec<String> = Vec::new();
+                let mut params = Vec::new();
+                for acc in &ix.accounts {
+                    if let Some(ref npk) = acc.constraints.npk_arg {
+                        if !seen.contains(npk) {
+                            seen.push(npk.clone());
+                            let ident = format_ident!("__npk_arg_{}", npk);
+                            params.push(quote! { #ident: &nssa_core::NullifierPublicKey });
+                        }
+                    }
+                }
+                params
+            };
+
             // Generate PDA checks for accounts with pda_seeds
             let pda_checks: Vec<TokenStream2> = ix
                 .accounts
@@ -1309,18 +1399,40 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         })
                         .collect();
 
-                    quote! {
-                        {
-                            #(#seed_exprs)*
-                            let __expected_id = spel_framework::pda::compute_pda(
-                                self_program_id, &[#(#seed_refs),*]
-                            );
-                            if accounts[#idx].account_id != __expected_id {
-                                return Err(spel_framework::error::SpelError::PdaMismatch {
-                                    account_name: #acc_name.to_string(),
-                                    expected: format!("{:?}", __expected_id),
-                                    actual: format!("{:?}", accounts[#idx].account_id),
-                                });
+                    if acc.constraints.private_pda {
+                        // Private PDA: address = for_private_pda(program_id, seed, npk)
+                        let npk_name = acc.constraints.npk_arg.as_deref()
+                            .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
+                        let npk_param = format_ident!("__npk_arg_{}", npk_name);
+                        quote! {
+                            {
+                                #(#seed_exprs)*
+                                let __expected_id = spel_framework::pda::compute_private_pda(
+                                    self_program_id, &[#(#seed_refs),*], #npk_param
+                                );
+                                if accounts[#idx].account_id != __expected_id {
+                                    return Err(spel_framework::error::SpelError::PdaMismatch {
+                                        account_name: #acc_name.to_string(),
+                                        expected: format!("{:?}", __expected_id),
+                                        actual: format!("{:?}", accounts[#idx].account_id),
+                                    });
+                                }
+                            }
+                        }
+                    } else {
+                        quote! {
+                            {
+                                #(#seed_exprs)*
+                                let __expected_id = spel_framework::pda::compute_pda(
+                                    self_program_id, &[#(#seed_refs),*]
+                                );
+                                if accounts[#idx].account_id != __expected_id {
+                                    return Err(spel_framework::error::SpelError::PdaMismatch {
+                                        account_name: #acc_name.to_string(),
+                                        expected: format!("{:?}", __expected_id),
+                                        actual: format!("{:?}", accounts[#idx].account_id),
+                                    });
+                                }
                             }
                         }
                     }
@@ -1331,6 +1443,11 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 return quote! {};
             }
 
+            // Combine all extra params: arg seeds first, then npk params
+            let all_validate_params: Vec<TokenStream2> = arg_seed_params.into_iter()
+                .chain(npk_params)
+                .collect();
+
             quote! {
                 #[allow(dead_code)]
                 pub fn #fn_name(
@@ -1339,7 +1456,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     // Retained for future use (e.g. instruction-level replay protection or
                     // content-based dispatch). Not used in validation logic today.
                     _instruction_words: &nssa_core::program::InstructionData,
-                    #(#arg_seed_params),*
+                    #(#all_validate_params),*
                 ) -> Result<(), spel_framework::error::SpelError> {
                     #(#signer_checks)*
                     #(#init_checks)*
@@ -1540,15 +1657,22 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
                                 },
                             })
                             .collect();
+                        let is_private = acc.constraints.private_pda;
 
                         quote! {
                             Some(spel_framework::idl::IdlPda {
                                 seeds: vec![#(#seed_literals),*],
+                                private: #is_private,
                             })
                         }
                     };
 
                     let is_rest = acc.is_rest;
+                    let visibility_tags: Vec<TokenStream2> = if acc.constraints.private_pda {
+                        vec![quote! { "private".to_string() }]
+                    } else {
+                        vec![quote! { "public".to_string() }]
+                    };
                     quote! {
                         spel_framework::idl::IdlAccountItem {
                             name: #acc_name.to_string(),
@@ -1558,7 +1682,7 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
                             owner: None,
                             pda: #pda_expr,
                             rest: #is_rest,
-                            visibility: vec!["public".to_string()],
+                            visibility: vec![#(#visibility_tags),*],
                         }
                     }
                 })
@@ -1684,13 +1808,22 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                                 }
                             })
                             .collect();
-                        format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
+                        if acc.constraints.private_pda {
+                            format!(",\"pda\":{{\"seeds\":[{}],\"private\":true}}", seeds.join(","))
+                        } else {
+                            format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
+                        }
                     };
 
+                    let visibility_json = if acc.constraints.private_pda {
+                        ",\"visibility\":[\"private\"]".to_string()
+                    } else {
+                        String::new()
+                    };
                     let rest_json = if acc.is_rest { ",\"rest\":true".to_string() } else { String::new() };
                     format!(
-                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}{}}}",
-                        name, writable, signer, init, pda_json, rest_json
+                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}{}{}}}",
+                        name, writable, signer, init, pda_json, rest_json, visibility_json
                     )
                 })
                 .collect();

@@ -1,6 +1,7 @@
 //! Generic PDA (Program Derived Address) computation utilities.
 
 use nssa_core::account::AccountId;
+use nssa_core::{NullifierPublicKey};
 use nssa_core::program::{PdaSeed, ProgramId};
 use sha2::{Sha256, Digest};
 
@@ -85,6 +86,33 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
 
     let pda_seed = PdaSeed::new(combined);
     AccountId::for_public_pda(program_id, &pda_seed)
+}
+
+/// Derive a **private** PDA `AccountId` from a program ID, one or more 32-byte seeds,
+/// and a `NullifierPublicKey`.
+///
+/// The seed combining logic mirrors [`compute_pda`]; the difference is the final
+/// derivation calls `AccountId::for_private_pda`, which includes the `npk` in the
+/// hash so each controller group gets a unique address for the same seed.
+///
+/// # Panics
+///
+/// Panics if `seeds` is empty.
+pub fn compute_private_pda(program_id: &ProgramId, seeds: &[&[u8; 32]], npk: &NullifierPublicKey) -> AccountId {
+    assert!(!seeds.is_empty(), "PDA requires at least one seed");
+
+    let combined = if seeds.len() == 1 {
+        *seeds[0]
+    } else {
+        let mut hasher = Sha256::new();
+        for seed in seeds {
+            hasher.update(seed);
+        }
+        hasher.finalize().into()
+    };
+
+    let pda_seed = PdaSeed::new(combined);
+    AccountId::for_private_pda(program_id, &pda_seed, npk)
 }
 
 /// Compute a PDA from a program ID and multiple [`ToSeed`] values.

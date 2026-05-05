@@ -450,13 +450,20 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
         .map(|a| (a.name.as_str(), &a.type_))
         .collect();
 
-    // Parse --key value pairs from remaining args, using IDL types when available
+    // Parse --key value pairs from remaining args, using IDL types when available.
+    // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
+    let mut npk_hex: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
             if i + 1 < args.len() {
                 let raw = &args[i + 1];
+                if key == "npk" {
+                    npk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
                 let arg_name = key.replace('-', "_");
                 let parsed = if let Some(ty) = arg_types.get(arg_name.as_str()) {
                     parse::parse_value(raw, ty).unwrap_or_else(|e| {
@@ -513,8 +520,30 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
         std::process::exit(1);
     };
 
+    // For private PDAs, parse and require --npk
+    use nssa_core::NullifierPublicKey;
+    let npk: Option<NullifierPublicKey> = if pda_def.private {
+        match npk_hex {
+            Some(ref hex) => {
+                use crate::hex::decode_bytes_32;
+                let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --npk '{}': {}", hex, e);
+                    std::process::exit(1);
+                });
+                Some(NullifierPublicKey(bytes))
+            }
+            None => {
+                eprintln!("❌ '{}' is a private PDA — pass --npk <64-char-hex>", account_name);
+                eprintln!("   The NullifierPublicKey is the recipient's npk from their wallet key.");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     // Compute PDA
-    match compute_pda_from_seeds(&pda_def.seeds, &program_id, &HashMap::new(), &seed_args) {
+    match compute_pda_from_seeds(&pda_def.seeds, &program_id, &HashMap::new(), &seed_args, npk.as_ref()) {
         Ok(account_id) => {
             println!("{}", account_id);
         }

@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use nssa::AccountId;
+use nssa_core::{NullifierPublicKey};
 use nssa_core::program::{PdaSeed, ProgramId};
 use spel_framework_core::idl::IdlSeed;
 use crate::parse::ParsedValue;
@@ -104,11 +105,15 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
 /// - Multi-seed: SHA-256(seed1 || seed2 || ...) combined into a single 32-byte seed
 ///
 /// Supports all seed types: `const`, `account`, and `arg`.
+///
+/// Pass `npk = Some(key)` for private PDAs; the address will be derived via
+/// `AccountId::for_private_pda`. For public PDAs pass `npk = None`.
 pub fn compute_pda_from_seeds(
     seeds: &[IdlSeed],
     program_id: &ProgramId,
     account_map: &HashMap<String, AccountId>,
     parsed_args: &HashMap<String, ParsedValue>,
+    npk: Option<&NullifierPublicKey>,
 ) -> Result<AccountId, String> {
     if seeds.is_empty() {
         return Err("PDA requires at least one seed".to_string());
@@ -129,7 +134,11 @@ pub fn compute_pda_from_seeds(
     };
 
     let pda_seed = PdaSeed::new(combined);
-    Ok(AccountId::for_public_pda(program_id, &pda_seed))
+    if let Some(npk) = npk {
+        Ok(AccountId::for_private_pda(program_id, &pda_seed, npk))
+    } else {
+        Ok(AccountId::for_public_pda(program_id, &pda_seed))
+    }
 }
 
 #[cfg(test)]
@@ -140,7 +149,7 @@ mod tests {
     fn test_single_const_seed() {
         let seeds = vec![IdlSeed::Const { value: "test_seed".to_string() }];
         let program_id: ProgramId = [1u32; 8];
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new());
+        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None);
         assert!(result.is_ok());
     }
 
@@ -153,7 +162,7 @@ mod tests {
         let program_id: ProgramId = [1u32; 8];
         let mut args = HashMap::new();
         args.insert("create_key".to_string(), ParsedValue::ByteArray(vec![42u8; 32]));
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args);
+        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None);
         assert!(result.is_ok());
     }
 
@@ -166,7 +175,7 @@ mod tests {
         let program_id: ProgramId = [1u32; 8];
         let mut args = HashMap::new();
         args.insert("index".to_string(), ParsedValue::U64(5));
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args);
+        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None);
         assert!(result.is_ok());
     }
 
@@ -174,7 +183,7 @@ mod tests {
     fn test_missing_arg_errors() {
         let seeds = vec![IdlSeed::Arg { path: "missing".to_string() }];
         let program_id: ProgramId = [1u32; 8];
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new());
+        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing"));
     }
@@ -199,6 +208,37 @@ mod tests {
     }
 
     #[test]
+    fn test_private_pda_differs_from_public() {
+        let seeds = vec![IdlSeed::Const { value: "vault".to_string() }];
+        let program_id: ProgramId = [2u32; 8];
+        let npk = NullifierPublicKey([0xABu8; 32]);
+
+        let private = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), Some(&npk)).unwrap();
+        let public  = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None).unwrap();
+
+        assert_ne!(private, public, "private PDA must differ from public PDA");
+
+        // Verify it matches a direct for_private_pda call with the same inputs
+        let mut combined = [0u8; 32];
+        combined[.."vault".len()].copy_from_slice(b"vault");
+        let expected = AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk);
+        assert_eq!(private, expected, "private PDA must match for_private_pda");
+    }
+
+    #[test]
+    fn test_private_pda_differs_across_npks() {
+        let seeds = vec![IdlSeed::Const { value: "vault".to_string() }];
+        let program_id: ProgramId = [2u32; 8];
+        let npk1 = NullifierPublicKey([0x01u8; 32]);
+        let npk2 = NullifierPublicKey([0x02u8; 32]);
+
+        let addr1 = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), Some(&npk1)).unwrap();
+        let addr2 = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), Some(&npk2)).unwrap();
+
+        assert_ne!(addr1, addr2, "different npks must yield different private PDAs");
+    }
+
+    #[test]
     fn test_multi_seed_differs_from_single() {
         let seeds_multi = vec![
             IdlSeed::Const { value: "test".to_string() },
@@ -211,8 +251,8 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("key".to_string(), ParsedValue::ByteArray(vec![0u8; 32]));
 
-        let multi = compute_pda_from_seeds(&seeds_multi, &program_id, &HashMap::new(), &args).unwrap();
-        let single = compute_pda_from_seeds(&seeds_single, &program_id, &HashMap::new(), &HashMap::new()).unwrap();
+        let multi = compute_pda_from_seeds(&seeds_multi, &program_id, &HashMap::new(), &args, None).unwrap();
+        let single = compute_pda_from_seeds(&seeds_single, &program_id, &HashMap::new(), &HashMap::new(), None).unwrap();
 
         // Multi-seed SHA-256 must differ from single seed (no zero-cancellation)
         assert_ne!(multi, single);
