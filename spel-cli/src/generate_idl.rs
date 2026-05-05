@@ -11,10 +11,31 @@
 //! - `.rs` file  → used directly (backwards-compatible).
 //! - directory   → `<dir>/methods/guest/src/bin/*.rs` is searched.
 
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use toml::Value;
+
+/// Result of path-dependency discovery, including warnings for any issues
+/// encountered during manifest parsing or directory resolution.
+pub struct PathDepResult {
+    /// Crate-root directories of all discovered path dependencies (including
+    /// transitive ones).
+    pub dirs: Vec<PathBuf>,
+    /// Non-fatal warnings emitted during discovery (e.g. TOML parse failures,
+    /// missing dep directories, no Cargo.toml found).
+    pub warnings: Vec<String>,
+}
+
+impl PathDepResult {
+    pub fn new() -> Self {
+        Self {
+            dirs: Vec::new(),
+            warnings: Vec::new(),
+        }
+    }
+}
 
 /// Resolve the list of SPEL program source files for IDL generation.
 ///
@@ -76,38 +97,274 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// crates are not part of the program's on-chain interface and must not appear
 /// in the generated IDL.  Registry (`version = "..."`) and git dependencies
 /// are also excluded so that only project-local crates are scanned.
-pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
-    (|| -> Option<Vec<PathBuf>> {
-        let manifest = find_crate_manifest(source_path)?;
-        let content = fs::read_to_string(&manifest).ok()?;
-        let value: Value = toml::from_str(&content).ok()?;
-        let manifest_dir = manifest.parent()?;
+///
+/// **Transitive path-dependencies** are resolved: if a discovered dependency
+/// itself declares path-based dependencies, those are included as well (with
+/// cycle detection).
+///
+/// In workspace projects the function detects when the nearest `Cargo.toml` is
+/// a workspace root manifest and searches for the actual crate manifest
+/// containing `[dependencies]`.
+pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
+    let mut result = PathDepResult::new();
+    let manifest = match find_crate_manifest(source_path, &mut result.warnings) {
+        Some(m) => m,
+        None => return result,
+    };
 
-        let mut dirs = Vec::new();
-        if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-            for (_name, dep) in table {
-                if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                    let dep_dir = manifest_dir.join(rel);
-                    if dep_dir.is_dir() {
-                        dirs.push(dep_dir);
+    let content = match fs::read_to_string(&manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            result.warnings.push(format!(
+                "⚠️  could not read manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return result;
+        }
+    };
+    let value: Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            result.warnings.push(format!(
+                "⚠️  failed to parse manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return result;
+        }
+    };
+
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d,
+        None => return result,
+    };
+
+    // Check if this is a workspace root — if so, it has no [dependencies] of its
+    // own.  We need to find the actual crate manifest for the program binary.
+    let is_workspace = value.get("workspace").is_some()
+        && value.get("package").is_none();
+
+    if is_workspace {
+        // Workspace root: search member directories for the crate that contains
+        // the source file.
+        if let Some(member_manifest) = find_member_manifest(
+            manifest_dir,
+            &value,
+            source_path,
+            &mut result.warnings,
+        ) {
+            resolve_path_deps_recursive(
+                &member_manifest,
+                &mut result.dirs,
+                &mut HashSet::new(),
+                &mut result.warnings,
+            );
+        }
+    } else {
+        // Regular crate manifest — extract path deps directly.
+        resolve_path_deps_recursive(
+            &manifest,
+            &mut result.dirs,
+            &mut HashSet::new(),
+            &mut result.warnings,
+        );
+    }
+
+    result
+}
+
+/// Recursively extract path-based dependencies from a manifest, following
+/// transitive path deps.  `visited` tracks canonicalised directories to avoid
+/// infinite loops.
+fn resolve_path_deps_recursive(
+    manifest: &Path,
+    dirs: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+    warnings: &mut Vec<String>,
+) {
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return,
+    };
+
+    // Deduplicate by canonical path.
+    let canonical = match &manifest_dir.canonicalize() {
+        Ok(c) => c.clone(),
+        Err(_) => manifest_dir.clone(),
+    };
+    if !visited.insert(canonical) {
+        return; // already processed — cycle or duplicate
+    }
+
+    let content = match fs::read_to_string(manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            warnings.push(format!(
+                "⚠️  could not read manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return;
+        }
+    };
+    let value: Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            warnings.push(format!(
+                "⚠️  failed to parse manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return;
+        }
+    };
+
+    // Skip workspace roots — they have no [dependencies].
+    if value.get("workspace").is_some() && value.get("package").is_none() {
+        return;
+    }
+
+    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
+        for (name, dep) in table {
+            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+                let dep_dir = manifest_dir.join(rel);
+                if !dep_dir.is_dir() {
+                    warnings.push(format!(
+                        "⚠️  path dependency '{}' points to non-existent directory: {}",
+                        name,
+                        dep_dir.display()
+                    ));
+                    continue;
+                }
+                dirs.push(dep_dir.clone());
+
+                // Recurse into the dependency's own Cargo.toml for transitive deps.
+                let dep_manifest = dep_dir.join("Cargo.toml");
+                if dep_manifest.exists() {
+                    resolve_path_deps_recursive(
+                        &dep_manifest,
+                        dirs,
+                        visited,
+                        warnings,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Given a workspace root directory, try to locate the member crate manifest
+/// that contains `source_path`.
+fn find_member_manifest(
+    workspace_root: &Path,
+    workspace_value: &Value,
+    source_path: &Path,
+    warnings: &mut Vec<String>,
+) -> Option<PathBuf> {
+    // Try to get the explicit member list from [workspace.members].
+    let members: Vec<String> = workspace_value
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
+    // Expand glob patterns (e.g. "crates/*") into concrete directories.
+    let concrete_members: Vec<String> = if members.iter().any(|m| m.contains('*')) {
+        let mut expanded = Vec::new();
+        for pattern in &members {
+            if pattern.contains('*') {
+                // Simple glob expansion: replace * with readdir.
+                let prefix = pattern.split_once('*').map(|(p, _)| p).unwrap_or("");
+                let dir = workspace_root.join(prefix);
+                if let Ok(entries) = fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
+                            expanded.push(format!("{}/{}", prefix, entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+            } else {
+                expanded.push(pattern.clone());
+            }
+        }
+        expanded
+    } else {
+        members.clone()
+    };
+
+    // Find the member whose directory contains source_path.
+    let source_dir = source_path.parent().unwrap_or(source_path);
+    for member in &concrete_members {
+        let member_dir = workspace_root.join(member.as_str());
+        if member_dir.is_dir() && source_dir.starts_with(&member_dir) {
+            let manifest = member_dir.join("Cargo.toml");
+            if manifest.exists() {
+                return Some(manifest);
+            }
+        }
+    }
+
+    // Fallback: recursively search all subdirectories for a Cargo.toml that
+    // contains source_path.  This handles nested workspace members (e.g.
+    // `methods/guest`) when the explicit `members` list is absent/mismatched.
+    warnings.push(format!(
+        "⚠️  workspace at '{}' has no matching member for '{}'; searching all subdirectories",
+        workspace_root.display(),
+        source_path.display()
+    ));
+
+    fn search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
+        // Search children FIRST (depth-first), then check current dir.
+        // This ensures we find the deepest matching member manifest rather
+        // than returning the workspace root immediately.
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    if let Some(found) = search_recursive(&entry.path(), target_dir) {
+                        return Some(found);
                     }
                 }
             }
         }
-        Some(dirs)
-    })()
-    .unwrap_or_default()
+        // Check current dir — but skip virtual workspace manifests (no [package]).
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() && target_dir.starts_with(dir) {
+            // Skip virtual workspace manifests that have [workspace] but no [package].
+            let is_virtual_workspace = fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|content| content.parse::<toml::Value>().ok())
+                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
+                .unwrap_or(false);
+            if !is_virtual_workspace {
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    search_recursive(workspace_root, source_dir)
 }
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
-fn find_crate_manifest(start: &Path) -> Option<PathBuf> {
+fn find_crate_manifest(start: &Path, warnings: &mut Vec<String>) -> Option<PathBuf> {
     let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
     loop {
         let candidate = dir.join("Cargo.toml");
         if candidate.exists() {
             return Some(candidate);
         }
-        dir = dir.parent()?;
+        dir = match dir.parent() {
+            Some(p) => p,
+            None => {
+                warnings.push(format!(
+                    "⚠️  no Cargo.toml found walking up from '{}'",
+                    start.display()
+                ));
+                return None;
+            }
+        };
     }
 }
 
@@ -353,9 +610,10 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program);
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("core"), "expected core dir, got {:?}", dirs[0]);
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs[0]);
     }
 
     #[test]
@@ -375,10 +633,11 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program);
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
         // Only the path dep (core) should be returned, not serde or nssa_core
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("core"));
+        assert_eq!(result.dirs.len(), 1);
+        assert!(result.dirs[0].ends_with("core"));
     }
 
     #[test]
@@ -404,10 +663,209 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program);
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
         // Only runtime path dep (core) should be returned
-        assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
-        assert!(dirs[0].ends_with("core"));
+        assert_eq!(result.dirs.len(), 1, "expected only core, got: {:?}", result.dirs);
+        assert!(result.dirs[0].ends_with("core"));
+    }
+
+    // ── workspace detection ────────────────────────────────────────────────
+
+    /// Standard case: program source is inside a member crate that has its own
+    /// Cargo.toml.  `find_crate_manifest` finds the member manifest (not the
+    /// workspace root), so the normal path-dependency resolution applies.
+    #[test]
+    fn find_path_dep_dirs_resolves_workspace_member_manifest() {
+        let tmp = TempDir::new("workspace-member");
+
+        // Workspace root manifest (no [package], no [dependencies])
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"core\", \"methods/guest\"]\n",
+        );
+
+        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
+    }
+
+    /// Workspace with glob patterns in members: the glob is expanded and the
+    /// correct member manifest is found.
+    #[test]
+    fn find_path_dep_dirs_resolves_workspace_with_glob_members() {
+        let tmp = TempDir::new("workspace-glob");
+
+        // Workspace root with glob pattern in members.
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"crates/*\", \"methods/guest\"]\n",
+        );
+
+        tmp.write("crates/core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("crates/core/src/lib.rs", "");
+
+        // Path is relative to methods/guest/, so needs ../.. to reach workspace root.
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../crates/core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(result.dirs[0].ends_with("crates/core"), "expected crates/core dir, got {:?}", result.dirs);
+    }
+
+    /// When the program source has no intermediate Cargo.toml (only a workspace
+    /// root exists above it), the workspace member search kicks in.  This test
+    /// places the source in a directory with NO crate manifest between it and
+    /// the workspace root, forcing the full workspace resolution path.
+    #[test]
+    fn find_path_dep_dirs_fallback_search_in_workspace() {
+        let tmp = TempDir::new("workspace-fallback");
+
+        // Workspace root — no [package] section, so find_crate_manifest returns this.
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"core\", \"programs/guest\"]\n",
+        );
+
+        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("core/src/lib.rs", "");
+
+        // The guest crate has its own Cargo.toml with dependencies.
+        tmp.write(
+            "programs/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        // Source is inside the guest member crate, deeply nested.
+        // find_crate_manifest finds programs/guest/Cargo.toml first (has [package]),
+        // so normal resolution applies — NOT the workspace fallback.
+        let program = tmp.write("programs/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
+    }
+
+    /// Test that exercises the workspace-root resolution path: the nearest
+    /// Cargo.toml is truly a virtual workspace root (no intermediate crate
+    /// manifest).  This validates `find_member_manifest` and recursive search.
+    #[test]
+    fn find_path_dep_dirs_virtual_workspace_root() {
+        let tmp = TempDir::new("virtual-workspace");
+
+        // Virtual workspace root — no [package], just [workspace].
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"libs/*\", \"programs/*\"]\n",
+        );
+
+        tmp.write("libs/common/Cargo.toml", "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("libs/common/src/lib.rs", "");
+
+        // The program crate is NOT a workspace member — it lives in a dir with
+        // no Cargo.toml, so find_crate_manifest walks up to the workspace root.
+        // The workspace resolution then finds libs/common via recursive search.
+        tmp.write(
+            "programs/myprog/Cargo.toml",
+            "[package]\nname = \"myprog\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ncommon = { path = \"../../libs/common\" }\n",
+        );
+        // Source file is in a deeply nested dir with no intermediate Cargo.toml.
+        let program = tmp.write("programs/myprog/src/deep/nested/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(
+            result.dirs[0].ends_with("libs/common"),
+            "expected libs/common dir, got {:?}",
+            result.dirs
+        );
+    }
+
+    // ── transitive dependencies ────────────────────────────────────────────
+
+    #[test]
+    fn find_path_dep_dirs_resolves_transitive_deps() {
+        let tmp = TempDir::new("transitive-deps");
+
+        // shared_types is a dependency of core, which is a dependency of guest
+        tmp.write("shared_types/Cargo.toml", "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("shared_types/src/lib.rs", "");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nshared_types = { path = \"../shared_types\" }\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        // Should include both direct dep (core) and transitive dep (shared_types)
+        assert_eq!(result.dirs.len(), 2, "expected 2 dirs, got {:?}", result.dirs);
+        let names: Vec<&str> = result.dirs.iter().map(|d| d.file_name().unwrap().to_str().unwrap()).collect();
+        assert!(names.contains(&"core"));
+        assert!(names.contains(&"shared_types"));
+    }
+
+    // ── warnings on errors ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_path_dep_dirs_warns_on_missing_dep_directory() {
+        let tmp = TempDir::new("missing-dep-dir");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../nonexistent\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.dirs.is_empty());
+        assert!(!result.warnings.is_empty(), "expected warning for missing dep dir");
+        assert!(result.warnings[0].contains("non-existent"), "unexpected warning: {}", result.warnings[0]);
+    }
+
+    #[test]
+    fn find_path_dep_dirs_warns_on_invalid_toml() {
+        let tmp = TempDir::new("invalid-toml");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "this is not valid [[ toml !!!\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.dirs.is_empty());
+        assert!(!result.warnings.is_empty(), "expected warning for invalid TOML");
     }
 
     // ── account types from path-dep crates ────────────────────────────────
@@ -512,10 +970,11 @@ pub mod token {
 "#,
         );
 
-        let dep_dirs = find_path_dep_dirs(&program);
-        assert_eq!(dep_dirs.len(), 1);
+        let dep_result = find_path_dep_dirs(&program);
+        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert_eq!(dep_result.dirs.len(), 1);
 
-        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         assert_eq!(idl.name, "token");
         assert_eq!(idl.instructions.len(), 4);
@@ -592,8 +1051,9 @@ pub mod token {
 "#,
         );
 
-        let dep_dirs = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+        let dep_result = find_path_dep_dirs(&program);
+        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -642,8 +1102,9 @@ pub mod token {
              pub fn deposit(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
         );
 
-        let dep_dirs = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+        let dep_result = find_path_dep_dirs(&program);
+        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -687,8 +1148,9 @@ pub mod token {
              pub fn stake(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
         );
 
-        let dep_dirs = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_dirs).unwrap();
+        let dep_result = find_path_dep_dirs(&program);
+        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -733,6 +1195,344 @@ pub mod token {
             idl.accounts.is_empty(),
             "expected no accounts without dep scanning, got {:?}",
             idl.accounts.iter().map(|a| &a.name).collect::<Vec<_>>()
+        );
+    }
+
+    // ── #[cfg(test)] modules are skipped ────────────────────────────────────
+
+    /// Account types inside a #[cfg(test)] module in a dependency crate should
+    /// NOT appear in the generated IDL — they are test-only and won't be compiled
+    /// into the on-chain program.
+    #[test]
+    fn cfg_test_module_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-test-exclude");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        // lib.rs has a regular account type and a test-only one.
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(test)]
+pub mod test_helpers {
+    #[account_type]
+    pub struct TestOnlyAccount { pub fake_balance: u64 }
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"TestOnlyAccount"),
+            "TestOnlyAccount in #[cfg(test)] module should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// Account types behind #[cfg(feature = "...")] are also excluded since we
+    /// don't know which features are enabled for the on-chain build.
+    #[test]
+    fn cfg_feature_module_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-feature-exclude");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(feature = "experimental")]
+pub mod experimental {
+    #[account_type]
+    pub struct ExperimentalAccount { pub secret: String }
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"ExperimentalAccount"),
+            "ExperimentalAccount in #[cfg(feature)] module should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// `#[cfg(any(test, ...))]` wrappers are also detected — if any alternative
+    /// references `test` or `feature`, the item is excluded.
+    #[test]
+    fn cfg_any_test_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-any-test");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(any(test, feature = "debug-tools"))]
+pub mod debug {
+    #[account_type]
+    pub struct DebugAccount { pub trace_id: String }
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"DebugAccount"),
+            "DebugAccount in #[cfg(any(test, ...))] module should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// Top-level (non-module) items with #[cfg(test)] are also filtered.
+    /// e.g. `#[cfg(test)] #[account_type] struct TestAccount {}`
+    #[test]
+    fn cfg_test_top_level_struct_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-test-top-level");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(test)]
+#[account_type]
+pub struct TestOnlyStruct { pub fake: u64 }
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"TestOnlyStruct"),
+            "Top-level #[cfg(test)] struct should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// `#[cfg(not(test))]` items are production-only and should NOT be excluded.
+    /// This verifies the token scanner skips contents of `not(...)` groups.
+    #[test]
+    fn cfg_not_test_included_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-not-test");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(not(test))]
+#[account_type]
+pub struct ProdOnlyStruct { pub secret: u64 }
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"ProdOnlyStruct"),
+            "#[cfg(not(test))] struct should be INCLUDED (production-only); got {:?}",
+            account_names
+        );
+    }
+
+    // ── transitive deps with account types ──────────────────────────────────
+
+    /// Account types from transitive path dependencies (A → B → C) are all
+    /// collected and appear in the generated IDL.
+    #[test]
+    fn account_types_from_transitive_deps_appear_in_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("transitive-account-types");
+
+        // shared_types is a transitive dependency (guest → core → shared_types)
+        tmp.write(
+            "shared_types/Cargo.toml",
+            "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "shared_types/src/lib.rs",
+            r#"
+#[account_type]
+pub struct SharedAccount { pub data: String }
+"#,
+        );
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nshared_types = { path = \"../shared_types\" }\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct CoreAccount { pub balance: u128 }
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        // Should include both direct and transitive deps
+        assert_eq!(dep_result.dirs.len(), 2, "expected 2 dep dirs, got {:?}", dep_result.dirs);
+
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"CoreAccount"),
+            "CoreAccount from direct dep should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            account_names.contains(&"SharedAccount"),
+            "SharedAccount from transitive dep should be present; got {:?}",
+            account_names
         );
     }
 }

@@ -332,6 +332,14 @@ fn collect_items_recursive(
     for item in items {
         match item {
             syn::Item::Mod(m) => {
+                // Skip modules gated behind #[cfg(...)] that would not be
+                // compiled in a default build (e.g. #[cfg(test)],
+                // #[cfg(feature = "...")]).  This prevents test-only or
+                // feature-gated types from leaking into the on-chain IDL.
+                if is_cfg_excluded(&m.attrs) {
+                    continue;
+                }
+
                 if let Some((_, inner)) = &m.content {
                     // Inline module — recurse into its body with an updated base_dir
                     // so that any file-backed `mod` declarations inside it resolve
@@ -345,8 +353,172 @@ fn collect_items_recursive(
                     }
                 }
             }
-            _ => out.push(item.clone()),
+            // Non-module items (structs, enums, etc.) — also skip if cfg-gated.
+            other => {
+                let attrs: &[syn::Attribute] = match other {
+                    syn::Item::Struct(s) => &s.attrs,
+                    syn::Item::Enum(e) => &e.attrs,
+                    syn::Item::Fn(f) => &f.attrs,
+                    syn::Item::Trait(t) => &t.attrs,
+                    syn::Item::Impl(i) => &i.attrs,
+                    syn::Item::Type(t) => &t.attrs,
+                    syn::Item::Static(s) => &s.attrs,
+                    syn::Item::Const(c) => &c.attrs,
+                    syn::Item::ExternCrate(e) => &e.attrs,
+                    syn::Item::Use(u) => &u.attrs,
+                    _ => &[],
+                };
+                if is_cfg_excluded(attrs) {
+                    continue;
+                }
+                out.push(other.clone());
+            }
         }
+    }
+}
+
+/// Return `true` if the item's attributes contain a `#[cfg(...)]` that would
+/// exclude it from a default (non-test, no-extra-features) build.
+///
+/// Handles:
+/// - `#[cfg(test)]` — always excluded (test-only).
+/// - `#[cfg(feature = "...")]` — excluded (unknown which features are enabled).
+/// - `#[cfg(any(test, ...))]` / `#[cfg(any(feature = "...", ...))]` — excluded
+///   if *any* alternative references `test` or `feature`.
+///
+/// Does **not** handle:
+/// - `#[cfg(all(...))]` — compound expressions requiring all conditions.
+/// - Target-triple cfgs (`target_os`, `windows`, etc.) — unresolvable at
+///   IDL-gen time without knowing the build target.
+///
+/// Note: `#[cfg(not(test))]` is handled correctly — the token scanner skips
+/// contents of `not(...)` groups, so production-only items are included.
+///
+/// Note: `#[cfg_attr(test, ...)]` is **not** treated as exclusion because it
+/// only conditionally applies attributes — it does not remove the item from
+/// compilation (e.g. `cfg_attr(test, derive(Debug))` is common and valid).
+fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("cfg") {
+            continue;
+        }
+        // Structural parse of the cfg expression.
+        if cfg_meta_excludes(&attr.meta) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Check a `cfg(...)` attribute for exclusion triggers by scanning its token stream.
+/// Handles bare paths (`test`, `feature = "..."`) and `any(...)` wrappers.
+/// Uses exact identifier matching to avoid false positives (e.g. `target_feature`).
+fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(path) => {
+            // Bare path: `#[cfg(test)]` (unlikely at top level, but handle it)
+            path.is_ident("test") || path.is_ident("feature")
+        }
+        syn::Meta::NameValue(nv) => {
+            // Name-value: `#[cfg(feature = "...")]`
+            nv.path.is_ident("feature")
+        }
+        syn::Meta::List(list) if list.path.is_ident("cfg") => {
+            // Scan the inner tokens of #[cfg(...)] for test/feature identifiers.
+            // This handles all cases: bare `test`, `feature = "x"`, and
+            // `any(test, feature = "x")` — because we recurse into nested groups.
+            cfg_tokens_have_exclusion(&list.tokens, false)
+        }
+        _ => false,
+    }
+}
+
+/// Recursively scan a token stream for `test` or `feature` identifiers.
+/// Skips tokens inside `not(...)` groups so `#[cfg(not(test))]` is not excluded.
+///
+/// When called from an `any(...)` context (in_any = true), returns true only if
+/// ALL alternatives contain exclusion triggers.  This prevents false exclusions
+/// like `#[cfg(any(not(test), feature = "x"))]` which should be included in
+/// default builds because the `not(test)` alternative satisfies it.
+fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) -> bool {
+    let mut iter = tokens.clone().into_iter().peekable();
+    let mut alternatives: Vec<bool> = Vec::new(); // for any() context
+
+    while let Some(token) = iter.next() {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) if ident == "not" => {
+                // Skip the next group (parentheses) — `not(test)` should not exclude.
+                if let Some(proc_macro2::TokenTree::Group(_)) = iter.peek() {
+                    iter.next(); // consume the group
+                }
+            }
+            proc_macro2::TokenTree::Ident(ident) if ident == "any" => {
+                // Handle any(...) — check if ALL alternatives would exclude.
+                let next = iter.peek().cloned();
+                if let Some(proc_macro2::TokenTree::Group(group)) = next {
+                    iter.next(); // consume the group
+                    let mut all_exclude = true;
+                    let mut alt_count = 0;
+                    // Split alternatives by comma at this level.
+                    for alt_token in group.stream().clone() {
+                        match alt_token {
+                            proc_macro2::TokenTree::Group(alt_group) => {
+                                // Nested expression like any(not(test), feature = "x")
+                                alt_count += 1;
+                                if !cfg_tokens_have_exclusion(&alt_group.stream(), true) {
+                                    all_exclude = false;
+                                }
+                            }
+                            proc_macro2::TokenTree::Ident(alt_ident) => {
+                                alt_count += 1;
+                                if alt_ident != "test" && alt_ident != "feature" {
+                                    all_exclude = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // If no alternatives found (parse issue), be conservative.
+                    if alt_count == 0 {
+                        return true;
+                    }
+                    if in_any {
+                        alternatives.push(all_exclude);
+                    } else if all_exclude {
+                        return true; // top-level: all alternatives exclude → exclude
+                    }
+                }
+            }
+            proc_macro2::TokenTree::Ident(ident) => {
+                if ident == "test" || ident == "feature" {
+                    if in_any {
+                        alternatives.push(true);
+                    } else {
+                        return true;
+                    }
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                // Recurse into groups (parentheses, braces, brackets).
+                let result = cfg_tokens_have_exclusion(&group.stream(), in_any);
+                if in_any {
+                    alternatives.push(result);
+                } else if result {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // In any() context: exclude only if ALL alternatives exclude.
+    if in_any && !alternatives.is_empty() {
+        alternatives.iter().all(|&b| b)
+    } else if in_any {
+        // No exclusion triggers found in any alternative → don't exclude.
+        false
+    } else {
+        false
     }
 }
 
