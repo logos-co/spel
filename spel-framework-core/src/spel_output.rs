@@ -5,6 +5,7 @@
 //! `(Account, AutoClaim)` pairs into the correct `AccountPostState` values.
 
 use nssa_core::account::Account;
+use nssa_core::{NullifierPublicKey};
 use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
 
 use crate::types::{IntoPostState, SpelOutput};
@@ -67,6 +68,19 @@ impl AutoClaim {
             hasher.finalize().into()
         };
         AutoClaim::Claimed(Claim::Pda(PdaSeed::new(combined)))
+    }
+
+    /// Create an `AutoClaim` for a private PDA-initialized account from raw seed bytes.
+    ///
+    /// Identical to [`pda_from_seeds`] in terms of the emitted claim — the circuit
+    /// reuses `Claim::Pda(seed)` for private PDAs and derives the address via
+    /// `AccountId::for_private_pda` using the `npk` it receives separately through
+    /// `PrivacyPreservingCircuitInput.private_account_keys`.
+    ///
+    /// The `npk` parameter is accepted for documentation clarity; it is not encoded
+    /// into the claim itself.
+    pub fn private_pda_from_seeds(seeds: &[&[u8]], _npk: &NullifierPublicKey) -> Self {
+        Self::pda_from_seeds(seeds)
     }
 }
 

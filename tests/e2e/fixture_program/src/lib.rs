@@ -102,6 +102,18 @@ mod treasury {
         Ok(SpelOutput::execute(vec![record, owner], vec![]))
     }
 
+    /// Initialize a private PDA — address is unique per (seed, npk) pair.
+    #[instruction]
+    pub fn init_private_account(
+        #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"))]
+        account: AccountWithMetadata,
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        user_npk: nssa_core::NullifierPublicKey,
+    ) -> SpelResult {
+        Ok(SpelOutput::execute(vec![account, authority], vec![]))
+    }
+
     /// Batch update: one fixed authority + variable-length list of target accounts.
     #[instruction]
     pub fn batch_update(
@@ -134,7 +146,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 8);
+        assert_eq!(idl.instructions.len(), 9);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -143,7 +155,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 8);
+        assert_eq!(idl.instructions.len(), 9);
     }
 
     #[test]
@@ -633,6 +645,114 @@ mod tests {
         let targets = vec![make_account(false), make_account(false)];
         let result = treasury::batch_update(authority, targets, 99).unwrap();
         assert_eq!(result.post_states.len(), 3); // authority + 2 targets
+    }
+
+    // ── init_private_account (private PDA) ──────────────────────────────────
+
+    fn make_npk(byte: u8) -> nssa_core::NullifierPublicKey {
+        nssa_core::NullifierPublicKey([byte; 32])
+    }
+
+    #[test]
+    fn validate_init_private_account_accepts_correct_address() {
+        let program_id = test_program_id();
+        let npk = make_npk(0xAB);
+        let correct_id = spel_framework::pda::compute_private_pda(
+            &program_id,
+            &[&spel_framework::pda::seed_from_str("private_vault")],
+            &npk,
+        );
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false), // account — correct private PDA
+            make_account_with_id([2u8; 32], true),             // authority — signer
+        ];
+        let result = treasury::__validate_init_private_account(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &npk,
+        );
+        assert!(result.is_ok(), "correct private PDA should pass: {result:?}");
+    }
+
+    #[test]
+    fn validate_init_private_account_rejects_wrong_npk() {
+        let program_id = test_program_id();
+        let correct_npk = make_npk(0xAB);
+        let wrong_npk = make_npk(0xCD);
+        let correct_id = spel_framework::pda::compute_private_pda(
+            &program_id,
+            &[&spel_framework::pda::seed_from_str("private_vault")],
+            &correct_npk,
+        );
+        // Supply the address for correct_npk but validate with wrong_npk
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false),
+            make_account_with_id([2u8; 32], true),
+        ];
+        let result = treasury::__validate_init_private_account(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &wrong_npk,
+        );
+        let err = result.expect_err("wrong npk should fail");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_init_private_account_rejects_public_pda_address() {
+        let program_id = test_program_id();
+        let npk = make_npk(0xAB);
+        // Supply the PUBLIC PDA address — should be rejected
+        let public_id = spel_framework::pda::compute_pda(
+            &program_id,
+            &[&spel_framework::pda::seed_from_str("private_vault")],
+        );
+        let accounts = vec![
+            make_account_with_id(*public_id.value(), false),
+            make_account_with_id([2u8; 32], true),
+        ];
+        let result = treasury::__validate_init_private_account(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &npk,
+        );
+        assert!(
+            result.is_err(),
+            "public PDA address should be rejected for a private PDA account"
+        );
+    }
+
+    #[test]
+    fn claims_init_private_account_emits_pda_claim() {
+        use spel_framework::spel_output::AutoClaim;
+        use nssa_core::program::Claim;
+        // __claims_* takes no npk — Claim::Pda encodes only the seed; the circuit
+        // handles the (seed, npk) binding for private PDAs independently.
+        let claims = treasury::__claims_init_private_account();
+        assert_eq!(claims.len(), 2);
+        assert!(
+            matches!(&claims[0], AutoClaim::Claimed(Claim::Pda(_))),
+            "private PDA account must emit Claim::Pda"
+        );
+        assert!(matches!(&claims[1], AutoClaim::None)); // authority
+    }
+
+    #[test]
+    fn idl_init_private_account_marks_pda_as_private() {
+        let idl = __program_idl();
+        let ix = idl.instructions.iter()
+            .find(|i| i.name == "init_private_account")
+            .expect("init_private_account must be in IDL");
+        let acc = &ix.accounts[0];
+        let pda = acc.pda.as_ref().expect("account must have PDA definition");
+        assert!(pda.private, "IDL PDA must be marked private");
+        assert!(acc.visibility.iter().any(|v| v == "private"), "visibility must include 'private'");
     }
 
     // ── output filtering ─────────────────────────────────────────────────────
