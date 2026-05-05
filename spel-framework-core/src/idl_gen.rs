@@ -385,47 +385,71 @@ fn collect_items_recursive(
 /// - `#[cfg(feature = "...")]` — excluded (unknown which features are enabled).
 /// - `#[cfg(any(test, ...))]` / `#[cfg(any(feature = "...", ...))]` — excluded
 ///   if *any* alternative references `test` or `feature`.
-/// - `#[cfg_attr(test, ...)]` — excluded.
 ///
 /// Does **not** handle:
-/// - `#[cfg(not(test))]` — negation is rare for test-gating and would require
-///   full expression evaluation.
+/// - `#[cfg(not(test))]` — negation is rare for test-gating; items gated by
+///   `not(test)` are included (conservative: better to over-include than
+///   drop production types).
+/// - `#[cfg(all(...))]` — compound expressions requiring all conditions.
 /// - Target-triple cfgs (`target_os`, `windows`, etc.) — unresolvable at
 ///   IDL-gen time without knowing the build target.
+///
+/// Note: `#[cfg_attr(test, ...)]` is **not** treated as exclusion because it
+/// only conditionally applies attributes — it does not remove the item from
+/// compilation (e.g. `cfg_attr(test, derive(Debug))` is common and valid).
 fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
-        if attr.path().is_ident("cfg") {
-            // Parse cfg contents recursively to handle `any(...)` wrappers.
-            if cfg_attr_excludes(attr) {
-                return true;
-            }
-        } else if attr.path().is_ident("cfg_attr") {
-            // `#[cfg_attr(test, ...)]` — excluded.
-            let mut found_test = false;
-            let _ = attr.parse_nested_meta(|meta| {
-                if meta.path.is_ident("test") {
-                    found_test = true;
-                }
-                Ok(())
-            });
-            if found_test {
-                return true;
-            }
+        if !attr.path().is_ident("cfg") {
+            continue;
+        }
+        // Structural parse of the cfg expression.
+        if cfg_meta_excludes(&attr.meta) {
+            return true;
         }
     }
     false
 }
 
-/// Recursively check a `#[cfg(...)]` attribute for exclusion triggers.
+/// Check a `cfg(...)` attribute for exclusion triggers by scanning its token stream.
 /// Handles bare paths (`test`, `feature = "..."`) and `any(...)` wrappers.
-fn cfg_attr_excludes(attr: &syn::Attribute) -> bool {
-    // Scan the debug representation of the meta for test/feature identifiers.
-    // This catches patterns like `#[cfg(any(test, feature = "x"))]` that
-    // parse_nested_meta alone cannot recurse into.  The Debug output from
-    // syn (with extra-traits) contains the token text we need.
-    let debug_text = format!("{:?}", attr.meta);
-    if debug_text.contains("test") || debug_text.contains("feature") {
-        return true;
+/// Uses exact identifier matching to avoid false positives (e.g. `target_feature`).
+fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
+    match meta {
+        syn::Meta::Path(path) => {
+            // Bare path: `#[cfg(test)]` (unlikely at top level, but handle it)
+            path.is_ident("test") || path.is_ident("feature")
+        }
+        syn::Meta::NameValue(nv) => {
+            // Name-value: `#[cfg(feature = "...")]`
+            nv.path.is_ident("feature")
+        }
+        syn::Meta::List(list) if list.path.is_ident("cfg") => {
+            // Scan the inner tokens of #[cfg(...)] for test/feature identifiers.
+            // This handles all cases: bare `test`, `feature = "x"`, and
+            // `any(test, feature = "x")` — because we recurse into nested groups.
+            cfg_tokens_have_exclusion(&list.tokens)
+        }
+        _ => false,
+    }
+}
+
+/// Recursively scan a token stream for `test` or `feature` identifiers.
+fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream) -> bool {
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                if ident == "test" || ident == "feature" {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                // Recurse into groups (parentheses, braces, brackets).
+                if cfg_tokens_have_exclusion(&group.stream()) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
     }
     false
 }

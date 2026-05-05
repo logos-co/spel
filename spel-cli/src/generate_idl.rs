@@ -306,26 +306,33 @@ fn find_member_manifest(
         }
     }
 
-    // Fallback: search all subdirectories for a Cargo.toml that contains source_path.
+    // Fallback: recursively search all subdirectories for a Cargo.toml that
+    // contains source_path.  This handles nested workspace members (e.g.
+    // `methods/guest`) when the explicit `members` list is absent/mismatched.
     warnings.push(format!(
         "⚠️  workspace at '{}' has no matching member for '{}'; searching all subdirectories",
         workspace_root.display(),
         source_path.display()
     ));
 
-    if let Ok(entries) = fs::read_dir(workspace_root) {
-        for entry in entries.flatten() {
-            if !entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                continue;
-            }
-            let manifest = entry.path().join("Cargo.toml");
-            if manifest.exists() && source_dir.starts_with(&entry.path()) {
-                return Some(manifest);
+    fn search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() && target_dir.starts_with(dir) {
+            return Some(manifest);
+        }
+        if let Ok(entries) = fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    if let Some(found) = search_recursive(&entry.path(), target_dir) {
+                        return Some(found);
+                    }
+                }
             }
         }
+        None
     }
 
-    None
+    search_recursive(workspace_root, source_dir)
 }
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
@@ -653,9 +660,9 @@ mod tests {
 
     // ── workspace detection ────────────────────────────────────────────────
 
-    /// When the program source lives in a directory with no Cargo.toml of its
-    /// own, `find_crate_manifest` walks up to the workspace root.  The member
-    /// search then locates the correct crate manifest.
+    /// Standard case: program source is inside a member crate that has its own
+    /// Cargo.toml.  `find_crate_manifest` finds the member manifest (not the
+    /// workspace root), so the normal path-dependency resolution applies.
     #[test]
     fn find_path_dep_dirs_resolves_workspace_member_manifest() {
         let tmp = TempDir::new("workspace-member");
@@ -674,8 +681,6 @@ mod tests {
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../core\" }\n",
         );
-        // Place the program file in a subdirectory WITHOUT its own Cargo.toml,
-        // so find_crate_manifest walks up past methods/guest/ to the workspace root.
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
@@ -705,7 +710,6 @@ mod tests {
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../crates/core\" }\n",
         );
-        // Source is in a subdirectory with no Cargo.toml → workspace root found.
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
@@ -745,6 +749,43 @@ mod tests {
         // The fallback search should find methods/guest/Cargo.toml
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
+    }
+
+    /// Test that exercises the workspace-root resolution path: the nearest
+    /// Cargo.toml is truly a virtual workspace root (no intermediate crate
+    /// manifest).  This validates `find_member_manifest` and recursive search.
+    #[test]
+    fn find_path_dep_dirs_virtual_workspace_root() {
+        let tmp = TempDir::new("virtual-workspace");
+
+        // Virtual workspace root — no [package], just [workspace].
+        tmp.write(
+            "Cargo.toml",
+            "[workspace]\nmembers = [\"libs/*\", \"programs/*\"]\n",
+        );
+
+        tmp.write("libs/common/Cargo.toml", "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write("libs/common/src/lib.rs", "");
+
+        // The program crate is NOT a workspace member — it lives in a dir with
+        // no Cargo.toml, so find_crate_manifest walks up to the workspace root.
+        // The workspace resolution then finds libs/common via recursive search.
+        tmp.write(
+            "programs/myprog/Cargo.toml",
+            "[package]\nname = \"myprog\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ncommon = { path = \"../../libs/common\" }\n",
+        );
+        // Source file is in a deeply nested dir with no intermediate Cargo.toml.
+        let program = tmp.write("programs/myprog/src/deep/nested/token.rs", "");
+
+        let result = find_path_dep_dirs(&program);
+        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert_eq!(result.dirs.len(), 1);
+        assert!(
+            result.dirs[0].ends_with("libs/common"),
+            "expected libs/common dir, got {:?}",
+            result.dirs
+        );
     }
 
     // ── transitive dependencies ────────────────────────────────────────────
