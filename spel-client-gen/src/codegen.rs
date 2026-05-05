@@ -25,6 +25,13 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use borsh::BorshDeserialize;").unwrap();
     writeln!(out, "use serde::{{Deserialize, Serialize}};").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
+    // Import NullifierPublicKey if any instruction uses private PDAs or has an npk arg
+    let needs_npk = idl.instructions.iter().any(|ix|
+        ix.accounts.iter().any(|a| a.pda.as_ref().map_or(false, |p| p.private))
+    );
+    if needs_npk {
+        writeln!(out, "use nssa_core::NullifierPublicKey;").unwrap();
+    }
     writeln!(out).unwrap();
 
     // Parse helpers
@@ -46,21 +53,39 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     // --- Standalone PDA computation helpers ---
     let pda_helpers = collect_pda_helpers(idl);
     for helper in &pda_helpers {
-        writeln!(out, "/// Compute PDA for the `{}` account.", helper.account_name).unwrap();
-        write!(out, "pub fn compute_{}_pda(program_id: &ProgramId", helper.account_name).unwrap();
-        for (pname, pty) in &helper.params {
-            write!(out, ", {}: {}", pname, pty).unwrap();
+        if helper.private {
+            writeln!(out, "/// Compute private PDA for the `{}` account (address is unique per npk).", helper.account_name).unwrap();
+            write!(out, "pub fn compute_{}_pda(program_id: &ProgramId", helper.account_name).unwrap();
+            for (pname, pty) in &helper.params {
+                write!(out, ", {}: {}", pname, pty).unwrap();
+            }
+            writeln!(out, ", npk: &NullifierPublicKey) -> AccountId {{").unwrap();
+            for binding in &helper.let_bindings {
+                writeln!(out, "    {}", binding).unwrap();
+            }
+            writeln!(out, "    spel_framework_core::pda::compute_private_pda(program_id, &[").unwrap();
+            for expr in &helper.seed_exprs {
+                writeln!(out, "        {},", expr).unwrap();
+            }
+            writeln!(out, "    ], npk)").unwrap();
+            writeln!(out, "}}").unwrap();
+        } else {
+            writeln!(out, "/// Compute PDA for the `{}` account.", helper.account_name).unwrap();
+            write!(out, "pub fn compute_{}_pda(program_id: &ProgramId", helper.account_name).unwrap();
+            for (pname, pty) in &helper.params {
+                write!(out, ", {}: {}", pname, pty).unwrap();
+            }
+            writeln!(out, ") -> AccountId {{").unwrap();
+            for binding in &helper.let_bindings {
+                writeln!(out, "    {}", binding).unwrap();
+            }
+            writeln!(out, "    spel_framework_core::pda::compute_pda(program_id, &[").unwrap();
+            for expr in &helper.seed_exprs {
+                writeln!(out, "        {},", expr).unwrap();
+            }
+            writeln!(out, "    ])").unwrap();
+            writeln!(out, "}}").unwrap();
         }
-        writeln!(out, ") -> AccountId {{").unwrap();
-        for binding in &helper.let_bindings {
-            writeln!(out, "    {}", binding).unwrap();
-        }
-        writeln!(out, "    spel_framework_core::pda::compute_pda(program_id, &[").unwrap();
-        for expr in &helper.seed_exprs {
-            writeln!(out, "        {},", expr).unwrap();
-        }
-        writeln!(out, "    ])").unwrap();
-        writeln!(out, "}}").unwrap();
         writeln!(out).unwrap();
     }
 
@@ -200,6 +225,7 @@ struct PdaHelper {
     params: Vec<(String, String)>,  // (param_name, param_type) for non-const seeds
     let_bindings: Vec<String>,      // let bindings needed before compute_pda call
     seed_exprs: Vec<String>,        // seed slice expressions for compute_pda
+    private: bool,                  // true → use compute_private_pda with npk param
 }
 
 /// Collect unique PDA accounts across all instructions, deduplicating by account name.
@@ -256,6 +282,7 @@ fn collect_pda_helpers(idl: &SpelIdl) -> Vec<PdaHelper> {
                     params,
                     let_bindings,
                     seed_exprs,
+                    private: pda.private,
                 });
             }
         }

@@ -105,6 +105,15 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
                 "{var}.as_array().ok_or(\"expected array\")?.iter().map(|item| Ok({inner})).collect::<Result<Vec<_>, String>>()?"
             )
         }
+        IdlType::Defined { defined } if defined == "NullifierPublicKey" => {
+            format!(
+                "{{ let _hex = {var}.as_str().ok_or(\"expected hex string for NullifierPublicKey\")?; \
+                 let _bytes = hex::decode(_hex.trim_start_matches(\"0x\")).map_err(|e| format!(\"invalid NullifierPublicKey hex: {{}}\", e))?; \
+                 if _bytes.len() != 32 {{ return Err(format!(\"NullifierPublicKey must be 32 bytes, got {{}}\", _bytes.len())); }} \
+                 let mut _arr = [0u8; 32]; _arr.copy_from_slice(&_bytes); \
+                 NullifierPublicKey(_arr) }}"
+            )
+        }
         _ => format!("serde_json::from_value({var}.clone()).map_err(|e| format!(\"parse error: {{}}\", e))?"),
     }
 }

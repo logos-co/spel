@@ -49,6 +49,12 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa_core::program::PdaSeed;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
+    let needs_npk = idl.instructions.iter().any(|ix|
+        ix.accounts.iter().any(|a| a.pda.as_ref().map_or(false, |p| p.private))
+    );
+    if needs_npk {
+        writeln!(out, "use nssa_core::NullifierPublicKey;").unwrap();
+    }
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -157,6 +163,10 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "#[allow(dead_code)]").unwrap();
     writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
     writeln!(out, "    Ok(AccountId::for_public_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?)))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out, "#[allow(dead_code)]").unwrap();
+    writeln!(out, "fn compute_private_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]], npk: &NullifierPublicKey) -> Result<AccountId, String> {{").unwrap();
+    writeln!(out, "    Ok(AccountId::for_private_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?), npk))").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -304,11 +314,22 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
                 for binding in &seed_pre_bindings {
                     writeln!(out, "{binding}").unwrap();
                 }
-                writeln!(out, "    let {name} = compute_pda_with_program(&program_id, &[").unwrap();
-                for entry in &seed_entries {
-                    writeln!(out, "{entry}").unwrap();
+                if pda.private {
+                    let npk_arg = pda.npk_arg.as_deref()
+                        .expect("private PDA must have npk_arg — should have been caught earlier");
+                    let npk_var = rust_ident(npk_arg);
+                    writeln!(out, "    let {name} = compute_private_pda_with_program(&program_id, &[").unwrap();
+                    for entry in &seed_entries {
+                        writeln!(out, "{entry}").unwrap();
+                    }
+                    writeln!(out, "    ], &{npk_var})?;").unwrap();
+                } else {
+                    writeln!(out, "    let {name} = compute_pda_with_program(&program_id, &[").unwrap();
+                    for entry in &seed_entries {
+                        writeln!(out, "{entry}").unwrap();
+                    }
+                    writeln!(out, "    ])?;").unwrap();
                 }
-                writeln!(out, "    ])?;").unwrap();
             }
         }
         writeln!(out).unwrap();
@@ -451,6 +472,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     params.iter().cloned().collect();
 
                 // Function signature
+                let is_private = pda.private;
                 write!(out, "pub fn compute_{}_pda(", acc_name).unwrap();
                 write!(out, "program_id: &ProgramId").unwrap();
                 for (name, ty) in &params {
@@ -461,6 +483,9 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     } else {
                         write!(out, ", {}: &{}", name, ty).unwrap();
                     }
+                }
+                if is_private {
+                    write!(out, ", npk: &NullifierPublicKey").unwrap();
                 }
                 writeln!(out, ") -> AccountId {{").unwrap();
 
@@ -491,7 +516,11 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                         }
                     }
                     writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(seed_bytes);").unwrap();
-                    writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
+                    if is_private {
+                        writeln!(out, "    AccountId::for_private_pda(program_id, &pda_seed, npk)").unwrap();
+                    } else {
+                        writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
+                    }
                 } else {
                     // Multi-seed: SHA-256(seed1 || seed2 || ...) — matches spel-cli/src/pda.rs
                     writeln!(out, "    use sha2::{{Sha256, Digest}};").unwrap();
@@ -525,7 +554,11 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     }
                     writeln!(out, "    let combined: [u8; 32] = hasher.finalize().into();").unwrap();
                     writeln!(out, "    let pda_seed = nssa_core::program::PdaSeed::new(combined);").unwrap();
-                    writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
+                    if is_private {
+                        writeln!(out, "    AccountId::for_private_pda(program_id, &pda_seed, npk)").unwrap();
+                    } else {
+                        writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
+                    }
                 }
                 writeln!(out, "}}").unwrap();
             }
