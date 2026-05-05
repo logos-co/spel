@@ -411,7 +411,12 @@ pub async fn execute_instruction(
                     pp_accounts.push(PrivacyPreservingAccount::Public(id));
                 }
             } else {
-                // PDA account — always public
+                // PDA account.
+                // TODO: private PDAs (pda.private == true) need mask=3 in the LEZ circuit,
+                // which requires PrivacyPreservingAccount::PrivatePdaInit (not yet in
+                // v0.2.0-rc3). Until LEZ exposes that variant, private PDAs are submitted
+                // as Public (mask=0) and the circuit will reject them.  Once LEZ adds
+                // mask-3 wallet support, use a dedicated variant here.
                 let id = *account_map.get(&acc.name).unwrap_or_else(|| {
                     eprintln!("❌ Account '{}' not resolved", acc.name);
                     process::exit(1);
