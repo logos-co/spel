@@ -192,6 +192,18 @@ mod privacy_test {
 
         Ok(SpelOutput::states_only(vec![post]))
     }
+
+    /// Initialize a private PDA — address is unique per (seed, npk) pair.
+    #[instruction]
+    pub fn init_private_pda(
+        #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"))]
+        vault: AccountWithMetadata,
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        user_npk: nssa_core::NullifierPublicKey,
+    ) -> SpelResult {
+        Ok(SpelOutput::execute(vec![vault, authority], vec![]))
+    }
 }
 RUSTEOF
 
@@ -319,6 +331,33 @@ SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" 
 
 log "  ✓ Privacy-preserving TX submitted and confirmed"
 
+# ─── Step 11: Get npk for private account ────────────────────────────────
+
+log "Step 11: Retrieving NullifierPublicKey for private account..."
+NPK_HEX=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account get --keys --account-id "$PRIVATE_ACCOUNT" \
+    2>&1 | grep "^npk " | awk '{print $2}')
+[ -n "$NPK_HEX" ] || fail "Could not retrieve npk for '$PRIVATE_ACCOUNT'"
+log "  npk: ${NPK_HEX:0:20}..."
+
+# ─── Step 12: Compute private PDA address ────────────────────────────────
+
+log "Step 12: Computing private PDA address..."
+PRIVATE_PDA=$("$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" pda vault --npk "$NPK_HEX" \
+    2>"$LOG_DIR/pda.log") || fail "spel pda failed (see $LOG_DIR/pda.log)"
+[ -n "$PRIVATE_PDA" ] || fail "spel pda returned empty address"
+log "  Private PDA: ${PRIVATE_PDA:0:40}..."
+
+# ─── Step 13: Initialize private PDA account ─────────────────────────────
+
+log "Step 13: Initializing private PDA account..."
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+    init-private-pda \
+    --authority "$PRIVATE_ACCOUNT" \
+    --user-npk "$NPK_HEX" \
+    > "$LOG_DIR/private-pda-tx.log" 2>&1 || { cat "$LOG_DIR/private-pda-tx.log"; fail "Private PDA TX failed"; }
+
+log "  ✓ Private PDA initialized at $PRIVATE_PDA"
+
 # ─── Done ─────────────────────────────────────────────────────────────────
 
 log ""
@@ -326,4 +365,5 @@ log "🎉 Privacy smoke test PASSED!"
 log "  Public TX:       $LOG_DIR/public-tx.log"
 log "  Auth-transfer:   $LOG_DIR/auth-transfer.log"
 log "  Private TX:      $LOG_DIR/private-tx.log"
+log "  Private PDA TX:  $LOG_DIR/private-pda-tx.log"
 log "  Sequencer:       $LOG_DIR/sequencer.log"

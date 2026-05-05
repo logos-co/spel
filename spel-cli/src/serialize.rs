@@ -96,6 +96,10 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
                 .collect();
             Ok(DynamicValue::Seq(vals.iter().map(|v| DynamicValue::U32(*v)).collect()))
         }
+        // NullifierPublicKey([u8; 32]) — serializes as a tuple of 32 u8 values
+        (IdlType::Defined { defined }, ParsedValue::ByteArray(bytes)) if defined == "NullifierPublicKey" => {
+            Ok(DynamicValue::Tuple(bytes.iter().map(|b| DynamicValue::U8(*b)).collect()))
+        }
         (IdlType::Option { option: _ }, ParsedValue::None) => Ok(DynamicValue::None),
         (IdlType::Option { option }, ParsedValue::Some(inner)) => {
             Ok(DynamicValue::Some(Box::new(to_dynamic_value(option, inner)?)))

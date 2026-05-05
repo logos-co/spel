@@ -1659,10 +1659,15 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
                             .collect();
                         let is_private = acc.constraints.private_pda;
 
+                        let npk_arg_expr: proc_macro2::TokenStream = match &acc.constraints.npk_arg {
+                            Some(name) => quote! { Some(#name.to_string()) },
+                            None => quote! { None },
+                        };
                         quote! {
                             Some(spel_framework::idl::IdlPda {
                                 seeds: vec![#(#seed_literals),*],
                                 private: #is_private,
+                                npk_arg: #npk_arg_expr,
                             })
                         }
                     };
@@ -1809,7 +1814,10 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                             })
                             .collect();
                         if acc.constraints.private_pda {
-                            format!(",\"pda\":{{\"seeds\":[{}],\"private\":true}}", seeds.join(","))
+                            let npk_json = acc.constraints.npk_arg.as_deref()
+                                .map(|n| format!(",\"npk_arg\":\"{}\"", n))
+                                .unwrap_or_default();
+                            format!(",\"pda\":{{\"seeds\":[{}],\"private\":true{}}}", seeds.join(","), npk_json)
                         } else {
                             format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
                         }
