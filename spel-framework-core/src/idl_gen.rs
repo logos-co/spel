@@ -427,7 +427,7 @@ fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
             // Scan the inner tokens of #[cfg(...)] for test/feature identifiers.
             // This handles all cases: bare `test`, `feature = "x"`, and
             // `any(test, feature = "x")` — because we recurse into nested groups.
-            cfg_tokens_have_exclusion(&list.tokens)
+            cfg_tokens_have_exclusion(&list.tokens, false)
         }
         _ => false,
     }
@@ -435,8 +435,15 @@ fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
 
 /// Recursively scan a token stream for `test` or `feature` identifiers.
 /// Skips tokens inside `not(...)` groups so `#[cfg(not(test))]` is not excluded.
-fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream) -> bool {
+///
+/// When called from an `any(...)` context (in_any = true), returns true only if
+/// ALL alternatives contain exclusion triggers.  This prevents false exclusions
+/// like `#[cfg(any(not(test), feature = "x"))]` which should be included in
+/// default builds because the `not(test)` alternative satisfies it.
+fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) -> bool {
     let mut iter = tokens.clone().into_iter().peekable();
+    let mut alternatives: Vec<bool> = Vec::new(); // for any() context
+
     while let Some(token) = iter.next() {
         match token {
             proc_macro2::TokenTree::Ident(ident) if ident == "not" => {
@@ -445,21 +452,74 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream) -> bool {
                     iter.next(); // consume the group
                 }
             }
+            proc_macro2::TokenTree::Ident(ident) if ident == "any" => {
+                // Handle any(...) — check if ALL alternatives would exclude.
+                let next = iter.peek().cloned();
+                if let Some(proc_macro2::TokenTree::Group(group)) = next {
+                    iter.next(); // consume the group
+                    let mut all_exclude = true;
+                    let mut alt_count = 0;
+                    // Split alternatives by comma at this level.
+                    for alt_token in group.stream().clone() {
+                        match alt_token {
+                            proc_macro2::TokenTree::Group(alt_group) => {
+                                // Nested expression like any(not(test), feature = "x")
+                                alt_count += 1;
+                                if !cfg_tokens_have_exclusion(&alt_group.stream(), true) {
+                                    all_exclude = false;
+                                }
+                            }
+                            proc_macro2::TokenTree::Ident(alt_ident) => {
+                                alt_count += 1;
+                                if alt_ident != "test" && alt_ident != "feature" {
+                                    all_exclude = false;
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+                    // If no alternatives found (parse issue), be conservative.
+                    if alt_count == 0 {
+                        return true;
+                    }
+                    if in_any {
+                        alternatives.push(all_exclude);
+                    } else if all_exclude {
+                        return true; // top-level: all alternatives exclude → exclude
+                    }
+                }
+            }
             proc_macro2::TokenTree::Ident(ident) => {
                 if ident == "test" || ident == "feature" {
-                    return true;
+                    if in_any {
+                        alternatives.push(true);
+                    } else {
+                        return true;
+                    }
                 }
             }
             proc_macro2::TokenTree::Group(group) => {
                 // Recurse into groups (parentheses, braces, brackets).
-                if cfg_tokens_have_exclusion(&group.stream()) {
+                let result = cfg_tokens_have_exclusion(&group.stream(), in_any);
+                if in_any {
+                    alternatives.push(result);
+                } else if result {
                     return true;
                 }
             }
             _ => {}
         }
     }
-    false
+
+    // In any() context: exclude only if ALL alternatives exclude.
+    if in_any && !alternatives.is_empty() {
+        alternatives.iter().all(|&b| b)
+    } else if in_any {
+        // No exclusion triggers found in any alternative → don't exclude.
+        false
+    } else {
+        false
+    }
 }
 
 // ─── Internal parsing types ───────────────────────────────────────────────
