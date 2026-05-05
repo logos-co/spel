@@ -164,10 +164,12 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
     writeln!(out, "    Ok(AccountId::for_public_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?)))").unwrap();
     writeln!(out, "}}").unwrap();
-    writeln!(out, "#[allow(dead_code)]").unwrap();
-    writeln!(out, "fn compute_private_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]], npk: &NullifierPublicKey) -> Result<AccountId, String> {{").unwrap();
-    writeln!(out, "    Ok(AccountId::for_private_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?), npk))").unwrap();
-    writeln!(out, "}}").unwrap();
+    if needs_npk {
+        writeln!(out, "#[allow(dead_code)]").unwrap();
+        writeln!(out, "fn compute_private_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]], npk: &NullifierPublicKey) -> Result<AccountId, String> {{").unwrap();
+        writeln!(out, "    Ok(AccountId::for_private_pda(program_id, &PdaSeed::new(pda_seed_bytes(seeds)?), npk))").unwrap();
+        writeln!(out, "}}").unwrap();
+    }
     writeln!(out).unwrap();
 
     // parse_program_id_hex

@@ -527,12 +527,19 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
     let npk: Option<NullifierPublicKey> = if pda_def.private {
         match npk_hex {
             Some(ref hex) => {
-                use crate::hex::decode_bytes_32;
-                let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-                    eprintln!("❌ Invalid --npk '{}': {}", hex, e);
+                use crate::hex::hex_decode;
+                let hex_clean = hex.strip_prefix("0x").or_else(|| hex.strip_prefix("0X")).unwrap_or(hex);
+                if hex_clean.len() != 64 {
+                    eprintln!("❌ --npk must be a 64-char hex string (32 bytes), got {} chars", hex_clean.len());
+                    std::process::exit(1);
+                }
+                let bytes = hex_decode(hex_clean).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --npk hex '{}': {}", hex, e);
                     std::process::exit(1);
                 });
-                Some(NullifierPublicKey(bytes))
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&bytes);
+                Some(NullifierPublicKey(arr))
             }
             None => {
                 eprintln!("❌ '{}' is a private PDA — pass --npk <64-char-hex>", account_name);

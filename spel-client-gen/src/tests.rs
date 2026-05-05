@@ -1355,6 +1355,7 @@ fn test_private_pda_ffi_is_valid_rust_syntax() {
 #[test]
 fn test_public_pda_does_not_get_npk_import() {
     // A program with only public PDAs should NOT import NullifierPublicKey
+    // and must NOT emit compute_private_pda_with_program (which references it)
     let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
     assert!(
         !output.ffi_code.contains("use nssa_core::NullifierPublicKey;"),
@@ -1363,5 +1364,9 @@ fn test_public_pda_does_not_get_npk_import() {
     assert!(
         !output.client_code.contains("use nssa_core::NullifierPublicKey;"),
         "public-PDA program must NOT import NullifierPublicKey in client"
+    );
+    assert!(
+        !output.ffi_code.contains("compute_private_pda_with_program"),
+        "public-PDA program must NOT emit compute_private_pda_with_program in FFI"
     );
 }
