@@ -24,7 +24,7 @@ pub struct PathDepResult {
     /// transitive ones).
     pub dirs: Vec<PathBuf>,
     /// Non-fatal warnings emitted during discovery (e.g. TOML parse failures,
-    /// missing dep directories, skipped cfg-gated modules).
+    /// missing dep directories, no Cargo.toml found).
     pub warnings: Vec<String>,
 }
 
@@ -653,6 +653,9 @@ mod tests {
 
     // ── workspace detection ────────────────────────────────────────────────
 
+    /// When the program source lives in a directory with no Cargo.toml of its
+    /// own, `find_crate_manifest` walks up to the workspace root.  The member
+    /// search then locates the correct crate manifest.
     #[test]
     fn find_path_dep_dirs_resolves_workspace_member_manifest() {
         let tmp = TempDir::new("workspace-member");
@@ -671,6 +674,8 @@ mod tests {
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../core\" }\n",
         );
+        // Place the program file in a subdirectory WITHOUT its own Cargo.toml,
+        // so find_crate_manifest walks up past methods/guest/ to the workspace root.
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
@@ -679,14 +684,13 @@ mod tests {
         assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
     }
 
+    /// Workspace with glob patterns in members: the glob is expanded and the
+    /// correct member manifest is found.
     #[test]
     fn find_path_dep_dirs_resolves_workspace_with_glob_members() {
         let tmp = TempDir::new("workspace-glob");
 
         // Workspace root with glob pattern in members.
-        // The program source lives under a member directory that has its own
-        // Cargo.toml, so find_crate_manifest finds the member manifest first
-        // (not the workspace root).  This is the normal and expected case.
         tmp.write(
             "Cargo.toml",
             "[workspace]\nmembers = [\"crates/*\", \"methods/guest\"]\n",
@@ -701,11 +705,11 @@ mod tests {
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../crates/core\" }\n",
         );
+        // Source is in a subdirectory with no Cargo.toml → workspace root found.
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
         assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
-        // Member manifest is found first; workspace detection is not triggered.
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("crates/core"), "expected crates/core dir, got {:?}", result.dirs);
     }
@@ -734,8 +738,8 @@ mod tests {
             "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ntoken_core = { path = \"../../core\" }\n",
         );
-        // Place the program file directly under methods/guest/ (no intermediate Cargo.toml)
-        let program = tmp.write("methods/guest/token.rs", "");
+        // Place the program file in a subdirectory WITHOUT its own Cargo.toml.
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
         // The fallback search should find methods/guest/Cargo.toml
@@ -1249,6 +1253,112 @@ pub mod experimental {
         assert!(
             !account_names.contains(&"ExperimentalAccount"),
             "ExperimentalAccount in #[cfg(feature)] module should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// `#[cfg(any(test, ...))]` wrappers are also detected — if any alternative
+    /// references `test` or `feature`, the item is excluded.
+    #[test]
+    fn cfg_any_test_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-any-test");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(any(test, feature = "debug-tools"))]
+pub mod debug {
+    #[account_type]
+    pub struct DebugAccount { pub trace_id: String }
+}
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"DebugAccount"),
+            "DebugAccount in #[cfg(any(test, ...))] module should be excluded; got {:?}",
+            account_names
+        );
+    }
+
+    /// Top-level (non-module) items with #[cfg(test)] are also filtered.
+    /// e.g. `#[cfg(test)] #[account_type] struct TestAccount {}`
+    #[test]
+    fn cfg_test_top_level_struct_excluded_from_idl() {
+        use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+
+        let tmp = TempDir::new("cfg-test-top-level");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct RealAccount { pub balance: u128 }
+
+#[cfg(test)]
+#[account_type]
+pub struct TestOnlyStruct { pub fake: u64 }
+"#,
+        );
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            "#[lez_program]\npub mod token {\n  \
+             #[instruction]\n  \
+             pub fn transfer(acc: AccountWithMetadata) -> SpelResult { todo!() }\n}\n",
+        );
+
+        let dep_result = find_path_dep_dirs(&program);
+        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+
+        let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
+        assert!(
+            account_names.contains(&"RealAccount"),
+            "RealAccount should be present; got {:?}",
+            account_names
+        );
+        assert!(
+            !account_names.contains(&"TestOnlyStruct"),
+            "Top-level #[cfg(test)] struct should be excluded; got {:?}",
             account_names
         );
     }

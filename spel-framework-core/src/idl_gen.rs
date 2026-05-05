@@ -353,7 +353,26 @@ fn collect_items_recursive(
                     }
                 }
             }
-            _ => out.push(item.clone()),
+            // Non-module items (structs, enums, etc.) — also skip if cfg-gated.
+            other => {
+                let attrs: &[syn::Attribute] = match other {
+                    syn::Item::Struct(s) => &s.attrs,
+                    syn::Item::Enum(e) => &e.attrs,
+                    syn::Item::Fn(f) => &f.attrs,
+                    syn::Item::Trait(t) => &t.attrs,
+                    syn::Item::Impl(i) => &i.attrs,
+                    syn::Item::Type(t) => &t.attrs,
+                    syn::Item::Static(s) => &s.attrs,
+                    syn::Item::Const(c) => &c.attrs,
+                    syn::Item::ExternCrate(e) => &e.attrs,
+                    syn::Item::Use(u) => &u.attrs,
+                    _ => &[],
+                };
+                if is_cfg_excluded(attrs) {
+                    continue;
+                }
+                out.push(other.clone());
+            }
         }
     }
 }
@@ -361,37 +380,27 @@ fn collect_items_recursive(
 /// Return `true` if the item's attributes contain a `#[cfg(...)]` that would
 /// exclude it from a default (non-test, no-extra-features) build.
 ///
-/// This is a conservative heuristic: we skip the module if *any* `#[cfg]`
-/// attribute references `test`, or a named feature.  We do *not* attempt
-/// full cfg expression evaluation (e.g. `cfg(any(...))`, `cfg(not(...))`)
-/// because that requires target-triple knowledge and feature resolution.
+/// Handles:
+/// - `#[cfg(test)]` — always excluded (test-only).
+/// - `#[cfg(feature = "...")]` — excluded (unknown which features are enabled).
+/// - `#[cfg(any(test, ...))]` / `#[cfg(any(feature = "...", ...))]` — excluded
+///   if *any* alternative references `test` or `feature`.
+/// - `#[cfg_attr(test, ...)]` — excluded.
+///
+/// Does **not** handle:
+/// - `#[cfg(not(test))]` — negation is rare for test-gating and would require
+///   full expression evaluation.
+/// - Target-triple cfgs (`target_os`, `windows`, etc.) — unresolvable at
+///   IDL-gen time without knowing the build target.
 fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
     for attr in attrs {
-        if !attr.path().is_ident("cfg") {
-            continue;
-        }
-
-        // Parse cfg contents using parse_nested_meta which handles both
-        // `#[cfg(test)]` (bare path) and `#[cfg(feature = "...")]` (name-value).
-        let mut excluded = false;
-        let _ = attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("test") {
-                excluded = true;
-            } else if meta.path.is_ident("feature") {
-                // `#[cfg(feature = "...")]` — any feature gate means excluded
-                // since we don't know which features are enabled.
-                excluded = true;
+        if attr.path().is_ident("cfg") {
+            // Parse cfg contents recursively to handle `any(...)` wrappers.
+            if cfg_attr_excludes(attr) {
+                return true;
             }
-            // Ignore other cfg keys (target_os, windows, etc.) — they depend
-            // on the build target and we can't resolve them at IDL-gen time.
-            Ok(())
-        });
-        if excluded {
-            return true;
-        }
-
-        // Also check for simple `#[cfg_attr(test, ...)]` patterns.
-        if attr.path().is_ident("cfg_attr") {
+        } else if attr.path().is_ident("cfg_attr") {
+            // `#[cfg_attr(test, ...)]` — excluded.
             let mut found_test = false;
             let _ = attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("test") {
@@ -403,6 +412,20 @@ fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
                 return true;
             }
         }
+    }
+    false
+}
+
+/// Recursively check a `#[cfg(...)]` attribute for exclusion triggers.
+/// Handles bare paths (`test`, `feature = "..."`) and `any(...)` wrappers.
+fn cfg_attr_excludes(attr: &syn::Attribute) -> bool {
+    // Scan the debug representation of the meta for test/feature identifiers.
+    // This catches patterns like `#[cfg(any(test, feature = "x"))]` that
+    // parse_nested_meta alone cannot recurse into.  The Debug output from
+    // syn (with extra-traits) contains the token text we need.
+    let debug_text = format!("{:?}", attr.meta);
+    if debug_text.contains("test") || debug_text.contains("feature") {
+        return true;
     }
     false
 }
