@@ -260,8 +260,11 @@ pub async fn run() {
                 });
 
                 if sources.len() == 1 {
-                    let dep_dirs = find_path_dep_dirs(&sources[0]);
-                    match generate_idl_from_file_with_deps(&sources[0], &dep_dirs) {
+                    let dep_result = find_path_dep_dirs(&sources[0]);
+                    for w in &dep_result.warnings {
+                        eprintln!("{}", w);
+                    }
+                    match generate_idl_from_file_with_deps(&sources[0], &dep_result.dirs) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -272,8 +275,11 @@ pub async fn run() {
                     // Multiple programs: write <name>-idl.json for each
                     let mut had_error = false;
                     for source in &sources {
-                        let dep_dirs = find_path_dep_dirs(source);
-                        match generate_idl_from_file_with_deps(source, &dep_dirs) {
+                        let dep_result = find_path_dep_dirs(source);
+                        for w in &dep_result.warnings {
+                            eprintln!("{}", w);
+                        }
+                        match generate_idl_from_file_with_deps(source, &dep_result.dirs) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
                                 match fs::write(&out_name, serde_json::to_string_pretty(&idl).unwrap()) {

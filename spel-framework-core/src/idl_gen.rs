@@ -332,6 +332,14 @@ fn collect_items_recursive(
     for item in items {
         match item {
             syn::Item::Mod(m) => {
+                // Skip modules gated behind #[cfg(...)] that would not be
+                // compiled in a default build (e.g. #[cfg(test)],
+                // #[cfg(feature = "...")]).  This prevents test-only or
+                // feature-gated types from leaking into the on-chain IDL.
+                if is_cfg_excluded(&m.attrs) {
+                    continue;
+                }
+
                 if let Some((_, inner)) = &m.content {
                     // Inline module — recurse into its body with an updated base_dir
                     // so that any file-backed `mod` declarations inside it resolve
@@ -348,6 +356,55 @@ fn collect_items_recursive(
             _ => out.push(item.clone()),
         }
     }
+}
+
+/// Return `true` if the item's attributes contain a `#[cfg(...)]` that would
+/// exclude it from a default (non-test, no-extra-features) build.
+///
+/// This is a conservative heuristic: we skip the module if *any* `#[cfg]`
+/// attribute references `test`, or a named feature.  We do *not* attempt
+/// full cfg expression evaluation (e.g. `cfg(any(...))`, `cfg(not(...))`)
+/// because that requires target-triple knowledge and feature resolution.
+fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("cfg") {
+            continue;
+        }
+
+        // Parse cfg contents using parse_nested_meta which handles both
+        // `#[cfg(test)]` (bare path) and `#[cfg(feature = "...")]` (name-value).
+        let mut excluded = false;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("test") {
+                excluded = true;
+            } else if meta.path.is_ident("feature") {
+                // `#[cfg(feature = "...")]` — any feature gate means excluded
+                // since we don't know which features are enabled.
+                excluded = true;
+            }
+            // Ignore other cfg keys (target_os, windows, etc.) — they depend
+            // on the build target and we can't resolve them at IDL-gen time.
+            Ok(())
+        });
+        if excluded {
+            return true;
+        }
+
+        // Also check for simple `#[cfg_attr(test, ...)]` patterns.
+        if attr.path().is_ident("cfg_attr") {
+            let mut found_test = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("test") {
+                    found_test = true;
+                }
+                Ok(())
+            });
+            if found_test {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 // ─── Internal parsing types ───────────────────────────────────────────────
