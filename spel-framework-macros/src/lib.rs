@@ -1864,6 +1864,209 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
 
 // ─── generate_idl! macro implementation ──────────────────────────────────
 
+/// Walk up from `start` to find the nearest `Cargo.toml`.
+fn find_crate_manifest(start: &std::path::Path) -> Option<std::path::PathBuf> {
+    let mut dir: &std::path::Path = if start.is_file() { start.parent()? } else { start };
+    loop {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Return the crate-root directories of all `path = "..."` entries in the
+/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+///
+/// Only runtime dependencies are considered.  `[dev-dependencies]` and
+/// `[build-dependencies]` are deliberately excluded: types defined in those
+/// crates are not part of the program's on-chain interface and must not appear
+/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
+/// are also excluded so that only project-local crates are scanned.
+///
+/// **Transitive path-dependencies** are resolved: if a discovered dependency
+/// itself declares path-based dependencies, those are included as well (with
+/// cycle detection).
+fn find_path_dep_dirs(source_path: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let manifest = match find_crate_manifest(source_path) {
+        Some(m) => m,
+        None => return vec![],
+    };
+
+    let content = match std::fs::read_to_string(&manifest) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return vec![],
+    };
+
+    // Check if this is a workspace root — if so, it has no [dependencies] of its
+    // own.  We need to find the actual crate manifest for the program binary.
+    let is_workspace = value.get("workspace").is_some()
+        && value.get("package").is_none();
+
+    if is_workspace {
+        // Workspace root: search member directories for the crate that contains
+        // the source file.
+        let mut dirs = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        if let Some(member_manifest) = find_member_manifest(&manifest_dir, &value, source_path) {
+            resolve_path_deps_recursive(&member_manifest, &mut dirs, &mut visited);
+        }
+        dirs
+    } else {
+        // Regular crate manifest — extract path deps directly.
+        let mut dirs = Vec::new();
+        let mut visited = std::collections::HashSet::new();
+        resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited);
+        dirs
+    }
+}
+
+/// Recursively extract path-based dependencies from a manifest, following
+/// transitive path deps.  `visited` tracks canonicalised directories to avoid
+/// infinite loops.
+fn resolve_path_deps_recursive(
+    manifest: &std::path::Path,
+    dirs: &mut Vec<std::path::PathBuf>,
+    visited: &mut std::collections::HashSet<std::path::PathBuf>,
+) {
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return,
+    };
+
+    // Deduplicate by canonical path.
+    let canonical = match &manifest_dir.canonicalize() {
+        Ok(c) => c.clone(),
+        Err(_) => manifest_dir.clone(),
+    };
+    if !visited.insert(canonical) {
+        return; // already processed — cycle or duplicate
+    }
+
+    let content = match std::fs::read_to_string(manifest) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Skip workspace roots — they have no [dependencies].
+    if value.get("workspace").is_some() && value.get("package").is_none() {
+        return;
+    }
+
+    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
+        for (_name, dep) in table {
+            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+                let dep_dir = manifest_dir.join(rel);
+                if !dep_dir.is_dir() {
+                    continue;
+                }
+                dirs.push(dep_dir.clone());
+
+                // Recurse into the dependency's own Cargo.toml for transitive deps.
+                let dep_manifest = dep_dir.join("Cargo.toml");
+                if dep_manifest.exists() {
+                    resolve_path_deps_recursive(&dep_manifest, dirs, visited);
+                }
+            }
+        }
+    }
+}
+
+/// Given a workspace root directory, try to locate the member crate manifest
+/// that contains `source_path`.
+fn find_member_manifest(
+    workspace_root: &std::path::Path,
+    workspace_value: &toml::Value,
+    source_path: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    // Try to get the explicit member list from [workspace.members].
+    let members: Vec<String> = workspace_value
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
+    // Expand glob patterns (e.g. "crates/*") into concrete directories.
+    let concrete_members: Vec<String> = if members.iter().any(|m| m.contains('*')) {
+        let mut expanded = Vec::new();
+        for pattern in &members {
+            if pattern.contains('*') {
+                // Simple glob expansion: replace * with readdir.
+                let prefix = pattern.split_once('*').map(|(p, _)| p).unwrap_or("");
+                let dir = workspace_root.join(prefix);
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
+                            expanded.push(format!("{}/{}", prefix, entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+            } else {
+                expanded.push(pattern.clone());
+            }
+        }
+        expanded
+    } else {
+        members.clone()
+    };
+
+    // Find the member whose directory contains source_path.
+    let source_dir = source_path.parent().unwrap_or(source_path);
+    for member in &concrete_members {
+        let member_dir = workspace_root.join(member.as_str());
+        if member_dir.is_dir() && source_dir.starts_with(&member_dir) {
+            let manifest = member_dir.join("Cargo.toml");
+            if manifest.exists() {
+                return Some(manifest);
+            }
+        }
+    }
+
+    // Fallback: recursively search all subdirectories for a Cargo.toml that
+    // contains source_path.
+    fn search_recursive(dir: &std::path::Path, target_dir: &std::path::Path) -> Option<std::path::PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    if let Some(found) = search_recursive(&entry.path(), target_dir) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() && target_dir.starts_with(dir) {
+            // Skip virtual workspace manifests.
+            let is_virtual_workspace = std::fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|content| content.parse::<toml::Value>().ok())
+                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
+                .unwrap_or(false);
+            if !is_virtual_workspace {
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    search_recursive(workspace_root, source_dir)
+}
+
 fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result<TokenStream2> {
     // Try the path as-is first, then relative to CARGO_MANIFEST_DIR
     let resolved_path = if std::path::Path::new(file_path).exists() {
@@ -1959,6 +2162,16 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // commonly defines account structs inside the program module.
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
+
+    // Also scan path-dependency crates for #[account_type] types.
+    // This handles the common project structure where account types are defined
+    // in a shared core crate (e.g. my_program_core) and the program binary
+    // depends on it via `path = "..."`.
+    let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
+    let dep_dirs = find_path_dep_dirs(&resolved_path_buf);
+    let extra_items = spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
+    all_items.extend(extra_items);
+
     let (accounts, types) = account_types::collect_account_types(&all_items);
 
     // Generate the IDL JSON
@@ -1977,4 +2190,325 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             println!("{}", spel_framework::serde_json::to_string_pretty(&json).unwrap());
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// Self-cleaning temporary directory.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(label: &str) -> Self {
+            let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!("spel-macro-test-{}-{}", label, n));
+            std::fs::create_dir_all(&path).unwrap();
+            TempDir(path)
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.0
+        }
+
+        fn write(&self, rel: &str, content: &str) -> std::path::PathBuf {
+            let p = self.0.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, content).unwrap();
+            p
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    // ── has_account_type_attr (qualified form) ─────────────────────────────
+
+    #[test]
+    fn has_account_type_attr_matches_bare_form() {
+        let file = syn::parse_file(
+            "#[account_type]\npub struct Vault { pub balance: u64 }",
+        )
+        .unwrap();
+        if let syn::Item::Struct(s) = &file.items[0] {
+            assert!(account_types::has_account_type_attr(&s.attrs));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn has_account_type_attr_matches_qualified_form() {
+        let file = syn::parse_file(
+            "#[spel_framework_macros::account_type]\npub struct Vault { pub balance: u64 }",
+        )
+        .unwrap();
+        if let syn::Item::Struct(s) = &file.items[0] {
+            assert!(account_types::has_account_type_attr(&s.attrs));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn has_account_type_attr_matches_deeply_qualified_form() {
+        let file = syn::parse_file(
+            "#[foo::bar::account_type]\npub struct Vault { pub balance: u64 }",
+        )
+        .unwrap();
+        if let syn::Item::Struct(s) = &file.items[0] {
+            assert!(account_types::has_account_type_attr(&s.attrs));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    #[test]
+    fn has_account_type_attr_rejects_other_attrs() {
+        let file = syn::parse_file(
+            "#[derive(Debug)]\npub struct Vault { pub balance: u64 }",
+        )
+        .unwrap();
+        if let syn::Item::Struct(s) = &file.items[0] {
+            assert!(!account_types::has_account_type_attr(&s.attrs));
+        } else {
+            panic!("expected struct");
+        }
+    }
+
+    // ── find_path_dep_dirs ─────────────────────────────────────────────────
+
+    #[test]
+    fn find_path_dep_dirs_returns_local_path_deps() {
+        let tmp = TempDir::new("find-path-deps-macro");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].ends_with("core"), "expected core dir, got {:?}", dirs[0]);
+    }
+
+    #[test]
+    fn find_path_dep_dirs_ignores_registry_and_git_deps() {
+        let tmp = TempDir::new("find-path-deps-filter-macro");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\n\
+             token_core = { path = \"../../core\" }\n\
+             serde = { version = \"1.0\" }\n\
+             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        assert_eq!(dirs.len(), 1);
+        assert!(dirs[0].ends_with("core"));
+    }
+
+    #[test]
+    fn find_path_dep_dirs_ignores_dev_and_build_deps() {
+        let tmp = TempDir::new("find-path-deps-dev-build-macro");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+        tmp.write(
+            "test_helpers/Cargo.toml",
+            "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("test_helpers/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\n\
+             token_core = { path = \"../../core\" }\n\n\
+             [dev-dependencies]\n\
+             test_helpers = { path = \"../../test_helpers\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
+        assert!(dirs[0].ends_with("core"));
+    }
+
+    #[test]
+    fn find_path_dep_dirs_resolves_transitive_deps() {
+        let tmp = TempDir::new("transitive-deps-macro");
+
+        // shared_types -> core -> guest
+        tmp.write(
+            "shared/Cargo.toml",
+            "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("shared/src/lib.rs", "");
+
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nshared_types = { path = \"../shared\" }\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let dirs = find_path_dep_dirs(&program);
+        assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
+        let names: Vec<&str> = dirs.iter().map(|d| d.file_name().unwrap().to_str().unwrap()).collect();
+        assert!(names.contains(&"core"));
+        assert!(names.contains(&"shared"));
+    }
+
+    // ── expand_generate_idl with path deps ─────────────────────────────────
+
+    /// End-to-end test: generate_idl! macro collects #[account_type] types from
+    /// a path-dependency crate.
+    #[test]
+    fn generate_idl_collects_account_types_from_path_dep() {
+        let tmp = TempDir::new("generate-idl-path-dep");
+
+        // Core crate with account types
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[account_type]
+pub struct TokenHolding {
+    pub balance: u128,
+}
+
+#[account_type]
+pub enum TokenDefinition {
+    Fungible { name: String },
+}
+"#,
+        );
+
+        // Guest crate depending on core
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            r#"
+#[lez_program]
+pub mod token {
+    #[instruction]
+    pub fn transfer(
+        sender: AccountWithMetadata,
+        recipient: AccountWithMetadata,
+        amount: u128,
+    ) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        // Run expand_generate_idl
+        let tokens = expand_generate_idl(
+            program.to_str().unwrap(),
+            &syn::LitStr::new("test", proc_macro2::Span::call_site()),
+        )
+        .unwrap();
+
+        // The generated code should contain main() with IDL that includes the account types.
+        let output = tokens.to_string();
+        assert!(
+            output.contains("TokenHolding"),
+            "TokenHolding from path dep not found in generated IDL. Output: {}", output
+        );
+        assert!(
+            output.contains("TokenDefinition"),
+            "TokenDefinition from path dep not found in generated IDL. Output: {}", output
+        );
+    }
+
+    /// Account types using the fully-qualified #[spel_framework_macros::account_type]
+    /// form should also be collected from path-dep crates.
+    #[test]
+    fn generate_idl_collects_qualified_account_type_from_path_dep() {
+        let tmp = TempDir::new("generate-idl-qualified");
+
+        // Core crate with account types using fully-qualified attribute
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write(
+            "core/src/lib.rs",
+            r#"
+#[spel_framework_macros::account_type]
+pub struct VaultConfig {
+    pub owner: String,
+}
+"#,
+        );
+
+        // Guest crate depending on core
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/token.rs",
+            r#"
+#[lez_program]
+pub mod token {
+    #[instruction]
+    pub fn init(acc: AccountWithMetadata) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let tokens = expand_generate_idl(
+            program.to_str().unwrap(),
+            &syn::LitStr::new("test", proc_macro2::Span::call_site()),
+        )
+        .unwrap();
+
+        let output = tokens.to_string();
+        assert!(
+            output.contains("VaultConfig"),
+            "VaultConfig with qualified attribute not found in generated IDL. Output: {}", output
+        );
+    }
 }

@@ -16,8 +16,16 @@ use crate::idl::{
 // ─── Account type scanning ────────────────────────────────────────────────
 
 /// Check if an item has the `#[account_type]` attribute.
-pub(crate) fn has_account_type_attr(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|a| a.path().is_ident("account_type"))
+///
+/// Matches both the bare form `#[account_type]` and the fully-qualified
+/// form `#[spel_framework_macros::account_type]` (idiomatic when importing
+/// via a path rather than a `use` declaration).
+pub fn has_account_type_attr(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        let path = a.path();
+        path.is_ident("account_type")
+            || path.segments.last().map_or(false, |s| s.ident == "account_type")
+    })
 }
 
 /// Convert a Rust `syn::Type` to an IDL type representation.

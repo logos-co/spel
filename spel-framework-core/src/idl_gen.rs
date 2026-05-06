@@ -236,7 +236,12 @@ fn generate_idl_inner(
 
 /// Parse the library source of each crate directory and return all `syn::Item`s
 /// found, following `mod` declarations recursively.
-fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
+///
+/// Each entry in `dirs` should be a Rust crate root (the directory that
+/// contains `src/lib.rs`).  Only local path-dependencies should be passed
+/// here — third-party registry or git crates are intentionally excluded to
+/// avoid pulling in unrelated type definitions.
+pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
     let mut items = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     for dir in dirs {
