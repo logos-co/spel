@@ -100,6 +100,12 @@ pub enum SpelError {
         actual: String,
     },
 
+    /// Account owner does not match the expected program (e.g. self_program_id).
+    #[error("Account '{account_name}' has wrong owner")]
+    AccountOwnerMismatch {
+        account_name: String,
+    },
+
     /// Custom program-specific error with code and message
     #[error("Program error {code}: {message}")]
     Custom {
@@ -130,6 +136,7 @@ impl SpelError {
             SpelError::Overflow { .. } => 1007,
             SpelError::Unauthorized { .. } => 1008,
             SpelError::PdaMismatch { .. } => 1009,
+            SpelError::AccountOwnerMismatch { .. } => 1010,
             SpelError::Custom { code, .. } => 6000 + code,
         }
     }

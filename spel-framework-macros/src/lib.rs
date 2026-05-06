@@ -155,6 +155,9 @@ struct InstructionInfo {
     accounts: Vec<AccountParam>,
     /// Non-account parameters (the instruction args)
     args: Vec<ArgParam>,
+    /// True if this instruction has a ProgramContext parameter.
+    /// The context is injected by the dispatcher and never appears in IDL/ABI.
+    has_context: bool,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
 }
@@ -472,6 +475,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     let fn_name = func.sig.ident.clone();
     let mut accounts = Vec::new();
     let mut args = Vec::new();
+    let mut has_context = false;
 
     for input in &func.sig.inputs {
         match input {
@@ -493,6 +497,9 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                         constraints,
                         is_rest: true,
                     });
+                } else if is_context_type(ty) {
+                    // ProgramContext — injected by dispatcher, not part of ABI/IDL.
+                    has_context = true;
                 } else {
                     args.push(ArgParam {
                         name: param_name,
@@ -513,6 +520,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         fn_name,
         accounts,
         args,
+        has_context,
         func,
     })
 }
@@ -547,6 +555,16 @@ fn is_vec_account_type(ty: &Type) -> bool {
                     }
                 }
             }
+        }
+    }
+    false
+}
+
+/// Check if a type is ProgramContext (execution context injected by dispatcher).
+fn is_context_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "ProgramContext";
         }
     }
     false
@@ -792,24 +810,30 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }
             };
 
-            // Check if this instruction has any validation (signer/init/pda checks)
+            // Check if this instruction has any validation (signer/init/owner/pda checks)
             let has_validation = ix.accounts.iter().any(|a| {
-                a.constraints.signer || a.constraints.init || !a.constraints.pda_seeds.is_empty()
+                a.constraints.signer || a.constraints.init || a.constraints.owner.is_some() || !a.constraints.pda_seeds.is_empty()
             });
             let validate_fn_name = format_ident!("__validate_{}", ix.fn_name);
 
-            let call_args: Vec<TokenStream2> = ix
-                .accounts
-                .iter()
-                .map(|a| {
+            let call_args: Vec<TokenStream2> = {
+                let mut args: Vec<TokenStream2> = Vec::new();
+                // Context is always first if present (matches typical function signature).
+                if ix.has_context {
+                    args.push(quote! {
+                        nssa_core::program::ProgramContext::new(self_program_id, caller_program_id)
+                    });
+                }
+                args.extend(ix.accounts.iter().map(|a| {
                     let name = &a.name;
                     quote! { #name }
-                })
-                .chain(ix.args.iter().map(|a| {
+                }));
+                args.extend(ix.args.iter().map(|a| {
                     let name = &a.name;
                     quote! { #name }
-                }))
-                .collect();
+                }));
+                args
+            };
 
             // Collect arg seed values to pass to validation
             let arg_seed_values: Vec<TokenStream2> = {
@@ -1334,6 +1358,26 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 })
                 .collect();
 
+            // Generate owner checks for accounts with #[account(owner = expr)]
+            let owner_checks: Vec<TokenStream2> = ix
+                .accounts
+                .iter()
+                .enumerate()
+                .filter(|(_, acc)| acc.constraints.owner.is_some())
+                .map(|(i, acc)| {
+                    let idx = i;
+                    let acc_name = acc.name.to_string();
+                    let owner_expr = acc.constraints.owner.as_ref().unwrap();
+                    quote! {
+                        if accounts[#idx].account.program_owner != #owner_expr {
+                            return Err(spel_framework::error::SpelError::AccountOwnerMismatch {
+                                account_name: #acc_name.to_string(),
+                            });
+                        }
+                    }
+                })
+                .collect();
+
             // Extra parameters for arg PDA seeds
             let arg_seed_params = pda_arg_params(ix);
 
@@ -1439,7 +1483,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 })
                 .collect();
 
-            if signer_checks.is_empty() && init_checks.is_empty() && pda_checks.is_empty() {
+            if signer_checks.is_empty() && init_checks.is_empty() && pda_checks.is_empty() && owner_checks.is_empty() {
                 return quote! {};
             }
 
@@ -1460,6 +1504,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 ) -> Result<(), spel_framework::error::SpelError> {
                     #(#signer_checks)*
                     #(#init_checks)*
+                    #(#owner_checks)*
                     #(#pda_checks)*
                     Ok(())
                 }
@@ -1673,13 +1718,34 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
                     } else {
                         vec![quote! { "public".to_string() }]
                     };
+                    // Owner constraint in IDL.
+                    let owner_literal = if let Some(ref owner) = acc.constraints.owner {
+                        if let syn::Expr::Path(ep) = owner {
+                            if let Some(seg) = ep.path.segments.last() {
+                                if seg.ident == "self_program_id" {
+                                    quote! { Some("self_program_id".to_string()) }
+                                } else {
+                                    let s = format!("{}", quote!(#owner));
+                                    quote! { Some(#s.to_string()) }
+                                }
+                            } else {
+                                quote! { None }
+                            }
+                        } else {
+                            let s = format!("{}", quote!(#owner));
+                            quote! { Some(#s.to_string()) }
+                        }
+                    } else {
+                        quote! { None }
+                    };
+
                     quote! {
                         spel_framework::idl::IdlAccountItem {
                             name: #acc_name.to_string(),
                             writable: #writable,
                             signer: #signer,
                             init: #init,
-                            owner: None,
+                            owner: #owner_literal,
                             pda: #pda_expr,
                             rest: #is_rest,
                             visibility: vec![#(#visibility_tags),*],
