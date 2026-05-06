@@ -8,6 +8,7 @@ pub mod spel_output;
 pub mod idl;
 pub mod pda;
 pub mod validation;
+pub mod context;
 
 #[cfg(feature = "idl-gen")]
 pub mod account_types;
@@ -34,6 +35,9 @@ pub mod prelude {
 
     // spel-framework additional re-exports
     pub use nssa_core::program::{InstructionData, ProgramInput, ProgramOutput, read_nssa_inputs};
+
+    // Execution context for instruction handlers (issue #172)
+    pub use crate::context::ProgramContext;
 
     // nssa::public_transaction (host-only)
     #[cfg(feature = "host")]
