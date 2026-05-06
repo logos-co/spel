@@ -236,7 +236,12 @@ fn generate_idl_inner(
 
 /// Parse the library source of each crate directory and return all `syn::Item`s
 /// found, following `mod` declarations recursively.
-fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
+///
+/// Each entry in `dirs` should be a Rust crate root (the directory that
+/// contains `src/lib.rs`).  Only local path-dependencies should be passed
+/// here — third-party registry or git crates are intentionally excluded to
+/// avoid pulling in unrelated type definitions.
+pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
     let mut items = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     for dir in dirs {
@@ -744,6 +749,215 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
                 func_name
             ),
         )),
+    }
+}
+
+// ─── Path-dependency scanning (shared by CLI and proc-macro) ─────────────
+
+/// Return the crate-root directories of all `path = "..."` entries in the
+/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+///
+/// Only runtime dependencies are considered.  `[dev-dependencies]` and
+/// `[build-dependencies]` are deliberately excluded: types defined in those
+/// crates are not part of the program's on-chain interface and must not appear
+/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
+/// are also excluded so that only project-local crates are scanned.
+///
+/// **Transitive path-dependencies** are resolved: if a discovered dependency
+/// itself declares path-based dependencies, those are included as well (with
+/// cycle detection).
+///
+/// In workspace projects the function detects when the nearest `Cargo.toml` is
+/// a workspace root manifest and searches for the actual crate manifest
+/// containing `[dependencies]`.
+pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
+    let manifest = match _find_crate_manifest(source_path) {
+        Some(m) => m,
+        None => return vec![],
+    };
+
+    let content = match std::fs::read_to_string(&manifest) {
+        Ok(c) => c,
+        Err(_) => return vec![],
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return vec![],
+    };
+
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return vec![],
+    };
+
+    // Check if this is a workspace root — if so, it has no [dependencies] of its
+    // own.  We need to find the actual crate manifest for the program binary.
+    let is_workspace = value.get("workspace").is_some()
+        && value.get("package").is_none();
+
+    if is_workspace {
+        // Workspace root: search member directories for the crate that contains
+        // the source file.
+        let mut dirs = Vec::new();
+        let mut visited = HashSet::new();
+        if let Some(member_manifest) = _find_member_manifest(&manifest_dir, &value, source_path) {
+            _resolve_path_deps_recursive(&member_manifest, &mut dirs, &mut visited);
+        }
+        dirs
+    } else {
+        // Regular crate manifest — extract path deps directly.
+        let mut dirs = Vec::new();
+        let mut visited = HashSet::new();
+        _resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited);
+        dirs
+    }
+}
+
+/// Recursively extract path-based dependencies from a manifest, following
+/// transitive path deps.  `visited` tracks canonicalised directories to avoid
+/// infinite loops.
+fn _resolve_path_deps_recursive(
+    manifest: &Path,
+    dirs: &mut Vec<PathBuf>,
+    visited: &mut HashSet<PathBuf>,
+) {
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return,
+    };
+
+    // Deduplicate by canonical path.
+    let canonical = match &manifest_dir.canonicalize() {
+        Ok(c) => c.clone(),
+        Err(_) => manifest_dir.clone(),
+    };
+    if !visited.insert(canonical) {
+        return; // already processed — cycle or duplicate
+    }
+
+    let content = match std::fs::read_to_string(manifest) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Skip workspace roots — they have no [dependencies].
+    if value.get("workspace").is_some() && value.get("package").is_none() {
+        return;
+    }
+
+    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
+        for (_name, dep) in table {
+            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+                let dep_dir = manifest_dir.join(rel);
+                if !dep_dir.is_dir() {
+                    continue;
+                }
+                dirs.push(dep_dir.clone());
+
+                // Recurse into the dependency's own Cargo.toml for transitive deps.
+                let dep_manifest = dep_dir.join("Cargo.toml");
+                if dep_manifest.exists() {
+                    _resolve_path_deps_recursive(&dep_manifest, dirs, visited);
+                }
+            }
+        }
+    }
+}
+
+/// Given a workspace root directory, try to locate the member crate manifest
+/// that contains `source_path`.
+fn _find_member_manifest(
+    workspace_root: &Path,
+    workspace_value: &toml::Value,
+    source_path: &Path,
+) -> Option<PathBuf> {
+    // Try to get the explicit member list from [workspace.members].
+    let members: Vec<String> = workspace_value
+        .get("workspace")
+        .and_then(|w| w.get("members"))
+        .and_then(|m| m.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+        .unwrap_or_default();
+
+    // Expand glob patterns (e.g. "crates/*") into concrete directories.
+    let concrete_members: Vec<String> = if members.iter().any(|m| m.contains('*')) {
+        let mut expanded = Vec::new();
+        for pattern in &members {
+            if pattern.contains('*') {
+                // Simple glob expansion: replace * with readdir.
+                let prefix = pattern.split_once('*').map(|(p, _)| p).unwrap_or("");
+                let dir = workspace_root.join(prefix);
+                if let Ok(entries) = std::fs::read_dir(&dir) {
+                    for entry in entries.flatten() {
+                        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
+                            expanded.push(format!("{}/{}", prefix, entry.file_name().to_string_lossy()));
+                        }
+                    }
+                }
+            } else {
+                expanded.push(pattern.clone());
+            }
+        }
+        expanded
+    } else {
+        members.clone()
+    };
+
+    // Find the member whose directory contains source_path.
+    let source_dir = source_path.parent().unwrap_or(source_path);
+    for member in &concrete_members {
+        let member_dir = workspace_root.join(member.as_str());
+        if member_dir.is_dir() && source_dir.starts_with(&member_dir) {
+            let manifest = member_dir.join("Cargo.toml");
+            if manifest.exists() {
+                return Some(manifest);
+            }
+        }
+    }
+
+    // Fallback: recursively search all subdirectories for a Cargo.toml that
+    // contains source_path.
+    fn _search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                    if let Some(found) = _search_recursive(&entry.path(), target_dir) {
+                        return Some(found);
+                    }
+                }
+            }
+        }
+        let manifest = dir.join("Cargo.toml");
+        if manifest.exists() && target_dir.starts_with(dir) {
+            // Skip virtual workspace manifests.
+            let is_virtual_workspace = std::fs::read_to_string(&manifest)
+                .ok()
+                .and_then(|content| content.parse::<toml::Value>().ok())
+                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
+                .unwrap_or(false);
+            if !is_virtual_workspace {
+                return Some(manifest);
+            }
+        }
+        None
+    }
+
+    _search_recursive(workspace_root, source_dir)
+}
+
+/// Walk up from `start` to find the nearest `Cargo.toml`.
+fn _find_crate_manifest(start: &Path) -> Option<PathBuf> {
+    let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
+    loop {
+        let candidate = dir.join("Cargo.toml");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+        dir = dir.parent()?;
     }
 }
 

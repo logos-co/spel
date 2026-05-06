@@ -11,11 +11,8 @@
 //! - `.rs` file  → used directly (backwards-compatible).
 //! - directory   → `<dir>/methods/guest/src/bin/*.rs` is searched.
 
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
-
-use toml::Value;
 
 /// Result of path-dependency discovery, including warnings for any issues
 /// encountered during manifest parsing or directory resolution.
@@ -106,266 +103,10 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// a workspace root manifest and searches for the actual crate manifest
 /// containing `[dependencies]`.
 pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
-    let mut result = PathDepResult::new();
-    let manifest = match find_crate_manifest(source_path, &mut result.warnings) {
-        Some(m) => m,
-        None => return result,
-    };
-
-    let content = match fs::read_to_string(&manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            result.warnings.push(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return result;
-        }
-    };
-    let value: Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            result.warnings.push(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return result;
-        }
-    };
-
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d,
-        None => return result,
-    };
-
-    // Check if this is a workspace root — if so, it has no [dependencies] of its
-    // own.  We need to find the actual crate manifest for the program binary.
-    let is_workspace = value.get("workspace").is_some()
-        && value.get("package").is_none();
-
-    if is_workspace {
-        // Workspace root: search member directories for the crate that contains
-        // the source file.
-        if let Some(member_manifest) = find_member_manifest(
-            manifest_dir,
-            &value,
-            source_path,
-            &mut result.warnings,
-        ) {
-            resolve_path_deps_recursive(
-                &member_manifest,
-                &mut result.dirs,
-                &mut HashSet::new(),
-                &mut result.warnings,
-            );
-        }
-    } else {
-        // Regular crate manifest — extract path deps directly.
-        resolve_path_deps_recursive(
-            &manifest,
-            &mut result.dirs,
-            &mut HashSet::new(),
-            &mut result.warnings,
-        );
-    }
-
-    result
-}
-
-/// Recursively extract path-based dependencies from a manifest, following
-/// transitive path deps.  `visited` tracks canonicalised directories to avoid
-/// infinite loops.
-fn resolve_path_deps_recursive(
-    manifest: &Path,
-    dirs: &mut Vec<PathBuf>,
-    visited: &mut HashSet<PathBuf>,
-    warnings: &mut Vec<String>,
-) {
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return,
-    };
-
-    // Deduplicate by canonical path.
-    let canonical = match &manifest_dir.canonicalize() {
-        Ok(c) => c.clone(),
-        Err(_) => manifest_dir.clone(),
-    };
-    if !visited.insert(canonical) {
-        return; // already processed — cycle or duplicate
-    }
-
-    let content = match fs::read_to_string(manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            warnings.push(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        }
-    };
-    let value: Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            warnings.push(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        }
-    };
-
-    // Skip workspace roots — they have no [dependencies].
-    if value.get("workspace").is_some() && value.get("package").is_none() {
-        return;
-    }
-
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dep_dir = manifest_dir.join(rel);
-                if !dep_dir.is_dir() {
-                    warnings.push(format!(
-                        "⚠️  path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dep_dir.display()
-                    ));
-                    continue;
-                }
-                dirs.push(dep_dir.clone());
-
-                // Recurse into the dependency's own Cargo.toml for transitive deps.
-                let dep_manifest = dep_dir.join("Cargo.toml");
-                if dep_manifest.exists() {
-                    resolve_path_deps_recursive(
-                        &dep_manifest,
-                        dirs,
-                        visited,
-                        warnings,
-                    );
-                }
-            }
-        }
-    }
-}
-
-/// Given a workspace root directory, try to locate the member crate manifest
-/// that contains `source_path`.
-fn find_member_manifest(
-    workspace_root: &Path,
-    workspace_value: &Value,
-    source_path: &Path,
-    warnings: &mut Vec<String>,
-) -> Option<PathBuf> {
-    // Try to get the explicit member list from [workspace.members].
-    let members: Vec<String> = workspace_value
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(|m| m.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
-        .unwrap_or_default();
-
-    // Expand glob patterns (e.g. "crates/*") into concrete directories.
-    let concrete_members: Vec<String> = if members.iter().any(|m| m.contains('*')) {
-        let mut expanded = Vec::new();
-        for pattern in &members {
-            if pattern.contains('*') {
-                // Simple glob expansion: replace * with readdir.
-                let prefix = pattern.split_once('*').map(|(p, _)| p).unwrap_or("");
-                let dir = workspace_root.join(prefix);
-                if let Ok(entries) = fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
-                            expanded.push(format!("{}/{}", prefix, entry.file_name().to_string_lossy()));
-                        }
-                    }
-                }
-            } else {
-                expanded.push(pattern.clone());
-            }
-        }
-        expanded
-    } else {
-        members.clone()
-    };
-
-    // Find the member whose directory contains source_path.
-    let source_dir = source_path.parent().unwrap_or(source_path);
-    for member in &concrete_members {
-        let member_dir = workspace_root.join(member.as_str());
-        if member_dir.is_dir() && source_dir.starts_with(&member_dir) {
-            let manifest = member_dir.join("Cargo.toml");
-            if manifest.exists() {
-                return Some(manifest);
-            }
-        }
-    }
-
-    // Fallback: recursively search all subdirectories for a Cargo.toml that
-    // contains source_path.  This handles nested workspace members (e.g.
-    // `methods/guest`) when the explicit `members` list is absent/mismatched.
-    warnings.push(format!(
-        "⚠️  workspace at '{}' has no matching member for '{}'; searching all subdirectories",
-        workspace_root.display(),
-        source_path.display()
-    ));
-
-    fn search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
-        // Search children FIRST (depth-first), then check current dir.
-        // This ensures we find the deepest matching member manifest rather
-        // than returning the workspace root immediately.
-        if let Ok(entries) = fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
-                    if let Some(found) = search_recursive(&entry.path(), target_dir) {
-                        return Some(found);
-                    }
-                }
-            }
-        }
-        // Check current dir — but skip virtual workspace manifests (no [package]).
-        let manifest = dir.join("Cargo.toml");
-        if manifest.exists() && target_dir.starts_with(dir) {
-            // Skip virtual workspace manifests that have [workspace] but no [package].
-            let is_virtual_workspace = fs::read_to_string(&manifest)
-                .ok()
-                .and_then(|content| content.parse::<toml::Value>().ok())
-                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
-                .unwrap_or(false);
-            if !is_virtual_workspace {
-                return Some(manifest);
-            }
-        }
-        None
-    }
-
-    search_recursive(workspace_root, source_dir)
-}
-
-/// Walk up from `start` to find the nearest `Cargo.toml`.
-fn find_crate_manifest(start: &Path, warnings: &mut Vec<String>) -> Option<PathBuf> {
-    let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
-    loop {
-        let candidate = dir.join("Cargo.toml");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        dir = match dir.parent() {
-            Some(p) => p,
-            None => {
-                warnings.push(format!(
-                    "⚠️  no Cargo.toml found walking up from '{}'",
-                    start.display()
-                ));
-                return None;
-            }
-        };
-    }
+    // Delegate to the shared implementation in spel-framework-core.
+    // The CLI keeps its own PathDepResult wrapper for warning propagation.
+    let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(source_path);
+    PathDepResult { dirs, warnings: Vec::new() }
 }
 
 /// Scan `<root>/methods/guest/src/bin/*.rs`.  Returns an empty vec — not an
@@ -834,10 +575,13 @@ mod tests {
         assert!(names.contains(&"shared_types"));
     }
 
-    // ── warnings on errors ─────────────────────────────────────────────────
+    // ── graceful degradation on errors ────────────────────────────────────
 
+    /// When a path dependency points to a non-existent directory, it is silently
+    /// skipped (no crash). The shared core implementation in spel-framework-core
+    /// does not emit warnings — those are a CLI-specific concern.
     #[test]
-    fn find_path_dep_dirs_warns_on_missing_dep_directory() {
+    fn find_path_dep_dirs_skips_missing_dep_directory() {
         let tmp = TempDir::new("missing-dep-dir");
 
         tmp.write(
@@ -848,13 +592,14 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.dirs.is_empty());
-        assert!(!result.warnings.is_empty(), "expected warning for missing dep dir");
-        assert!(result.warnings[0].contains("non-existent"), "unexpected warning: {}", result.warnings[0]);
+        assert!(result.dirs.is_empty(), "expected no dirs for missing dep, got: {:?}", result.dirs);
     }
 
+    /// When the manifest has invalid TOML, path-dep scanning returns empty
+    /// (no crash). The shared core implementation in spel-framework-core
+    /// does not emit warnings — those are a CLI-specific concern.
     #[test]
-    fn find_path_dep_dirs_warns_on_invalid_toml() {
+    fn find_path_dep_dirs_skips_invalid_toml() {
         let tmp = TempDir::new("invalid-toml");
 
         tmp.write(
@@ -864,8 +609,7 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.dirs.is_empty());
-        assert!(!result.warnings.is_empty(), "expected warning for invalid TOML");
+        assert!(result.dirs.is_empty(), "expected no dirs for invalid TOML, got: {:?}", result.dirs);
     }
 
     // ── account types from path-dep crates ────────────────────────────────

@@ -6,7 +6,7 @@ description = "Core types for the SPEL program framework"
 
 [features]
 default = []
-idl-gen = ["dep:syn", "dep:proc-macro2"]
+idl-gen = ["dep:syn", "dep:proc-macro2", "dep:toml"]
 host = ["dep:nssa"]
 
 [dependencies]
@@ -21,3 +21,4 @@ nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", t
 
 syn = { version = "2.0", features = ["full", "extra-traits"], optional = true }
 proc-macro2 = { version = "1.0", optional = true }
+toml = { version = "0.8", optional = true }
