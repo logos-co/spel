@@ -77,7 +77,7 @@ pub fn generate_idl_from_file_with_deps(
     dep_source_dirs: &[PathBuf],
 ) -> Result<SpelIdl, IdlGenError> {
     let content = std::fs::read_to_string(source_path)?;
-    let extra_items = collect_items_from_crate_dirs(dep_source_dirs);
+    let (extra_items, _) = collect_items_from_crate_dirs(dep_source_dirs);
     generate_idl_inner(&content, &source_path.display().to_string(), &extra_items)
 }
 
@@ -241,16 +241,22 @@ fn generate_idl_inner(
 /// contains `src/lib.rs`).  Only local path-dependencies should be passed
 /// here — third-party registry or git crates are intentionally excluded to
 /// avoid pulling in unrelated type definitions.
-pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> Vec<syn::Item> {
+///
+/// Returns `(items, files_read)` where `files_read` lists every source file
+/// that was actually parsed.  Callers can use this list for change tracking
+/// (e.g. emitting `include_str!()` references so cargo rebuilds when
+/// path-dep sources change).
+pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> (Vec<syn::Item>, Vec<PathBuf>) {
     let mut items = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
+    let mut files_read = Vec::new();
     for dir in dirs {
         let lib_rs = dir.join("src").join("lib.rs");
         if lib_rs.exists() {
-            collect_items_from_source_file(&lib_rs, &mut items, &mut visited);
+            collect_items_from_source_file(&lib_rs, &mut items, &mut visited, &mut files_read);
         }
     }
-    items
+    (items, files_read)
 }
 
 /// Parse a single Rust source file and append its items to `out`, following
@@ -259,6 +265,7 @@ fn collect_items_from_source_file(
     path: &Path,
     out: &mut Vec<syn::Item>,
     visited: &mut HashSet<PathBuf>,
+    files_read: &mut Vec<PathBuf>,
 ) {
     let canonical = match path.canonicalize() {
         Ok(p) => p,
@@ -272,6 +279,7 @@ fn collect_items_from_source_file(
         Ok(c) => c,
         Err(_) => return,
     };
+    files_read.push(path.to_path_buf());
     let file = match syn::parse_file(&content) {
         Ok(f) => f,
         Err(_) => return,
@@ -287,7 +295,7 @@ fn collect_items_from_source_file(
         path.parent().map(|p| p.join(stem))
     };
 
-    collect_items_recursive(&file.items, sub_base.as_deref(), out, visited);
+    collect_items_recursive(&file.items, sub_base.as_deref(), out, visited, files_read);
 }
 
 /// Resolve the on-disk path for an external `mod` declaration.
@@ -333,6 +341,7 @@ fn collect_items_recursive(
     base_dir: Option<&Path>,
     out: &mut Vec<syn::Item>,
     visited: &mut HashSet<PathBuf>,
+    files_read: &mut Vec<PathBuf>,
 ) {
     for item in items {
         match item {
@@ -350,11 +359,11 @@ fn collect_items_recursive(
                     // so that any file-backed `mod` declarations inside it resolve
                     // relative to `base_dir/<mod_name>/` rather than `base_dir/`.
                     let inner_base = base_dir.map(|d| d.join(m.ident.to_string()));
-                    collect_items_recursive(inner, inner_base.as_deref(), out, visited);
+                    collect_items_recursive(inner, inner_base.as_deref(), out, visited, files_read);
                 } else if let Some(dir) = base_dir {
                     // External module file — locate and parse it.
                     if let Some(p) = mod_file_path(m, dir) {
-                        collect_items_from_source_file(&p, out, visited);
+                        collect_items_from_source_file(&p, out, visited, files_read);
                     }
                 }
             }

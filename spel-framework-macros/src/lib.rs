@@ -1967,7 +1967,8 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
     let dep_dirs =
         spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
-    let extra_items = spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
+    let (extra_items, dep_source_files) =
+        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
     all_items.extend(extra_items);
 
     let (accounts, types) = account_types::collect_account_types(&all_items);
@@ -1978,11 +1979,24 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // Embed the resolved path for cargo tracking
     let resolved = resolved_path.clone();
 
+    // Emit include_str!() for every path-dep source file we read, so cargo
+    // tracks them as dependencies.  Without this, changes in a path-dep crate
+    // would not trigger macro re-expansion (stale IDL until cargo clean).
+    let dep_tracking: Vec<proc_macro2::TokenStream> = dep_source_files
+        .iter()
+        .filter_map(|p| p.to_str().map(|s| s.to_string()))
+        .map(|path| {
+            let lit = syn::LitStr::new(&path, proc_macro2::Span::call_site());
+            quote! { const _: &str = include_str!(#lit); }
+        })
+        .collect();
+
     // Generate a main() that pretty-prints the IDL
     Ok(quote! {
         pub fn main() {
             // Help cargo track source changes
             const _SOURCE: &str = include_str!(#resolved);
+            #(#dep_tracking)*
             let json: spel_framework::serde_json::Value = spel_framework::serde_json::from_str(#idl_json)
                 .expect("Generated IDL JSON is invalid");
             println!("{}", spel_framework::serde_json::to_string_pretty(&json).unwrap());
