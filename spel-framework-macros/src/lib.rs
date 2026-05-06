@@ -271,24 +271,23 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
             // Dispatch to instruction handler
             let result: Result<
-                (
-                    Vec<nssa_core::program::AccountPostState>,
-                    Vec<nssa_core::program::ChainedCall>,
-                    nssa_core::program::BlockValidityWindow,
-                    nssa_core::program::TimestampValidityWindow,
-                ),
+                spel_framework::SpelOutputParts,
                 spel_framework::error::SpelError
             > = match instruction {
                 #(#match_arms)*
             };
 
             // Handle result
-            let (post_states, chained_calls, block_validity_window, timestamp_validity_window) = match result {
+            let parts = match result {
                 Ok(output) => output,
                 Err(e) => {
                     panic!("Program error [{}]: {}", e.error_code(), e);
                 }
             };
+            let post_states = parts.post_states;
+            let chained_calls = parts.chained_calls;
+            let block_validity_window = parts.block_validity_window;
+            let timestamp_validity_window = parts.timestamp_validity_window;
 
             // Filter out non-program-owned, non-default-state accounts from the output.
             //
@@ -895,7 +894,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     #account_destructure
                     #validation_call
                     #mod_name::#fn_name(#(#call_args),*)
-                        .map(|output| output.into_parts_with_windows())
+                        .map(|output| output.into_parts())
                 }
             }
         })
