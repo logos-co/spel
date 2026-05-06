@@ -1965,7 +1965,8 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // in a shared core crate (e.g. my_program_core) and the program binary
     // depends on it via `path = "..."`.
     let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
-    let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf);
+    let dep_dirs =
+        spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
     let extra_items = spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
     all_items.extend(extra_items);
 
@@ -2098,7 +2099,7 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program);
+        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with("core"), "expected core dir, got {:?}", dirs[0]);
     }
@@ -2123,7 +2124,7 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program);
+        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with("core"));
     }
@@ -2153,7 +2154,7 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program);
+        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
         assert!(dirs[0].ends_with("core"));
     }
@@ -2183,7 +2184,7 @@ mod tests {
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program);
+        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
         let names: Vec<&str> = dirs.iter().map(|d| d.file_name().unwrap().to_str().unwrap()).collect();
         assert!(names.contains(&"core"));

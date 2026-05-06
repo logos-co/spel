@@ -103,10 +103,11 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// a workspace root manifest and searches for the actual crate manifest
 /// containing `[dependencies]`.
 pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
-    // Delegate to the shared implementation in spel-framework-core.
-    // The CLI keeps its own PathDepResult wrapper for warning propagation.
-    let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(source_path);
-    PathDepResult { dirs, warnings: Vec::new() }
+    let mut warnings = Vec::new();
+    let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(source_path, |w| {
+        warnings.push(w);
+    });
+    PathDepResult { dirs, warnings }
 }
 
 /// Scan `<root>/methods/guest/src/bin/*.rs`.  Returns an empty vec — not an
@@ -575,13 +576,10 @@ mod tests {
         assert!(names.contains(&"shared_types"));
     }
 
-    // ── graceful degradation on errors ────────────────────────────────────
+    // ── warnings on errors ─────────────────────────────────────────────────
 
-    /// When a path dependency points to a non-existent directory, it is silently
-    /// skipped (no crash). The shared core implementation in spel-framework-core
-    /// does not emit warnings — those are a CLI-specific concern.
     #[test]
-    fn find_path_dep_dirs_skips_missing_dep_directory() {
+    fn find_path_dep_dirs_warns_on_missing_dep_directory() {
         let tmp = TempDir::new("missing-dep-dir");
 
         tmp.write(
@@ -592,14 +590,13 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.dirs.is_empty(), "expected no dirs for missing dep, got: {:?}", result.dirs);
+        assert!(result.dirs.is_empty());
+        assert!(!result.warnings.is_empty(), "expected warning for missing dep dir");
+        assert!(result.warnings[0].contains("non-existent"), "unexpected warning: {}", result.warnings[0]);
     }
 
-    /// When the manifest has invalid TOML, path-dep scanning returns empty
-    /// (no crash). The shared core implementation in spel-framework-core
-    /// does not emit warnings — those are a CLI-specific concern.
     #[test]
-    fn find_path_dep_dirs_skips_invalid_toml() {
+    fn find_path_dep_dirs_warns_on_invalid_toml() {
         let tmp = TempDir::new("invalid-toml");
 
         tmp.write(
@@ -609,7 +606,8 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.dirs.is_empty(), "expected no dirs for invalid TOML, got: {:?}", result.dirs);
+        assert!(result.dirs.is_empty());
+        assert!(!result.warnings.is_empty(), "expected warning for invalid TOML");
     }
 
     // ── account types from path-dep crates ────────────────────────────────

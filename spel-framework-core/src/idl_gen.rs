@@ -770,19 +770,36 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
 /// In workspace projects the function detects when the nearest `Cargo.toml` is
 /// a workspace root manifest and searches for the actual crate manifest
 /// containing `[dependencies]`.
-pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
-    let manifest = match _find_crate_manifest(source_path) {
+///
+/// `on_warning` is called for non-fatal issues (missing dep directories,
+/// unparseable manifests, etc.).  Pass `|_| {}` to ignore warnings.
+pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: F) -> Vec<PathBuf> {
+    let manifest = match _find_crate_manifest(source_path, &mut on_warning) {
         Some(m) => m,
         None => return vec![],
     };
 
     let content = match std::fs::read_to_string(&manifest) {
         Ok(c) => c,
-        Err(_) => return vec![],
+        Err(e) => {
+            on_warning(format!(
+                "⚠️  could not read manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return vec![];
+        }
     };
     let value: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return vec![],
+        Err(e) => {
+            on_warning(format!(
+                "⚠️  failed to parse manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return vec![];
+        }
     };
 
     let manifest_dir = match manifest.parent() {
@@ -800,15 +817,17 @@ pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
         // the source file.
         let mut dirs = Vec::new();
         let mut visited = HashSet::new();
-        if let Some(member_manifest) = _find_member_manifest(&manifest_dir, &value, source_path) {
-            _resolve_path_deps_recursive(&member_manifest, &mut dirs, &mut visited);
+        if let Some(member_manifest) =
+            _find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning)
+        {
+            _resolve_path_deps_recursive(&member_manifest, &mut dirs, &mut visited, &mut on_warning);
         }
         dirs
     } else {
         // Regular crate manifest — extract path deps directly.
         let mut dirs = Vec::new();
         let mut visited = HashSet::new();
-        _resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited);
+        _resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, &mut on_warning);
         dirs
     }
 }
@@ -816,10 +835,11 @@ pub fn find_path_dep_dirs(source_path: &Path) -> Vec<PathBuf> {
 /// Recursively extract path-based dependencies from a manifest, following
 /// transitive path deps.  `visited` tracks canonicalised directories to avoid
 /// infinite loops.
-fn _resolve_path_deps_recursive(
+fn _resolve_path_deps_recursive<F: FnMut(String)>(
     manifest: &Path,
     dirs: &mut Vec<PathBuf>,
     visited: &mut HashSet<PathBuf>,
+    on_warning: &mut F,
 ) {
     let manifest_dir = match manifest.parent() {
         Some(d) => d.to_path_buf(),
@@ -837,11 +857,25 @@ fn _resolve_path_deps_recursive(
 
     let content = match std::fs::read_to_string(manifest) {
         Ok(c) => c,
-        Err(_) => return,
+        Err(e) => {
+            on_warning(format!(
+                "⚠️  could not read manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return;
+        }
     };
     let value: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
-        Err(_) => return,
+        Err(e) => {
+            on_warning(format!(
+                "⚠️  failed to parse manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return;
+        }
     };
 
     // Skip workspace roots — they have no [dependencies].
@@ -850,10 +884,15 @@ fn _resolve_path_deps_recursive(
     }
 
     if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (_name, dep) in table {
+        for (name, dep) in table {
             if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
                 let dep_dir = manifest_dir.join(rel);
                 if !dep_dir.is_dir() {
+                    on_warning(format!(
+                        "⚠️  path dependency '{}' points to non-existent directory: {}",
+                        name,
+                        dep_dir.display()
+                    ));
                     continue;
                 }
                 dirs.push(dep_dir.clone());
@@ -861,7 +900,7 @@ fn _resolve_path_deps_recursive(
                 // Recurse into the dependency's own Cargo.toml for transitive deps.
                 let dep_manifest = dep_dir.join("Cargo.toml");
                 if dep_manifest.exists() {
-                    _resolve_path_deps_recursive(&dep_manifest, dirs, visited);
+                    _resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
                 }
             }
         }
@@ -870,10 +909,11 @@ fn _resolve_path_deps_recursive(
 
 /// Given a workspace root directory, try to locate the member crate manifest
 /// that contains `source_path`.
-fn _find_member_manifest(
+fn _find_member_manifest<F: FnMut(String)>(
     workspace_root: &Path,
     workspace_value: &toml::Value,
     source_path: &Path,
+    on_warning: &mut F,
 ) -> Option<PathBuf> {
     // Try to get the explicit member list from [workspace.members].
     let members: Vec<String> = workspace_value
@@ -920,8 +960,18 @@ fn _find_member_manifest(
     }
 
     // Fallback: recursively search all subdirectories for a Cargo.toml that
-    // contains source_path.
+    // contains source_path.  This handles nested workspace members (e.g.
+    // `methods/guest`) when the explicit `members` list is absent/mismatched.
+    on_warning(format!(
+        "⚠️  workspace at '{}' has no matching member for '{}'; searching all subdirectories",
+        workspace_root.display(),
+        source_path.display()
+    ));
+
     fn _search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
+        // Search children FIRST (depth-first), then check current dir.
+        // This ensures we find the deepest matching member manifest rather
+        // than returning the workspace root immediately.
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 if entry.file_type().map_or(false, |ft| ft.is_dir()) {
@@ -931,9 +981,10 @@ fn _find_member_manifest(
                 }
             }
         }
+        // Check current dir — but skip virtual workspace manifests (no [package]).
         let manifest = dir.join("Cargo.toml");
         if manifest.exists() && target_dir.starts_with(dir) {
-            // Skip virtual workspace manifests.
+            // Skip virtual workspace manifests that have [workspace] but no [package].
             let is_virtual_workspace = std::fs::read_to_string(&manifest)
                 .ok()
                 .and_then(|content| content.parse::<toml::Value>().ok())
@@ -950,14 +1001,23 @@ fn _find_member_manifest(
 }
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
-fn _find_crate_manifest(start: &Path) -> Option<PathBuf> {
+fn _find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> Option<PathBuf> {
     let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
     loop {
         let candidate = dir.join("Cargo.toml");
         if candidate.exists() {
             return Some(candidate);
         }
-        dir = dir.parent()?;
+        dir = match dir.parent() {
+            Some(p) => p,
+            None => {
+                on_warning(format!(
+                    "⚠️  no Cargo.toml found walking up from '{}'",
+                    start.display()
+                ));
+                return None;
+            }
+        };
     }
 }
 
