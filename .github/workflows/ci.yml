@@ -321,3 +321,74 @@ jobs:
         run: |
           export PATH="/tmp/lssa/target/release:$PATH"
           scripts/ffi-call-test.sh /tmp/ffi-call-test
+
+  init-e2e-test:
+    name: Init E2E (default flags)
+    needs: [sequencer-setup]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      RISC0_VERSION: "3.0.5"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Clone LEZ at correct revision
+        run: |
+          rm -rf /tmp/lssa
+          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
+          cd /tmp/lssa
+          git fetch --depth 1 origin ${{ needs.sequencer-setup.outputs.lez-rev }}
+          git checkout ${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Restore sequencer cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/sequencer_service
+          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Restore wallet cache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/wallet
+          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore spel CLI cache (PR-specific)
+        uses: actions/cache@v4
+        with:
+          path: /tmp/lssa/target/release/spel
+          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
+
+      - name: Determine SPEL ref for testing
+        id: spel-ref
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+          else
+            SPEL_REF=""
+          fi
+          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
+
+      - name: Install risc0 toolchain
+        run: |
+          curl -L https://risc0.com/install | bash
+          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
+          rzup install rust
+
+      - name: Run init E2E test (default LEZ, PR spel on PRs)
+        env:
+          LSSA_DIR: /tmp/lssa
+          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
+        run: |
+          export PATH="/tmp/lssa/target/release:$PATH"
+          scripts/init-e2e-test.sh /tmp/init-e2e-test
