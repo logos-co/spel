@@ -18,7 +18,7 @@ pub mod prelude {
     pub use crate::error::{SpelError, SpelResult};
     pub use crate::pda::{compute_pda, compute_pda_multi, seed_from_str, ToSeed};
     pub use crate::spel_output::AutoClaim;
-    pub use crate::types::{IntoPostState, SpelOutput, AccountConstraint};
+    pub use crate::types::{IntoPostState, SpelOutput, SpelOutputParts, AccountConstraint};
 
     // nssa_core::account
     pub use nssa_core::account::{Account, AccountId, AccountWithMetadata};
