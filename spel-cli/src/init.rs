@@ -284,7 +284,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "branch = \"fix/issue-172-expose-execution-context\"".to_string(),
+        _ => "branch = \"main\"".to_string(),
     };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
@@ -339,7 +339,6 @@ mod {snake_name} {{
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {{
-        // _ctx.self_program_id and _ctx.caller_program_id are available here
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,
