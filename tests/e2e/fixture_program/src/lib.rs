@@ -127,6 +127,21 @@ mod treasury {
         accounts.extend(targets);
         Ok(SpelOutput::execute(accounts, vec![]))
     }
+
+    /// Initialize a holding account, validating the definition is owned by this program.
+    /// Exercises ProgramContext injection and #[account(owner = self_program_id)].
+    #[instruction]
+    pub fn initialize_holding(
+        ctx: ProgramContext,
+        #[account(owner = self_program_id)]
+        definition: AccountWithMetadata,
+        #[account(init, signer)]
+        holding: AccountWithMetadata,
+    ) -> SpelResult {
+        // ctx.self_program_id and ctx.caller_program_id are available here
+        let _ = ctx; // suppress unused warning in this example
+        Ok(SpelOutput::execute(vec![definition, holding], vec![]))
+    }
 }
 
 #[cfg(test)]
@@ -146,7 +161,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 9);
+        assert_eq!(idl.instructions.len(), 10);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -155,7 +170,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 9);
+        assert_eq!(idl.instructions.len(), 10);
     }
 
     #[test]
@@ -761,4 +776,97 @@ mod tests {
     // The filter logic (pre_states_clone.zip(post_states).filter(...)) is covered by
     // integration/e2e tests that invoke the guest binary end-to-end.
 
+    // ── ProgramContext + owner constraint tests ──────────────────────────────
+
+    fn make_account_with_owner(id: [u8; 32], owner: nssa_core::program::ProgramId, authorized: bool) -> AccountWithMetadata {
+        let mut account = nssa_core::account::Account::default();
+        account.program_owner = owner;
+        AccountWithMetadata {
+            account_id: nssa_core::account::AccountId::new(id),
+            account,
+            is_authorized: authorized,
+        }
+    }
+
+    #[test]
+    fn idl_excludes_context_from_initialize_holding() {
+        let idl = __program_idl();
+        let ix = idl.instructions.iter().find(|i| i.name == "initialize_holding")
+            .expect("initialize_holding must be in IDL");
+        // Context must NOT appear in IDL accounts or args
+        assert!(!ix.accounts.iter().any(|a| a.name == "ctx"));
+        assert_eq!(ix.accounts.len(), 2); // only definition + holding
+        assert_eq!(ix.args.len(), 0);
+    }
+
+    #[test]
+    fn idl_owner_constraint_reflected() {
+        let idl = __program_idl();
+        let ix = idl.instructions.iter().find(|i| i.name == "initialize_holding")
+            .expect("initialize_holding must be in IDL");
+        // definition account has #[account(owner = self_program_id)]
+        assert_eq!(ix.accounts[0].owner, Some("self_program_id".to_string()));
+    }
+
+    #[test]
+    fn handler_initialize_holding_callable_with_context() {
+        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let ctx = ProgramContext::new(program_id, [2u32; 8]);
+        let definition = make_account_with_owner([3u8; 32], program_id, false);
+        let holding = make_account(true); // init + signer
+        let result = treasury::initialize_holding(ctx, definition, holding);
+        assert!(result.is_ok(), "handler should succeed with valid context and owner");
+    }
+
+    #[test]
+    fn validate_initialize_holding_rejects_wrong_owner() {
+        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let other_program: nssa_core::program::ProgramId = [99u32; 8];
+        let accounts = vec![
+            make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
+            make_account_with_id([4u8; 32], true),                     // holding: init + signer (empty)
+        ];
+        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        let err = result.expect_err("should reject account with wrong owner");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::AccountOwnerMismatch { .. }),
+            "expected AccountOwnerMismatch, got: {:?}", err
+        );
+    }
+
+    #[test]
+    fn validate_initialize_holding_owner_check_runs_first() {
+        // Owner check must fire before init/signer checks.
+        // Even if holding is not empty and not authorized, owner error should surface first.
+        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let other_program: nssa_core::program::ProgramId = [99u32; 8];
+        let mut bad_account = nssa_core::account::Account::default();
+        bad_account.data = vec![1u8; 32].try_into().unwrap(); // not empty → init violation
+        let accounts = vec![
+            make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
+            AccountWithMetadata {
+                account_id: nssa_core::account::AccountId::new([4u8; 32]),
+                account: bad_account,
+                is_authorized: false, // not authorized → signer violation
+            },
+        ];
+        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        match result.unwrap_err() {
+            spel_framework::error::SpelError::AccountOwnerMismatch { account_name } => {
+                assert_eq!(account_name, "definition");
+            }
+            other => panic!("expected AccountOwnerMismatch (owner check runs first), got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn validate_initialize_holding_accepts_correct_owner() {
+        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let accounts = vec![
+            make_account_with_owner([3u8; 32], program_id, false), // definition — correct owner
+            make_account_with_id([4u8; 32], true),                 // holding: init + signer (empty)
+        ];
+        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        assert!(result.is_ok(), "correct owner should pass: {:?}", result);
+    }
 }

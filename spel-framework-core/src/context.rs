@@ -5,7 +5,7 @@
 //! values from [`nssa_core::program::ProgramInput`] at call time.
 //! The context parameter is **never** part of the instruction ABI or IDL.
 
-use crate::prelude::{InstructionData, ProgramId};
+use crate::prelude::ProgramId;
 
 /// Trusted execution metadata supplied by the SPEL guest entrypoint.
 ///
@@ -28,6 +28,8 @@ pub struct ProgramContext {
     /// The program ID of the currently executing program.
     pub self_program_id: ProgramId,
     /// The program ID of the caller (the program that invoked this one).
+    /// If there is no explicit caller (e.g. top-level transaction),
+    /// this is set to [`nssa_core::program::DEFAULT_PROGRAM_ID`] (all zeros).
     pub caller_program_id: ProgramId,
 }
 
@@ -41,12 +43,3 @@ impl ProgramContext {
         }
     }
 }
-
-/// The serialized instruction data words passed by the caller.
-///
-/// Included in [`ProgramContext`] when `#[instruction]` handlers need
-/// access to the raw instruction payload for custom validation or
-/// logging.  This is the same value used internally by SPEL for
-/// instruction dispatch and is available through the `instruction_words`
-/// field.
-pub type InstructionWords = InstructionData;
