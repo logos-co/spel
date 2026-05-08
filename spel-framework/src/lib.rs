@@ -8,6 +8,7 @@ pub use spel_framework_macros::{lez_program, instruction, account_type, generate
 
 // Re-export core types
 pub use spel_framework_core::*;
+pub use spel_framework_core::types::{SpelOutput, SpelOutputParts};
 
 // Re-export serde_json for use in generated code
 pub use serde_json;

@@ -14,7 +14,12 @@ pub trait IntoPostState {
 }
 
 /// Output from an instruction handler.
+///
+/// This struct is `#[non_exhaustive]` to allow future field additions without
+/// breaking external programs that construct it via struct literals.
+/// Use the builder methods (`execute()`, `with_*()`) instead.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct SpelOutput {
     pub post_states: Vec<AccountPostState>,
     pub chained_calls: Vec<ChainedCall>,
@@ -23,31 +28,6 @@ pub struct SpelOutput {
 }
 
 impl SpelOutput {
-    /// Create output with only post-states and no chained calls.
-    #[deprecated(note = "Use SpelOutput::execute() for auto-claim support")]
-    pub fn states_only(post_states: Vec<AccountPostState>) -> Self {
-        Self {
-            post_states,
-            chained_calls: vec![],
-            block_validity_window: ValidityWindow::new_unbounded(),
-            timestamp_validity_window: ValidityWindow::new_unbounded(),
-        }
-    }
-
-    /// Create output with post-states and chained calls.
-    #[deprecated(note = "Use SpelOutput::execute() for auto-claim support")]
-    pub fn with_chained_calls(
-        post_states: Vec<AccountPostState>,
-        chained_calls: Vec<ChainedCall>,
-    ) -> Self {
-        Self {
-            post_states,
-            chained_calls,
-            block_validity_window: ValidityWindow::new_unbounded(),
-            timestamp_validity_window: ValidityWindow::new_unbounded(),
-        }
-    }
-
     /// Create an empty output.
     pub fn empty() -> Self {
         Self {
@@ -101,28 +81,35 @@ impl SpelOutput {
         Ok(self)
     }
 
-    /// Convert to the original tuple form of post-states and chained calls.
-    #[deprecated(note = "Use SpelOutput::into_parts_with_windows() to also retrieve validity windows")]
-    pub fn into_parts(self) -> (Vec<AccountPostState>, Vec<ChainedCall>) {
-        (self.post_states, self.chained_calls)
+    /// Destructure into individual components.
+    ///
+    /// Returns a [`SpelOutputParts`] struct instead of a raw tuple so that
+    /// future field additions don't require updating every call site.
+    pub fn into_parts(self) -> SpelOutputParts {
+        SpelOutputParts {
+            post_states: self.post_states,
+            chained_calls: self.chained_calls,
+            block_validity_window: self.block_validity_window,
+            timestamp_validity_window: self.timestamp_validity_window,
+        }
     }
+}
 
-    /// Convert to the tuple form including validity windows.
-    pub fn into_parts_with_windows(
-        self,
-    ) -> (
-        Vec<AccountPostState>,
-        Vec<ChainedCall>,
-        BlockValidityWindow,
-        TimestampValidityWindow,
-    ) {
-        (
-            self.post_states,
-            self.chained_calls,
-            self.block_validity_window,
-            self.timestamp_validity_window,
-        )
-    }
+/// Components of a [`SpelOutput`] after destructuring via [`SpelOutput::into_parts`].
+///
+/// This struct is `#[non_exhaustive]` so future field additions don't break
+/// callers that pattern-match on it.
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SpelOutputParts {
+    /// Post-transaction account states (claims, mutability).
+    pub post_states: Vec<AccountPostState>,
+    /// Chained calls to other programs.
+    pub chained_calls: Vec<ChainedCall>,
+    /// Block range in which the transaction is valid.
+    pub block_validity_window: BlockValidityWindow,
+    /// Timestamp range in which the transaction is valid.
+    pub timestamp_validity_window: TimestampValidityWindow,
 }
 
 /// Account constraint flags used by the proc-macro.
