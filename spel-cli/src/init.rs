@@ -284,7 +284,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "branch = \"main\"".to_string(),
+        _ => "branch = \"fix/issue-172-expose-execution-context\"".to_string(),
     };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
@@ -333,13 +333,13 @@ mod {snake_name} {{
     /// Initialize the program state.
     #[instruction]
     pub fn initialize(
-        ctx: ProgramContext,
+        _ctx: ProgramContext,
         #[account(init, pda = literal("state"))]
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {{
-        // ctx.self_program_id and ctx.caller_program_id are available here
+        // _ctx.self_program_id and _ctx.caller_program_id are available here
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,
@@ -357,7 +357,7 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-        amount: u64,
+        _amount: u64,
     ) -> SpelResult {{
         // TODO: implement your logic
         Ok(SpelOutput::execute(vec![state, owner], vec![]))
