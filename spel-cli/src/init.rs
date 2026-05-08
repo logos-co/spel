@@ -284,7 +284,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0-rc.3\"".to_string(),
+        _ => "branch = \"main\"".to_string(),
     };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
