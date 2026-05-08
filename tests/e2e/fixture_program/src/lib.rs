@@ -114,6 +114,35 @@ mod treasury {
         Ok(SpelOutput::execute(vec![account, authority], vec![]))
     }
 
+    /// Uses the injected program ID to derive a PDA at runtime.
+    /// Exercises #[self_program_id] together with accounts and no instruction args.
+    #[instruction]
+    pub fn create_self_pda(
+        #[account(init, pda = literal("self_derived"))]
+        derived: AccountWithMetadata,
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        #[self_program_id] program_id: ProgramId,
+    ) -> SpelResult {
+        // Use program_id to recompute the expected PDA — exercises the injected value.
+        let _expected = spel_framework::pda::compute_pda(
+            &program_id,
+            &[&spel_framework::pda::seed_from_str("self_derived")],
+        );
+        Ok(SpelOutput::execute(vec![derived, authority], vec![]))
+    }
+
+    /// Exercises #[self_program_id] with a flexible parameter name and no other args.
+    #[instruction]
+    pub fn echo_program_id(
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        #[self_program_id] pid: ProgramId,
+    ) -> SpelResult {
+        let _ = pid;
+        Ok(SpelOutput::execute(vec![authority], vec![]))
+    }
+
     /// Batch update: one fixed authority + variable-length list of target accounts.
     #[instruction]
     pub fn batch_update(
@@ -146,7 +175,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 9);
+        assert_eq!(idl.instructions.len(), 11);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -155,7 +184,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 9);
+        assert_eq!(idl.instructions.len(), 11);
     }
 
     #[test]
@@ -760,5 +789,97 @@ mod tests {
     // `#[cfg(not(test))]`. It cannot be unit-tested here without a full zkVM harness.
     // The filter logic (pre_states_clone.zip(post_states).filter(...)) is covered by
     // integration/e2e tests that invoke the guest binary end-to-end.
+
+    // ── #[self_program_id] ───────────────────────────────────────────────────
+
+    /// Handler is callable directly with a ProgramId as the last argument.
+    #[test]
+    fn handler_create_self_pda_callable() {
+        let acc = make_account(true);
+        let result = treasury::create_self_pda(acc.clone(), acc.clone(), test_program_id());
+        assert!(result.is_ok());
+    }
+
+    /// Flexible naming: the parameter doesn't have to be called `program_id`.
+    #[test]
+    fn handler_echo_program_id_callable() {
+        let acc = make_account(true);
+        let result = treasury::echo_program_id(acc.clone(), test_program_id());
+        assert!(result.is_ok());
+    }
+
+    /// The #[self_program_id] parameter must NOT appear in the IDL instruction args —
+    /// it is injected by the runtime and must not be serialised as part of the instruction.
+    #[test]
+    fn idl_self_program_id_param_excluded_from_args() {
+        let idl = __program_idl();
+
+        let create_self = idl.instructions.iter()
+            .find(|i| i.name == "create_self_pda")
+            .expect("create_self_pda must be in IDL");
+        assert_eq!(
+            create_self.args.len(), 0,
+            "create_self_pda should have no instruction args (program_id is injected)"
+        );
+
+        let echo = idl.instructions.iter()
+            .find(|i| i.name == "echo_program_id")
+            .expect("echo_program_id must be in IDL");
+        assert_eq!(
+            echo.args.len(), 0,
+            "echo_program_id should have no instruction args"
+        );
+    }
+
+    /// Accounts are still tracked correctly even when a #[self_program_id] param is present.
+    #[test]
+    fn idl_self_program_id_does_not_affect_account_metadata() {
+        let idl = __program_idl();
+
+        let create_self = idl.instructions.iter()
+            .find(|i| i.name == "create_self_pda")
+            .expect("create_self_pda must be in IDL");
+        assert_eq!(create_self.accounts.len(), 2);
+        assert!(create_self.accounts[0].init, "derived should be init");
+        assert!(create_self.accounts[0].pda.is_some(), "derived should have PDA");
+        assert!(create_self.accounts[1].signer, "authority should be signer");
+
+        let echo = idl.instructions.iter()
+            .find(|i| i.name == "echo_program_id")
+            .expect("echo_program_id must be in IDL");
+        assert_eq!(echo.accounts.len(), 1);
+        assert!(echo.accounts[0].signer, "authority should be signer");
+    }
+
+    /// PDA validation is unaffected by the presence of a #[self_program_id] param —
+    /// the macro still generates __validate_* using the program_id from ProgramInput.
+    #[test]
+    fn validate_create_self_pda_accepts_correct_address() {
+        let program_id = test_program_id();
+        let seed = spel_framework::pda::seed_from_str("self_derived");
+        let correct_id = spel_framework::pda::compute_pda(&program_id, &[&seed]);
+
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false),
+            make_account_with_id([2u8; 32], true),
+        ];
+        let result = treasury::__validate_create_self_pda(&accounts, &program_id, &empty_ix_data());
+        assert!(result.is_ok(), "correct PDA should pass: {result:?}");
+    }
+
+    #[test]
+    fn validate_create_self_pda_rejects_wrong_address() {
+        let program_id = test_program_id();
+        let accounts = vec![
+            make_account_with_id([0xFFu8; 32], false), // wrong address
+            make_account_with_id([2u8; 32], true),
+        ];
+        let result = treasury::__validate_create_self_pda(&accounts, &program_id, &empty_ix_data());
+        let err = result.expect_err("wrong address should fail");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
 
 }

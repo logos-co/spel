@@ -157,6 +157,9 @@ struct InstructionInfo {
     args: Vec<ArgParam>,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
+    /// True if the handler declares a `#[self_program_id]` parameter.
+    /// When set, the macro injects `self_program_id` as the last argument in the call.
+    has_program_id_param: bool,
 }
 
 struct AccountParam {
@@ -471,6 +474,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     let fn_name = func.sig.ident.clone();
     let mut accounts = Vec::new();
     let mut args = Vec::new();
+    let mut has_program_id_param = false;
 
     for input in &func.sig.inputs {
         match input {
@@ -478,7 +482,14 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                 let param_name = extract_param_name(pat_type)?;
                 let ty = &*pat_type.ty;
 
-                if is_account_type(ty) {
+                if pat_type
+                    .attrs
+                    .iter()
+                    .any(|a| a.path().is_ident("self_program_id"))
+                {
+                    has_program_id_param = true;
+                    // excluded from `args` so it doesn't become an Instruction enum field
+                } else if is_account_type(ty) {
                     let constraints = parse_account_constraints(&pat_type.attrs)?;
                     accounts.push(AccountParam {
                         name: param_name,
@@ -513,6 +524,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         accounts,
         args,
         func,
+        has_program_id_param,
     })
 }
 
@@ -808,6 +820,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     let name = &a.name;
                     quote! { #name }
                 }))
+                .chain(ix.has_program_id_param.then(|| quote! { self_program_id }))
                 .collect();
 
             // Collect arg seed values to pass to validation
@@ -1063,7 +1076,8 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
             call.args.push(syn::parse_quote! { &#accounts_arg });
-            call.args.push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+            call.args
+                .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
             call.args.push(syn::parse_quote! { #chained_arg });
         }
     }
@@ -1101,7 +1115,9 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
             for input in &mut func.sig.inputs {
                 if let FnArg::Typed(pat_type) = input {
-                    pat_type.attrs.retain(|a| !a.path().is_ident("account"));
+                    pat_type.attrs.retain(|a| {
+                        !a.path().is_ident("account") && !a.path().is_ident("self_program_id")
+                    });
                 }
             }
             // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
