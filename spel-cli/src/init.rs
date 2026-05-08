@@ -333,11 +333,13 @@ mod {snake_name} {{
     /// Initialize the program state.
     #[instruction]
     pub fn initialize(
+        ctx: ProgramContext,
         #[account(init, pda = literal("state"))]
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {{
+        // ctx.self_program_id and ctx.caller_program_id are available here
         let mut acc = state.account.clone();
         let ps = ProgramState {{
             initialized: true,

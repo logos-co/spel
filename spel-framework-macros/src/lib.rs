@@ -476,7 +476,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     let mut args = Vec::new();
     let mut has_context = false;
 
-    for input in &func.sig.inputs {
+    for (idx, input) in func.sig.inputs.iter().enumerate() {
         match input {
             FnArg::Typed(pat_type) => {
                 let param_name = extract_param_name(pat_type)?;
@@ -498,6 +498,18 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                     });
                 } else if is_context_type(ty) {
                     // ProgramContext — injected by dispatcher, not part of ABI/IDL.
+                    if has_context {
+                        return Err(syn::Error::new_spanned(
+                            ty,
+                            "instruction functions can have at most one ProgramContext parameter",
+                        ));
+                    }
+                    if idx != 0 {
+                        return Err(syn::Error::new_spanned(
+                            ty,
+                            "ProgramContext must be the first parameter of an instruction function",
+                        ));
+                    }
                     has_context = true;
                 } else {
                     args.push(ArgParam {
@@ -817,10 +829,14 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
 
             let call_args: Vec<TokenStream2> = {
                 let mut args: Vec<TokenStream2> = Vec::new();
-                // Context is always first if present (matches typical function signature).
+                // Context is always first if present (enforced by parse_instruction).
+                // caller_program_id is Option<ProgramId> from ProgramInput; default to zeroed ID.
                 if ix.has_context {
                     args.push(quote! {
-                        nssa_core::program::ProgramContext::new(self_program_id, caller_program_id)
+                        spel_framework::context::ProgramContext::new(
+                            self_program_id,
+                            caller_program_id.unwrap_or(nssa_core::program::DEFAULT_PROGRAM_ID)
+                        )
                     });
                 }
                 args.extend(ix.accounts.iter().map(|a| {
@@ -1367,8 +1383,9 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     let idx = i;
                     let acc_name = acc.name.to_string();
                     let owner_expr = acc.constraints.owner.as_ref().unwrap();
+                    // self_program_id is passed as &ProgramId; deref for comparison.
                     quote! {
-                        if accounts[#idx].account.program_owner != #owner_expr {
+                        if accounts[#idx].account.program_owner != *#owner_expr {
                             return Err(spel_framework::error::SpelError::AccountOwnerMismatch {
                                 account_name: #acc_name.to_string(),
                             });
@@ -1501,9 +1518,10 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     _instruction_words: &nssa_core::program::InstructionData,
                     #(#all_validate_params),*
                 ) -> Result<(), spel_framework::error::SpelError> {
+                    // Owner checks first — fail fast if account isn't owned by this program.
+                    #(#owner_checks)*
                     #(#signer_checks)*
                     #(#init_checks)*
-                    #(#owner_checks)*
                     #(#pda_checks)*
                     Ok(())
                 }
