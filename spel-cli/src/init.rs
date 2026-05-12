@@ -333,6 +333,7 @@ mod {snake_name} {{
     /// Initialize the program state.
     #[instruction]
     pub fn initialize(
+        _ctx: ProgramContext,
         #[account(init, pda = literal("state"))]
         state: AccountWithMetadata,
         #[account(signer)]
@@ -355,7 +356,7 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-        amount: u64,
+        _amount: u64,
     ) -> SpelResult {{
         // TODO: implement your logic
         Ok(SpelOutput::execute(vec![state, owner], vec![]))
