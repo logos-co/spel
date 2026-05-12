@@ -585,6 +585,8 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
                         constraints,
                         is_rest: true,
                     });
+                } else if is_context_type(ty) {
+                    // ProgramContext is injected by the dispatcher and never part of the IDL/ABI.
                 } else {
                     args.push(ArgParam {
                         name: param_name,
@@ -616,6 +618,15 @@ fn extract_param_name(pat_type: &PatType) -> Result<Ident, IdlGenError> {
             "expected simple identifier pattern",
         ))),
     }
+}
+
+fn is_context_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "ProgramContext";
+        }
+    }
+    false
 }
 
 fn is_account_type(ty: &Type) -> bool {
@@ -1083,6 +1094,22 @@ mod tests {
         "#;
         let args = &ok(src).instructions[0].args;
         assert!(matches!(&args[0].type_, IdlType::Primitive(s) if s == "account_id"));
+    }
+
+    #[test]
+    fn program_context_excluded_from_idl() {
+        let src = r#"
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn ix(ctx: ProgramContext, acc: AccountWithMetadata, amount: u64) {}
+            }
+        "#;
+        let idl = ok(src);
+        let ix = &idl.instructions[0];
+        assert_eq!(ix.accounts.len(), 1, "should have one account");
+        assert_eq!(ix.args.len(), 1, "should have one arg");
+        assert_eq!(ix.args[0].name, "amount");
     }
 
     // ── Multiple instructions ─────────────────────────────────────────────────
