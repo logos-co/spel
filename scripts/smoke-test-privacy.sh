@@ -190,7 +190,7 @@ mod privacy_test {
             AccountPostState::new(acc)
         };
 
-        Ok(SpelOutput::states_only(vec![post]))
+        Ok(SpelOutput::execute(vec![post], vec![]))
     }
 }
 RUSTEOF

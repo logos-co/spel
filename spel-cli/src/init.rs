@@ -284,7 +284,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0-rc.3\"".to_string(),
+        _ => "branch = \"main\"".to_string(),
     };
     // methods/guest/Cargo.toml
     write_file(root, "methods/guest/Cargo.toml", &format!(r#"[package]
@@ -333,6 +333,7 @@ mod {snake_name} {{
     /// Initialize the program state.
     #[instruction]
     pub fn initialize(
+        _ctx: ProgramContext,
         #[account(init, pda = literal("state"))]
         state: AccountWithMetadata,
         #[account(signer)]
@@ -355,7 +356,7 @@ mod {snake_name} {{
         state: AccountWithMetadata,
         #[account(signer)]
         owner: AccountWithMetadata,
-        amount: u64,
+        _amount: u64,
     ) -> SpelResult {{
         // TODO: implement your logic
         Ok(SpelOutput::execute(vec![state, owner], vec![]))

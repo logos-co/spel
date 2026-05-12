@@ -342,6 +342,38 @@ spel inspect 0000...0000 \
 | `spel` | Generic IDL-driven CLI with TX submission + project scaffolding |
 | `spel-client-gen` | Code generator — produces typed Rust FFI clients from IDL JSON |
 
+## Troubleshooting
+
+### Guest build fails with `ring` cross-compilation error on riscv32
+
+If your guest build fails with:
+
+```
+riscv32-unknown-elf-gcc: error: unrecognized command-line option '-m64'
+error: failed to run custom build command for `ring v0.17.14`
+```
+
+This is caused by the LEZ workspace enabling `risc0-zkvm` default features (`bonsai`, `client`), which pull in `reqwest → rustls → ring`. The `ring` crate cannot cross-compile for riscv32.
+
+**Root cause:** [logos-blockchain/logos-execution-zone issue #468](https://github.com/logos-blockchain/logos-execution-zone/issues/468)
+
+**Workaround:** fork the LEZ repo, apply this one-line change to `Cargo.toml`, and patch your workspace:
+
+```diff
+- risc0-zkvm = { version = "3.0.5", features = ["std"] }
++ risc0-zkvm = { version = "3.0.5", default-features = false, features = ["std"] }
+```
+
+Then in your workspace `Cargo.toml`:
+
+```toml
+[patch."https://github.com/logos-blockchain/logos-execution-zone.git"]
+nssa_core = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
+nssa = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
+```
+
+Once the upstream fix is merged, remove the `[patch]` section and update your LEZ dependency tag.
+
 ## License
 
 MIT

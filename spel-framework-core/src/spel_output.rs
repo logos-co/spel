@@ -360,13 +360,17 @@ mod tests {
     }
 
     #[test]
-    fn into_parts_includes_windows() {
+    fn into_parts_returns_all_fields() {
         let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
             .with_block_validity_window(5u64..)
             .try_with_timestamp_validity_window(100u64..200)
             .unwrap();
 
-        let (post_states, chained_calls, block_window, ts_window) = output.into_parts_with_windows();
+        let parts = output.into_parts();
+        let post_states = parts.post_states;
+        let chained_calls = parts.chained_calls;
+        let block_window = parts.block_validity_window;
+        let ts_window = parts.timestamp_validity_window;
         assert!(post_states.is_empty());
         assert!(chained_calls.is_empty());
         assert_eq!(block_window.start(), Some(5));
