@@ -1,3 +1,11 @@
+## v0.3.0 (2026-05-13)
+
+### ✨ Features
+expose execution context to instruction handlers (issue #172) (#182) (c4b7b0b)
+
+### 🐛 Fixes
+exclude ProgramContext from runtime-generated IDL (#191) (582b452)
+
 # Changelog
 
 ## v0.2.0 (2026-04-01)
