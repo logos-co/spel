@@ -142,6 +142,17 @@ mod treasury {
         let _ = ctx; // suppress unused warning in this example
         Ok(SpelOutput::execute(vec![definition, holding], vec![]))
     }
+
+    /// Demonstrate a validity window on the program output.
+    /// The returned SpelOutput restricts the transaction to a specific block range.
+    #[instruction]
+    pub fn emit_with_window(
+        #[account(signer)]
+        authority: AccountWithMetadata,
+    ) -> SpelResult {
+        Ok(SpelOutput::execute(vec![authority], vec![])
+            .with_block_validity_window(100u64..200))
+    }
 }
 
 #[cfg(test)]
@@ -161,7 +172,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 10);
+        assert_eq!(idl.instructions.len(), 11);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -170,7 +181,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 10);
+        assert_eq!(idl.instructions.len(), 11);
     }
 
     #[test]
@@ -806,6 +817,16 @@ mod tests {
             .expect("initialize_holding must be in IDL");
         // definition account has #[account(owner = self_program_id)]
         assert_eq!(ix.accounts[0].owner, Some("self_program_id".to_string()));
+    }
+
+    #[test]
+    fn handler_emit_with_window_callable() {
+        let acc = make_account(true);
+        let result = treasury::emit_with_window(acc);
+        assert!(result.is_ok());
+        let output = result.unwrap();
+        assert_eq!(output.block_validity_window.start(), Some(100));
+        assert_eq!(output.block_validity_window.end(), Some(200));
     }
 
     #[test]

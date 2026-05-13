@@ -58,7 +58,7 @@ fn e2e_idl_generation() {
     // Top-level fields
     assert_eq!(idl.version, "0.1.0");
     assert_eq!(idl.name, "treasury");
-    assert_eq!(idl.instructions.len(), 10);
+    assert_eq!(idl.instructions.len(), 11);
 
     // initialize instruction
     let init = &idl.instructions[0];
