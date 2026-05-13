@@ -35,17 +35,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Get current LEZ commit from Cargo.lock
+      - name: Generate Cargo.lock and get current LEZ ref
         id: current
         run: |
+          # Generate Cargo.lock first so we can extract exact commit SHAs
+          cargo generate-lockfile 2>/dev/null || true
+
           # Extract current LEZ commit from Cargo.lock
-          CURRENT=$(grep -A 5 'name = "nssa_core"' Cargo.lock | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+          CURRENT=$(grep -A 5 'name = "nssa_core"' Cargo.lock 2>/dev/null | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
           if [ -z "$CURRENT" ]; then
-            # Try alternative: check Cargo.toml files
-            CURRENT=$(grep -rh 'logos-execution-zone' */Cargo.toml | grep 'rev' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+            # Fallback: extract tag/rev from Cargo.toml files
+            CURRENT=$(grep -rh 'logos-execution-zone' */Cargo.toml 2>/dev/null | head -1 | grep -oE '(tag|rev) = "[^"]*"' | head -1 | cut -d'"' -f2 || echo "")
           fi
           echo "commit=$CURRENT" >> "$GITHUB_OUTPUT"
-          echo "Current LEZ commit: $CURRENT"
+          echo "Current LEZ: $CURRENT"
 
       - name: Get target LEZ commit
         id: lez
@@ -120,7 +123,8 @@ jobs:
           for f in $(find . -name "Cargo.toml" -type f); do
             if grep -q "logos-execution-zone" "$f" 2>/dev/null; then
               echo "  Updating: $f"
-              sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
+              # Replace both tag = "..." and rev = "..." formats with rev = "<SHA>"
+              sed -i "s|tag = \"[^"]*\"|rev = \"$LEZ\"|g; s|rev = \"[a-f0-9]*\"|rev = \"$LEZ\"|g" "$f"
               UPDATED_FILES+=("$f")
             fi
           done
