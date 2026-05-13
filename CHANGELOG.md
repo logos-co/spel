@@ -1,5 +1,35 @@
 # Changelog
 
+## v0.3.0 (2026-05-13)
+
+### ✨ Features
+expose execution context to instruction handlers (issue #172) (#182) (c4b7b0b)
+extend SPEL macros to support private PDAs (#171) (529bf2a)
+re-export nssa_core/nssa types from spel-framework prelude (#153) (e7135b8)
+generate C FFI fetch functions + CI workflow cleanup (#156) (cd9d81a)
+generate C FFI fetch functions for PDA account types (#154) (3cd5102)
+support LEZ validity windows in program output (#139) (9e7f275)
+--dry-run with full tx summary and JSON output (1dc31bf)
+show seed inputs in PDA derivation output (665c5b8)
+SpelOutput::execute() with auto-claim support (#126) (2384881)
+add #[account_type] annotation for IDL-driven account inspection (#106) (62f91e2)
+
+### 🐛 Fixes
+exclude ProgramContext from runtime-generated IDL (#191) (582b452)
+use branch=main for spel-framework default (issue #183) (#184) (ea2f998)
+API stability for SpelOutput (issue #158) (#177) (ba6e87d)
+harden path-dep account_type scanning (issue #173) (#175) (338129a)
+collect #[account_type] types from path-dependency crates (#169) (577b802)
+wrap generated extern "C" FFI functions with catch_unwind (#150) (5e943cc)
+collect #[account_type] structs defined inside #[lez_program] module (#162) (d4e34f0)
+unify IDL generation paths to include #[account_type] annotated types (#146) (82204ab)
+strip Public/Private prefix in generated parse_account_id (#149) (3242f4a)
+map lowercase 'string' IDL type to Rust 'String' (#148) (40dc8ed)
+resolve config paths relative to spel.toml and clean up post-merge issues (fce4a0c)
+clean up serializer after risc0 serde refactor (f36cfdf)
+separate CLI flags from instruction args to avoid parsing conflicts (67af1e6)
+parse PDA seed args through IDL type system (#129) (9005e9f)
+
 ## v0.2.0 (2026-04-01)
 
 ### 📦 Other
