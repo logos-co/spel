@@ -38,17 +38,20 @@ impl SpelOutput {
         }
     }
 
-    /// Restrict the block range in which the transaction is valid.
+    /// Restrict the block range in which the transaction is valid (infallible).
     ///
     /// Accepts any infallible range conversion: `1..`, `..100`, or `..` (unbounded).
+    /// For the fallible variant (returns `Err` on empty/inverted ranges), see
+    /// [`try_with_block_validity_window`](Self::try_with_block_validity_window).
     pub fn with_block_validity_window<W: Into<BlockValidityWindow>>(mut self, window: W) -> Self {
         self.block_validity_window = window.into();
         self
     }
 
-    /// Restrict the block range in which the transaction is valid.
+    /// Restrict the block range in which the transaction is valid (fallible).
     ///
-    /// Returns `Err` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    /// Returns `Err(InvalidWindow)` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    /// For the infallible variant, see [`with_block_validity_window`](Self::with_block_validity_window).
     pub fn try_with_block_validity_window<W: TryInto<BlockValidityWindow, Error = InvalidWindow>>(
         mut self,
         window: W,
@@ -57,9 +60,11 @@ impl SpelOutput {
         Ok(self)
     }
 
-    /// Restrict the timestamp range in which the transaction is valid.
+    /// Restrict the timestamp range in which the transaction is valid (infallible).
     ///
     /// Accepts any infallible range conversion: `1..`, `..100`, or `..` (unbounded).
+    /// For the fallible variant (returns `Err` on empty/inverted ranges), see
+    /// [`try_with_timestamp_validity_window`](Self::try_with_timestamp_validity_window).
     pub fn with_timestamp_validity_window<W: Into<TimestampValidityWindow>>(
         mut self,
         window: W,
@@ -68,9 +73,10 @@ impl SpelOutput {
         self
     }
 
-    /// Restrict the timestamp range in which the transaction is valid.
+    /// Restrict the timestamp range in which the transaction is valid (fallible).
     ///
-    /// Returns `Err` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    /// Returns `Err(InvalidWindow)` if `window` is an empty range (e.g. `5..5` or `10..5`).
+    /// For the infallible variant, see [`with_timestamp_validity_window`](Self::with_timestamp_validity_window).
     pub fn try_with_timestamp_validity_window<
         W: TryInto<TimestampValidityWindow, Error = InvalidWindow>,
     >(

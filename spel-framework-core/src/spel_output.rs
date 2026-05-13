@@ -192,6 +192,12 @@ mod tests {
         assert!(!AutoClaim::None.is_claimed());
     }
 
+    /// Convenience helper: returns a `SpelOutput` with no accounts or calls.
+    /// Reduces boilerplate in validity-window tests below.
+    fn empty_output() -> SpelOutput {
+        SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+    }
+
     #[test]
     fn execute_auto_claims() {
         let account_a = Account::default();
@@ -274,7 +280,7 @@ mod tests {
     /// windows, which matches the prior hard-coded behavior.
     #[test]
     fn default_output_has_unbounded_windows() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![]);
+        let output = empty_output();
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), None);
         assert_eq!(output.timestamp_validity_window.start(), None);
@@ -290,7 +296,7 @@ mod tests {
 
     #[test]
     fn with_block_validity_window_range_from() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .with_block_validity_window(42u64..);
         assert_eq!(output.block_validity_window.start(), Some(42));
         assert_eq!(output.block_validity_window.end(), None);
@@ -298,7 +304,7 @@ mod tests {
 
     #[test]
     fn with_block_validity_window_range_to() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .with_block_validity_window(..100u64);
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), Some(100));
@@ -306,7 +312,7 @@ mod tests {
 
     #[test]
     fn with_block_validity_window_unbounded() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .with_block_validity_window(..);
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), None);
@@ -314,7 +320,7 @@ mod tests {
 
     #[test]
     fn try_with_block_validity_window_valid_range() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .try_with_block_validity_window(10u64..20)
             .expect("10..20 is a valid range");
         assert_eq!(output.block_validity_window.start(), Some(10));
@@ -323,21 +329,43 @@ mod tests {
 
     #[test]
     fn try_with_block_validity_window_empty_range_errors() {
-        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let result = empty_output()
             .try_with_block_validity_window(5u64..5);
         assert!(result.is_err(), "empty range should return Err");
     }
 
     #[test]
     fn try_with_block_validity_window_inverted_range_errors() {
-        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let result = empty_output()
             .try_with_block_validity_window(10u64..5);
         assert!(result.is_err(), "inverted range should return Err");
     }
 
+    /// RangeFull (`..`) is an infallible path for `try_with_block_validity_window`
+    /// and should succeed (same as `with_block_validity_window(..)`).
+    #[test]
+    fn try_with_block_validity_window_range_full_succeeds() {
+        let output = empty_output()
+            .try_with_block_validity_window(..)
+            .expect("RangeFull is an infallible conversion, should never fail");
+        assert_eq!(output.block_validity_window.start(), None);
+        assert_eq!(output.block_validity_window.end(), None);
+    }
+
+    /// RangeFull (`..`) is an infallible path for `try_with_timestamp_validity_window`
+    /// and should succeed (same as `with_timestamp_validity_window(..)`).
+    #[test]
+    fn try_with_timestamp_validity_window_range_full_succeeds() {
+        let output = empty_output()
+            .try_with_timestamp_validity_window(..)
+            .expect("RangeFull is an infallible conversion, should never fail");
+        assert_eq!(output.timestamp_validity_window.start(), None);
+        assert_eq!(output.timestamp_validity_window.end(), None);
+    }
+
     #[test]
     fn with_timestamp_validity_window_range_from() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .with_timestamp_validity_window(1_700_000_000u64..);
         assert_eq!(output.timestamp_validity_window.start(), Some(1_700_000_000));
         assert_eq!(output.timestamp_validity_window.end(), None);
@@ -345,7 +373,7 @@ mod tests {
 
     #[test]
     fn try_with_timestamp_validity_window_valid_range() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let output = empty_output()
             .try_with_timestamp_validity_window(1_000u64..2_000)
             .expect("1000..2000 is a valid range");
         assert_eq!(output.timestamp_validity_window.start(), Some(1_000));
@@ -354,9 +382,16 @@ mod tests {
 
     #[test]
     fn try_with_timestamp_validity_window_empty_range_errors() {
-        let result = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
+        let result = empty_output()
             .try_with_timestamp_validity_window(99u64..99);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn try_with_timestamp_validity_window_inverted_range_errors() {
+        let result = empty_output()
+            .try_with_timestamp_validity_window(2_000u64..1_000);
+        assert!(result.is_err(), "inverted range should return Err");
     }
 
     #[test]
