@@ -550,8 +550,34 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
         None
     };
 
+    // Build account_map: parse --<account-name> <base58-id> for IdlSeed::Account seeds.
+    let mut account_map: HashMap<String, nssa::AccountId> = HashMap::new();
+    for seed in &pda_def.seeds {
+        if let IdlSeed::Account { path } = seed {
+            let kebab_key = format!("--{}", path.replace('_', "-"));
+            let snake_key = format!("--{}", path);
+            let mut j = 1;
+            while j < args.len() {
+                if args[j] == kebab_key || args[j] == snake_key {
+                    if j + 1 < args.len() {
+                        let raw = &args[j + 1];
+                        match raw.parse::<nssa::AccountId>() {
+                            Ok(id) => { account_map.insert(path.clone(), id); }
+                            Err(_) => {
+                                eprintln!("❌ '{}' is not a valid base58 account ID", raw);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                    break;
+                }
+                j += 1;
+            }
+        }
+    }
+
     // Compute PDA
-    match compute_pda_from_seeds(&pda_def.seeds, &program_id, &HashMap::new(), &seed_args, npk.as_ref()) {
+    match compute_pda_from_seeds(&pda_def.seeds, &program_id, &account_map, &seed_args, npk.as_ref()) {
         Ok(account_id) => {
             println!("{}", account_id);
         }
@@ -563,7 +589,7 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 match seed {
                     IdlSeed::Const { value } => eprintln!("  const: {:?}", value),
                     IdlSeed::Arg { path } => eprintln!("  arg: --{}", path.replace('_', "-")),
-                    IdlSeed::Account { path } => eprintln!("  account: {}", path),
+                    IdlSeed::Account { path } => eprintln!("  account: --{} <base58-account-id>", path.replace('_', "-")),
                 }
             }
             std::process::exit(1);
