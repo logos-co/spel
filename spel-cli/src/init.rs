@@ -110,7 +110,8 @@ help: ## Show this help
 	@echo "  make cli ARGS=\"<command> --arg1 value1\""
 
 build: ## Build the guest binary
-	cargo risczero build --manifest-path methods/guest/Cargo.toml
+	cargo risczero build --manifest-path methods/guest/Cargo.toml \
+		2> >(grep -Ev "Falling back to slow ImageID|No such file or directory \(os error 2\)" >&2)
 	@echo ""
 	@echo "✅ Guest binary built: $(PROGRAM_BIN)"
 	@ls -la $(PROGRAM_BIN) 2>/dev/null || true
