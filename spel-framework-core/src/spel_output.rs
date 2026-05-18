@@ -341,24 +341,20 @@ mod tests {
         assert!(result.is_err(), "inverted range should return Err");
     }
 
-    /// RangeFull (`..`) is an infallible path for `try_with_block_validity_window`
-    /// and should succeed (same as `with_block_validity_window(..)`).
+    /// RangeFull (`..`) is an infallible conversion — use the infallible
+    /// `with_block_validity_window` variant, not `try_with_*`.
     #[test]
-    fn try_with_block_validity_window_range_full_succeeds() {
-        let output = empty_output()
-            .try_with_block_validity_window(..)
-            .expect("RangeFull is an infallible conversion, should never fail");
+    fn with_block_validity_window_range_full_succeeds() {
+        let output = empty_output().with_block_validity_window(..);
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), None);
     }
 
-    /// RangeFull (`..`) is an infallible path for `try_with_timestamp_validity_window`
-    /// and should succeed (same as `with_timestamp_validity_window(..)`).
+    /// RangeFull (`..`) is an infallible conversion — use the infallible
+    /// `with_timestamp_validity_window` variant, not `try_with_*`.
     #[test]
-    fn try_with_timestamp_validity_window_range_full_succeeds() {
-        let output = empty_output()
-            .try_with_timestamp_validity_window(..)
-            .expect("RangeFull is an infallible conversion, should never fail");
+    fn with_timestamp_validity_window_range_full_succeeds() {
+        let output = empty_output().with_timestamp_validity_window(..);
         assert_eq!(output.timestamp_validity_window.start(), None);
         assert_eq!(output.timestamp_validity_window.end(), None);
     }
