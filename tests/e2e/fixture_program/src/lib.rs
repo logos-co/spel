@@ -151,7 +151,8 @@ mod treasury {
         authority: AccountWithMetadata,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![authority], vec![])
-            .with_block_validity_window(100u64..200))
+            .try_with_block_validity_window(100u64..200)
+            .expect("100..200 is a valid range"))
     }
 }
 
