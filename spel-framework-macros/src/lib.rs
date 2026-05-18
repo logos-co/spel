@@ -1867,7 +1867,7 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                 .accounts
                 .iter()
                 .map(|acc| {
-                    let name = acc.name.to_string();
+                    let name = acc.name.to_string().trim_start_matches('_').to_string();
                     let writable = acc.constraints.mutable;
                     let signer = acc.constraints.signer;
                     let init = acc.constraints.init;
@@ -1915,7 +1915,7 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                 .args
                 .iter()
                 .map(|arg| {
-                    let name = arg.name.to_string();
+                    let name = arg.name.to_string().trim_start_matches('_').to_string();
                     let type_json = rust_type_to_idl_json(&arg.ty);
                     format!("{{\"name\":\"{}\",\"type\":{}}}", name, type_json)
                 })
