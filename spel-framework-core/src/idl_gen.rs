@@ -182,7 +182,7 @@ fn generate_idl_inner(
                     };
 
                     IdlAccountItem {
-                        name: acc.name.to_string(),
+                        name: acc.name.to_string().trim_start_matches('_').to_string(),
                         writable: acc.constraints.mutable,
                         signer: acc.constraints.signer,
                         init: acc.constraints.init,
@@ -198,7 +198,7 @@ fn generate_idl_inner(
                 .args
                 .iter()
                 .map(|arg| IdlArg {
-                    name: arg.name.to_string(),
+                    name: arg.name.to_string().trim_start_matches('_').to_string(),
                     type_: syn_type_to_idl_type(&arg.ty),
                 })
                 .collect();
