@@ -214,8 +214,7 @@ log "  Signer: ${SIGNER_ID:0:20}..."
 log "Step 8: Sending initialize transaction..."
 SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     initialize \
-    --account "$SIGNER_ID" \
-    --threshold 1 \
+    --owner "$SIGNER_ID" \
     > "$WORK_DIR/initialize-tx.log" 2>&1 || { cat "$WORK_DIR/initialize-tx.log"; fail "Initialize TX failed"; }
 log "  ✓ Initialize TX submitted and confirmed"
 
@@ -224,7 +223,7 @@ log "  ✓ Initialize TX submitted and confirmed"
 log "Step 9: Sending do_something transaction..."
 SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     do_something \
-    --account "$SIGNER_ID" \
+    --owner "$SIGNER_ID" \
     --amount 42 \
     > "$WORK_DIR/do-something-tx.log" 2>&1 || { cat "$WORK_DIR/do-something-tx.log"; fail "do_something TX failed"; }
 log "  ✓ do_something TX submitted and confirmed"
@@ -235,7 +234,7 @@ log "Step 10: Verifying --dry-run mode..."
 SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     --dry-run \
     do_something \
-    --account "$SIGNER_ID" \
+    --owner "$SIGNER_ID" \
     --amount 100 \
     > "$WORK_DIR/dry-run.log" 2>&1 || { cat "$WORK_DIR/dry-run.log"; fail "Dry-run failed"; }
 
