@@ -18,10 +18,13 @@ use spel_framework_core::idl::*;
 
 mod codegen;
 mod ffi_codegen;
+mod logos_module_codegen;
 mod util;
 
 #[cfg(test)]
 mod tests;
+
+pub use logos_module_codegen::LogosModuleOutput;
 
 /// Output of code generation.
 #[derive(Debug, Clone)]
@@ -39,6 +42,13 @@ pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
     let idl: SpelIdl = serde_json::from_str(json)
         .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
     generate_from_idl(&idl)
+}
+
+/// Generate a Logos Basecamp module scaffold from an IDL JSON string.
+pub fn generate_logos_module_from_idl_json(json: &str) -> Result<LogosModuleOutput, String> {
+    let idl: SpelIdl = serde_json::from_str(json)
+        .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
+    logos_module_codegen::generate_logos_module(&idl)
 }
 
 /// Generate client + FFI code from a parsed IDL.
