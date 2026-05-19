@@ -400,6 +400,9 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     // PDA compute helpers
     out.push_str(&generate_pda_helpers(idl));
 
+    // Named IDL types (enums, structs) referenced by account fields
+    generate_defined_types(idl, &mut out);
+
     // Account state structs (BorshDeserialize)
     generate_account_types(idl, &mut out);
 
@@ -554,8 +557,9 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
 /// Emit a JSON field expression for a given IDL type and field name.
 ///
 /// Returns the Rust expression to use inside `serde_json::json!({...})`.
-/// `u128`/`i128` must be stringified; `[u8; N]` becomes hex; everything else is direct.
-fn idl_type_to_json_field(ty: &IdlType, field_name: &str) -> String {
+/// `u128`/`i128` must be stringified; `[u8; N]` becomes hex; Defined enum/struct types
+/// are serialized via a generated match expression or nested JSON object.
+fn idl_type_to_json_field(ty: &IdlType, field_name: &str, types: &[IdlTypeDef]) -> String {
     use spel_framework_core::idl::IdlType;
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
@@ -567,41 +571,150 @@ fn idl_type_to_json_field(ty: &IdlType, field_name: &str) -> String {
             _ => format!("state.{field_name}"),
         },
         IdlType::Array { array: (elem, _) } => {
-            // Byte arrays → hex; other arrays fallback to direct (serde_json handles Vec-like)
             match elem.as_ref() {
                 IdlType::Primitive(p) if p == "u8" => format!("hex::encode(&state.{field_name})"),
                 _ => format!("state.{field_name}"),
             }
         }
-        _ => format!("state.{field_name}"),
+        IdlType::Vec { vec } => {
+            // Vec<[u8;32]> → array of hex strings; Vec<Defined(enum)> → array of strings
+            match vec.as_ref() {
+                IdlType::Primitive(p) if matches!(p.as_str(), "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]") => {
+                    format!("state.{field_name}.iter().map(hex::encode).collect::<Vec<_>>()")
+                }
+                IdlType::Defined { defined } => {
+                    let expr = defined_type_to_json_expr(defined, "item", types);
+                    format!("state.{field_name}.iter().map(|item| {expr}).collect::<Vec<_>>()")
+                }
+                _ => format!("state.{field_name}"),
+            }
+        }
+        IdlType::Option { option } => {
+            match option.as_ref() {
+                IdlType::Defined { defined } => {
+                    let expr = defined_type_to_json_expr(defined, "v", types);
+                    format!("state.{field_name}.as_ref().map(|v| {expr})")
+                }
+                _ => format!("state.{field_name}"),
+            }
+        }
+        IdlType::Defined { defined } => {
+            defined_type_to_json_expr(defined, &format!("state.{field_name}"), types)
+        }
     }
 }
 
-/// Returns true if the type (or any nested type) contains a `Defined` reference.
-/// Such types have no generated Rust definition in the FFI output, so fetch
-/// generation must be skipped for account structs that contain them.
-fn has_defined_type(ty: &IdlType) -> bool {
+/// Generate a Rust expression that serializes a value of a named IDL type to a
+/// `serde_json::Value` (or a type that `serde_json::json!` can embed).
+///
+/// For unit enums: a `match` returning `&str`.
+/// For enums with fields: a `match` returning `serde_json::Value`.
+/// For unknown/struct types: falls back to direct use (relies on serde).
+fn defined_type_to_json_expr(type_name: &str, value_expr: &str, types: &[IdlTypeDef]) -> String {
+    let Some(def) = types.iter().find(|t| t.name == type_name) else {
+        return value_expr.to_string();
+    };
+    if def.kind != "enum" {
+        return value_expr.to_string();
+    }
+    let all_unit = def.variants.iter().all(|v| v.fields.is_empty());
+    if all_unit {
+        // match &state.status { TypeName::V1 => "V1", TypeName::V2 => "V2", ... }
+        let arms: String = def.variants.iter()
+            .map(|v| format!("            {type_name}::{n} => \"{n}\"", n = v.name))
+            .collect::<Vec<_>>()
+            .join(",\n");
+        format!("match &{value_expr} {{\n{arms}\n        }}")
+    } else {
+        // match, returning serde_json::json! per variant
+        let arms: String = def.variants.iter().map(|v| {
+            if v.fields.is_empty() {
+                format!("            {type_name}::{n} => serde_json::json!(\"{n}\")", n = v.name)
+            } else {
+                let field_pats: String = v.fields.iter().map(|f| rust_ident(&f.name)).collect::<Vec<_>>().join(", ");
+                let field_kvs: String = v.fields.iter().map(|f| {
+                    let fname = rust_ident(&f.name);
+                    let expr = match &f.type_ {
+                        IdlType::Primitive(p) if matches!(p.as_str(), "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]") => {
+                            format!("hex::encode({fname})")
+                        }
+                        IdlType::Array { array: (elem, _) } if matches!(elem.as_ref(), IdlType::Primitive(p) if p == "u8") => {
+                            format!("hex::encode({fname})")
+                        }
+                        _ => fname.clone(),
+                    };
+                    format!("\"{fname}\": {expr}")
+                }).collect::<Vec<_>>().join(", ");
+                format!(
+                    "            {type_name}::{n} {{ {field_pats} }} => serde_json::json!({{\"type\": \"{n}\", {field_kvs}}})",
+                    n = v.name
+                )
+            }
+        }).collect::<Vec<_>>().join(",\n");
+        format!("match &{value_expr} {{\n{arms}\n        }}")
+    }
+}
+
+/// Returns true if the type (or any nested type) contains a `Defined` reference
+/// that cannot be resolved in `known_types`.
+fn has_unresolvable_defined_type(ty: &IdlType, known_types: &std::collections::HashSet<&str>) -> bool {
     use spel_framework_core::idl::IdlType;
     match ty {
-        IdlType::Defined { .. } => true,
-        IdlType::Vec { vec } => has_defined_type(vec),
-        IdlType::Option { option } => has_defined_type(option),
-        IdlType::Array { array: (elem, _) } => has_defined_type(elem),
+        IdlType::Defined { defined } => !known_types.contains(defined.as_str()),
+        IdlType::Vec { vec } => has_unresolvable_defined_type(vec, known_types),
+        IdlType::Option { option } => has_unresolvable_defined_type(option, known_types),
+        IdlType::Array { array: (elem, _) } => has_unresolvable_defined_type(elem, known_types),
         _ => false,
     }
 }
 
 /// Returns true if `acc_name` (snake_case) qualifies for fetch function generation:
 /// it must have a matching struct entry in `idl.accounts` with non-empty fields and
-/// no `Defined` field types. Used by both `generate_account_fetch_functions` and
-/// `generate_header` to keep their filtering logic in sync.
+/// all `Defined` field types resolvable in `idl.types`.
 fn is_fetch_eligible(idl: &SpelIdl, acc_name: &str) -> bool {
+    let known: std::collections::HashSet<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
     match idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name) {
         None => false,
         Some(t) => {
             t.type_.kind == "struct"
                 && !t.type_.fields.is_empty()
-                && !t.type_.fields.iter().any(|f| has_defined_type(&f.type_))
+                && !t.type_.fields.iter().any(|f| has_unresolvable_defined_type(&f.type_, &known))
+        }
+    }
+}
+
+/// Emit Borsh-deserializable type definitions for all named types in `idl.types`.
+/// These cover enums and structs referenced via `Defined { defined }` from account fields.
+pub fn generate_defined_types(idl: &SpelIdl, out: &mut String) {
+    for def in &idl.types {
+        if def.name.is_empty() { continue; }
+        let name = &def.name;
+        writeln!(out).unwrap();
+        writeln!(out, "/// Auto-generated Borsh type: `{name}`.").unwrap();
+        writeln!(out, "#[allow(dead_code)]").unwrap();
+        writeln!(out, "#[derive(borsh::BorshDeserialize)]").unwrap();
+        if def.kind == "enum" {
+            writeln!(out, "enum {name} {{").unwrap();
+            for variant in &def.variants {
+                if variant.fields.is_empty() {
+                    writeln!(out, "    {},", variant.name).unwrap();
+                } else {
+                    let fields: String = variant.fields.iter()
+                        .map(|f| format!("{}: {}", rust_ident(&f.name), idl_type_to_borsh_rust(&f.type_)))
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    writeln!(out, "    {} {{ {fields} }},", variant.name).unwrap();
+                }
+            }
+            writeln!(out, "}}").unwrap();
+        } else if def.kind == "struct" {
+            writeln!(out, "struct {name} {{").unwrap();
+            for field in &def.fields {
+                let fname = rust_ident(&field.name);
+                let ftype = idl_type_to_borsh_rust(&field.type_);
+                writeln!(out, "    pub {fname}: {ftype},").unwrap();
+            }
+            writeln!(out, "}}").unwrap();
         }
     }
 }
@@ -782,7 +895,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             for field in &type_def.type_.fields {
                 let json_key = &field.name;
                 let field_ident = rust_ident(&field.name);
-                let expr = idl_type_to_json_field(&field.type_, &field_ident);
+                let expr = idl_type_to_json_field(&field.type_, &field_ident, &idl.types);
                 writeln!(out, "            \"{json_key}\": {expr},").unwrap();
             }
             writeln!(out, "        }}").unwrap();
@@ -815,7 +928,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             for field in &type_def.type_.fields {
                 let json_key = &field.name;
                 let field_ident = rust_ident(&field.name);
-                let expr = idl_type_to_json_field(&field.type_, &field_ident);
+                let expr = idl_type_to_json_field(&field.type_, &field_ident, &idl.types);
                 writeln!(out, "            \"{json_key}\": {expr},").unwrap();
             }
             writeln!(out, "        }}").unwrap();

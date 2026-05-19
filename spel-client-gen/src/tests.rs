@@ -1229,3 +1229,109 @@ fn test_ffi_code_is_valid_rust_syntax_sample_idl() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
     assert_parses_as_rust("SAMPLE_IDL ffi_code", &output.ffi_code);
 }
+
+/// IDL with `types` entries (enum with and without variant fields) referenced by
+/// account struct fields via `Defined`.  The generator must:
+/// 1. Emit Borsh type definitions for each entry in `idl.types`
+/// 2. Emit the account struct with the Defined field types
+/// 3. Emit a fetch function with correct JSON serialization (match for unit enums,
+///    serde_json::json! match for enums with fields)
+const DEFINED_TYPES_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "test_program",
+    "instructions": [
+        {
+            "name": "propose",
+            "accounts": [
+                {
+                    "name": "proposal",
+                    "writable": true,
+                    "signer": false,
+                    "init": true,
+                    "pda": {
+                        "seeds": [
+                            {"kind": "const", "value": "prop____"},
+                            {"kind": "arg", "path": "index"}
+                        ]
+                    }
+                }
+            ],
+            "args": [
+                {"name": "index", "type": "u64"}
+            ]
+        }
+    ],
+    "accounts": [
+        {
+            "name": "Proposal",
+            "type": {
+                "kind": "struct",
+                "fields": [
+                    {"name": "index", "type": "u64"},
+                    {"name": "proposer", "type": "[u8; 32]"},
+                    {"name": "status", "type": {"defined": "ProposalStatus"}},
+                    {"name": "action", "type": {"option": {"defined": "ConfigAction"}}}
+                ]
+            }
+        }
+    ],
+    "types": [
+        {
+            "kind": "enum",
+            "name": "ProposalStatus",
+            "variants": [
+                {"name": "Active"},
+                {"name": "Executed"},
+                {"name": "Rejected"}
+            ]
+        },
+        {
+            "kind": "enum",
+            "name": "ConfigAction",
+            "variants": [
+                {
+                    "name": "AddMember",
+                    "fields": [{"name": "new_member", "type": {"array": ["u8", 32]}}]
+                },
+                {
+                    "name": "ChangeThreshold",
+                    "fields": [{"name": "new_threshold", "type": "u8"}]
+                }
+            ]
+        }
+    ]
+}"#;
+
+#[test]
+fn test_defined_types_emitted() {
+    let output = generate_from_idl_json(DEFINED_TYPES_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // Borsh type definitions must be emitted
+    assert!(ffi.contains("enum ProposalStatus"), "must emit ProposalStatus enum");
+    assert!(ffi.contains("Active,"), "ProposalStatus must have Active variant");
+    assert!(ffi.contains("enum ConfigAction"), "must emit ConfigAction enum");
+    assert!(ffi.contains("AddMember"), "ConfigAction must have AddMember variant");
+
+    // Account struct must be emitted with Defined fields
+    assert!(ffi.contains("struct ProposalState"), "must emit ProposalState struct");
+    assert!(ffi.contains("pub status: ProposalStatus"), "ProposalState must have status: ProposalStatus");
+    assert!(ffi.contains("pub action: Option<ConfigAction>"), "ProposalState must have action: Option<ConfigAction>");
+
+    // Fetch function must be emitted
+    assert!(ffi.contains("fn test_program_fetch_proposal_impl"), "must emit fetch_proposal_impl");
+
+    // JSON serialization: unit enum → match returning &str
+    assert!(ffi.contains("ProposalStatus::Active"), "must match ProposalStatus::Active");
+    assert!(ffi.contains("\"Active\""), "unit enum variant must serialize as string");
+
+    // JSON serialization: enum with fields → serde_json::json! match
+    assert!(ffi.contains("ConfigAction::AddMember"), "must match ConfigAction::AddMember");
+    assert!(ffi.contains("hex::encode(new_member)"), "byte field in enum variant must be hex-encoded");
+}
+
+#[test]
+fn test_defined_types_ffi_is_valid_rust() {
+    let output = generate_from_idl_json(DEFINED_TYPES_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("DEFINED_TYPES_IDL ffi_code", &output.ffi_code);
+}
