@@ -493,6 +493,7 @@ fn gen_backend_cpp(
             f.acc_name
         ));
     }
+    o.push_str(&format!("    char* {effective_prog}_program_id();\n"));
     o.push_str(&format!("    void  {prog}_free_string(char* s);\n"));
     o.push_str("}\n\n");
 
@@ -506,6 +507,15 @@ fn gen_backend_cpp(
     o.push_str(&format!(
         "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID_HEX\")).toString();\n"
     ));
+    // Fallback: call the compiled-in FFI constant if still empty (priority 3)
+    o.push_str(&format!("    if (m_programIdHex.isEmpty()) {{\n"));
+    o.push_str(&format!("        char* raw = {effective_prog}_program_id();\n"));
+    o.push_str("        if (raw) {\n");
+    o.push_str("            m_programIdHex = QJsonDocument::fromJson(QByteArray(raw))\n");
+    o.push_str("                                 .object().value(\"program_id_hex\").toString();\n");
+    o.push_str(&format!("            {prog}_free_string(raw);\n"));
+    o.push_str("        }\n");
+    o.push_str("    }\n");
     o.push_str("}\n\n");
     o.push_str(&format!("{backend}::~{backend}() = default;\n\n"));
 
