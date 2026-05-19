@@ -1394,14 +1394,16 @@ fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
     o.push_str(&format!("{ind}                    Layout.rightMargin: 8\n"));
     o.push_str(&format!("{ind}                    Text {{ text: modelData + \":\"; color: root.colMuted; font.pixelSize: 12; Layout.preferredWidth: 140 }}\n"));
     o.push_str(&format!("{ind}                    Text {{\n"));
-    o.push_str(&format!("{ind}                        text: backend.{prop}[modelData] ?? \"\"\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.{prop}[modelData]\n"));
+    o.push_str(&format!("{ind}                        text: Array.isArray(_v) ? _v.join(\"\\n\") : (_v ?? \"\")\n"));
     o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12\n"));
     o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere\n"));
     o.push_str(&format!("{ind}                        Layout.fillWidth: true\n"));
     o.push_str(&format!("{ind}                    }}\n"));
     o.push_str(&format!("{ind}                    Button {{\n"));
     o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
-    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(backend.{prop}[modelData] ?? \"\")\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.{prop}[modelData]\n"));
+    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(Array.isArray(_v) ? _v.join(\"\\n\") : (_v ?? \"\"))\n"));
     o.push_str(&format!("{ind}                        background: Item {{}}\n"));
     o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
     o.push_str(&format!("{ind}                            text: \"\\u29C9\"\n")); // ⧉ copy glyph
