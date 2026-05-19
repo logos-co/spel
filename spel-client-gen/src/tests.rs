@@ -217,7 +217,7 @@ fn test_pda_helpers_single_arg_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda { private: false, npk_arg: None,
                     seeds: vec![IdlSeed::Arg { path: "create_key".to_string() }],
                 }),
                 rest: false,
@@ -272,7 +272,7 @@ fn test_pda_helpers_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda { private: false, npk_arg: None,
                     seeds: vec![
                         IdlSeed::Const { value: "multisig_state__".to_string() },
                         IdlSeed::Arg { path: "create_key".to_string() },
@@ -328,7 +328,7 @@ fn test_pda_helpers_deduplication() {
             signer: false,
             init: false,
             owner: None,
-            pda: Some(IdlPda { private: false,
+            pda: Some(IdlPda { private: false, npk_arg: None,
                 seeds: vec![IdlSeed::Arg { path: "my_key".to_string() }],
             }),
             rest: false,
@@ -399,7 +399,7 @@ fn test_pda_helpers_u64_single_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda { private: false, npk_arg: None,
                     seeds: vec![IdlSeed::Arg { path: "proposal_index".to_string() }],
                 }),
                 rest: false,
@@ -452,7 +452,7 @@ fn test_pda_helpers_u64_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda { private: false, npk_arg: None,
                     seeds: vec![
                         IdlSeed::Arg { path: "create_key".to_string() },
                         IdlSeed::Arg { path: "proposal_index".to_string() },
@@ -1228,4 +1228,145 @@ fn test_account_seed_pda_binding_order() {
 fn test_ffi_code_is_valid_rust_syntax_sample_idl() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
     assert_parses_as_rust("SAMPLE_IDL ffi_code", &output.ffi_code);
+}
+
+// ── Private PDA codegen tests ─────────────────────────────────────────────────
+
+const PRIVATE_PDA_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "private_vault",
+    "instructions": [
+        {
+            "name": "init_vault",
+            "accounts": [
+                {
+                    "name": "vault",
+                    "writable": false,
+                    "signer": false,
+                    "init": true,
+                    "pda": {
+                        "seeds": [{"kind": "const", "value": "vault"}],
+                        "private": true,
+                        "npk_arg": "user_npk"
+                    },
+                    "visibility": ["private"]
+                },
+                {
+                    "name": "authority",
+                    "writable": false,
+                    "signer": true,
+                    "init": false
+                }
+            ],
+            "args": [
+                {"name": "user_npk", "type": {"defined": "NullifierPublicKey"}}
+            ]
+        }
+    ],
+    "accounts": [],
+    "types": [],
+    "errors": []
+}"#;
+
+#[test]
+fn test_private_pda_client_helper_has_npk_param() {
+    let output = generate_from_idl_json(PRIVATE_PDA_IDL).expect("codegen should succeed");
+    let client = &output.client_code;
+    assert!(
+        client.contains("compute_vault_pda("),
+        "client should emit compute_vault_pda helper: {client}"
+    );
+    assert!(
+        client.contains("npk: &NullifierPublicKey"),
+        "private PDA helper must have npk parameter: {client}"
+    );
+    assert!(
+        client.contains("compute_private_pda("),
+        "private PDA helper must call compute_private_pda: {client}"
+    );
+    assert!(
+        !client.contains("compute_pda(program_id"),
+        "private PDA helper must NOT call compute_pda (public): {client}"
+    );
+}
+
+#[test]
+fn test_private_pda_ffi_helper_has_npk_param() {
+    let output = generate_from_idl_json(PRIVATE_PDA_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+    assert!(
+        ffi.contains("compute_vault_pda("),
+        "FFI should emit compute_vault_pda helper: {ffi}"
+    );
+    assert!(
+        ffi.contains("npk: &NullifierPublicKey"),
+        "FFI private PDA helper must have npk parameter: {ffi}"
+    );
+    assert!(
+        ffi.contains("for_private_pda("),
+        "FFI private PDA helper must call for_private_pda: {ffi}"
+    );
+    assert!(
+        ffi.contains("compute_private_pda_with_program("),
+        "FFI must call compute_private_pda_with_program for inline PDA derivation: {ffi}"
+    );
+    assert!(
+        !ffi.contains("compute_pda_with_program(&program_id"),
+        "FFI must NOT use public compute_pda_with_program for private PDA: {ffi}"
+    );
+}
+
+#[test]
+fn test_private_pda_ffi_uses_npk_arg_from_json() {
+    let output = generate_from_idl_json(PRIVATE_PDA_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+    // The npk arg must be parsed from JSON before being passed to the PDA derivation.
+    // Search for the call site (contains '&program_id') rather than the function definition.
+    let npk_parse_pos = ffi.find("let user_npk =")
+        .expect("must bind user_npk from JSON args");
+    let pda_call_pos = ffi.find("compute_private_pda_with_program(&program_id")
+        .expect("must call compute_private_pda_with_program with &program_id");
+    assert!(
+        npk_parse_pos < pda_call_pos,
+        "user_npk binding must appear before private PDA derivation call"
+    );
+}
+
+#[test]
+fn test_private_pda_ffi_imports_nullifier_public_key() {
+    let output = generate_from_idl_json(PRIVATE_PDA_IDL).expect("codegen should succeed");
+    assert!(
+        output.ffi_code.contains("use nssa_core::NullifierPublicKey;"),
+        "FFI with private PDA must import NullifierPublicKey"
+    );
+    assert!(
+        output.client_code.contains("use nssa_core::NullifierPublicKey;"),
+        "client with private PDA must import NullifierPublicKey"
+    );
+}
+
+#[test]
+fn test_private_pda_ffi_is_valid_rust_syntax() {
+    let output = generate_from_idl_json(PRIVATE_PDA_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("PRIVATE_PDA_IDL ffi_code", &output.ffi_code);
+    assert_parses_as_rust("PRIVATE_PDA_IDL client_code", &output.client_code);
+}
+
+#[test]
+fn test_public_pda_does_not_get_npk_import() {
+    // A program with only public PDAs should NOT import NullifierPublicKey
+    // and must NOT emit compute_private_pda_with_program (which references it)
+    let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
+    assert!(
+        !output.ffi_code.contains("use nssa_core::NullifierPublicKey;"),
+        "public-PDA program must NOT import NullifierPublicKey in FFI"
+    );
+    assert!(
+        !output.client_code.contains("use nssa_core::NullifierPublicKey;"),
+        "public-PDA program must NOT import NullifierPublicKey in client"
+    );
+    assert!(
+        !output.ffi_code.contains("compute_private_pda_with_program"),
+        "public-PDA program must NOT emit compute_private_pda_with_program in FFI"
+    );
 }

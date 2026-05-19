@@ -178,7 +178,7 @@ fn generate_idl_inner(
                                 PdaSeedDef::Arg(p) => IdlSeed::Arg { path: p.clone() },
                             })
                             .collect();
-                        Some(IdlPda { seeds, private: false })
+                        Some(IdlPda { seeds, private: false, npk_arg: None })
                     };
 
                     IdlAccountItem {

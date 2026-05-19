@@ -105,6 +105,10 @@ pub struct IdlPda {
     /// Callers must supply `--npk <hex>` to derive the address.
     #[serde(default, skip_serializing_if = "is_false")]
     pub private: bool,
+    /// Name of the instruction argument that holds the NullifierPublicKey for this private PDA.
+    /// Only set when `private == true`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub npk_arg: Option<String>,
 }
 
 /// A seed component for PDA derivation.

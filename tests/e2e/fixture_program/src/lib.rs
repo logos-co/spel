@@ -779,6 +779,7 @@ mod tests {
         let acc = &ix.accounts[0];
         let pda = acc.pda.as_ref().expect("account must have PDA definition");
         assert!(pda.private, "IDL PDA must be marked private");
+        assert_eq!(pda.npk_arg.as_deref(), Some("user_npk"), "IDL PDA must record npk_arg name");
         assert!(acc.visibility.iter().any(|v| v == "private"), "visibility must include 'private'");
     }
 
