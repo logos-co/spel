@@ -124,7 +124,7 @@ jobs:
             if grep -q "logos-execution-zone" "$f" 2>/dev/null; then
               echo "  Updating: $f"
               # Replace both tag = "..." and rev = "..." formats with rev = "<SHA>"
-              sed -i "s|tag = \"[^"]*\"|rev = \"$LEZ\"|g; s|rev = \"[a-f0-9]*\"|rev = \"$LEZ\"|g" "$f"
+              sed -i "s|tag = \"[^\"]*\"|rev = \"$LEZ\"|g; s|rev = \"[a-f0-9]*\"|rev = \"$LEZ\"|g" "$f"
               UPDATED_FILES+=("$f")
             fi
           done

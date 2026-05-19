@@ -540,6 +540,8 @@ fn gen_backend_cpp(
         o.push_str(&backend);
         o.push_str("::autoRefresh);\n");
     }
+    o.push_str("    } else {\n");
+    o.push_str("        emit operationSuccess(operation, QString());\n");
     o.push_str("    }\n}\n\n");
 
     // autoRefresh

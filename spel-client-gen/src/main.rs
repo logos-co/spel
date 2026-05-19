@@ -3,6 +3,7 @@
 //! Usage:
 //!   spel-client-gen --idl path/to/idl.json --out-dir generated/
 
+use spel_client_gen::pascal_case;
 use std::path::PathBuf;
 
 fn main() {
@@ -47,7 +48,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Options:");
                 println!("  --idl <path>          Path to IDL JSON file");
                 println!("  --out-dir <dir>       Output directory for generated files");
-                println!("  --target <target>     Output target (default: rust+ffi, logos-module)");
+                println!("  --target <target>     Output target: rust+ffi (default) | logos-module");
                 println!("  --module-name <name>  Override class/file name for logos-module target");
                 return Ok(());
             }
@@ -131,20 +132,3 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn pascal_case(s: &str) -> String {
-    let mut out = String::new();
-    let mut upper = true;
-    for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            if upper {
-                out.push(ch.to_ascii_uppercase());
-                upper = false;
-            } else {
-                out.push(ch);
-            }
-        } else {
-            upper = true;
-        }
-    }
-    out
-}

@@ -25,6 +25,7 @@ mod util;
 mod tests;
 
 pub use logos_module_codegen::LogosModuleOutput;
+pub use util::pascal_case;
 
 /// Output of code generation.
 #[derive(Debug, Clone)]
