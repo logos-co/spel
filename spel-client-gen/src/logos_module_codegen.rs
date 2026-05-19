@@ -41,11 +41,11 @@ pub fn generate_logos_module(
 
     Ok(LogosModuleOutput {
         backend_h: gen_backend_h(idl, &class, &prog, &fetches, &env_base),
-        backend_cpp: gen_backend_cpp(idl, &class, &prog, &fetches, &env_base),
+        backend_cpp: gen_backend_cpp(idl, &class, &prog, &fetches, &env_base, &effective_prog),
         plugin_h: gen_plugin_h(&class),
-        plugin_cpp: gen_plugin_cpp(&class),
+        plugin_cpp: gen_plugin_cpp(&class, &effective_prog),
         main_cpp: gen_main_cpp(&class, &effective_prog),
-        main_qml: gen_main_qml(idl, &fetches),
+        main_qml: gen_main_qml(idl, &fetches, &effective_prog),
         module_yaml: gen_module_yaml(idl, &effective_prog, &class),
         metadata_json: gen_metadata_json(idl, &effective_prog),
     })
@@ -106,6 +106,20 @@ fn camel_case(s: &str) -> String {
         None => String::new(),
         Some(c) => c.to_lowercase().to_string() + chars.as_str(),
     }
+}
+
+fn title_case(s: &str) -> String {
+    s.split('_')
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                None => String::new(),
+                Some(f) => f.to_uppercase().to_string() + c.as_str(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn is_bool_type(ty: &IdlType) -> bool {
@@ -324,6 +338,10 @@ fn gen_backend_h(
     o.push_str("    Q_PROPERTY(QString    lastError  READ lastError  NOTIFY lastErrorChanged)\n");
     o.push_str("    Q_PROPERTY(QString    lastTxHash READ lastTxHash NOTIFY lastTxHashChanged)\n");
     o.push_str("    Q_PROPERTY(QVariantMap lastResult READ lastResult NOTIFY lastResultChanged)\n\n");
+    o.push_str("    // ── Configuration ────────────────────────────────────────────────────\n");
+    o.push_str("    Q_PROPERTY(QString walletPath   READ walletPath   WRITE setWalletPath   NOTIFY walletPathChanged)\n");
+    o.push_str("    Q_PROPERTY(QString sequencerUrl READ sequencerUrl WRITE setSequencerUrl NOTIFY sequencerUrlChanged)\n");
+    o.push_str("    Q_PROPERTY(QString programIdHex READ programIdHex WRITE setProgramIdHex NOTIFY programIdHexChanged)\n\n");
 
     o.push_str("public:\n");
     o.push_str(&format!(
@@ -345,6 +363,13 @@ fn gen_backend_h(
     o.push_str("    QString    lastError()  const { return m_lastError; }\n");
     o.push_str("    QString    lastTxHash() const { return m_lastTxHash; }\n");
     o.push_str("    QVariantMap lastResult() const { return m_lastResult; }\n\n");
+
+    o.push_str("    QString walletPath()   const { return m_walletPath; }\n");
+    o.push_str("    QString sequencerUrl() const { return m_sequencerUrl; }\n");
+    o.push_str("    QString programIdHex() const { return m_programIdHex; }\n");
+    o.push_str("    Q_INVOKABLE void setWalletPath(const QString& v);\n");
+    o.push_str("    Q_INVOKABLE void setSequencerUrl(const QString& v);\n");
+    o.push_str("    Q_INVOKABLE void setProgramIdHex(const QString& v);\n\n");
 
     o.push_str("    // ── Instructions ──────────────────────────────────────────────────────\n");
     for ix in &idl.instructions {
@@ -386,7 +411,10 @@ fn gen_backend_h(
     o.push_str("    void lastTxHashChanged();\n");
     o.push_str("    void lastResultChanged();\n");
     o.push_str("    void operationSuccess(const QString& operation, const QString& txHash);\n");
-    o.push_str("    void operationError(const QString& operation, const QString& error);\n\n");
+    o.push_str("    void operationError(const QString& operation, const QString& error);\n");
+    o.push_str("    void walletPathChanged();\n");
+    o.push_str("    void sequencerUrlChanged();\n");
+    o.push_str("    void programIdHexChanged();\n\n");
 
     o.push_str("private:\n");
     if has_no_arg_fetches {
@@ -433,6 +461,7 @@ fn gen_backend_cpp(
     prog: &str,
     fetches: &[FetchAccount],
     env_base: &str,
+    effective_prog: &str,
 ) -> String {
     let mut o = String::new();
     let backend = format!("{class}Backend");
@@ -448,6 +477,7 @@ fn gen_backend_cpp(
     o.push_str("#include <QJsonDocument>\n");
     o.push_str("#include <QJsonObject>\n");
     o.push_str("#include <QMetaObject>\n");
+    o.push_str("#include <QSettings>\n");
     o.push_str("#include <QThreadPool>\n");
     o.push_str("#include <QtConcurrent/QtConcurrent>\n\n");
 
@@ -469,18 +499,30 @@ fn gen_backend_cpp(
     // Constructor
     o.push_str("// ── Construction ──────────────────────────────────────────────────────────\n\n");
     o.push_str(&format!("{backend}::{backend}(LogosAPI* /*api*/, QObject* parent)\n"));
-    o.push_str("    : QObject(parent)\n");
-    o.push_str(
-        "    , m_walletPath(qEnvironmentVariable(\"NSSA_WALLET_HOME_DIR\", \".scaffold/wallet\"))\n",
-    );
-    o.push_str(
-        "    , m_sequencerUrl(qEnvironmentVariable(\"NSSA_SEQUENCER_URL\", \"http://127.0.0.1:3040\"))\n",
-    );
+    o.push_str("    : QObject(parent)\n{\n");
+    o.push_str(&format!("    QSettings s(\"logos-co\", \"{effective_prog}\");\n"));
+    o.push_str("    m_walletPath   = s.value(\"walletPath\",   qEnvironmentVariable(\"NSSA_WALLET_HOME_DIR\",  \".scaffold/wallet\")).toString();\n");
+    o.push_str("    m_sequencerUrl = s.value(\"sequencerUrl\", qEnvironmentVariable(\"NSSA_SEQUENCER_URL\",   \"http://127.0.0.1:3040\")).toString();\n");
     o.push_str(&format!(
-        "    , m_programIdHex(qEnvironmentVariable(\"{env_base}_PROGRAM_ID_HEX\"))\n"
+        "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID_HEX\")).toString();\n"
     ));
-    o.push_str("{}\n\n");
+    o.push_str("}\n\n");
     o.push_str(&format!("{backend}::~{backend}() = default;\n\n"));
+
+    // Configuration setters (QSettings-backed, priority: QSettings > env var)
+    o.push_str("// ── Configuration ────────────────────────────────────────────────────────\n\n");
+    for (field, method, key, signal) in [
+        ("m_walletPath",   "setWalletPath",   "walletPath",   "walletPathChanged"),
+        ("m_sequencerUrl", "setSequencerUrl", "sequencerUrl", "sequencerUrlChanged"),
+        ("m_programIdHex", "setProgramIdHex", "programIdHex", "programIdHexChanged"),
+    ] {
+        o.push_str(&format!("void {backend}::{method}(const QString& v) {{\n"));
+        o.push_str(&format!("    if ({field} == v) return;\n"));
+        o.push_str(&format!("    {field} = v;\n"));
+        o.push_str(&format!("    QSettings(\"logos-co\", \"{effective_prog}\").setValue(\"{key}\", v);\n"));
+        o.push_str(&format!("    emit {signal}();\n"));
+        o.push_str("}\n\n");
+    }
 
     // Helpers
     o.push_str("// ── Helpers ──────────────────────────────────────────────────────────────\n\n");
@@ -667,7 +709,10 @@ fn gen_plugin_h(class: &str) -> String {
 
 // ── Plugin.cpp ────────────────────────────────────────────────────────────────
 
-fn gen_plugin_cpp(class: &str) -> String {
+fn gen_plugin_cpp(class: &str, effective_prog: &str) -> String {
+    // Q_INIT_RESOURCE name must match the qt_add_resources() name in CMakeLists.txt.
+    // Convention: <effective_prog>_qml  (snake_case with _qml suffix).
+    let res = effective_prog.replace('-', "_");
     format!(
         "// Auto-generated by spel-client-gen --target logos-module. DO NOT EDIT.\n\
          #include \"{class}Plugin.h\"\n\
@@ -690,10 +735,13 @@ fn gen_plugin_cpp(class: &str) -> String {
          \tview->engine()->rootContext()->setContextProperty(\"backend\", m_backend);\n\
          \tview->setResizeMode(QQuickWidget::SizeRootObjectToView);\n\
          \tconst char* qmlPath = std::getenv(\"QML_PATH\");\n\
-         \tif (qmlPath)\n\
+         \tif (qmlPath) {{\n\
          \t\tview->setSource(QUrl::fromLocalFile(QString::fromUtf8(qmlPath) + \"/Main.qml\"));\n\
-         \telse\n\
+         \t}} else {{\n\
+         \t\t// Qt does not auto-register embedded resources in dynamically loaded plugins.\n\
+         \t\tQ_INIT_RESOURCE({res}_qml); // name must match qt_add_resources() in CMakeLists.txt\n\
          \t\tview->setSource(QUrl(\"qrc:/qml/Main.qml\"));\n\
+         \t}}\n\
          \treturn view;\n\
          }}\n\n\
          void {class}Plugin::destroyWidget(QWidget* widget) {{\n\
@@ -747,20 +795,36 @@ fn gen_main_cpp(class: &str, effective_prog: &str) -> String {
 
 // ── Main.qml ─────────────────────────────────────────────────────────────────
 
-fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount]) -> String {
-    let mut o = String::new();
+fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -> String {
+    // Sidebar nav model: fetch state panels first, then instructions, then Settings.
+    let prog_title = title_case(
+        effective_prog
+            .trim_end_matches("_program")
+            .trim_end_matches("_contract"),
+    );
+    let mut nav_items: Vec<String> = Vec::new();
+    for f in fetches {
+        nav_items.push(format!("\"{}\"", title_case(&f.acc_name)));
+    }
+    for ix in &idl.instructions {
+        nav_items.push(format!("\"{}\"", title_case(&ix.name)));
+    }
+    nav_items.push("\"Settings\"".to_string());
+    let nav_model = nav_items.join(", ");
 
+    let mut o = String::new();
     o.push_str("// Auto-generated by spel-client-gen --target logos-module. DO NOT EDIT.\n");
     o.push_str("import QtQuick 2.15\n");
     o.push_str("import QtQuick.Controls 2.15\n");
     o.push_str("import QtQuick.Layouts 1.15\n\n");
 
-    o.push_str("Item {\n");
-    o.push_str("    id: root\n\n");
+    o.push_str("Item {\n    id: root\n\n");
 
-    o.push_str("    // ── Logos palette ─────────────────────────────────────────────────────\n");
+    // Palette
+    o.push_str("    // ── Logos palette ────────────────────────────────────────────────\n");
     o.push_str("    readonly property color colBg:      \"#0f1117\"\n");
     o.push_str("    readonly property color colSurface: \"#1a1d27\"\n");
+    o.push_str("    readonly property color colSidebar: \"#13151f\"\n");
     o.push_str("    readonly property color colBorder:  \"#2d3148\"\n");
     o.push_str("    readonly property color colPrimary: \"#7c6ef5\"\n");
     o.push_str("    readonly property color colSuccess: \"#3ecf8e\"\n");
@@ -769,146 +833,181 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount]) -> String {
     o.push_str("    readonly property color colMuted:   \"#6b7280\"\n");
     o.push_str("    readonly property int   radius:     12\n\n");
 
+    // Connections
     o.push_str("    Connections {\n");
     o.push_str("        target: backend\n");
     o.push_str("        function onOperationSuccess(operation, txHash) {\n");
-    o.push_str("            toast.show(\"\\u2713 \" + operation + \" \\u00b7 \" + txHash.slice(0, 12) + \"\\u2026\", root.colSuccess)\n");
+    o.push_str("            toast.show(\"\\u2713 \" + operation + (txHash ? \" \\u00b7 \" + txHash.slice(0, 12) + \"\\u2026\" : \"\"), root.colSuccess)\n");
     o.push_str("        }\n");
     o.push_str("        function onOperationError(operation, error) {\n");
     o.push_str("            toast.show(\"\\u2717 \" + operation + \": \" + error, root.colError)\n");
     o.push_str("        }\n");
     o.push_str("    }\n\n");
 
+    // Background
     o.push_str("    Rectangle {\n");
     o.push_str("        anchors.fill: parent\n");
     o.push_str("        color: root.colBg\n\n");
 
-    o.push_str("        ScrollView {\n");
-    o.push_str("            id: scrollView\n");
-    o.push_str("            anchors.fill: parent\n");
-    o.push_str("            clip: true\n\n");
-
+    // ── Sidebar ──────────────────────────────────────────────────────────────
+    o.push_str("        // ── Sidebar ──────────────────────────────────────────────────────\n");
+    o.push_str("        Rectangle {\n");
+    o.push_str("            id: sidebar\n");
+    o.push_str("            anchors { left: parent.left; top: parent.top; bottom: parent.bottom }\n");
+    o.push_str("            width: 200\n");
+    o.push_str("            color: root.colSidebar\n\n");
     o.push_str("            ColumnLayout {\n");
-    o.push_str("                width: scrollView.width\n");
-    o.push_str("                spacing: 12\n");
-    o.push_str("                leftPadding: 16; rightPadding: 16\n");
-    o.push_str("                topPadding: 16; bottomPadding: 80\n\n");
-
-    o.push_str("                BusyIndicator {\n");
-    o.push_str("                    running: backend.busy\n");
-    o.push_str("                    visible: running\n");
-    o.push_str("                    Layout.alignment: Qt.AlignHCenter\n");
+    o.push_str("                anchors.fill: parent\n");
+    o.push_str("                spacing: 0\n\n");
+    // Header row
+    o.push_str("                RowLayout {\n");
+    o.push_str("                    Layout.fillWidth: true\n");
+    o.push_str("                    Layout.preferredHeight: 52\n");
+    o.push_str("                    Layout.leftMargin: 16; Layout.rightMargin: 8\n");
+    o.push_str(&format!("                    Text {{\n"));
+    o.push_str(&format!("                        text: \"{prog_title}\"\n"));
+    o.push_str("                        color: root.colText\n");
+    o.push_str("                        font.pixelSize: 15; font.bold: true\n");
+    o.push_str("                        Layout.fillWidth: true\n");
+    o.push_str("                    }\n");
+    o.push_str("                    BusyIndicator {\n");
+    o.push_str("                        running: backend.busy; visible: running\n");
+    o.push_str("                        implicitWidth: 24; implicitHeight: 24\n");
+    o.push_str("                    }\n");
     o.push_str("                }\n\n");
+    // Divider
+    o.push_str("                Rectangle { Layout.fillWidth: true; height: 1; color: root.colBorder }\n\n");
+    // Nav list
+    o.push_str("                ListView {\n");
+    o.push_str("                    id: navList\n");
+    o.push_str("                    Layout.fillWidth: true\n");
+    o.push_str("                    Layout.fillHeight: true\n");
+    o.push_str("                    currentIndex: 0\n");
+    o.push_str("                    clip: true\n");
+    o.push_str(&format!("                    model: [{nav_model}]\n\n"));
+    o.push_str("                    delegate: ItemDelegate {\n");
+    o.push_str("                        width: ListView.view.width\n");
+    o.push_str("                        height: 40\n");
+    o.push_str("                        onClicked: navList.currentIndex = index\n");
+    o.push_str("                        background: Rectangle {\n");
+    o.push_str("                            color: navList.currentIndex === index\n");
+    o.push_str("                                   ? Qt.rgba(0.49, 0.43, 0.96, 0.15) : \"transparent\"\n");
+    o.push_str("                        }\n");
+    o.push_str("                        contentItem: Text {\n");
+    o.push_str("                            text: modelData\n");
+    o.push_str("                            color: navList.currentIndex === index ? root.colPrimary : root.colText\n");
+    o.push_str("                            font.pixelSize: 13\n");
+    o.push_str("                            leftPadding: 16\n");
+    o.push_str("                            verticalAlignment: Text.AlignVCenter\n");
+    o.push_str("                        }\n");
+    o.push_str("                    }\n");
+    o.push_str("                }\n");       // ListView
+    o.push_str("            }\n");           // ColumnLayout
+    o.push_str("        }\n\n");            // Rectangle#sidebar
+
+    // ── Content pages ──────────────────────────────────────────────────────────
+    o.push_str("        // ── Content pages ────────────────────────────────────────────────\n");
+    o.push_str("        StackLayout {\n");
+    o.push_str("            id: pageStack\n");
+    o.push_str("            anchors { left: sidebar.right; right: parent.right; top: parent.top; bottom: parent.bottom }\n");
+    o.push_str("            currentIndex: navList.currentIndex\n\n");
 
     for f in fetches {
-        qml_state_section(&mut o, f);
+        qml_fetch_page(&mut o, f);
     }
     for ix in &idl.instructions {
-        qml_instruction_section(&mut o, ix);
+        qml_instruction_page(&mut o, ix);
     }
+    qml_settings_page(&mut o);
 
-    o.push_str("            }\n"); // ColumnLayout
-    o.push_str("        }\n\n"); // ScrollView
+    o.push_str("        }\n\n");    // StackLayout
 
     qml_toast(&mut o);
 
     o.push_str("    }\n"); // Rectangle
-    o.push_str("}\n"); // Item
+    o.push_str("}\n");     // Item
 
     o
 }
 
-fn qml_textfield(o: &mut String, id: &str, placeholder: &str, indent: &str) {
-    o.push_str(&format!("{indent}TextField {{\n"));
-    o.push_str(&format!("{indent}    id: {id}\n"));
-    o.push_str(&format!("{indent}    Layout.fillWidth: true\n"));
-    o.push_str(&format!("{indent}    placeholderText: \"{placeholder}\"\n"));
-    o.push_str(&format!("{indent}    color: root.colText\n"));
-    o.push_str(&format!("{indent}    placeholderTextColor: root.colMuted\n"));
-    o.push_str(&format!("{indent}    background: Rectangle {{\n"));
-    o.push_str(&format!("{indent}        color: root.colBg\n"));
-    o.push_str(&format!("{indent}        border.color: root.colBorder\n"));
-    o.push_str(&format!("{indent}        radius: root.radius / 2\n"));
-    o.push_str(&format!("{indent}    }}\n"));
-    o.push_str(&format!("{indent}}}\n\n"));
+fn qml_textfield_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
+    o.push_str(&format!("{ind}            TextField {{\n"));
+    o.push_str(&format!("{ind}                id: {id}\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                placeholderText: \"{placeholder}\"\n"));
+    o.push_str(&format!("{ind}                color: root.colText\n"));
+    o.push_str(&format!("{ind}                placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: root.colSurface\n"));
+    o.push_str(&format!("{ind}                    border.color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
 }
 
-fn qml_textarea(o: &mut String, id: &str, placeholder: &str, indent: &str) {
-    // For Vec params: multi-line TextArea, one item per line.
-    o.push_str(&format!("{indent}TextArea {{\n"));
-    o.push_str(&format!("{indent}    id: {id}\n"));
-    o.push_str(&format!("{indent}    Layout.fillWidth: true\n"));
-    o.push_str(&format!("{indent}    implicitHeight: 72\n"));
-    o.push_str(&format!(
-        "{indent}    placeholderText: \"{placeholder} (one per line)\"\n"
-    ));
-    o.push_str(&format!("{indent}    color: root.colText\n"));
-    o.push_str(&format!("{indent}    wrapMode: TextArea.Wrap\n"));
-    o.push_str(&format!("{indent}    background: Rectangle {{\n"));
-    o.push_str(&format!("{indent}        color: root.colBg\n"));
-    o.push_str(&format!("{indent}        border.color: root.colBorder\n"));
-    o.push_str(&format!("{indent}        radius: root.radius / 2\n"));
-    o.push_str(&format!("{indent}    }}\n"));
-    o.push_str(&format!("{indent}}}\n\n"));
+fn qml_textarea_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
+    o.push_str(&format!("{ind}            TextArea {{\n"));
+    o.push_str(&format!("{ind}                id: {id}\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                implicitHeight: 72\n"));
+    o.push_str(&format!("{ind}                placeholderText: \"{placeholder} (one per line)\"\n"));
+    o.push_str(&format!("{ind}                color: root.colText; wrapMode: TextArea.Wrap\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: root.colSurface\n"));
+    o.push_str(&format!("{ind}                    border.color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
 }
 
-fn qml_instruction_section(o: &mut String, ix: &IdlInstruction) {
+fn qml_instruction_page(o: &mut String, ix: &IdlInstruction) {
     let params = instruction_params(ix);
-    let col_id = format!("col_{}", snake_case(&ix.name));
     let method = camel_case(&ix.name);
-    let title = pascal_case(&ix.name);
-    let ind = "                ";
+    let title = title_case(&ix.name);
+    let page_id = format!("page{}", pascal_case(&ix.name));
+    let ind = "            ";
 
-    o.push_str(&format!(
-        "{ind}// ── {title} ──────────────────────────────────────────────\n"
-    ));
-    o.push_str(&format!("{ind}Rectangle {{\n"));
-    o.push_str(&format!("{ind}    Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}    color: root.colSurface\n"));
-    o.push_str(&format!("{ind}    radius: root.radius\n"));
-    o.push_str(&format!(
-        "{ind}    implicitHeight: {col_id}.implicitHeight + 32\n\n"
-    ));
-    o.push_str(&format!("{ind}    ColumnLayout {{\n"));
-    o.push_str(&format!("{ind}        id: {col_id}\n"));
-    o.push_str(&format!(
-        "{ind}        anchors {{ left: parent.left; right: parent.right; margins: 16 }}\n"
-    ));
-    o.push_str(&format!("{ind}        y: 16; spacing: 8\n\n"));
-    o.push_str(&format!("{ind}        Text {{\n"));
-    o.push_str(&format!("{ind}            text: \"{title}\"\n"));
-    o.push_str(&format!("{ind}            color: root.colText\n"));
-    o.push_str(&format!(
-        "{ind}            font.pixelSize: 14; font.bold: true\n"
-    ));
-    o.push_str(&format!("{ind}        }}\n\n"));
+    o.push_str(&format!("{ind}Item {{\n"));
+    o.push_str(&format!("{ind}    id: {page_id}\n"));
+    o.push_str(&format!("{ind}    ScrollView {{\n"));
+    o.push_str(&format!("{ind}        anchors.fill: parent; clip: true\n"));
+    o.push_str(&format!("{ind}        contentWidth: availableWidth\n\n"));
+    o.push_str(&format!("{ind}        ColumnLayout {{\n"));
+    o.push_str(&format!("{ind}            width: {page_id}.width; spacing: 12\n\n"));
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 24 }}\n\n"));
 
+    // Title
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"{title}\"\n"));
+    o.push_str(&format!("{ind}                color: root.colText\n"));
+    o.push_str(&format!("{ind}                font.pixelSize: 18; font.bold: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Fields
     for p in &params {
         let field_id = format!("{}_{}f", snake_case(&ix.name), snake_case(&p.qt_name));
         match &p.kind {
             ParamKind::Arg(ty) if is_bool_type(ty) => {
-                o.push_str(&format!("{ind}        RowLayout {{\n"));
-                o.push_str(&format!("{ind}            Layout.fillWidth: true\n"));
-                o.push_str(&format!("{ind}            CheckBox {{\n"));
-                o.push_str(&format!("{ind}                id: {field_id}\n"));
-                o.push_str(&format!("{ind}                checked: false\n"));
-                o.push_str(&format!("{ind}            }}\n"));
-                o.push_str(&format!("{ind}            Text {{\n"));
-                o.push_str(&format!("{ind}                text: \"{}\"\n", p.qt_name));
-                o.push_str(&format!("{ind}                color: root.colText\n"));
-                o.push_str(&format!("{ind}                font.pixelSize: 13\n"));
-                o.push_str(&format!("{ind}            }}\n"));
-                o.push_str(&format!("{ind}        }}\n\n"));
+                o.push_str(&format!("{ind}            RowLayout {{\n"));
+                o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+                o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+                o.push_str(&format!("{ind}                CheckBox {{ id: {field_id}; checked: false }}\n"));
+                o.push_str(&format!("{ind}                Text {{ text: \"{}\"; color: root.colText; font.pixelSize: 13 }}\n", p.qt_name));
+                o.push_str(&format!("{ind}            }}\n\n"));
             }
             ParamKind::Arg(ty) if is_list_type(ty) => {
-                qml_textarea(o, &field_id, &p.qt_name, &format!("{ind}        "));
+                qml_textarea_page(o, &field_id, &p.qt_name, ind);
             }
             _ => {
-                qml_textfield(o, &field_id, &p.qt_name, &format!("{ind}        "));
+                qml_textfield_page(o, &field_id, &p.qt_name, ind);
             }
         }
     }
 
+    // Submit button
     let call_args = params
         .iter()
         .map(|p| {
@@ -918,79 +1017,41 @@ fn qml_instruction_section(o: &mut String, ix: &IdlInstruction) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    o.push_str(&format!("{ind}        Button {{\n"));
-    o.push_str(&format!(
-        "{ind}            text: backend.busy ? \"\\u2026\" : \"{title}\"\n"
-    ));
-    o.push_str(&format!("{ind}            enabled: !backend.busy\n"));
-    o.push_str(&format!(
-        "{ind}            Layout.alignment: Qt.AlignRight\n"
-    ));
-    o.push_str(&format!(
-        "{ind}            onClicked: backend.{method}({call_args})\n"
-    ));
-    o.push_str(&format!("{ind}            background: Rectangle {{\n"));
-    o.push_str(&format!("{ind}                color: parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary\n"));
-    o.push_str(&format!("{ind}                radius: root.radius / 2\n"));
-    o.push_str(&format!(
-        "{ind}                opacity: parent.enabled ? 1.0 : 0.5\n"
-    ));
-    o.push_str(&format!("{ind}            }}\n"));
-    o.push_str(&format!("{ind}            contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                text: parent.text\n"));
-    o.push_str(&format!("{ind}                color: root.colText\n"));
-    o.push_str(&format!(
-        "{ind}                horizontalAlignment: Text.AlignHCenter\n"
-    ));
-    o.push_str(&format!(
-        "{ind}                verticalAlignment: Text.AlignVCenter\n"
-    ));
-    o.push_str(&format!("{ind}            }}\n"));
-    o.push_str(&format!("{ind}        }}\n"));
-    o.push_str(&format!("{ind}    }}\n")); // ColumnLayout
-    o.push_str(&format!("{ind}}}\n\n")); // Rectangle
+    o.push_str(&format!("{ind}            Button {{\n"));
+    o.push_str(&format!("{ind}                text: backend.busy ? \"\\u2026\" : \"{title}\"\n"));
+    o.push_str(&format!("{ind}                enabled: !backend.busy\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24; Layout.alignment: Qt.AlignRight\n"));
+    o.push_str(&format!("{ind}                onClicked: backend.{method}({call_args})\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary\n"));
+    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    opacity: parent.enabled ? 1.0 : 0.5\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}                contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                    text: parent.text; color: root.colText\n"));
+    o.push_str(&format!("{ind}                    horizontalAlignment: Text.AlignHCenter\n"));
+    o.push_str(&format!("{ind}                    verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 80 }}\n"));
+    o.push_str(&format!("{ind}        }}\n")); // ColumnLayout
+    o.push_str(&format!("{ind}    }}\n"));     // ScrollView
+    o.push_str(&format!("{ind}}}\n\n"));       // Item
 }
 
-fn qml_state_section(o: &mut String, f: &FetchAccount) {
+fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
     let prop = camel_case(&f.acc_name);
-    let title = pascal_case(&f.acc_name);
-    let col_id = format!("colFetch{title}");
-    let fetch_method = format!("fetch{title}");
-    let ind = "                ";
-
-    o.push_str(&format!(
-        "{ind}// ── {title} State ─────────────────────────────────────────────\n"
-    ));
-    o.push_str(&format!("{ind}Rectangle {{\n"));
-    o.push_str(&format!("{ind}    Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}    color: root.colSurface\n"));
-    o.push_str(&format!("{ind}    radius: root.radius\n"));
-    o.push_str(&format!(
-        "{ind}    implicitHeight: {col_id}.implicitHeight + 32\n\n"
-    ));
-    o.push_str(&format!("{ind}    ColumnLayout {{\n"));
-    o.push_str(&format!("{ind}        id: {col_id}\n"));
-    o.push_str(&format!(
-        "{ind}        anchors {{ left: parent.left; right: parent.right; margins: 16 }}\n"
-    ));
-    o.push_str(&format!("{ind}        y: 16; spacing: 8\n\n"));
-
-    // Seed input fields
-    for (name, ty) in &f.seed_params {
-        let fid = format!("fetch{}_{}_f", title, snake_case(name));
-        let label = format!("{} (seed)", camel_case(name));
-        if is_list_type(ty) {
-            qml_textarea(o, &fid, &label, &format!("{ind}        "));
-        } else {
-            qml_textfield(o, &fid, &label, &format!("{ind}        "));
-        }
-    }
+    let title = title_case(&f.acc_name);
+    let page_id = format!("pageFetch{}", pascal_case(&f.acc_name));
+    let fetch_method = format!("fetch{}", pascal_case(&f.acc_name));
+    let ind = "            ";
 
     let seed_call = f
         .seed_params
         .iter()
         .map(|(name, ty)| {
-            let fid = format!("fetch{}_{}_f", title, snake_case(name));
+            let fid = format!("fetch{}_{}_f", pascal_case(&f.acc_name), snake_case(name));
             match ty {
                 IdlType::Primitive(p) => match p.as_str() {
                     "bool" => format!("{fid}.checked"),
@@ -1008,87 +1069,120 @@ fn qml_state_section(o: &mut String, f: &FetchAccount) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    // Header row: title + refresh button
-    o.push_str(&format!("{ind}        RowLayout {{\n"));
-    o.push_str(&format!("{ind}            Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}            Text {{\n"));
-    o.push_str(&format!("{ind}                text: \"{title} State\"\n"));
-    o.push_str(&format!("{ind}                color: root.colText\n"));
-    o.push_str(&format!(
-        "{ind}                font.pixelSize: 14; font.bold: true\n"
-    ));
+    o.push_str(&format!("{ind}Item {{\n"));
+    o.push_str(&format!("{ind}    id: {page_id}\n"));
+    o.push_str(&format!("{ind}    ScrollView {{\n"));
+    o.push_str(&format!("{ind}        anchors.fill: parent; clip: true\n"));
+    o.push_str(&format!("{ind}        contentWidth: availableWidth\n\n"));
+    o.push_str(&format!("{ind}        ColumnLayout {{\n"));
+    o.push_str(&format!("{ind}            width: {page_id}.width; spacing: 12\n\n"));
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 24 }}\n\n"));
+
+    // Title row with refresh button
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
     o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}            }}\n"));
-    o.push_str(&format!("{ind}            Button {{\n"));
-    o.push_str(&format!("{ind}                text: \"\\u21ba\"\n"));
-    o.push_str(&format!(
-        "{ind}                onClicked: backend.{fetch_method}({seed_call})\n"
-    ));
-    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
-    o.push_str(&format!("{ind}                    color: root.colSurface\n"));
-    o.push_str(&format!(
-        "{ind}                    border.color: root.colBorder\n"
-    ));
-    o.push_str(&format!(
-        "{ind}                    radius: root.radius / 2\n"
-    ));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                Text {{\n"));
+    o.push_str(&format!("{ind}                    text: \"{title}\"\n"));
+    o.push_str(&format!("{ind}                    color: root.colText\n"));
+    o.push_str(&format!("{ind}                    font.pixelSize: 18; font.bold: true\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
     o.push_str(&format!("{ind}                }}\n"));
-    o.push_str(&format!("{ind}                contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                    text: parent.text\n"));
-    o.push_str(&format!("{ind}                    color: root.colMuted\n"));
-    o.push_str(&format!(
-        "{ind}                    horizontalAlignment: Text.AlignHCenter\n"
-    ));
-    o.push_str(&format!(
-        "{ind}                    verticalAlignment: Text.AlignVCenter\n"
-    ));
-    o.push_str(&format!("{ind}                }}\n"));
-    o.push_str(&format!("{ind}            }}\n"));
-    o.push_str(&format!("{ind}        }}\n\n")); // RowLayout
+    o.push_str(&format!("{ind}                Button {{\n"));
+    o.push_str(&format!("{ind}                    text: \"\\u21ba\"\n"));
+    o.push_str(&format!("{ind}                    onClicked: backend.{fetch_method}({seed_call})\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: root.colSurface; border.color: root.colBorder; radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                        text: parent.text; color: root.colMuted\n"));
+    o.push_str(&format!("{ind}                        horizontalAlignment: Text.AlignHCenter\n"));
+    o.push_str(&format!("{ind}                        verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n")); // Button
+    o.push_str(&format!("{ind}            }}\n\n")); // RowLayout
+
+    // Seed input fields
+    for (name, ty) in &f.seed_params {
+        let fid = format!("fetch{}_{}_f", pascal_case(&f.acc_name), snake_case(name));
+        let label = format!("{} (seed)", camel_case(name));
+        if is_list_type(ty) {
+            qml_textarea_page(o, &fid, &label, ind);
+        } else {
+            qml_textfield_page(o, &fid, &label, ind);
+        }
+    }
 
     // Key-value display
-    o.push_str(&format!("{ind}        Repeater {{\n"));
-    o.push_str(&format!(
-        "{ind}            model: Object.keys(backend.{prop})\n"
-    ));
-    o.push_str(&format!("{ind}            delegate: RowLayout {{\n"));
-    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}                Text {{\n"));
-    o.push_str(&format!("{ind}                    text: modelData + \":\"\n"));
-    o.push_str(&format!("{ind}                    color: root.colMuted\n"));
-    o.push_str(&format!("{ind}                    font.pixelSize: 12\n"));
-    o.push_str(&format!(
-        "{ind}                    Layout.preferredWidth: 140\n"
-    ));
-    o.push_str(&format!("{ind}                }}\n"));
-    o.push_str(&format!("{ind}                Text {{\n"));
-    o.push_str(&format!(
-        "{ind}                    text: backend.{prop}[modelData] ?? \"\"\n"
-    ));
-    o.push_str(&format!("{ind}                    color: root.colText\n"));
-    o.push_str(&format!("{ind}                    font.pixelSize: 12\n"));
-    o.push_str(&format!(
-        "{ind}                    wrapMode: Text.WrapAtWordBoundaryOrAnywhere\n"
-    ));
-    o.push_str(&format!(
-        "{ind}                    Layout.fillWidth: true\n"
-    ));
-    o.push_str(&format!("{ind}                }}\n"));
-    o.push_str(&format!("{ind}            }}\n"));
-    o.push_str(&format!("{ind}        }}\n\n")); // Repeater
+    o.push_str(&format!("{ind}            Repeater {{\n"));
+    o.push_str(&format!("{ind}                model: Object.keys(backend.{prop})\n"));
+    o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                    Text {{ text: modelData + \":\"; color: root.colMuted; font.pixelSize: 12; Layout.preferredWidth: 140 }}\n"));
+    o.push_str(&format!("{ind}                    Text {{\n"));
+    o.push_str(&format!("{ind}                        text: backend.{prop}[modelData] ?? \"\"\n"));
+    o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n")); // delegate
+    o.push_str(&format!("{ind}            }}\n\n")); // Repeater
 
-    o.push_str(&format!("{ind}        Text {{\n"));
-    o.push_str(&format!(
-        "{ind}            visible: Object.keys(backend.{prop}).length === 0\n"
-    ));
-    o.push_str(&format!(
-        "{ind}            text: \"No data. Press \\u21ba to fetch.\"\n"
-    ));
-    o.push_str(&format!("{ind}            color: root.colMuted\n"));
-    o.push_str(&format!("{ind}            font.pixelSize: 12\n"));
-    o.push_str(&format!("{ind}        }}\n"));
-    o.push_str(&format!("{ind}    }}\n")); // ColumnLayout
-    o.push_str(&format!("{ind}}}\n\n")); // Rectangle
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: Object.keys(backend.{prop}).length === 0\n"));
+    o.push_str(&format!("{ind}                text: \"No data — press \\u21ba to fetch.\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 80 }}\n"));
+    o.push_str(&format!("{ind}        }}\n")); // ColumnLayout
+    o.push_str(&format!("{ind}    }}\n"));     // ScrollView
+    o.push_str(&format!("{ind}}}\n\n"));       // Item
+}
+
+fn qml_settings_page(o: &mut String) {
+    let ind = "            ";
+    o.push_str(&format!("{ind}Item {{\n"));
+    o.push_str(&format!("{ind}    id: pageSettings\n"));
+    o.push_str(&format!("{ind}    ScrollView {{\n"));
+    o.push_str(&format!("{ind}        anchors.fill: parent; clip: true\n"));
+    o.push_str(&format!("{ind}        contentWidth: availableWidth\n\n"));
+    o.push_str(&format!("{ind}        ColumnLayout {{\n"));
+    o.push_str(&format!("{ind}            width: pageSettings.width; spacing: 16\n\n"));
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 24 }}\n\n"));
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"Settings\"\n"));
+    o.push_str(&format!("{ind}                color: root.colText; font.pixelSize: 18; font.bold: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    for (label, prop, setter) in [
+        ("Wallet Path",      "walletPath",   "setWalletPath"),
+        ("Sequencer URL",    "sequencerUrl", "setSequencerUrl"),
+        ("Program ID (hex)", "programIdHex", "setProgramIdHex"),
+    ] {
+        o.push_str(&format!("{ind}            Text {{\n"));
+        o.push_str(&format!("{ind}                text: \"{label}\"\n"));
+        o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 11\n"));
+        o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+        o.push_str(&format!("{ind}            }}\n"));
+        o.push_str(&format!("{ind}            TextField {{\n"));
+        o.push_str(&format!("{ind}                text: backend.{prop}\n"));
+        o.push_str(&format!("{ind}                onEditingFinished: backend.{setter}(text)\n"));
+        o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+        o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+        o.push_str(&format!("{ind}                color: root.colText; placeholderTextColor: root.colMuted\n"));
+        o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+        o.push_str(&format!("{ind}                    color: root.colSurface; border.color: root.colBorder; radius: root.radius / 2\n"));
+        o.push_str(&format!("{ind}                }}\n"));
+        o.push_str(&format!("{ind}            }}\n\n"));
+    }
+
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 80 }}\n"));
+    o.push_str(&format!("{ind}        }}\n")); // ColumnLayout
+    o.push_str(&format!("{ind}    }}\n"));     // ScrollView
+    o.push_str(&format!("{ind}}}\n\n"));       // Item
 }
 
 fn qml_toast(o: &mut String) {
