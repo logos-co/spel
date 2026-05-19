@@ -565,7 +565,7 @@ fn idl_type_to_json_field(ty: &IdlType, field_name: &str, types: &[IdlTypeDef]) 
         IdlType::Primitive(p) => match p.as_str() {
             "u128" | "i128" => format!("state.{field_name}.to_string()"),
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => format!("hex::encode(&state.{field_name})"),
-            "ProgramId" | "[u32; 8]" | "[u32;8]" => format!(
+            "program_id" | "ProgramId" | "[u32; 8]" | "[u32;8]" => format!(
                 "hex::encode(state.{field_name}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>())"
             ),
             _ => format!("state.{field_name}"),
@@ -725,7 +725,7 @@ fn idl_type_to_borsh_rust(ty: &IdlType) -> String {
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => "[u8; 32]".to_string(),
-            "ProgramId" | "[u32; 8]" | "[u32;8]" => "[u32; 8]".to_string(),
+            "program_id" | "ProgramId" | "[u32; 8]" | "[u32;8]" => "[u32; 8]".to_string(),
             "string" => "String".to_string(),
             s => s.to_string(),
         },
