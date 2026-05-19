@@ -16,6 +16,7 @@ pub struct LogosModuleOutput {
     pub main_qml: String,
     pub module_yaml: String,
     pub metadata_json: String,
+    pub cmake_lists: String,
 }
 
 /// `module_name` overrides the name derived from the IDL (e.g. from --module-name).
@@ -48,6 +49,7 @@ pub fn generate_logos_module(
         main_qml: gen_main_qml(idl, &fetches, &effective_prog),
         module_yaml: gen_module_yaml(idl, &effective_prog, &class),
         metadata_json: gen_metadata_json(idl, &effective_prog),
+        cmake_lists: gen_cmake_lists(&class, &effective_prog),
     })
 }
 
@@ -1254,6 +1256,57 @@ fn gen_module_yaml(idl: &SpelIdl, effective_prog: &str, class: &str) -> String {
 }
 
 // ── metadata.json ─────────────────────────────────────────────────────────────
+
+fn gen_cmake_lists(class: &str, effective_prog: &str) -> String {
+    // The Qt resource name MUST be kept in sync with Q_INIT_RESOURCE() in XyzPlugin.cpp.
+    let res_name = effective_prog.replace('-', "_");
+    format!(
+        "cmake_minimum_required(VERSION 3.16)\n\
+         project({class} VERSION 1.0 LANGUAGES CXX)\n\
+         \n\
+         set(CMAKE_CXX_STANDARD 17)\n\
+         set(CMAKE_CXX_STANDARD_REQUIRED ON)\n\
+         set(CMAKE_AUTOMOC ON)\n\
+         \n\
+         find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickWidgets Concurrent)\n\
+         \n\
+         # ── Plugin (loaded by Basecamp) ────────────────────────────────────────────\n\
+         add_library({class}Plugin SHARED\n\
+         \x20   src/{class}Backend.cpp\n\
+         \x20   src/{class}Plugin.cpp\n\
+         )\n\
+         \n\
+         # Resource name \"{res_name}\" must match Q_INIT_RESOURCE({res_name}) in {class}Plugin.cpp\n\
+         qt_add_resources({class}Plugin \"{res_name}\"\n\
+         \x20   PREFIX \"/\"\n\
+         \x20   FILES qml/Main.qml\n\
+         )\n\
+         \n\
+         target_link_libraries({class}Plugin PRIVATE\n\
+         \x20   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Concurrent\n\
+         \x20   # Add your FFI library here, e.g.:\n\
+         \x20   # {effective_prog}_ffi\n\
+         )\n\
+         \n\
+         # ── Standalone preview app ─────────────────────────────────────────────────\n\
+         add_executable({class}App\n\
+         \x20   src/main.cpp\n\
+         \x20   src/{class}Backend.cpp\n\
+         \x20   src/{class}Plugin.cpp\n\
+         )\n\
+         \n\
+         # Same resource name as the plugin so Q_INIT_RESOURCE resolves in both targets\n\
+         qt_add_resources({class}App \"{res_name}\"\n\
+         \x20   PREFIX \"/\"\n\
+         \x20   FILES qml/Main.qml\n\
+         )\n\
+         \n\
+         target_link_libraries({class}App PRIVATE\n\
+         \x20   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Concurrent\n\
+         \x20   # {effective_prog}_ffi\n\
+         )\n"
+    )
+}
 
 fn gen_metadata_json(idl: &SpelIdl, effective_prog: &str) -> String {
     let desc = format!("Qt/QML Basecamp module for the {} program", idl.name);

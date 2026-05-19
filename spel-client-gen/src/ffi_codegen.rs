@@ -257,9 +257,22 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         for acc in &ix.accounts {
             let name = rust_ident(&acc.name);
             if acc.rest {
-                writeln!(out, "    let {name}: Vec<AccountId> = v[\"{}\"].as_array()", acc.name).unwrap();
-                writeln!(out, "        .ok_or(\"missing {}\")?", acc.name).unwrap();
-                writeln!(out, "        .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?;").unwrap();
+                // If there's a Vec<[u8;32]> arg, derive rest accounts from it when the
+                // JSON field is absent — the UI sends keys only once (as the instruction arg).
+                let src_arg = ix.args.iter().find(|a| is_vec_bytes32(&a.type_));
+                if let Some(src) = src_arg {
+                    let src_name = rust_ident(&src.name);
+                    writeln!(out, "    let {name}: Vec<AccountId> = if v[\"{}\"].is_array() {{", acc.name).unwrap();
+                    writeln!(out, "        v[\"{}\"].as_array().unwrap()", acc.name).unwrap();
+                    writeln!(out, "            .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?").unwrap();
+                    writeln!(out, "    }} else {{").unwrap();
+                    writeln!(out, "        {src_name}.clone()").unwrap();
+                    writeln!(out, "    }};").unwrap();
+                } else {
+                    writeln!(out, "    let {name}: Vec<AccountId> = v[\"{}\"].as_array()", acc.name).unwrap();
+                    writeln!(out, "        .ok_or(\"missing {}\")?", acc.name).unwrap();
+                    writeln!(out, "        .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?;").unwrap();
+                }
             } else if acc.pda.is_none() {
                 writeln!(out, "    let {name} = parse_account_id(v[\"{}\"].as_str().ok_or(\"missing {}\")?)?;",
                     acc.name, acc.name).unwrap();
@@ -360,9 +373,12 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "            .map_err(|e| format!(\"message: {{:?}}\", e))?;").unwrap();
         writeln!(out, "        let witness_set = WitnessSet::for_message(&message, &signing_keys);").unwrap();
         writeln!(out, "        let tx = PublicTransaction::new(message, witness_set);").unwrap();
-        writeln!(out, "        wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
-        writeln!(out, "            .map_err(|e| format!(\"submit: {{}}\", e))").unwrap();
-        writeln!(out, "            .map(|r| hex::encode(r.0))").unwrap();
+        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
+        writeln!(out, "            .map_err(|e| format!(\"submit: {{}}\", e))?;").unwrap();
+        writeln!(out, "        let tx_hash_hex = hex::encode(raw.0);").unwrap();
+        writeln!(out, "        let poller = wallet::poller::TxPoller::new(wallet.config(), wallet.sequencer_client.clone());").unwrap();
+        writeln!(out, "        poller.poll_tx(raw).await.map_err(|e| format!(\"confirm: {{}}\", e))?;").unwrap();
+        writeln!(out, "        Ok::<String, String>(tx_hash_hex)").unwrap();
         writeln!(out, "    }})?;").unwrap();
         writeln!(out).unwrap();
         writeln!(out, "    Ok(json!({{\"success\": true, \"tx_hash\": tx_hash}}).to_string())").unwrap();
@@ -642,26 +658,32 @@ pub fn generate_account_types(idl: &SpelIdl, out: &mut String) {
 /// Generate `extern "C" fn {prefix}_fetch_{account}(args_json) -> *mut c_char` for each
 /// unique PDA-backed account that has a known type definition.
 pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut String) {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
+    use std::collections::HashMap;
 
+    // Build PDA map: account_name -> (ix_index, pda) from the first instruction
+    // that defines this account as a PDA. Used to generate seed-based fetch functions.
+    let mut pda_map: HashMap<String, (usize, &spel_framework_core::idl::IdlPda)> = HashMap::new();
     for ix in &idl.instructions {
         for acc in &ix.accounts {
-            let pda = match &acc.pda {
-                Some(p) => p,
-                None => continue,
-            };
-            let acc_name = snake_case(&acc.name);
-            if !seen.insert(acc_name.clone()) { continue; }
+            if let Some(pda) = &acc.pda {
+                let acc_name = snake_case(&acc.name);
+                let ix_idx = idl.instructions.iter().position(|i| std::ptr::eq(i, ix)).unwrap_or(0);
+                pda_map.entry(acc_name).or_insert((ix_idx, pda));
+            }
+        }
+    }
 
-            // Only generate fetch functions when we have qualifying type information.
-            if !is_fetch_eligible(idl, &acc_name) { continue; }
-            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name).unwrap();
+    // Generate fetch functions for ALL idl.accounts entries with struct type definitions.
+    for type_def in &idl.accounts {
+        let acc_name = snake_case(&type_def.name);
+        if type_def.type_.kind != "struct" || type_def.type_.fields.is_empty() { continue; }
 
-            let pascal_name = pascal_case(&acc_name);
-            let fn_name = format!("{prefix}_fetch_{acc_name}");
+        let pascal_name = pascal_case(&acc_name);
+        let fn_name = format!("{prefix}_fetch_{acc_name}");
 
-            // Build a type map for seed arg lookups
+        if let Some((ix_idx, pda)) = pda_map.get(&acc_name) {
+            // PDA account: compute address from seeds then fetch.
+            let ix = &idl.instructions[*ix_idx];
             let param_type_map: std::collections::HashMap<String, String> = ix.args.iter()
                 .map(|a| (rust_ident(&a.name), idl_type_to_rust(&a.type_)))
                 .collect();
@@ -753,6 +775,40 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "    let state = <{pascal_name}State as borsh::BorshDeserialize>::try_from_slice(&account.data).map_err(|e| format!(\"decode: {{e}}\"))?;").unwrap();
 
             // Build JSON response
+            // Build JSON response
+            writeln!(out, "    Ok(serde_json::json!({{").unwrap();
+            writeln!(out, "        \"success\": true,").unwrap();
+            writeln!(out, "        \"state\": {{").unwrap();
+            for field in &type_def.type_.fields {
+                let json_key = &field.name;
+                let field_ident = rust_ident(&field.name);
+                let expr = idl_type_to_json_field(&field.type_, &field_ident);
+                writeln!(out, "            \"{json_key}\": {expr},").unwrap();
+            }
+            writeln!(out, "        }}").unwrap();
+            writeln!(out, "    }}).to_string())").unwrap();
+            writeln!(out, "}}").unwrap();
+        } else {
+            // Non-PDA account: caller provides the account address directly.
+            writeln!(out).unwrap();
+            writeln!(out, "/// FFI: fetch and decode `{acc_name}` account state by address.").unwrap();
+            writeln!(out, "#[no_mangle]").unwrap();
+            writeln!(out, "pub extern \"C\" fn {fn_name}(args_json: *const c_char) -> *mut c_char {{").unwrap();
+            writeln!(out, "    ffi_call(move || {{").unwrap();
+            writeln!(out, "        let args_str = match cstr_to_str(args_json) {{ Ok(s) => s.to_owned(), Err(e) => return Err(e) }};").unwrap();
+            writeln!(out, "        {fn_name}_impl(&args_str)").unwrap();
+            writeln!(out, "    }})").unwrap();
+            writeln!(out, "}}").unwrap();
+            writeln!(out).unwrap();
+            writeln!(out, "fn {fn_name}_impl(args_str: &str) -> Result<String, String> {{").unwrap();
+            writeln!(out, "    let args: serde_json::Value = serde_json::from_str(args_str).map_err(|e| format!(\"invalid JSON: {{e}}\"))?;").unwrap();
+            writeln!(out, "    let wallet = init_wallet(&args)?;").unwrap();
+            writeln!(out, "    let account_id = parse_account_id(args[\"account_id\"].as_str().ok_or(\"missing account_id\")?)?;").unwrap();
+            writeln!(out, "    let rt = get_runtime();").unwrap();
+            writeln!(out, "    let account = rt.block_on(async {{").unwrap();
+            writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{e}}\"))").unwrap();
+            writeln!(out, "    }})?;").unwrap();
+            writeln!(out, "    let state = <{pascal_name}State as borsh::BorshDeserialize>::try_from_slice(&account.data).map_err(|e| format!(\"decode: {{e}}\"))?;").unwrap();
             writeln!(out, "    Ok(serde_json::json!({{").unwrap();
             writeln!(out, "        \"success\": true,").unwrap();
             writeln!(out, "        \"state\": {{").unwrap();

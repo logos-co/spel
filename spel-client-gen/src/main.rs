@@ -93,6 +93,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ("qml/Main.qml",                        &output.main_qml),
                 ("module.yaml",                         &output.module_yaml),
                 ("metadata.json",                       &output.metadata_json),
+                ("CMakeLists.txt",                      &output.cmake_lists),
             ];
 
             println!("Generated (--target logos-module):");

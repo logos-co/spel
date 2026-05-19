@@ -113,6 +113,23 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
     }
 }
 
+/// Returns true if `ty` is a `Vec` whose element type is a 32-byte value
+/// (`[u8; 32]`, `AccountId`, or any spelling thereof).
+pub fn is_vec_bytes32(ty: &spel_framework_core::idl::IdlType) -> bool {
+    use spel_framework_core::idl::IdlType;
+    if let IdlType::Vec { vec } = ty {
+        matches!(vec.as_ref(),
+            IdlType::Primitive(p) if matches!(p.as_str(),
+                "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]")
+        ) || matches!(vec.as_ref(),
+            IdlType::Array { array: (elem, 32) } if matches!(elem.as_ref(),
+                IdlType::Primitive(p) if p == "u8")
+        )
+    } else {
+        false
+    }
+}
+
 fn collapse_underscores(s: &str) -> String {
     let mut out = String::new();
     let mut prev_underscore = false;
