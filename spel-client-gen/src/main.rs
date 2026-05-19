@@ -17,6 +17,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut idl_path: Option<PathBuf> = None;
     let mut out_dir: Option<PathBuf> = None;
     let mut target: Option<String> = None;
+    let mut module_name: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -33,16 +34,21 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 target = Some(args.get(i + 1).ok_or("--target requires value")?.clone());
                 i += 2;
             }
+            "--module-name" => {
+                module_name = Some(args.get(i + 1).ok_or("--module-name requires value")?.clone());
+                i += 2;
+            }
             "--help" | "-h" => {
                 println!("spel-client-gen - Generate typed Rust client and C FFI from SPEL IDL");
                 println!();
                 println!("Usage:");
-                println!("  spel-client-gen --idl <path> --out-dir <dir> [--target <target>]");
+                println!("  spel-client-gen --idl <path> --out-dir <dir> [--target <target>] [--module-name <name>]");
                 println!();
                 println!("Options:");
-                println!("  --idl <path>       Path to IDL JSON file");
-                println!("  --out-dir <dir>    Output directory for generated files");
-                println!("  --target <target>  Output target (default: rust+ffi, logos-module)");
+                println!("  --idl <path>          Path to IDL JSON file");
+                println!("  --out-dir <dir>       Output directory for generated files");
+                println!("  --target <target>     Output target (default: rust+ffi, logos-module)");
+                println!("  --module-name <name>  Override class/file name for logos-module target");
                 return Ok(());
             }
             other => return Err(format!("unknown argument: {other}").into()),
@@ -63,21 +69,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     match target.as_deref() {
         Some("logos-module") => {
-            let output = spel_client_gen::generate_logos_module_from_idl_json(&json)?;
+            let output = spel_client_gen::generate_logos_module_from_idl_json(
+                &json,
+                module_name.as_deref(),
+            )?;
 
             std::fs::create_dir_all(out_dir.join("src"))
                 .map_err(|e| format!("failed to create src dir: {e}"))?;
             std::fs::create_dir_all(out_dir.join("qml"))
                 .map_err(|e| format!("failed to create qml dir: {e}"))?;
 
-            // Derive class base name (PascalCase of program name)
-            let class = pascal_case(&prog);
+            // Use --module-name if given, otherwise fall back to IDL name.
+            let effective = module_name.as_deref().unwrap_or(&prog);
+            let class = pascal_case(effective);
 
             let files: &[(&str, &str)] = &[
                 (&format!("src/{}Backend.h", class),   &output.backend_h),
                 (&format!("src/{}Backend.cpp", class), &output.backend_cpp),
                 (&format!("src/{}Plugin.h", class),    &output.plugin_h),
                 (&format!("src/{}Plugin.cpp", class),  &output.plugin_cpp),
+                ("src/main.cpp",                        &output.main_cpp),
                 ("qml/Main.qml",                        &output.main_qml),
                 ("module.yaml",                         &output.module_yaml),
                 ("metadata.json",                       &output.metadata_json),

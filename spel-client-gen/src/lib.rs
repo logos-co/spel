@@ -45,10 +45,14 @@ pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
 }
 
 /// Generate a Logos Basecamp module scaffold from an IDL JSON string.
-pub fn generate_logos_module_from_idl_json(json: &str) -> Result<LogosModuleOutput, String> {
+/// `module_name` overrides the name derived from the IDL (e.g. `--module-name lez_multisig`).
+pub fn generate_logos_module_from_idl_json(
+    json: &str,
+    module_name: Option<&str>,
+) -> Result<LogosModuleOutput, String> {
     let idl: SpelIdl = serde_json::from_str(json)
         .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
-    logos_module_codegen::generate_logos_module(&idl)
+    logos_module_codegen::generate_logos_module(&idl, module_name)
 }
 
 /// Generate client + FFI code from a parsed IDL.
