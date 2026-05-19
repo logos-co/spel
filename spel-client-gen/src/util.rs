@@ -83,15 +83,24 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
             }
             "string" | "String" => format!("{var}.as_str().ok_or(\"expected string\")?.to_string()"),
             "bool" => format!("{var}.as_bool().ok_or(\"expected bool\")?"),
-            "u8" | "u16" | "u32" | "u64" => {
+            "u8" | "u16" | "u32" => {
                 format!("{var}.as_u64().ok_or(\"expected number\")? as {p}")
+            }
+            // u64 may arrive as a JSON string (from the generated Qt UI, which sends raw
+            // text to avoid IEEE-754 precision loss) or as a JSON number (from CLI callers).
+            "u64" => {
+                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<u64>().map_err(|_| format!(\"invalid u64: {{}}\", _s))? }} else {{ _v.as_u64().ok_or(\"expected u64\")? }} }}")
             }
             "u128" => {
                 // Accept either a JSON string (for values > u64::MAX) or a JSON number.
                 format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<u128>().map_err(|_| format!(\"invalid u128: {{}}\", _s))? }} else {{ _v.as_u64().ok_or(\"expected u128\")? as u128 }} }}")
             }
-            "i8" | "i16" | "i32" | "i64" => {
+            "i8" | "i16" | "i32" => {
                 format!("{var}.as_i64().ok_or(\"expected number\")? as {p}")
+            }
+            // i64 may arrive as a JSON string (same reason as u64).
+            "i64" => {
+                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<i64>().map_err(|_| format!(\"invalid i64: {{}}\", _s))? }} else if let Some(_n) = _v.as_i64() {{ _n }} else {{ _v.as_u64().ok_or(\"expected i64\")? as i64 }} }}")
             }
             "i128" => {
                 // Accept either a JSON string (for values outside i64 range) or a JSON number.

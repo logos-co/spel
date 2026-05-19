@@ -59,9 +59,10 @@ fn qt_type(ty: &IdlType) -> (String, bool) {
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "u8" | "u16" | "u32" => ("quint32".into(), false),
-            "u64" => ("quint64".into(), false),
+            // u64/i64 use QString so the full range survives the JS → C++ boundary
+            // without precision loss (JS numbers are IEEE-754 doubles, limited to 2^53).
+            "u64" | "i64" => ("QString".into(), true),
             "i8" | "i16" | "i32" => ("qint32".into(), false),
-            "i64" => ("qint64".into(), false),
             "bool" => ("bool".into(), false),
             _ => ("QString".into(), true),
         },
@@ -76,12 +77,81 @@ fn qt_type(ty: &IdlType) -> (String, bool) {
             }
             _ => ("QVariantList".into(), true),
         },
-        IdlType::Option { option } => qt_type(option),
+        // Option<T> is always QVariant so the C++ layer can detect null (= unchecked).
+        IdlType::Option { .. } => ("QVariant".into(), true),
         IdlType::Defined { .. } => ("QVariantMap".into(), true),
         IdlType::Array { array: (elem, _) } => match elem.as_ref() {
             IdlType::Primitive(p) if p == "u8" => ("QString".into(), true),
             _ => ("QVariantList".into(), true),
         },
+    }
+}
+
+/// If `ty` (possibly wrapped in Option) resolves to a known enum in `idl.types`,
+/// return the variant names.  Used to decide whether to emit a ComboBox.
+fn enum_variants<'a>(ty: &IdlType, idl: &'a SpelIdl) -> Option<Vec<&'a str>> {
+    let inner = match ty {
+        IdlType::Option { option } => option.as_ref(),
+        other => other,
+    };
+    if let IdlType::Defined { defined } = inner {
+        if let Some(def) = idl.types.iter().find(|t| &t.name == defined && t.kind == "enum") {
+            if !def.variants.is_empty() {
+                return Some(def.variants.iter().map(|v| v.name.as_str()).collect());
+            }
+        }
+    }
+    None
+}
+
+/// Human-readable placeholder hint for an IDL field type.
+fn type_placeholder(ty: &IdlType) -> &'static str {
+    match ty {
+        IdlType::Primitive(p) => match p.as_str() {
+            "account_id" | "AccountId" => "base58 or 0x… hex",
+            "[u8; 32]" | "[u8;32]" => "base58 or 0x… hex",
+            "u8" | "u16" | "u32" | "u64" | "u128" => "integer (≥ 0)",
+            "i8" | "i16" | "i32" | "i64" | "i128" => "integer",
+            "bool" | "string" | "String" => "",
+            _ => "value",
+        },
+        IdlType::Array { array: (elem, 32) }
+            if matches!(elem.as_ref(), IdlType::Primitive(p) if p == "u8") =>
+        {
+            "base58 or 0x… hex"
+        }
+        IdlType::Option { option } => type_placeholder(option),
+        _ => "value",
+    }
+}
+
+/// IntValidator bounds for small integer types; None for larger types.
+fn validator_str(ty: &IdlType) -> Option<&'static str> {
+    if let IdlType::Primitive(p) = ty {
+        match p.as_str() {
+            "u8"  => Some("IntValidator { bottom: 0; top: 255 }"),
+            "u16" => Some("IntValidator { bottom: 0; top: 65535 }"),
+            "u32" => Some("IntValidator { bottom: 0; top: 2147483647 }"),
+            "i8"  => Some("IntValidator { bottom: -128; top: 127 }"),
+            "i16" => Some("IntValidator { bottom: -32768; top: 32767 }"),
+            "i32" => Some("IntValidator { bottom: -2147483648; top: 2147483647 }"),
+            _ => None,
+        }
+    } else {
+        None
+    }
+}
+
+/// inputMethodHints for large integer types that can't use IntValidator.
+fn input_hints_str(ty: &IdlType) -> Option<&'static str> {
+    if let IdlType::Primitive(p) = ty {
+        match p.as_str() {
+            "u64" | "u128" => Some("Qt.ImhDigitsOnly"),
+            "i64" | "i128" => Some("Qt.ImhFormattedNumbersOnly"),
+            _ => None,
+        }
+    } else {
+        None
     }
 }
 
@@ -231,11 +301,19 @@ fn arg_to_json_lines(ty: &IdlType, qt_name: &str, json_key: &str) -> Vec<String>
             "u8" | "u16" | "u32" | "i8" | "i16" | "i32" => vec![
                 format!("    args[\"{json_key}\"] = static_cast<int>({qt_name});"),
             ],
+            // u64/i64 are now QString — pass the raw string so the Rust FFI can
+            // parse the full range without loss through JS or QJsonValue (doubles).
             "u64" | "i64" => vec![
-                format!("    args[\"{json_key}\"] = static_cast<qint64>({qt_name});"),
+                format!("    args[\"{json_key}\"] = {qt_name};"),
             ],
             _ => vec![format!("    args[\"{json_key}\"] = {qt_name};")],
         },
+        // Option<T> is QVariant; only add the key if the QML checkbox was checked.
+        IdlType::Option { .. } => vec![
+            format!("    if ({qt_name}.isValid() && !{qt_name}.isNull()) {{"),
+            format!("        args[\"{json_key}\"] = QJsonValue::fromVariant({qt_name});"),
+            "    }".to_string(),
+        ],
         IdlType::Vec { vec } => match vec.as_ref() {
             // QStringList: elements are already QString — append directly.
             IdlType::Primitive(p)
@@ -272,26 +350,40 @@ fn param_to_json_lines(p: &InstrParam) -> Vec<String> {
     }
 }
 
-/// QML JS expression to extract a field value with appropriate type conversion.
-fn qml_field_expr(kind: &ParamKind, field_id: &str) -> String {
-    match kind {
-        ParamKind::Account => format!("{field_id}.text"),
-        ParamKind::Arg(ty) => match ty {
-            IdlType::Primitive(p) => match p.as_str() {
-                "bool" => format!("{field_id}.checked"),
-                "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" => {
-                    format!("parseInt({field_id}.text)")
-                }
-                _ => format!("{field_id}.text"),
-            },
-            IdlType::Vec { .. } => {
-                // Split newline-separated input into a list, trimming blanks.
-                format!(
-                    "{field_id}.text.split(\"\\n\").map(function(s){{ return s.trim() }}).filter(function(s){{ return s.length > 0 }})"
-                )
-            }
+/// Inner QML JS expression for a given IDL type (no Option wrapping).
+fn qml_type_expr(ty: &IdlType, field_id: &str, idl: &SpelIdl) -> String {
+    // Enum Defined type → ComboBox.currentText
+    if enum_variants(ty, idl).is_some() {
+        return format!("{field_id}.currentText");
+    }
+    match ty {
+        IdlType::Primitive(p) => match p.as_str() {
+            "bool" => format!("{field_id}.checked"),
+            // u64/i64: send raw text string so the full range passes without JS precision loss.
+            "u64" | "i64" | "u128" | "i128" => format!("{field_id}.text"),
+            "u8" | "u16" | "u32" | "i8" | "i16" | "i32" => format!("parseInt({field_id}.text)"),
             _ => format!("{field_id}.text"),
         },
+        IdlType::Vec { .. } => {
+            format!("{field_id}.text.split(\"\\n\").map(function(s){{ return s.trim() }}).filter(function(s){{ return s.length > 0 }})")
+        }
+        IdlType::Option { option } => {
+            let inner = if enum_variants(option, idl).is_some() {
+                format!("{field_id}.currentText")
+            } else {
+                qml_type_expr(option, field_id, idl)
+            };
+            format!("{field_id}_enabled.checked ? ({inner}) : null")
+        }
+        _ => format!("{field_id}.text"),
+    }
+}
+
+/// QML JS expression to extract a field value with appropriate type conversion.
+fn qml_field_expr(kind: &ParamKind, field_id: &str, idl: &SpelIdl) -> String {
+    match kind {
+        ParamKind::Account => format!("{field_id}.text"),
+        ParamKind::Arg(ty) => qml_type_expr(ty, field_id, idl),
     }
 }
 
@@ -968,7 +1060,7 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
         qml_fetch_page(&mut o, f);
     }
     for ix in &idl.instructions {
-        qml_instruction_page(&mut o, ix);
+        qml_instruction_page(&mut o, ix, idl);
     }
     qml_settings_page(&mut o);
 
@@ -977,17 +1069,106 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     qml_toast(&mut o);
 
     o.push_str("    }\n"); // Rectangle
-    o.push_str("}\n");     // Item
+
+    // Hidden TextEdit used as a cross-platform clipboard helper.
+    o.push_str("    TextEdit {\n");
+    o.push_str("        id: clipHelper; visible: false\n");
+    o.push_str("        function copyText(t) { clipHelper.text = t; selectAll(); copy() }\n");
+    o.push_str("    }\n\n");
+
+    o.push_str("}\n"); // Item
 
     o
+}
+
+/// Persistent label above a field so the name stays visible while typing.
+fn qml_field_label(o: &mut String, label: &str, ind: &str) {
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"{label}\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted\n"));
+    o.push_str(&format!("{ind}                font.pixelSize: 11\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n"));
+}
+
+/// Checkbox + label row for Option fields ("field_id_enabled" drives the field below).
+fn qml_option_label_row(o: &mut String, field_id: &str, label: &str, ind: &str) {
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                CheckBox {{ id: {field_id}_enabled; checked: false }}\n"));
+    o.push_str(&format!("{ind}                Text {{\n"));
+    o.push_str(&format!("{ind}                    text: \"{label} (optional)\"\n"));
+    o.push_str(&format!("{ind}                    color: root.colMuted\n"));
+    o.push_str(&format!("{ind}                    font.pixelSize: 11\n"));
+    o.push_str(&format!("{ind}                    verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n"));
+}
+
+/// TextField with type-appropriate placeholder, optional IntValidator / inputMethodHints,
+/// and optional enable-gating (for Option fields).
+fn qml_textfield_typed(
+    o: &mut String, id: &str, ty: &IdlType, is_opt: bool, ind: &str,
+) {
+    let placeholder = type_placeholder(ty);
+    let val = validator_str(ty);
+    let hints = input_hints_str(ty);
+    o.push_str(&format!("{ind}            TextField {{\n"));
+    o.push_str(&format!("{ind}                id: {id}\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
+    if !placeholder.is_empty() {
+        o.push_str(&format!("{ind}                placeholderText: \"{placeholder}\"\n"));
+    }
+    if is_opt {
+        o.push_str(&format!("{ind}                enabled: {id}_enabled.checked\n"));
+        o.push_str(&format!("{ind}                opacity: enabled ? 1.0 : 0.4\n"));
+    }
+    if let Some(v) = val {
+        o.push_str(&format!("{ind}                validator: {v}\n"));
+    }
+    if let Some(h) = hints {
+        o.push_str(&format!("{ind}                inputMethodHints: {h}\n"));
+    }
+    o.push_str(&format!("{ind}                color: root.colText\n"));
+    o.push_str(&format!("{ind}                placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: root.colSurface\n"));
+    o.push_str(&format!("{ind}                    border.color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+}
+
+/// ComboBox populated from known enum variants; optional enable-gating.
+fn qml_combobox(
+    o: &mut String, id: &str, variants: &[&str], is_opt: bool, ind: &str,
+) {
+    let model = variants.iter().map(|v| format!("\"{v}\"")).collect::<Vec<_>>().join(", ");
+    o.push_str(&format!("{ind}            ComboBox {{\n"));
+    o.push_str(&format!("{ind}                id: {id}\n"));
+    o.push_str(&format!("{ind}                model: [{model}]\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
+    if is_opt {
+        o.push_str(&format!("{ind}                enabled: {id}_enabled.checked\n"));
+        o.push_str(&format!("{ind}                opacity: enabled ? 1.0 : 0.4\n"));
+    }
+    o.push_str(&format!("{ind}            }}\n\n"));
 }
 
 fn qml_textfield_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
     o.push_str(&format!("{ind}            TextField {{\n"));
     o.push_str(&format!("{ind}                id: {id}\n"));
     o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
-    o.push_str(&format!("{ind}                placeholderText: \"{placeholder}\"\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
+    if !placeholder.is_empty() {
+        o.push_str(&format!("{ind}                placeholderText: \"{placeholder}\"\n"));
+    }
     o.push_str(&format!("{ind}                color: root.colText\n"));
     o.push_str(&format!("{ind}                placeholderTextColor: root.colMuted\n"));
     o.push_str(&format!("{ind}                background: Rectangle {{\n"));
@@ -1014,7 +1195,7 @@ fn qml_textarea_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
     o.push_str(&format!("{ind}            }}\n\n"));
 }
 
-fn qml_instruction_page(o: &mut String, ix: &IdlInstruction) {
+fn qml_instruction_page(o: &mut String, ix: &IdlInstruction, idl: &SpelIdl) {
     let params = instruction_params(ix);
     let method = camel_case(&ix.name);
     let title = title_case(&ix.name);
@@ -1034,27 +1215,63 @@ fn qml_instruction_page(o: &mut String, ix: &IdlInstruction) {
     o.push_str(&format!("{ind}            Text {{\n"));
     o.push_str(&format!("{ind}                text: \"{title}\"\n"));
     o.push_str(&format!("{ind}                color: root.colText\n"));
-    o.push_str(&format!("{ind}                font.pixelSize: 18; font.bold: true\n"));
+    o.push_str(&format!("{ind}                font.pixelSize: 18\n"));
+    o.push_str(&format!("{ind}                font.bold: true\n"));
     o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
     o.push_str(&format!("{ind}            }}\n\n"));
 
     // Fields
     for p in &params {
         let field_id = format!("{}_{}f", snake_case(&ix.name), snake_case(&p.qt_name));
-        match &p.kind {
-            ParamKind::Arg(ty) if is_bool_type(ty) => {
+
+        // Peel Option wrapper to inspect the core type.
+        let (is_opt, core_ty): (bool, Option<&IdlType>) = match &p.kind {
+            ParamKind::Arg(IdlType::Option { option }) => (true, Some(option.as_ref())),
+            ParamKind::Arg(ty) => (false, Some(ty)),
+            ParamKind::Account => (false, None),
+        };
+        let variants = core_ty.and_then(|ty| enum_variants(ty, idl));
+
+        match (&p.kind, &variants) {
+            // ── bool: inline CheckBox row (label acts as the checkbox text) ──────
+            (ParamKind::Arg(ty), None) if is_bool_type(ty) => {
                 o.push_str(&format!("{ind}            RowLayout {{\n"));
-                o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+                o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+                o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
                 o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
                 o.push_str(&format!("{ind}                CheckBox {{ id: {field_id}; checked: false }}\n"));
                 o.push_str(&format!("{ind}                Text {{ text: \"{}\"; color: root.colText; font.pixelSize: 13 }}\n", p.qt_name));
                 o.push_str(&format!("{ind}            }}\n\n"));
             }
-            ParamKind::Arg(ty) if is_list_type(ty) => {
+            // ── Vec<T>: label + multiline TextArea ──────────────────────────────
+            (ParamKind::Arg(ty), None) if is_list_type(ty) => {
+                qml_field_label(o, &p.qt_name, ind);
                 qml_textarea_page(o, &field_id, &p.qt_name, ind);
             }
-            _ => {
-                qml_textfield_page(o, &field_id, &p.qt_name, ind);
+            // ── Enum Defined (non-optional): label + ComboBox ───────────────────
+            (_, Some(vs)) if !is_opt => {
+                qml_field_label(o, &p.qt_name, ind);
+                qml_combobox(o, &field_id, vs, false, ind);
+            }
+            // ── Option<Enum>: checkbox label + disabled ComboBox ────────────────
+            (_, Some(vs)) => {
+                qml_option_label_row(o, &field_id, &p.qt_name, ind);
+                qml_combobox(o, &field_id, vs, true, ind);
+            }
+            // ── Account signer: label + plain TextField ──────────────────────────
+            (ParamKind::Account, None) => {
+                qml_field_label(o, &p.qt_name, ind);
+                qml_textfield_page(o, &field_id, "base58 or 0x… hex", ind);
+            }
+            // ── Option<T>: checkbox label + disabled typed TextField ─────────────
+            (ParamKind::Arg(_), None) if is_opt => {
+                qml_option_label_row(o, &field_id, &p.qt_name, ind);
+                qml_textfield_typed(o, &field_id, core_ty.unwrap(), true, ind);
+            }
+            // ── Regular T: label + typed TextField ──────────────────────────────
+            (ParamKind::Arg(ty), None) => {
+                qml_field_label(o, &p.qt_name, ind);
+                qml_textfield_typed(o, &field_id, ty, false, ind);
             }
         }
     }
@@ -1064,7 +1281,7 @@ fn qml_instruction_page(o: &mut String, ix: &IdlInstruction) {
         .iter()
         .map(|p| {
             let fid = format!("{}_{}f", snake_case(&ix.name), snake_case(&p.qt_name));
-            qml_field_expr(&p.kind, &fid)
+            qml_field_expr(&p.kind, &fid, idl)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1168,18 +1385,32 @@ fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
         }
     }
 
-    // Key-value display
+    // Key-value display with per-row copy button
     o.push_str(&format!("{ind}            Repeater {{\n"));
     o.push_str(&format!("{ind}                model: Object.keys(backend.{prop})\n"));
     o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
     o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}                    Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                    Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                    Layout.rightMargin: 8\n"));
     o.push_str(&format!("{ind}                    Text {{ text: modelData + \":\"; color: root.colMuted; font.pixelSize: 12; Layout.preferredWidth: 140 }}\n"));
     o.push_str(&format!("{ind}                    Text {{\n"));
     o.push_str(&format!("{ind}                        text: backend.{prop}[modelData] ?? \"\"\n"));
     o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12\n"));
-    o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere\n"));
+    o.push_str(&format!("{ind}                        Layout.fillWidth: true\n"));
     o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    Button {{\n"));
+    o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
+    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(backend.{prop}[modelData] ?? \"\")\n"));
+    o.push_str(&format!("{ind}                        background: Item {{}}\n"));
+    o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"\\u29C9\"\n")); // ⧉ copy glyph
+    o.push_str(&format!("{ind}                            color: root.colMuted\n"));
+    o.push_str(&format!("{ind}                            font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter\n"));
+    o.push_str(&format!("{ind}                            verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // Button
     o.push_str(&format!("{ind}                }}\n")); // delegate
     o.push_str(&format!("{ind}            }}\n\n")); // Repeater
 
