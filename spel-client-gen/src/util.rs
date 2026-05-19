@@ -105,6 +105,10 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
                 "{var}.as_array().ok_or(\"expected array\")?.iter().map(|item| Ok({inner})).collect::<Result<Vec<_>, String>>()?"
             )
         }
+        IdlType::Array { array: (elem, 32) } if matches!(elem.as_ref(), IdlType::Primitive(p) if p == "u8") => {
+            // [u8; 32]: accept base58 (Public/Private prefix), hex (0x prefix), or raw hex — same as parse_account_id
+            format!("parse_account_id({var}.as_str().ok_or(\"expected string for [u8; 32]\")?)?")
+        }
         _ => format!("serde_json::from_value({var}.clone()).map_err(|e| format!(\"parse error: {{}}\", e))?"),
     }
 }
