@@ -596,9 +596,13 @@ fn idl_type_to_json_field(ty: &IdlType, field_name: &str, types: &[IdlTypeDef]) 
             }
         }
         IdlType::Vec { vec } => {
-            // Vec<[u8;32]> → array of hex strings; Vec<Defined(enum)> → array of strings
+            // Vec<[u8;32]> / Vec<Array(u8,N)> → array of hex strings; Vec<Defined> → array of strings
             match vec.as_ref() {
                 IdlType::Primitive(p) if matches!(p.as_str(), "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]") => {
+                    format!("state.{field_name}.iter().map(hex::encode).collect::<Vec<_>>()")
+                }
+                // IDL emits array types as Array(Primitive("u8"), N) — must hex-encode each element
+                IdlType::Array { array: (elem, _) } if matches!(elem.as_ref(), IdlType::Primitive(p) if p == "u8") => {
                     format!("state.{field_name}.iter().map(hex::encode).collect::<Vec<_>>()")
                 }
                 IdlType::Defined { defined } => {
