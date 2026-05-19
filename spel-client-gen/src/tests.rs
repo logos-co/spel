@@ -1335,3 +1335,42 @@ fn test_defined_types_ffi_is_valid_rust() {
     let output = generate_from_idl_json(DEFINED_TYPES_IDL).expect("codegen should succeed");
     assert_parses_as_rust("DEFINED_TYPES_IDL ffi_code", &output.ffi_code);
 }
+
+/// IDL with a [u8; 32] instruction argument (e.g. a PDA seed key).
+/// The generator must use `parse_bytes32` (not `parse_account_id`) so the
+/// parsed type is `[u8; 32]`, matching the instruction enum field type.
+const BYTES32_ARG_IDL: &str = r#"{
+    "version": "0.1.0",
+    "name": "test_program",
+    "instructions": [
+        {
+            "name": "create",
+            "accounts": [],
+            "args": [
+                {"name": "create_key", "type": {"array": ["u8", 32]}},
+                {"name": "owner",      "type": "account_id"}
+            ]
+        }
+    ],
+    "accounts": [],
+    "types": []
+}"#;
+
+#[test]
+fn test_bytes32_arg_uses_parse_bytes32() {
+    let output = generate_from_idl_json(BYTES32_ARG_IDL).expect("codegen should succeed");
+    let ffi = &output.ffi_code;
+
+    // [u8; 32] arg must use parse_bytes32, not parse_account_id
+    assert!(ffi.contains("parse_bytes32("), "must emit parse_bytes32 helper");
+    assert!(ffi.contains("let create_key = parse_bytes32("), "create_key must use parse_bytes32");
+
+    // account_id arg still uses parse_account_id
+    assert!(ffi.contains("let owner = parse_account_id("), "owner must use parse_account_id");
+}
+
+#[test]
+fn test_bytes32_arg_ffi_is_valid_rust() {
+    let output = generate_from_idl_json(BYTES32_ARG_IDL).expect("codegen should succeed");
+    assert_parses_as_rust("BYTES32_ARG_IDL ffi_code", &output.ffi_code);
+}

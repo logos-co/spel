@@ -193,6 +193,25 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
+    // parse_bytes32 — same inputs as parse_account_id but returns the raw [u8; 32].
+    // Used for IDL fields typed [u8; 32] (PDA seed bytes, keys stored as raw arrays).
+    writeln!(out, "fn parse_bytes32(s: &str) -> Result<[u8; 32], String> {{").unwrap();
+    writeln!(out, "    let raw = s;").unwrap();
+    writeln!(out, "    let s = s.strip_prefix(\"Public/\").or_else(|| s.strip_prefix(\"Private/\")).unwrap_or(s);").unwrap();
+    writeln!(out, "    let s = s.trim_start_matches(\"0x\");").unwrap();
+    writeln!(out, "    if s.len() == 64 {{").unwrap();
+    writeln!(out, "        let bytes = hex::decode(s).map_err(|e| format!(\"invalid hex: {{}}\", e))?;").unwrap();
+    writeln!(out, "        let mut arr = [0u8; 32]; arr.copy_from_slice(&bytes);").unwrap();
+    writeln!(out, "        return Ok(arr);").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    if let Ok(id) = s.parse::<AccountId>() {{").unwrap();
+    writeln!(out, "        let mut arr = [0u8; 32]; arr.copy_from_slice(id.as_ref());").unwrap();
+    writeln!(out, "        return Ok(arr);").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    Err(format!(\"invalid [u8; 32]: {{}}\", raw))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
     // Shared async runtime — created once per process, reused across all FFI calls.
     writeln!(out, "static ASYNC_RUNTIME: std::sync::OnceLock<tokio::runtime::Runtime> = std::sync::OnceLock::new();").unwrap();
     writeln!(out, "fn get_runtime() -> &'static tokio::runtime::Runtime {{").unwrap();
@@ -738,33 +757,25 @@ fn idl_type_to_borsh_rust(ty: &IdlType) -> String {
     }
 }
 
-/// For each unique account type referenced as a PDA in any instruction, emit a
-/// BorshDeserialize struct if the account type is found in `idl.accounts`.
+/// For each entry in `idl.accounts` that qualifies for fetch, emit a BorshDeserialize struct.
+/// Mirrors the iteration in `generate_account_fetch_functions` so every emitted fetch function
+/// has a corresponding state struct.
 pub fn generate_account_types(idl: &SpelIdl, out: &mut String) {
-    use std::collections::HashSet;
-    let mut seen: HashSet<String> = HashSet::new();
+    for type_def in &idl.accounts {
+        let acc_name = snake_case(&type_def.name);
+        if !is_fetch_eligible(idl, &acc_name) { continue; }
 
-    for ix in &idl.instructions {
-        for acc in &ix.accounts {
-            if acc.pda.is_none() { continue; }
-            let acc_name = snake_case(&acc.name);
-            if !seen.insert(acc_name.clone()) { continue; }
-
-            if !is_fetch_eligible(idl, &acc_name) { continue; }
-            let type_def = idl.accounts.iter().find(|at| snake_case(&at.name) == acc_name).unwrap();
-
-            let pascal_name = pascal_case(&acc_name);
-            writeln!(out).unwrap();
-            writeln!(out, "/// Auto-generated Borsh state struct for `{acc_name}` account.").unwrap();
-            writeln!(out, "#[derive(borsh::BorshDeserialize)]").unwrap();
-            writeln!(out, "struct {pascal_name}State {{").unwrap();
-            for field in &type_def.type_.fields {
-                let fname = rust_ident(&field.name);
-                let ftype = idl_type_to_borsh_rust(&field.type_);
-                writeln!(out, "    pub {fname}: {ftype},").unwrap();
-            }
-            writeln!(out, "}}").unwrap();
+        let pascal_name = pascal_case(&acc_name);
+        writeln!(out).unwrap();
+        writeln!(out, "/// Auto-generated Borsh state struct for `{acc_name}` account.").unwrap();
+        writeln!(out, "#[derive(borsh::BorshDeserialize)]").unwrap();
+        writeln!(out, "struct {pascal_name}State {{").unwrap();
+        for field in &type_def.type_.fields {
+            let fname = rust_ident(&field.name);
+            let ftype = idl_type_to_borsh_rust(&field.type_);
+            writeln!(out, "    pub {fname}: {ftype},").unwrap();
         }
+        writeln!(out, "}}").unwrap();
     }
 }
 
@@ -786,10 +797,10 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
         }
     }
 
-    // Generate fetch functions for ALL idl.accounts entries with struct type definitions.
+    // Generate fetch functions for ALL idl.accounts entries that are fetch-eligible.
     for type_def in &idl.accounts {
         let acc_name = snake_case(&type_def.name);
-        if type_def.type_.kind != "struct" || type_def.type_.fields.is_empty() { continue; }
+        if !is_fetch_eligible(idl, &acc_name) { continue; }
 
         let pascal_name = pascal_case(&acc_name);
         let fn_name = format!("{prefix}_fetch_{acc_name}");
@@ -960,28 +971,15 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out).unwrap();
     }
 
-    // Fetch function declarations for PDA-backed accounts.
-    // Only emit a declaration if there is a matching accounts[] entry with kind == "struct"
-    // and non-empty fields — mirroring the guard used in generate_account_fetch_functions.
-    {
-        use std::collections::HashSet;
-        let mut seen: HashSet<String> = HashSet::new();
-        for ix in &idl.instructions {
-            for acc in &ix.accounts {
-                if acc.pda.is_some() {
-                    let acc_name = snake_case(&acc.name);
-                    if !seen.insert(acc_name.clone()) {
-                        continue;
-                    }
-                    if !is_fetch_eligible(idl, &acc_name) { continue; }
-
-                    let fn_name = format!("{}_fetch_{}", prefix, acc_name);
-                    writeln!(out, "/* fetch {} account state */", acc.name).unwrap();
-                    writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
-                    writeln!(out).unwrap();
-                }
-            }
-        }
+    // Fetch function declarations — one per fetch-eligible idl.accounts entry.
+    // Mirrors generate_account_fetch_functions exactly.
+    for type_def in &idl.accounts {
+        let acc_name = snake_case(&type_def.name);
+        if !is_fetch_eligible(idl, &acc_name) { continue; }
+        let fn_name = format!("{}_fetch_{}", prefix, acc_name);
+        writeln!(out, "/* fetch {} account state */", type_def.name).unwrap();
+        writeln!(out, "char* {fn_name}(const char* args_json);").unwrap();
+        writeln!(out).unwrap();
     }
 
     writeln!(out, "void {prefix}_free_string(char* s);").unwrap();
