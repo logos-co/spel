@@ -4,6 +4,7 @@
 //! account data into a `serde_json::Value` without knowing the concrete Rust
 //! type at compile time.
 
+use base58::ToBase58;
 use crate::idl::{IdlEnumVariant, IdlField, IdlType, IdlTypeDef, SpelIdl};
 use serde_json::{json, Value};
 
@@ -84,7 +85,11 @@ fn decode_borsh_value(cursor: &mut &[u8], ty: &IdlType, idl: &SpelIdl) -> Result
             if matches!(inner.as_ref(), IdlType::Primitive(s) if s == "u8") {
                 let mut buf = vec![0u8; *len];
                 read_exact(cursor, &mut buf)?;
-                Ok(json!(hex_encode(&buf)))
+                if *len == 32 {
+                    Ok(json!(account_id_encode(&buf)))
+                } else {
+                    Ok(json!(hex_encode(&buf)))
+                }
             } else {
                 let mut arr = Vec::with_capacity(*len);
                 for _ in 0..*len {
@@ -149,7 +154,7 @@ fn decode_primitive(cursor: &mut &[u8], name: &str) -> Result<Value, String> {
         "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => {
             let mut buf = [0u8; 32];
             read_exact(cursor, &mut buf)?;
-            Ok(json!(hex_encode(&buf)))
+            Ok(json!(account_id_encode(&buf)))
         }
         other => Err(format!("unknown primitive type: {}", other)),
     }
@@ -194,6 +199,10 @@ fn read_u128(cursor: &mut &[u8]) -> Result<u128, String> {
     let mut b = [0u8; 16];
     read_exact(cursor, &mut b)?;
     Ok(u128::from_le_bytes(b))
+}
+
+fn account_id_encode(bytes: &[u8]) -> String {
+    format!("Public/{}", bytes.to_base58())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

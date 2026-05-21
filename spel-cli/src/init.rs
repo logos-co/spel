@@ -23,6 +23,12 @@ pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, l
     println!("🚀 Creating SPEL project '{}'...", project_name);
 
     let snake_name = project_name.replace('-', "_");
+    let pascal_name: String = snake_name.split('_')
+        .map(|w| {
+            let mut c = w.chars();
+            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+        })
+        .collect();
 
     // Detect spel-client-gen: check the directory next to the running binary first
     // (covers `cargo run`, installed builds, and CI). Fall back to bare name (PATH lookup).
@@ -253,11 +259,11 @@ binary = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin"
     write_file(root, "Makefile", &format!(r#"# {project_name} — SPEL Program
 #
 # Quick start:
-#   make build idl deploy setup
+#   make all        # full build (guest binary → IDL → FFI → UI)
+#   make deploy     # deploy to sequencer
+#   make setup      # create accounts
 #   make cli ARGS="<command> --arg1 value1"
-#
-# Qt/QML Basecamp UI:
-#   make idl ffi ui-gen ui-build install
+#   make install    # install plugin to Basecamp
 
 
 SHELL := /bin/bash
@@ -284,11 +290,12 @@ define save_var
 	@mv $(STATE_FILE).tmp $(STATE_FILE)
 endef
 
-.PHONY: help build idl cli deploy setup inspect status clean ffi-gen ffi ui-gen ui-build ui-run ui-package lgx lgx-sign install
+.PHONY: help all build idl cli deploy setup inspect status clean ffi-gen ffi ui-gen ui-build ui-run ui-package lgx lgx-sign install
 
 help: ## Show this help
 	@echo "{project_name} — SPEL Program"
 	@echo ""
+	@echo "  make all         Full build: guest binary → IDL → FFI → UI scaffold → UI app"
 	@echo "  make build       Build the guest binary (needs risc0 toolchain)"
 	@echo "  make idl         Generate IDL from program source"
 	@echo "  make cli ARGS=   Run the IDL-driven CLI (reads spel.toml for config)"
@@ -315,10 +322,17 @@ help: ## Show this help
 	@echo "    make install"
 	@echo ""
 	@echo "Example:"
-	@echo "  make build idl deploy"
+	@echo "  make all         # full build from scratch"
+	@echo "  make all deploy  # full build + deploy to sequencer"
 	@echo "  make cli ARGS=\"--help\""
 	@echo "  make cli ARGS=\"<command> --arg1 value1\""
-	@echo "  make idl ffi ui-gen ui-build install"
+
+all: build idl ffi ui-gen ui-build ## Full build: guest binary → IDL → FFI → UI scaffold → UI app
+	@echo ""
+	@echo "✅ Full build complete!"
+	@echo "   Run with: make ui-run"
+	@echo "   Install:  make install"
+	@echo "   Deploy:   make deploy  (then make setup)"
 
 build: ## Build the guest binary
 	cargo risczero build --manifest-path methods/guest/Cargo.toml
@@ -386,11 +400,11 @@ ui-build: ffi ## Build the Qt/QML standalone preview app (needs Qt6 + CMake)
 	cmake -B $(UI_OUT_DIR)/build $(UI_OUT_DIR)
 	cmake --build $(UI_OUT_DIR)/build --parallel
 	@echo ""
-	@echo "✅ Preview app built: $(UI_OUT_DIR)/build/{project_name}App"
+	@echo "✅ Preview app built: $(UI_OUT_DIR)/build/{pascal_name}App"
 	@echo "   Run with: make ui-run  or install with: make install"
 
 ui-run: ui-build ## Run the Qt/QML standalone preview app
-	$(UI_OUT_DIR)/build/{project_name}App
+	$(UI_OUT_DIR)/build/{pascal_name}App
 
 ui-package: ui-build ## Package plugin + FFI .so for loading in Basecamp
 	mkdir -p $(UI_OUT_DIR)/lib
@@ -434,7 +448,7 @@ install: ui-build ## Install plugin directly to Basecamp plugins directory (no L
 	cp $(UI_OUT_DIR)/build/lib{snake_name}_plugin.so $(INSTALL_DIR)/
 	cp $(UI_OUT_DIR)/qml/Main.qml $(INSTALL_DIR)/
 	cp $(UI_OUT_DIR)/manifest.json $(INSTALL_DIR)/
-	@printf 'linux-amd64' > $(INSTALL_DIR)/variant
+	@printf '%s' '$(VARIANT)' > $(INSTALL_DIR)/variant
 	@echo ""
 	@echo "✅ Installed to $(INSTALL_DIR)"
 	@echo "   Restart Basecamp to load the module"
@@ -477,6 +491,7 @@ make cli ARGS="--dry-run -- <command> --arg1 value1"
 
 | Target | Description |
 |--------|-------------|
+| `make all` | Full build: guest binary → IDL → FFI → UI scaffold → UI app |
 | `make build` | Build the guest binary (risc0) |
 | `make idl` | Generate IDL JSON from program source |
 | `make cli ARGS="..."` | Run the IDL-driven CLI |

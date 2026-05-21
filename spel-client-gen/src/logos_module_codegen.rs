@@ -221,15 +221,6 @@ fn fetch_eligible_accounts(idl: &SpelIdl) -> Vec<FetchAccount> {
                 continue;
             }
 
-            let has_type = idl.accounts.iter().any(|at| {
-                snake_case(&at.name) == acc_name
-                    && at.type_.kind == "struct"
-                    && !at.type_.fields.is_empty()
-            });
-            if !has_type {
-                continue;
-            }
-
             let seed_params: Vec<(String, IdlType)> = pda
                 .seeds
                 .iter()
@@ -566,7 +557,7 @@ fn gen_backend_h(
 
     // Remind dev of the expected env var
     o.push_str(&format!(
-        "\n// Expected environment variable: {env_base}_PROGRAM_ID_HEX\n"
+        "\n// Expected environment variable: {env_base}_PROGRAM_ID\n"
     ));
 
     o
@@ -629,7 +620,7 @@ fn gen_backend_cpp(
     o.push_str("    m_walletPath   = s.value(\"walletPath\",   qEnvironmentVariable(\"NSSA_WALLET_HOME_DIR\",  \".scaffold/wallet\")).toString();\n");
     o.push_str("    m_sequencerUrl = s.value(\"sequencerUrl\", qEnvironmentVariable(\"NSSA_SEQUENCER_URL\",   \"http://127.0.0.1:3040\")).toString();\n");
     o.push_str(&format!(
-        "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID_HEX\")).toString();\n"
+        "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID\")).toString();\n"
     ));
     // Fallback: call the compiled-in FFI constant if still empty (priority 3)
     o.push_str(&format!("    if (m_programIdHex.isEmpty()) {{\n"));
@@ -1015,7 +1006,7 @@ fn gen_main_cpp(class: &str, effective_prog: &str) -> String {
     format!(
         "// Standalone preview app — loads the QML UI without Basecamp.\n\
          // Build with: cmake -B build && cmake --build build\n\
-         // Run with:   {env_hint}_PROGRAM_ID_HEX=<hex> ./build/{effective_prog}_app\n\n\
+         // Run with:   {env_hint}_PROGRAM_ID=<hex> ./build/{effective_prog}_app\n\n\
          #include \"{class}Backend.h\"\n\
          #include \"{class}Plugin.h\"\n\n\
          #include <QApplication>\n\
@@ -1081,10 +1072,10 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     o.push_str("    Connections {\n");
     o.push_str("        target: backend\n");
     o.push_str("        function onOperationSuccess(operation, txHash) {\n");
-    o.push_str("            toast.show(\"\\u2713 \" + operation + (txHash ? \" \\u00b7 \" + txHash.slice(0, 12) + \"\\u2026\" : \"\"), root.colSuccess)\n");
+    o.push_str("            toast.show(\"\\u2713 \" + operation + (txHash ? \" \\u00b7 \" + txHash.slice(0, 12) + \"\\u2026\" : \"\"), root.colSuccess, 4000)\n");
     o.push_str("        }\n");
     o.push_str("        function onOperationError(operation, error) {\n");
-    o.push_str("            toast.show(\"\\u2717 \" + operation + \": \" + error, root.colError)\n");
+    o.push_str("            toast.show(\"\\u2717 \" + operation + \": \" + error, root.colError, 7000)\n");
     o.push_str("        }\n");
     o.push_str("    }\n\n");
 
@@ -1114,9 +1105,23 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     o.push_str("                        font.pixelSize: 15; font.bold: true\n");
     o.push_str("                        Layout.fillWidth: true\n");
     o.push_str("                    }\n");
-    o.push_str("                    BusyIndicator {\n");
-    o.push_str("                        running: backend.busy; visible: running\n");
-    o.push_str("                        implicitWidth: 24; implicitHeight: 24\n");
+    o.push_str("                    Row {\n");
+    o.push_str("                        visible: backend.busy\n");
+    o.push_str("                        spacing: 4\n");
+    o.push_str("                        Repeater {\n");
+    o.push_str("                            model: 3\n");
+    o.push_str("                            Rectangle {\n");
+    o.push_str("                                width: 5; height: 5; radius: 2.5\n");
+    o.push_str("                                color: root.colPrimary\n");
+    o.push_str("                                SequentialAnimation on opacity {\n");
+    o.push_str("                                    running: backend.busy; loops: Animation.Infinite\n");
+    o.push_str("                                    PauseAnimation   { duration: index * 200 }\n");
+    o.push_str("                                    NumberAnimation  { to: 1.0; duration: 200 }\n");
+    o.push_str("                                    NumberAnimation  { to: 0.25; duration: 200 }\n");
+    o.push_str("                                    PauseAnimation   { duration: (2 - index) * 200 }\n");
+    o.push_str("                                }\n");
+    o.push_str("                            }\n");
+    o.push_str("                        }\n");
     o.push_str("                    }\n");
     o.push_str("                }\n\n");
     // Divider
@@ -1963,26 +1968,34 @@ fn qml_toast(o: &mut String) {
     o.push_str("        Rectangle {\n");
     o.push_str("            id: toast\n");
     o.push_str("            anchors { bottom: parent.bottom; horizontalCenter: parent.horizontalCenter; bottomMargin: 24 }\n");
-    o.push_str("            width: toastText.implicitWidth + 32; height: 40\n");
+    o.push_str("            width: Math.min(toastText.implicitWidth + 48, parent.width - 80); height: 44\n");
     o.push_str("            radius: root.radius\n");
     o.push_str("            color: root.colSurface\n");
     o.push_str("            opacity: 0; visible: opacity > 0\n\n");
-    o.push_str("            function show(msg, col) {\n");
+    o.push_str("            function show(msg, col, duration) {\n");
     o.push_str("                toastText.text = msg\n");
     o.push_str("                toast.color = col\n");
     o.push_str("                toast.opacity = 1\n");
+    o.push_str("                toastTimer.interval = duration || 4000\n");
     o.push_str("                toastTimer.restart()\n");
     o.push_str("            }\n\n");
     o.push_str("            Text {\n");
     o.push_str("                id: toastText\n");
-    o.push_str("                anchors.centerIn: parent\n");
+    o.push_str("                anchors { fill: parent; margins: 12 }\n");
     o.push_str("                color: root.colText\n");
     o.push_str("                font.pixelSize: 13\n");
+    o.push_str("                wrapMode: Text.WordWrap\n");
+    o.push_str("                horizontalAlignment: Text.AlignHCenter\n");
+    o.push_str("                verticalAlignment: Text.AlignVCenter\n");
     o.push_str("            }\n\n");
-    o.push_str("            Behavior on opacity { NumberAnimation { duration: 200 } }\n\n");
+    o.push_str("            MouseArea {\n");
+    o.push_str("                anchors.fill: parent\n");
+    o.push_str("                onClicked: { toastTimer.stop(); toast.opacity = 0 }\n");
+    o.push_str("                cursorShape: Qt.PointingHandCursor\n");
+    o.push_str("            }\n\n");
+    o.push_str("            Behavior on opacity { NumberAnimation { duration: 350 } }\n\n");
     o.push_str("            Timer {\n");
     o.push_str("                id: toastTimer\n");
-    o.push_str("                interval: 3000\n");
     o.push_str("                onTriggered: toast.opacity = 0\n");
     o.push_str("            }\n");
     o.push_str("        }\n");
