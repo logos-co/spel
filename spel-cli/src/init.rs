@@ -87,6 +87,11 @@ ui/
         (_, Some(r)) => format!("rev = \"{}\"", r),
         _ => "tag = \"v0.2.0-rc3\"".to_string(),
     };
+    let spel_ref_ffi = match (spel_tag, spel_rev) {
+        (Some(t), _) => format!("tag = \"{}\"", t),
+        (_, Some(r)) => format!("rev = \"{}\"", r),
+        _ => "tag = \"v0.3.0\"".to_string(),
+    };
     write_file(root, &format!("{snake_name}_ffi/Cargo.toml"), &format!(r#"[package]
 name = "{snake_name}_ffi"
 version = "0.1.0"
@@ -101,7 +106,7 @@ nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone
 common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
 sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
 wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-spel-framework-core = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+spel-framework-core = {{ git = "https://github.com/logos-co/spel.git", {spel_ref_ffi} }}
 serde_json  = "1"
 serde       = {{ version = "1", features = ["derive"] }}
 borsh       = "1.5"
