@@ -9,6 +9,7 @@ pub mod idl;
 pub mod pda;
 pub mod validation;
 pub mod context;
+pub mod decode;
 
 #[cfg(feature = "idl-gen")]
 pub mod account_types;

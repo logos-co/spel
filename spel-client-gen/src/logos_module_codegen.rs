@@ -440,7 +440,8 @@ fn gen_backend_h(
     o.push_str("    // ── Wallet state ─────────────────────────────────────────────────────\n");
     o.push_str("    Q_PROPERTY(QString     connectionStatus  READ connectionStatus  NOTIFY connectionStatusChanged)\n");
     o.push_str("    Q_PROPERTY(QVariantList walletAccounts    READ walletAccounts    NOTIFY walletAccountsChanged)\n");
-    o.push_str("    Q_PROPERTY(QVariantMap walletAccountInfo READ walletAccountInfo NOTIFY walletAccountInfoChanged)\n\n");
+    o.push_str("    Q_PROPERTY(QVariantMap walletAccountInfo READ walletAccountInfo NOTIFY walletAccountInfoChanged)\n");
+    o.push_str("    Q_PROPERTY(QVariantMap walletDecodedAccount READ walletDecodedAccount NOTIFY walletDecodedAccountChanged)\n\n");
 
     o.push_str("public:\n");
     o.push_str(&format!(
@@ -465,7 +466,8 @@ fn gen_backend_h(
 
     o.push_str("    QString     connectionStatus()  const { return m_connectionStatus; }\n");
     o.push_str("    QVariantList walletAccounts()    const { return m_walletAccounts; }\n");
-    o.push_str("    QVariantMap walletAccountInfo() const { return m_walletAccountInfo; }\n\n");
+    o.push_str("    QVariantMap walletAccountInfo() const { return m_walletAccountInfo; }\n");
+    o.push_str("    QVariantMap walletDecodedAccount() const { return m_walletDecodedAccount; }\n\n");
 
     o.push_str("    QString walletPath()   const { return m_walletPath; }\n");
     o.push_str("    QString sequencerUrl() const { return m_sequencerUrl; }\n");
@@ -508,7 +510,8 @@ fn gen_backend_h(
     o.push_str("    Q_INVOKABLE void checkConnection();\n");
     o.push_str("    Q_INVOKABLE void listAccounts();\n");
     o.push_str("    Q_INVOKABLE void createAccount(const QString& label);\n");
-    o.push_str("    Q_INVOKABLE void inspectAccount(const QString& accountId);\n\n");
+    o.push_str("    Q_INVOKABLE void inspectAccount(const QString& accountId);\n");
+    o.push_str("    Q_INVOKABLE void decodeAccount(const QString& accountId);\n\n");
     o.push_str("signals:\n");
     for f in fetches {
         let p = camel_case(&f.acc_name);
@@ -525,7 +528,8 @@ fn gen_backend_h(
     o.push_str("    void programIdHexChanged();\n");
     o.push_str("    void connectionStatusChanged();\n");
     o.push_str("    void walletAccountsChanged();\n");
-    o.push_str("    void walletAccountInfoChanged();\n\n");
+    o.push_str("    void walletAccountInfoChanged();\n");
+    o.push_str("    void walletDecodedAccountChanged();\n\n");
 
     o.push_str("private:\n");
     if has_no_arg_fetches {
@@ -557,6 +561,7 @@ fn gen_backend_h(
     o.push_str("    QString     m_connectionStatus;\n");
     o.push_str("    QVariantList m_walletAccounts;\n");
     o.push_str("    QVariantMap m_walletAccountInfo;\n");
+    o.push_str("    QVariantMap m_walletDecodedAccount;\n");
     o.push_str("};\n");
 
     // Remind dev of the expected env var
@@ -613,6 +618,7 @@ fn gen_backend_cpp(
     o.push_str(&format!("    char* {prog}_inspect_account(const char* args_json);\n"));
     o.push_str(&format!("    char* {prog}_list_accounts(const char* args_json);\n"));
     o.push_str(&format!("    char* {prog}_create_account(const char* args_json);\n"));
+    o.push_str(&format!("    char* {prog}_decode_account(const char* args_json);\n"));
     o.push_str("}\n\n");
 
     // Constructor
@@ -813,6 +819,7 @@ fn gen_backend_cpp(
 
     o.push_str(&format!("void {backend}::listAccounts() {{\n"));
     o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    args[\"program_id_hex\"] = m_programIdHex;\n");
     o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
     o.push_str(&format!("        QString result = callFfi({prog}_list_accounts, args);\n"));
     o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
@@ -822,9 +829,10 @@ fn gen_backend_cpp(
     o.push_str("                for (const QJsonValue& v : obj.value(\"accounts\").toArray()) {\n");
     o.push_str("                    QJsonObject ao = v.toObject();\n");
     o.push_str("                    QVariantMap item;\n");
-    o.push_str("                    item[\"id\"]    = ao.value(\"id\").toString();\n");
-    o.push_str("                    item[\"label\"] = ao.value(\"label\").toString();\n");
-    o.push_str("                    item[\"path\"]  = ao.value(\"path\").toString();\n");
+    o.push_str("                    item[\"id\"]     = ao.value(\"id\").toString();\n");
+    o.push_str("                    item[\"label\"]  = ao.value(\"label\").toString();\n");
+    o.push_str("                    item[\"path\"]   = ao.value(\"path\").toString();\n");
+    o.push_str("                    item[\"status\"] = ao.value(\"status\").toString();\n");
     o.push_str("                    list.append(item);\n");
     o.push_str("                }\n");
     o.push_str("                m_walletAccounts = list;\n");
@@ -858,14 +866,18 @@ fn gen_backend_cpp(
     o.push_str(&format!("void {backend}::inspectAccount(const QString& accountId) {{\n"));
     o.push_str("    QJsonObject args = baseArgs();\n");
     o.push_str("    args[\"account_id\"] = accountId;\n");
+    // pass program_id_hex so the FFI can classify owner status
+    o.push_str("    args[\"program_id_hex\"] = m_programIdHex;\n");
     o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
     o.push_str(&format!("        QString result = callFfi({prog}_inspect_account, args);\n"));
     o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
     o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
     o.push_str("            if (obj.value(\"success\").toBool()) {\n");
     o.push_str("                QVariantMap info;\n");
-    o.push_str("                info[\"data_len\"] = obj.value(\"data_len\").toInt();\n");
-    o.push_str("                info[\"data_preview\"] = obj.value(\"data_preview\").toString();\n");
+    o.push_str("                info[\"status\"]          = obj.value(\"status\").toString();\n");
+    o.push_str("                info[\"data_len\"]        = obj.value(\"data_len\").toInt();\n");
+    o.push_str("                info[\"data_preview\"]    = obj.value(\"data_preview\").toString();\n");
+    o.push_str("                info[\"program_owner\"]   = obj.value(\"program_owner\").toString();\n");
     o.push_str("                info[\"has_signing_key\"] = obj.value(\"has_signing_key\").toBool() ? \"yes\" : \"no\";\n");
     o.push_str("                m_walletAccountInfo = info;\n");
     o.push_str("            } else {\n");
@@ -874,6 +886,35 @@ fn gen_backend_cpp(
     o.push_str("                m_walletAccountInfo = info;\n");
     o.push_str("            }\n");
     o.push_str("            emit walletAccountInfoChanged();\n");
+    o.push_str("        }, Qt::QueuedConnection);\n");
+    o.push_str("    });\n}\n\n");
+
+    o.push_str(&format!("void {backend}::decodeAccount(const QString& accountId) {{\n"));
+    o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    args[\"account_id\"] = accountId;\n");
+    o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
+    o.push_str(&format!("        QString result = callFfi({prog}_decode_account, args);\n"));
+    o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
+    o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
+    o.push_str("            if (obj.value(\"success\").toBool()) {\n");
+    o.push_str("                QVariantMap decoded;\n");
+    o.push_str("                decoded[\"type\"] = obj.value(\"type\").toString();\n");
+    o.push_str("                if (!obj.value(\"fields\").isNull()) {\n");
+    o.push_str("                    QJsonObject fields = obj.value(\"fields\").toObject();\n");
+    o.push_str("                    QVariantMap fmap;\n");
+    o.push_str("                    for (auto it = fields.begin(); it != fields.end(); ++it)\n");
+    o.push_str("                        fmap[it.key()] = it.value().toVariant();\n");
+    o.push_str("                    decoded[\"fields\"] = fmap;\n");
+    o.push_str("                }\n");
+    o.push_str("                if (!obj.value(\"raw_hex\").isNull())\n");
+    o.push_str("                    decoded[\"raw_hex\"] = obj.value(\"raw_hex\").toString();\n");
+    o.push_str("                if (!obj.value(\"status\").isNull())\n");
+    o.push_str("                    decoded[\"status\"] = obj.value(\"status\").toString();\n");
+    o.push_str("                m_walletDecodedAccount = decoded;\n");
+    o.push_str("            } else {\n");
+    o.push_str("                m_walletDecodedAccount = {{ {\"error\", obj.value(\"error\").toString()} }};\n");
+    o.push_str("            }\n");
+    o.push_str("            emit walletDecodedAccountChanged();\n");
     o.push_str("        }, Qt::QueuedConnection);\n");
     o.push_str("    });\n}\n\n");
 
@@ -1623,38 +1664,77 @@ fn qml_wallet_page(o: &mut String) {
 
     o.push_str(&format!("{ind}            Repeater {{\n"));
     o.push_str(&format!("{ind}                model: backend.walletAccounts\n"));
-    o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
-    o.push_str(&format!("{ind}                    Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 8\n"));
-    // Label/path badge
-    o.push_str(&format!("{ind}                    Text {{\n"));
-    o.push_str(&format!("{ind}                        property string _disp: modelData[\"label\"] || modelData[\"path\"] || \"\"\n"));
-    o.push_str(&format!("{ind}                        text: _disp\n"));
-    o.push_str(&format!("{ind}                        visible: _disp !== \"\"\n"));
-    o.push_str(&format!("{ind}                        color: modelData[\"label\"] ? root.colPrimary : root.colMuted\n"));
-    o.push_str(&format!("{ind}                        font.pixelSize: 11; Layout.preferredWidth: 90\n"));
-    o.push_str(&format!("{ind}                        elide: Text.ElideRight\n"));
-    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                delegate: ColumnLayout {{\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true; spacing: 2\n"));
+    o.push_str(&format!("{ind}                    RowLayout {{\n"));
+    o.push_str(&format!("{ind}                        Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 8\n"));
+    // Status badge — color-coded by owner classification
+    o.push_str(&format!("{ind}                        Rectangle {{\n"));
+    o.push_str(&format!("{ind}                            property string _st: modelData[\"status\"] || \"unknown\"\n"));
+    o.push_str(&format!("{ind}                            width: statusLabel.implicitWidth + 10; height: 18; radius: 9\n"));
+    o.push_str(&format!("{ind}                            color: _st === \"uninitialized\" ? Qt.rgba(0.6, 0.6, 0.6, 0.2)\n"));
+    o.push_str(&format!("{ind}                                 : _st === \"owned\"         ? Qt.rgba(0.2, 0.8, 0.4, 0.2)\n"));
+    o.push_str(&format!("{ind}                                 : _st === \"foreign\"       ? Qt.rgba(0.3, 0.5, 1.0, 0.2)\n"));
+    o.push_str(&format!("{ind}                                 : Qt.rgba(1.0, 0.6, 0.0, 0.2)\n"));
+    o.push_str(&format!("{ind}                            Text {{\n"));
+    o.push_str(&format!("{ind}                                id: statusLabel\n"));
+    o.push_str(&format!("{ind}                                anchors.centerIn: parent\n"));
+    o.push_str(&format!("{ind}                                text: parent._st === \"uninitialized\" ? \"free\"\n"));
+    o.push_str(&format!("{ind}                                     : parent._st === \"owned\"         ? \"owned\"\n"));
+    o.push_str(&format!("{ind}                                     : parent._st === \"foreign\"       ? \"other\"\n"));
+    o.push_str(&format!("{ind}                                     : \"?\"\n"));
+    o.push_str(&format!("{ind}                                color: parent._st === \"uninitialized\" ? root.colMuted\n"));
+    o.push_str(&format!("{ind}                                     : parent._st === \"owned\"         ? root.colSuccess\n"));
+    o.push_str(&format!("{ind}                                     : parent._st === \"foreign\"       ? root.colPrimary\n"));
+    o.push_str(&format!("{ind}                                     : \"#f0a030\"\n"));
+    o.push_str(&format!("{ind}                                font.pixelSize: 10; font.bold: true\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n")); // Rectangle badge
+    // Label/path
+    o.push_str(&format!("{ind}                        Text {{\n"));
+    o.push_str(&format!("{ind}                            property string _disp: modelData[\"label\"] || modelData[\"path\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                            text: _disp\n"));
+    o.push_str(&format!("{ind}                            visible: _disp !== \"\"\n"));
+    o.push_str(&format!("{ind}                            color: modelData[\"label\"] ? root.colPrimary : root.colMuted\n"));
+    o.push_str(&format!("{ind}                            font.pixelSize: 11; Layout.preferredWidth: 80\n"));
+    o.push_str(&format!("{ind}                            elide: Text.ElideRight\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
     // Account ID — click to populate inspect field
-    o.push_str(&format!("{ind}                    Text {{\n"));
-    o.push_str(&format!("{ind}                        text: modelData[\"id\"] || \"\"\n"));
-    o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12\n"));
-    o.push_str(&format!("{ind}                        elide: Text.ElideMiddle; Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}                        MouseArea {{\n"));
-    o.push_str(&format!("{ind}                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor\n"));
-    o.push_str(&format!("{ind}                            onClicked: walletInspectId.text = modelData[\"id\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                        Text {{\n"));
+    o.push_str(&format!("{ind}                            text: modelData[\"id\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                            color: root.colText; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                            elide: Text.ElideMiddle; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                            MouseArea {{\n"));
+    o.push_str(&format!("{ind}                                anchors.fill: parent; cursorShape: Qt.PointingHandCursor\n"));
+    o.push_str(&format!("{ind}                                onClicked: walletInspectId.text = modelData[\"id\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
     o.push_str(&format!("{ind}                        }}\n"));
-    o.push_str(&format!("{ind}                    }}\n"));
     // Copy button
-    o.push_str(&format!("{ind}                    Button {{\n"));
-    o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
-    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(modelData[\"id\"] || \"\")\n"));
-    o.push_str(&format!("{ind}                        background: Item {{}}\n"));
-    o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
-    o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
-    o.push_str(&format!("{ind}                        }}\n"));
-    o.push_str(&format!("{ind}                    }}\n")); // Button
-    o.push_str(&format!("{ind}                }}\n")); // delegate
+    o.push_str(&format!("{ind}                        Button {{\n"));
+    o.push_str(&format!("{ind}                            implicitWidth: 28; implicitHeight: 28\n"));
+    o.push_str(&format!("{ind}                            onClicked: clipHelper.copyText(modelData[\"id\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                            background: Item {{}}\n"));
+    o.push_str(&format!("{ind}                            contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                                text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n")); // copy Button
+    // Decode button — only for program-owned accounts
+    o.push_str(&format!("{ind}                        Button {{\n"));
+    o.push_str(&format!("{ind}                            visible: (modelData[\"status\"] || \"\") === \"owned\"\n"));
+    o.push_str(&format!("{ind}                            implicitHeight: 22; implicitWidth: 52\n"));
+    o.push_str(&format!("{ind}                            onClicked: backend.decodeAccount(modelData[\"id\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                            background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                                color: parent.down ? Qt.darker(root.colSuccess, 1.3) : Qt.rgba(0.2, 0.8, 0.4, 0.25)\n"));
+    o.push_str(&format!("{ind}                                radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                            contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                                text: \"Decode\"; color: root.colSuccess; font.pixelSize: 11\n"));
+    o.push_str(&format!("{ind}                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n")); // decode Button
+    o.push_str(&format!("{ind}                    }}\n")); // RowLayout
+    o.push_str(&format!("{ind}                }}\n")); // ColumnLayout delegate
     o.push_str(&format!("{ind}            }}\n\n")); // Repeater
 
     // Divider before create section
@@ -1755,6 +1835,75 @@ fn qml_wallet_page(o: &mut String) {
     o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     o.push_str(&format!("{ind}                    }}\n")); // Button
+    o.push_str(&format!("{ind}                }}\n")); // delegate
+    o.push_str(&format!("{ind}            }}\n\n")); // Repeater
+
+    // ── Section: Decoded Data ────────────────────────────────────────────
+    o.push_str(&format!("{ind}            Rectangle {{ Layout.fillWidth: true; height: 1; color: root.colBorder; Layout.topMargin: 8 }}\n\n"));
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"DECODED DATA\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.topMargin: 8\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // Type name header when decode succeeded
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: (backend.walletDecodedAccount[\"type\"] || \"\") !== \"\"\n"));
+    o.push_str(&format!("{ind}                text: \"Type: \" + (backend.walletDecodedAccount[\"type\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                color: root.colSuccess; font.pixelSize: 13; font.bold: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // Uninitialized notice
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: (backend.walletDecodedAccount[\"status\"] || \"\") === \"uninitialized\"\n"));
+    o.push_str(&format!("{ind}                text: \"Account is uninitialized (no data).\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 12; Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // No matching type
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                property bool _noType: Object.keys(backend.walletDecodedAccount).length > 0\n"));
+    o.push_str(&format!("{ind}                    && (backend.walletDecodedAccount[\"type\"] === undefined || backend.walletDecodedAccount[\"type\"] === null || backend.walletDecodedAccount[\"type\"] === \"\")\n"));
+    o.push_str(&format!("{ind}                    && (backend.walletDecodedAccount[\"status\"] || \"\") !== \"uninitialized\"\n"));
+    o.push_str(&format!("{ind}                    && (backend.walletDecodedAccount[\"error\"] || \"\") === \"\"\n"));
+    o.push_str(&format!("{ind}                visible: _noType\n"));
+    o.push_str(&format!("{ind}                text: \"No matching IDL type. Raw hex: \" + (backend.walletDecodedAccount[\"raw_hex\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 11; font.family: \"monospace\"\n"));
+    o.push_str(&format!("{ind}                wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // Error
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: (backend.walletDecodedAccount[\"error\"] || \"\") !== \"\"\n"));
+    o.push_str(&format!("{ind}                text: backend.walletDecodedAccount[\"error\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                color: root.colError; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // Empty state hint
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: Object.keys(backend.walletDecodedAccount).length === 0\n"));
+    o.push_str(&format!("{ind}                text: \"Click \\\"Decode\\\" on a program-owned account to view its data.\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 12; Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+    // Decoded fields as key-value rows
+    o.push_str(&format!("{ind}            Repeater {{\n"));
+    o.push_str(&format!("{ind}                model: Object.keys((backend.walletDecodedAccount[\"fields\"] instanceof Object) ? backend.walletDecodedAccount[\"fields\"] : {{}})\n"));
+    o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 8\n"));
+    o.push_str(&format!("{ind}                    Text {{ text: modelData + \":\"; color: root.colMuted; font.pixelSize: 12; Layout.preferredWidth: 140 }}\n"));
+    o.push_str(&format!("{ind}                    Text {{\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.walletDecodedAccount[\"fields\"][modelData]\n"));
+    o.push_str(&format!("{ind}                        text: _v !== undefined && _v !== null ? String(_v) : \"\"\n"));
+    o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12; font.family: \"monospace\"\n"));
+    o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    Button {{\n"));
+    o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.walletDecodedAccount[\"fields\"][modelData]\n"));
+    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(_v !== undefined ? String(_v) : \"\")\n"));
+    o.push_str(&format!("{ind}                        background: Item {{}}\n"));
+    o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // copy button
     o.push_str(&format!("{ind}                }}\n")); // delegate
     o.push_str(&format!("{ind}            }}\n\n")); // Repeater
 

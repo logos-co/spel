@@ -15,7 +15,11 @@ use std::fmt::Write;
 use crate::util::*;
 
 /// Generate C FFI wrapper source code from an IDL.
-pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
+///
+/// `idl_json` is the raw JSON that was parsed into `idl`; it is embedded as a
+/// static string in the generated code so `{prefix}_decode_account` can call
+/// `spel_framework_core::decode::decode_account_data_try_all` at runtime.
+pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     let mut out = String::new();
     let prefix = snake_case(&idl.name);
     let local_enum = pascal_case(&idl.name) + "Instruction";
@@ -49,6 +53,11 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "use nssa_core::program::PdaSeed;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
+
+    // Embed IDL JSON for runtime decode (spel_framework_core::decode::decode_account_data_try_all)
+    // The raw string literal uses r##"..."## to survive any "#" that appears in IDL string values.
+    writeln!(out).unwrap();
+    writeln!(out, "static PROGRAM_IDL_JSON: &str = r##\"{}\"##;", idl_json).unwrap();
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
@@ -462,7 +471,21 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    let data_len = account.data.len();").unwrap();
     writeln!(out, "    let preview_len = data_len.min(32);").unwrap();
     writeln!(out, "    let data_preview = hex::encode(&account.data[..preview_len]);").unwrap();
-    writeln!(out, "    Ok(json!({{\"success\": true, \"data_len\": data_len, \"data_preview\": data_preview, \"has_signing_key\": has_key}}).to_string())").unwrap();
+    // program_owner classification
+    writeln!(out, "    let owner_bytes: Vec<u8> = account.program_owner.iter().flat_map(|w| w.to_le_bytes()).collect();").unwrap();
+    writeln!(out, "    let program_owner_hex = hex::encode(&owner_bytes);").unwrap();
+    writeln!(out, "    let is_uninitialized = account.program_owner == [0u32; 8];").unwrap();
+    writeln!(out, "    let maybe_program_id = v[\"program_id_hex\"].as_str()").unwrap();
+    writeln!(out, "        .filter(|s| !s.is_empty())").unwrap();
+    writeln!(out, "        .map(|s| parse_program_id_hex(s))").unwrap();
+    writeln!(out, "        .transpose()?;").unwrap();
+    writeln!(out, "    let status = if is_uninitialized {{ \"uninitialized\" }}").unwrap();
+    writeln!(out, "        else if maybe_program_id.map_or(false, |pid| account.program_owner == pid) {{ \"owned\" }}").unwrap();
+    writeln!(out, "        else {{ \"foreign\" }};").unwrap();
+    writeln!(out, "    Ok(json!({{").unwrap();
+    writeln!(out, "        \"success\": true, \"data_len\": data_len, \"data_preview\": data_preview,").unwrap();
+    writeln!(out, "        \"has_signing_key\": has_key, \"program_owner\": program_owner_hex, \"status\": status").unwrap();
+    writeln!(out, "    }}).to_string())").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -491,9 +514,7 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "    let stdout = String::from_utf8_lossy(&output.stdout);").unwrap();
     writeln!(out, "    // Output format per line: `{{path}} {{Public|Private}}/{{id}} [optional-tag]`").unwrap();
-    writeln!(out, "    // path  = derivation path or 'Preconfigured' (before the account word)").unwrap();
-    writeln!(out, "    // tag   = optional user label in [brackets] after the account word").unwrap();
-    writeln!(out, "    let accounts: Vec<serde_json::Value> = stdout.lines()").unwrap();
+    writeln!(out, "    let raw: Vec<(String, String, String)> = stdout.lines()").unwrap();
     writeln!(out, "        .filter_map(|line| {{").unwrap();
     writeln!(out, "            let id = line.split_whitespace()").unwrap();
     writeln!(out, "                .find(|s| s.starts_with(\"Public/\") || s.starts_with(\"Private/\"))?;").unwrap();
@@ -503,9 +524,38 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "                .unwrap_or_default();").unwrap();
     writeln!(out, "            let path = line.trim_end()").unwrap();
     writeln!(out, "                .split(id).next().unwrap_or(\"\").trim().to_string();").unwrap();
-    writeln!(out, "            Some(json!({{\"id\": id, \"label\": label, \"path\": path}}))").unwrap();
+    writeln!(out, "            Some((id.to_string(), label, path))").unwrap();
     writeln!(out, "        }})").unwrap();
     writeln!(out, "        .collect();").unwrap();
+    writeln!(out).unwrap();
+    // Classify accounts via sequencer if available
+    writeln!(out, "    // Classify each account (owner → uninitialized / owned / foreign).").unwrap();
+    writeln!(out, "    // Falls back to status \"unknown\" when sequencer is unreachable.").unwrap();
+    writeln!(out, "    let maybe_wallet = init_wallet(&v).ok();").unwrap();
+    writeln!(out, "    let maybe_program_id = v[\"program_id_hex\"].as_str()").unwrap();
+    writeln!(out, "        .filter(|s| !s.is_empty())").unwrap();
+    writeln!(out, "        .and_then(|s| parse_program_id_hex(s).ok());").unwrap();
+    writeln!(out, "    let rt = get_runtime();").unwrap();
+    writeln!(out, "    let accounts: Vec<serde_json::Value> = rt.block_on(async {{").unwrap();
+    writeln!(out, "        let mut result = Vec::new();").unwrap();
+    writeln!(out, "        for (id, label, path) in &raw {{").unwrap();
+    writeln!(out, "            // Strip \"Public/\" or \"Private/\" prefix before parsing").unwrap();
+    writeln!(out, "            let raw_id = id.split('/').last().unwrap_or(id.as_str());").unwrap();
+    writeln!(out, "            let status = if let (Some(wallet), Ok(aid)) = (&maybe_wallet, parse_account_id(raw_id)) {{").unwrap();
+    writeln!(out, "                match wallet.sequencer_client.get_account(aid).await {{").unwrap();
+    writeln!(out, "                    Ok(account) => {{").unwrap();
+    writeln!(out, "                        let is_uninit = account.program_owner == [0u32; 8];").unwrap();
+    writeln!(out, "                        if is_uninit {{ \"uninitialized\" }}").unwrap();
+    writeln!(out, "                        else if maybe_program_id.map_or(false, |pid| account.program_owner == pid) {{ \"owned\" }}").unwrap();
+    writeln!(out, "                        else {{ \"foreign\" }}").unwrap();
+    writeln!(out, "                    }}").unwrap();
+    writeln!(out, "                    Err(_) => \"unknown\",").unwrap();
+    writeln!(out, "                }}").unwrap();
+    writeln!(out, "            }} else {{ \"unknown\" }};").unwrap();
+    writeln!(out, "            result.push(json!({{\"id\": id, \"label\": label, \"path\": path, \"status\": status}}));").unwrap();
+    writeln!(out, "        }}").unwrap();
+    writeln!(out, "        result").unwrap();
+    writeln!(out, "    }});").unwrap();
     writeln!(out, "    Ok(json!({{\"success\": true, \"accounts\": accounts}}).to_string())").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
@@ -536,6 +586,34 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "    }}").unwrap();
     writeln!(out, "    // stdout from `wallet account new public` is the new account ID").unwrap();
     writeln!(out, "    Ok(json!({{\"success\": true, \"account_id\": stdout}}).to_string())").unwrap();
+    writeln!(out, "}}").unwrap();
+
+    // decode_account: fetches raw data and tries each IDL account type via spel_framework_core::decode
+    writeln!(out).unwrap();
+    writeln!(out, "/// FFI: decode an account's data against each known IDL type, returning the first match.").unwrap();
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_decode_account(args_json: *const c_char) -> *mut c_char {{").unwrap();
+    writeln!(out, "    let args = match cstr_to_str(args_json) {{ Ok(s) => s, Err(e) => return error_json(&e) }};").unwrap();
+    writeln!(out, "    ffi_call(move || {prefix}_decode_account_impl(args))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn {prefix}_decode_account_impl(args: &str) -> Result<String, String> {{").unwrap();
+    writeln!(out, "    let v: Value = serde_json::from_str(args).map_err(|e| format!(\"invalid JSON: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let wallet = init_wallet(&v)?;").unwrap();
+    writeln!(out, "    let account_id = parse_account_id(v[\"account_id\"].as_str().ok_or(\"missing account_id\")?)?;").unwrap();
+    writeln!(out, "    let rt = get_runtime();").unwrap();
+    writeln!(out, "    let account = rt.block_on(async {{").unwrap();
+    writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
+    writeln!(out, "    }})?;").unwrap();
+    writeln!(out, "    if account.data.is_empty() {{").unwrap();
+    writeln!(out, "        return Ok(json!({{\"success\": true, \"status\": \"uninitialized\", \"type\": null, \"fields\": null}}).to_string());").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    let idl: spel_framework_core::idl::SpelIdl = serde_json::from_str(PROGRAM_IDL_JSON)").unwrap();
+    writeln!(out, "        .map_err(|e| format!(\"IDL parse: {{}}\", e))?;").unwrap();
+    writeln!(out, "    match spel_framework_core::decode::decode_account_data_try_all(&account.data, &idl) {{").unwrap();
+    writeln!(out, "        Some((type_name, fields)) => Ok(json!({{\"success\": true, \"type\": type_name, \"fields\": fields}}).to_string()),").unwrap();
+    writeln!(out, "        None => Ok(json!({{\"success\": true, \"type\": null, \"fields\": null, \"raw_hex\": hex::encode(&account.data)}}).to_string()),").unwrap();
+    writeln!(out, "    }}").unwrap();
     writeln!(out, "}}").unwrap();
 
     // PDA compute helpers
@@ -1117,6 +1195,7 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "void {prefix}_free_string(char* s);").unwrap();
     writeln!(out, "char* {prefix}_version(void);").unwrap();
     writeln!(out, "char* {prefix}_program_id(void);").unwrap();
+    writeln!(out, "char* {prefix}_decode_account(const char* args_json);").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "#ifdef __cplusplus").unwrap();
     writeln!(out, "}}").unwrap();

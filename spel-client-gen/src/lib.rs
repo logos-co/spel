@@ -42,7 +42,10 @@ pub struct CodegenOutput {
 pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
     let idl: SpelIdl = serde_json::from_str(json)
         .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
-    generate_from_idl(&idl)
+    let client_code = codegen::generate_client(&idl)?;
+    let ffi_code = ffi_codegen::generate_ffi(&idl, json)?;
+    let header = ffi_codegen::generate_header(&idl)?;
+    Ok(CodegenOutput { client_code, ffi_code, header })
 }
 
 /// Generate a Logos Basecamp module scaffold from an IDL JSON string.
@@ -63,9 +66,12 @@ pub fn generate_logos_module_from_idl_json(
 }
 
 /// Generate client + FFI code from a parsed IDL.
+/// Use `generate_from_idl_json` if you have the raw JSON — it embeds the JSON
+/// in the generated FFI for runtime decode support.
 pub fn generate_from_idl(idl: &SpelIdl) -> Result<CodegenOutput, String> {
+    let json = serde_json::to_string(idl).unwrap_or_default();
     let client_code = codegen::generate_client(idl)?;
-    let ffi_code = ffi_codegen::generate_ffi(idl)?;
+    let ffi_code = ffi_codegen::generate_ffi(idl, &json)?;
     let header = ffi_codegen::generate_header(idl)?;
     Ok(CodegenOutput { client_code, ffi_code, header })
 }
