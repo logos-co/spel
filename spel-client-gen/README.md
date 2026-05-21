@@ -112,7 +112,7 @@ out-dir/
 │   └── Main.qml            # Full UI: sidebar nav + per-instruction/fetch pages + wallet page
 ├── CMakeLists.txt          # Qt6 build (plugin + standalone app targets)
 ├── module.yaml             # Basecamp module descriptor
-└── metadata.json           # Plugin metadata
+└── manifest.json           # Plugin metadata
 ```
 
 ### Prerequisites
@@ -214,7 +214,7 @@ The wallet page provides:
 use spel_client_gen::{generate_logos_module_from_idl_json, pascal_case};
 
 let idl_json = std::fs::read_to_string("my_program-idl.json")?;
-let output = generate_logos_module_from_idl_json(&idl_json, Some("my_program"))?;
+let output = generate_logos_module_from_idl_json(&idl_json, Some("my_program"), None)?;
 
 let class = pascal_case("my_program");
 std::fs::write(format!("src/{class}Backend.h"),   &output.backend_h)?;
@@ -224,7 +224,7 @@ std::fs::write(format!("src/{class}Plugin.cpp"),  &output.plugin_cpp)?;
 std::fs::write("src/main.cpp",   &output.main_cpp)?;
 std::fs::write("qml/Main.qml",   &output.main_qml)?;
 std::fs::write("module.yaml",    &output.module_yaml)?;
-std::fs::write("metadata.json",  &output.metadata_json)?;
+std::fs::write("manifest.json",  &output.manifest_json)?;
 std::fs::write("CMakeLists.txt", &output.cmake_lists)?;
 ```
 

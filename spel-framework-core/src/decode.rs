@@ -13,11 +13,24 @@ use serde_json::{json, Value};
 /// without error, or `None` if no type matches.
 pub fn decode_account_data_try_all(data: &[u8], idl: &SpelIdl) -> Option<(String, Value)> {
     for acc in &idl.accounts {
-        if let Ok(fields) = decode_account_data(data, &acc.name, idl) {
+        if let Ok(fields) = decode_account_data_exact(data, &acc.name, idl) {
             return Some((acc.name.clone(), fields));
         }
     }
     None
+}
+
+/// Like `decode_account_data` but requires all bytes to be consumed — prevents
+/// false-positive matches when a shorter type decodes successfully from a prefix.
+fn decode_account_data_exact(data: &[u8], type_name: &str, idl: &SpelIdl) -> Result<Value, String> {
+    let type_def = find_type_def(idl, type_name)
+        .ok_or_else(|| format!("type '{}' not found in IDL", type_name))?;
+    let mut cursor: &[u8] = data;
+    let value = decode_type_def(&mut cursor, type_def, idl)?;
+    if !cursor.is_empty() {
+        return Err(format!("{} bytes remaining after decode", cursor.len()));
+    }
+    Ok(value)
 }
 
 /// Decode `data` as the IDL type named `type_name` (searched in `idl.accounts`

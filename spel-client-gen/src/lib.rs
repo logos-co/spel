@@ -69,7 +69,7 @@ pub fn generate_logos_module_from_idl_json(
 /// Use `generate_from_idl_json` if you have the raw JSON — it embeds the JSON
 /// in the generated FFI for runtime decode support.
 pub fn generate_from_idl(idl: &SpelIdl) -> Result<CodegenOutput, String> {
-    let json = serde_json::to_string(idl).unwrap_or_default();
+    let json = serde_json::to_string(idl).map_err(|e| format!("failed to serialise IDL: {}", e))?;
     let client_code = codegen::generate_client(idl)?;
     let ffi_code = ffi_codegen::generate_ffi(idl, &json)?;
     let header = ffi_codegen::generate_header(idl)?;

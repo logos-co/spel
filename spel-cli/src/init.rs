@@ -78,7 +78,6 @@ methods/guest/target/
 *.bin
 .{snake_name}-state
 .{snake_name}-state.tmp
-{snake_name}_ffi/generated/
 ui/
 "#));
 
@@ -102,7 +101,7 @@ nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone
 common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
 sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
 wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-spel-framework-core = {{ git = "https://github.com/logos-co/spel.git", tag = "v0.3.0" }}
+spel-framework-core = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
 serde_json  = "1"
 serde       = {{ version = "1", features = ["derive"] }}
 borsh       = "1.5"

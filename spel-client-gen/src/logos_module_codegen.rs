@@ -603,7 +603,7 @@ fn gen_backend_cpp(
             f.acc_name
         ));
     }
-    o.push_str(&format!("    char* {effective_prog}_program_id();\n"));
+    o.push_str(&format!("    char* {prog}_program_id();\n"));
     o.push_str(&format!("    void  {prog}_free_string(char* s);\n"));
     o.push_str(&format!("    char* {prog}_check_connection(const char* args_json);\n"));
     o.push_str(&format!("    char* {prog}_inspect_account(const char* args_json);\n"));
@@ -624,7 +624,7 @@ fn gen_backend_cpp(
     ));
     // Fallback: call the compiled-in FFI constant if still empty (priority 3)
     o.push_str(&format!("    if (m_programIdHex.isEmpty()) {{\n"));
-    o.push_str(&format!("        char* raw = {effective_prog}_program_id();\n"));
+    o.push_str(&format!("        char* raw = {prog}_program_id();\n"));
     o.push_str("        if (raw) {\n");
     o.push_str("            m_programIdHex = QJsonDocument::fromJson(QByteArray(raw))\n");
     o.push_str("                                 .object().value(\"program_id_hex\").toString();\n");
@@ -1487,9 +1487,11 @@ fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
             match ty {
                 IdlType::Primitive(p) => match p.as_str() {
                     "bool" => format!("{fid}.checked"),
-                    "u8" | "u16" | "u32" | "u64" | "i8" | "i16" | "i32" | "i64" => {
+                    "u8" | "u16" | "u32" | "i8" | "i16" | "i32" => {
                         format!("parseInt({fid}.text)")
                     }
+                    // 64/128-bit integers: pass as string to avoid IEEE-754 precision loss
+                    "u64" | "i64" | "u128" | "i128" => format!("{fid}.text"),
                     _ => format!("{fid}.text"),
                 },
                 IdlType::Vec { .. } => format!(
