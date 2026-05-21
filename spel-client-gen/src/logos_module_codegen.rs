@@ -1228,9 +1228,10 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
 
     o.push_str("    }\n"); // Rectangle
 
-    // Hidden TextEdit used as a cross-platform clipboard helper.
+    // Zero-size TextEdit clipboard helper — must NOT use visible:false because
+    // Qt won't let invisible elements interact with the clipboard.
     o.push_str("    TextEdit {\n");
-    o.push_str("        id: clipHelper; visible: false\n");
+    o.push_str("        id: clipHelper; width: 0; height: 0; opacity: 0\n");
     o.push_str("        function copyText(t) { clipHelper.text = t; selectAll(); copy() }\n");
     o.push_str("    }\n\n");
 
