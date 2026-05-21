@@ -298,11 +298,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
                     writeln!(out, "        v[\"{}\"].as_array().unwrap()", acc.name).unwrap();
                     writeln!(out, "            .iter().map(|a| parse_account_id(a.as_str().ok_or(\"expected string\")?)).collect::<Result<Vec<_>,_>>()?").unwrap();
                     writeln!(out, "    }} else {{").unwrap();
-                    // TODO: this else-branch emits `{src_name}.clone()` where src is
-                    // Vec<[u8;32]>, but the binding is typed Vec<AccountId> — type error.
-                    // Fix: emit `.iter().map(|m| AccountId::new(*m)).collect()` instead.
-                    // Until then, lez-multisig patches this in scripts/patch-ffi-gen.sh.
-                    writeln!(out, "        {src_name}.clone()").unwrap();
+                    writeln!(out, "        {src_name}.iter().map(|m| AccountId::new(*m)).collect()").unwrap();
                     writeln!(out, "    }};").unwrap();
                 } else {
                     writeln!(out, "    let {name}: Vec<AccountId> = v[\"{}\"].as_array()", acc.name).unwrap();
