@@ -1,7 +1,7 @@
 //! Qt/QML Logos Basecamp module scaffold generation from SPEL IDL.
 //!
 //! Generates: XyzBackend.h/.cpp, XyzPlugin.h/.cpp, src/main.cpp,
-//!            qml/Main.qml, module.yaml, metadata.json
+//!            qml/Main.qml, module.yaml, manifest.json
 
 use spel_framework_core::idl::*;
 use std::collections::HashSet;
@@ -15,7 +15,7 @@ pub struct LogosModuleOutput {
     pub main_cpp: String,
     pub main_qml: String,
     pub module_yaml: String,
-    pub metadata_json: String,
+    pub manifest_json: String,
     pub cmake_lists: String,
 }
 
@@ -23,6 +23,7 @@ pub struct LogosModuleOutput {
 pub fn generate_logos_module(
     idl: &SpelIdl,
     module_name: Option<&str>,
+    ffi_lib_path: Option<&str>,
 ) -> Result<LogosModuleOutput, String> {
     // effective_prog is the module identity used for file/class/env-var names.
     // prog is the raw IDL snake_case name, used only for FFI function names.
@@ -48,8 +49,8 @@ pub fn generate_logos_module(
         main_cpp: gen_main_cpp(&class, &effective_prog),
         main_qml: gen_main_qml(idl, &fetches, &effective_prog),
         module_yaml: gen_module_yaml(idl, &effective_prog, &class),
-        metadata_json: gen_metadata_json(idl, &effective_prog),
-        cmake_lists: gen_cmake_lists(&class, &effective_prog),
+        manifest_json: gen_manifest_json(idl, &effective_prog),
+        cmake_lists: gen_cmake_lists(&class, &effective_prog, ffi_lib_path),
     })
 }
 
@@ -436,6 +437,10 @@ fn gen_backend_h(
     o.push_str("    Q_PROPERTY(QString walletPath   READ walletPath   WRITE setWalletPath   NOTIFY walletPathChanged)\n");
     o.push_str("    Q_PROPERTY(QString sequencerUrl READ sequencerUrl WRITE setSequencerUrl NOTIFY sequencerUrlChanged)\n");
     o.push_str("    Q_PROPERTY(QString programIdHex READ programIdHex WRITE setProgramIdHex NOTIFY programIdHexChanged)\n\n");
+    o.push_str("    // ── Wallet state ─────────────────────────────────────────────────────\n");
+    o.push_str("    Q_PROPERTY(QString     connectionStatus  READ connectionStatus  NOTIFY connectionStatusChanged)\n");
+    o.push_str("    Q_PROPERTY(QVariantList walletAccounts    READ walletAccounts    NOTIFY walletAccountsChanged)\n");
+    o.push_str("    Q_PROPERTY(QVariantMap walletAccountInfo READ walletAccountInfo NOTIFY walletAccountInfoChanged)\n\n");
 
     o.push_str("public:\n");
     o.push_str(&format!(
@@ -457,6 +462,10 @@ fn gen_backend_h(
     o.push_str("    QString    lastError()  const { return m_lastError; }\n");
     o.push_str("    QString    lastTxHash() const { return m_lastTxHash; }\n");
     o.push_str("    QVariantMap lastResult() const { return m_lastResult; }\n\n");
+
+    o.push_str("    QString     connectionStatus()  const { return m_connectionStatus; }\n");
+    o.push_str("    QVariantList walletAccounts()    const { return m_walletAccounts; }\n");
+    o.push_str("    QVariantMap walletAccountInfo() const { return m_walletAccountInfo; }\n\n");
 
     o.push_str("    QString walletPath()   const { return m_walletPath; }\n");
     o.push_str("    QString sequencerUrl() const { return m_sequencerUrl; }\n");
@@ -495,6 +504,11 @@ fn gen_backend_h(
         o.push('\n');
     }
 
+    o.push_str("    // ── Wallet ────────────────────────────────────────────────────────────\n");
+    o.push_str("    Q_INVOKABLE void checkConnection();\n");
+    o.push_str("    Q_INVOKABLE void listAccounts();\n");
+    o.push_str("    Q_INVOKABLE void createAccount(const QString& label);\n");
+    o.push_str("    Q_INVOKABLE void inspectAccount(const QString& accountId);\n\n");
     o.push_str("signals:\n");
     for f in fetches {
         let p = camel_case(&f.acc_name);
@@ -508,7 +522,10 @@ fn gen_backend_h(
     o.push_str("    void operationError(const QString& operation, const QString& error);\n");
     o.push_str("    void walletPathChanged();\n");
     o.push_str("    void sequencerUrlChanged();\n");
-    o.push_str("    void programIdHexChanged();\n\n");
+    o.push_str("    void programIdHexChanged();\n");
+    o.push_str("    void connectionStatusChanged();\n");
+    o.push_str("    void walletAccountsChanged();\n");
+    o.push_str("    void walletAccountInfoChanged();\n\n");
 
     o.push_str("private:\n");
     if has_no_arg_fetches {
@@ -537,6 +554,9 @@ fn gen_backend_h(
     o.push_str("    QString    m_lastError;\n");
     o.push_str("    QString    m_lastTxHash;\n");
     o.push_str("    QVariantMap m_lastResult;\n");
+    o.push_str("    QString     m_connectionStatus;\n");
+    o.push_str("    QVariantList m_walletAccounts;\n");
+    o.push_str("    QVariantMap m_walletAccountInfo;\n");
     o.push_str("};\n");
 
     // Remind dev of the expected env var
@@ -589,6 +609,10 @@ fn gen_backend_cpp(
     }
     o.push_str(&format!("    char* {effective_prog}_program_id();\n"));
     o.push_str(&format!("    void  {prog}_free_string(char* s);\n"));
+    o.push_str(&format!("    char* {prog}_check_connection(const char* args_json);\n"));
+    o.push_str(&format!("    char* {prog}_inspect_account(const char* args_json);\n"));
+    o.push_str(&format!("    char* {prog}_list_accounts(const char* args_json);\n"));
+    o.push_str(&format!("    char* {prog}_create_account(const char* args_json);\n"));
     o.push_str("}\n\n");
 
     // Constructor
@@ -770,6 +794,89 @@ fn gen_backend_cpp(
         }
     }
 
+    // Wallet methods
+    o.push_str("// ── Wallet ──────────────────────────────────────────────────────────────\n\n");
+    o.push_str(&format!("void {backend}::checkConnection() {{\n"));
+    o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
+    o.push_str(&format!("        QString result = callFfi({prog}_check_connection, args);\n"));
+    o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
+    o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
+    o.push_str("            if (obj.value(\"success\").toBool()) {\n");
+    o.push_str("                m_connectionStatus = \"\\u2713 \" + obj.value(\"sequencer_url\").toString();\n");
+    o.push_str("            } else {\n");
+    o.push_str("                m_connectionStatus = \"\\u2717 \" + obj.value(\"error\").toString(result);\n");
+    o.push_str("            }\n");
+    o.push_str("            emit connectionStatusChanged();\n");
+    o.push_str("        }, Qt::QueuedConnection);\n");
+    o.push_str("    });\n}\n\n");
+
+    o.push_str(&format!("void {backend}::listAccounts() {{\n"));
+    o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
+    o.push_str(&format!("        QString result = callFfi({prog}_list_accounts, args);\n"));
+    o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
+    o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
+    o.push_str("            if (obj.value(\"success\").toBool()) {\n");
+    o.push_str("                QVariantList list;\n");
+    o.push_str("                for (const QJsonValue& v : obj.value(\"accounts\").toArray()) {\n");
+    o.push_str("                    QJsonObject ao = v.toObject();\n");
+    o.push_str("                    QVariantMap item;\n");
+    o.push_str("                    item[\"id\"]    = ao.value(\"id\").toString();\n");
+    o.push_str("                    item[\"label\"] = ao.value(\"label\").toString();\n");
+    o.push_str("                    item[\"path\"]  = ao.value(\"path\").toString();\n");
+    o.push_str("                    list.append(item);\n");
+    o.push_str("                }\n");
+    o.push_str("                m_walletAccounts = list;\n");
+    o.push_str("                emit walletAccountsChanged();\n");
+    o.push_str("            } else {\n");
+    o.push_str("                m_lastError = obj.value(\"error\").toString(result);\n");
+    o.push_str("                emit lastErrorChanged();\n");
+    o.push_str("            }\n");
+    o.push_str("        }, Qt::QueuedConnection);\n");
+    o.push_str("    });\n}\n\n");
+
+    o.push_str(&format!("void {backend}::createAccount(const QString& label) {{\n"));
+    o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    if (!label.isEmpty()) args[\"label\"] = label;\n");
+    o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
+    o.push_str(&format!("        QString result = callFfi({prog}_create_account, args);\n"));
+    o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
+    o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
+    o.push_str("            if (obj.value(\"success\").toBool()) {\n");
+    o.push_str("                QString newId = obj.value(\"account_id\").toString();\n");
+    o.push_str("                emit operationSuccess(\"create_account\", newId);\n");
+    o.push_str("                listAccounts();\n");
+    o.push_str("            } else {\n");
+    o.push_str("                m_lastError = obj.value(\"error\").toString(result);\n");
+    o.push_str("                emit lastErrorChanged();\n");
+    o.push_str("                emit operationError(\"create_account\", m_lastError);\n");
+    o.push_str("            }\n");
+    o.push_str("        }, Qt::QueuedConnection);\n");
+    o.push_str("    });\n}\n\n");
+
+    o.push_str(&format!("void {backend}::inspectAccount(const QString& accountId) {{\n"));
+    o.push_str("    QJsonObject args = baseArgs();\n");
+    o.push_str("    args[\"account_id\"] = accountId;\n");
+    o.push_str("    QThreadPool::globalInstance()->start([this, args]() {\n");
+    o.push_str(&format!("        QString result = callFfi({prog}_inspect_account, args);\n"));
+    o.push_str("        QMetaObject::invokeMethod(this, [this, result]() {\n");
+    o.push_str("            QJsonObject obj = QJsonDocument::fromJson(result.toUtf8()).object();\n");
+    o.push_str("            if (obj.value(\"success\").toBool()) {\n");
+    o.push_str("                QVariantMap info;\n");
+    o.push_str("                info[\"data_len\"] = obj.value(\"data_len\").toInt();\n");
+    o.push_str("                info[\"data_preview\"] = obj.value(\"data_preview\").toString();\n");
+    o.push_str("                info[\"has_signing_key\"] = obj.value(\"has_signing_key\").toBool() ? \"yes\" : \"no\";\n");
+    o.push_str("                m_walletAccountInfo = info;\n");
+    o.push_str("            } else {\n");
+    o.push_str("                QVariantMap info;\n");
+    o.push_str("                info[\"error\"] = obj.value(\"error\").toString();\n");
+    o.push_str("                m_walletAccountInfo = info;\n");
+    o.push_str("            }\n");
+    o.push_str("            emit walletAccountInfoChanged();\n");
+    o.push_str("        }, Qt::QueuedConnection);\n");
+    o.push_str("    });\n}\n\n");
+
     o
 }
 
@@ -796,7 +903,7 @@ fn gen_plugin_h(class: &str) -> String {
          Q_DECLARE_INTERFACE(IComponent, IComponent_iid)\n\n\
          class {class}Plugin : public QObject, public IComponent {{\n\
          \tQ_OBJECT\n\
-         \tQ_PLUGIN_METADATA(IID IComponent_iid FILE \"../metadata.json\")\n\
+         \tQ_PLUGIN_METADATA(IID IComponent_iid FILE \"../manifest.json\")\n\
          \tQ_INTERFACES(IComponent)\n\n\
          public:\n\
          \texplicit {class}Plugin(QObject* parent = nullptr);\n\
@@ -1022,7 +1129,8 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
 
     let n_fetches = fetches.len();
     let n_instructions = idl.instructions.len();
-    let settings_idx = n_fetches + n_instructions;
+    let wallet_idx = n_fetches + n_instructions;
+    let settings_idx = n_fetches + n_instructions + 1;
 
     // Accounts section
     if n_fetches > 0 {
@@ -1038,6 +1146,9 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     for (i, ix) in idl.instructions.iter().enumerate() {
         emit_nav_item(&mut o, &title_case(&ix.name), n_fetches + i);
     }
+    // Wallet
+    emit_section_label(&mut o, "WALLET");
+    emit_nav_item(&mut o, "Wallet", wallet_idx);
     emit_divider(&mut o);
 
     // Settings
@@ -1062,6 +1173,7 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     for ix in &idl.instructions {
         qml_instruction_page(&mut o, ix, idl);
     }
+    qml_wallet_page(&mut o);
     qml_settings_page(&mut o);
 
     o.push_str("        }\n\n");    // StackLayout
@@ -1429,6 +1541,229 @@ fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
     o.push_str(&format!("{ind}}}\n\n"));       // Item
 }
 
+fn qml_wallet_page(o: &mut String) {
+    let ind = "            ";
+    o.push_str(&format!("{ind}Item {{\n"));
+    o.push_str(&format!("{ind}    id: pageWallet\n"));
+    o.push_str(&format!("{ind}    Rectangle {{ anchors.fill: parent; color: root.colSurface }}\n"));
+    o.push_str(&format!("{ind}    ScrollView {{\n"));
+    o.push_str(&format!("{ind}        anchors.fill: parent; clip: true\n"));
+    o.push_str(&format!("{ind}        contentWidth: availableWidth\n\n"));
+    o.push_str(&format!("{ind}        ColumnLayout {{\n"));
+    o.push_str(&format!("{ind}            width: pageWallet.width; spacing: 12\n\n"));
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 24 }}\n\n"));
+
+    // Title
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"Wallet\"\n"));
+    o.push_str(&format!("{ind}                color: root.colText; font.pixelSize: 18; font.bold: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // ── Section: Connection ──────────────────────────────────────────────
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"CONNECTION\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.topMargin: 8\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Button {{\n"));
+    o.push_str(&format!("{ind}                text: \"Check Connection\"\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                onClicked: backend.checkConnection()\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary\n"));
+    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}                contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                    text: parent.text; color: root.colText\n"));
+    o.push_str(&format!("{ind}                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: backend.connectionStatus || \"Not checked\"\n"));
+    o.push_str(&format!("{ind}                color: backend.connectionStatus.startsWith(\"\\u2713\") ? root.colSuccess\n"));
+    o.push_str(&format!("{ind}                     : backend.connectionStatus.startsWith(\"\\u2717\") ? root.colError\n"));
+    o.push_str(&format!("{ind}                     : root.colMuted\n"));
+    o.push_str(&format!("{ind}                font.pixelSize: 13; Layout.leftMargin: 24; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                wrapMode: Text.WrapAtWordBoundaryOrAnywhere\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Divider
+    o.push_str(&format!("{ind}            Rectangle {{ Layout.fillWidth: true; height: 1; color: root.colBorder; Layout.topMargin: 8 }}\n\n"));
+
+    // ── Section: Accounts ────────────────────────────────────────────────
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"ACCOUNTS\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.topMargin: 8\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Refresh button
+    o.push_str(&format!("{ind}            Button {{\n"));
+    o.push_str(&format!("{ind}                text: \"\\u21ba Refresh\"\n")); // ↺ Refresh
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                onClicked: backend.listAccounts()\n"));
+    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                    color: parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary; radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}                contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                    text: parent.text; color: root.colText\n"));
+    o.push_str(&format!("{ind}                    horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Account list
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: backend.walletAccounts.length === 0\n"));
+    o.push_str(&format!("{ind}                text: \"No accounts — press Refresh.\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 12; Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Repeater {{\n"));
+    o.push_str(&format!("{ind}                model: backend.walletAccounts\n"));
+    o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 8\n"));
+    // Label/path badge
+    o.push_str(&format!("{ind}                    Text {{\n"));
+    o.push_str(&format!("{ind}                        property string _disp: modelData[\"label\"] || modelData[\"path\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                        text: _disp\n"));
+    o.push_str(&format!("{ind}                        visible: _disp !== \"\"\n"));
+    o.push_str(&format!("{ind}                        color: modelData[\"label\"] ? root.colPrimary : root.colMuted\n"));
+    o.push_str(&format!("{ind}                        font.pixelSize: 11; Layout.preferredWidth: 90\n"));
+    o.push_str(&format!("{ind}                        elide: Text.ElideRight\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    // Account ID — click to populate inspect field
+    o.push_str(&format!("{ind}                    Text {{\n"));
+    o.push_str(&format!("{ind}                        text: modelData[\"id\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                        color: root.colText; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                        elide: Text.ElideMiddle; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                        MouseArea {{\n"));
+    o.push_str(&format!("{ind}                            anchors.fill: parent; cursorShape: Qt.PointingHandCursor\n"));
+    o.push_str(&format!("{ind}                            onClicked: walletInspectId.text = modelData[\"id\"] || \"\"\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    // Copy button
+    o.push_str(&format!("{ind}                    Button {{\n"));
+    o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
+    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(modelData[\"id\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                        background: Item {{}}\n"));
+    o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // Button
+    o.push_str(&format!("{ind}                }}\n")); // delegate
+    o.push_str(&format!("{ind}            }}\n\n")); // Repeater
+
+    // Divider before create section
+    o.push_str(&format!("{ind}            Rectangle {{ Layout.fillWidth: true; height: 1; color: root.colBorder; Layout.topMargin: 8 }}\n\n"));
+
+    // New account subsection
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"NEW ACCOUNT\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.topMargin: 4\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                TextField {{\n"));
+    o.push_str(&format!("{ind}                    id: walletNewLabel\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    placeholderText: \"Label (optional)\"\n"));
+    o.push_str(&format!("{ind}                    color: root.colText; placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: root.colBg; border.color: root.colBorder; radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}                Button {{\n"));
+    o.push_str(&format!("{ind}                    text: \"+ Create\"\n"));
+    o.push_str(&format!("{ind}                    onClicked: backend.createAccount(walletNewLabel.text)\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary; radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                        text: parent.text; color: root.colText\n"));
+    o.push_str(&format!("{ind}                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Divider
+    o.push_str(&format!("{ind}            Rectangle {{ Layout.fillWidth: true; height: 1; color: root.colBorder; Layout.topMargin: 8 }}\n\n"));
+
+    // ── Section: Inspect Account ─────────────────────────────────────────
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                text: \"INSPECT ACCOUNT\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 10; font.bold: true; font.letterSpacing: 1\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24; Layout.topMargin: 8\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Account ID input + Inspect button
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                TextField {{\n"));
+    o.push_str(&format!("{ind}                    id: walletInspectId\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    placeholderText: \"Account ID (base58 or 0x\\u2026 hex)\"\n"));
+    o.push_str(&format!("{ind}                    color: root.colText; placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: root.colBg; border.color: root.colBorder; radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}                Button {{\n"));
+    o.push_str(&format!("{ind}                    text: \"Inspect\"\n"));
+    o.push_str(&format!("{ind}                    enabled: walletInspectId.text.length > 0\n"));
+    o.push_str(&format!("{ind}                    onClicked: backend.inspectAccount(walletInspectId.text)\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: parent.enabled ? (parent.down ? Qt.darker(root.colPrimary, 1.2) : root.colPrimary) : root.colBorder\n"));
+    o.push_str(&format!("{ind}                        radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                        text: parent.text; color: root.colText\n"));
+    o.push_str(&format!("{ind}                        horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    // Account info repeater
+    o.push_str(&format!("{ind}            Text {{\n"));
+    o.push_str(&format!("{ind}                visible: Object.keys(backend.walletAccountInfo).length === 0\n"));
+    o.push_str(&format!("{ind}                text: \"Enter an account ID and press Inspect.\"\n"));
+    o.push_str(&format!("{ind}                color: root.colMuted; font.pixelSize: 12; Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}            }}\n\n"));
+
+    o.push_str(&format!("{ind}            Repeater {{\n"));
+    o.push_str(&format!("{ind}                model: Object.keys(backend.walletAccountInfo)\n"));
+    o.push_str(&format!("{ind}                delegate: RowLayout {{\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true; Layout.leftMargin: 24; Layout.rightMargin: 8\n"));
+    o.push_str(&format!("{ind}                    Text {{ text: modelData + \":\"; color: root.colMuted; font.pixelSize: 12; Layout.preferredWidth: 140 }}\n"));
+    o.push_str(&format!("{ind}                    Text {{\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.walletAccountInfo[modelData]\n"));
+    o.push_str(&format!("{ind}                        text: _v ?? \"\"; color: root.colText; font.pixelSize: 12\n"));
+    o.push_str(&format!("{ind}                        wrapMode: Text.WrapAtWordBoundaryOrAnywhere; Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    Button {{\n"));
+    o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
+    o.push_str(&format!("{ind}                        property var _v: backend.walletAccountInfo[modelData]\n"));
+    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(_v ?? \"\")\n"));
+    o.push_str(&format!("{ind}                        background: Item {{}}\n"));
+    o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // Button
+    o.push_str(&format!("{ind}                }}\n")); // delegate
+    o.push_str(&format!("{ind}            }}\n\n")); // Repeater
+
+    o.push_str(&format!("{ind}            Item {{ Layout.fillWidth: true; height: 80 }}\n"));
+    o.push_str(&format!("{ind}        }}\n")); // ColumnLayout
+    o.push_str(&format!("{ind}    }}\n"));     // ScrollView
+    o.push_str(&format!("{ind}}}\n\n"));       // Item
+}
+
 fn qml_settings_page(o: &mut String) {
     let ind = "            ";
     // Settings page uses colSurface — same visual group as fetch/account pages.
@@ -1533,11 +1868,50 @@ fn gen_module_yaml(idl: &SpelIdl, effective_prog: &str, class: &str) -> String {
     )
 }
 
-// ── metadata.json ─────────────────────────────────────────────────────────────
+// ── manifest.json ─────────────────────────────────────────────────────────────
 
-fn gen_cmake_lists(class: &str, effective_prog: &str) -> String {
+fn gen_cmake_lists(class: &str, effective_prog: &str, ffi_lib_path: Option<&str>) -> String {
     // The Qt resource name MUST be kept in sync with Q_INIT_RESOURCE() in XyzPlugin.cpp.
-    let res_name = effective_prog.replace('-', "_");
+    // Convention: <effective_prog>_qml — the _qml suffix avoids collisions with other targets.
+    let res_name = format!("{}_qml", effective_prog.replace('-', "_"));
+
+    let ffi_imported = if let Some(path) = ffi_lib_path {
+        format!(
+            "\n\
+             # ── FFI shared library (built by `make ffi`) ──────────────────────────────────\n\
+             add_library({effective_prog}_ffi SHARED IMPORTED)\n\
+             set_target_properties({effective_prog}_ffi PROPERTIES\n\
+             \x20   IMPORTED_LOCATION \"${{CMAKE_CURRENT_SOURCE_DIR}}/{path}\"\n\
+             )\n"
+        )
+    } else {
+        format!(
+            "\n\
+             # ── FFI shared library ────────────────────────────────────────────────────────\n\
+             # Run `make ffi` then `make ui-gen` to wire up the FFI library automatically.\n\
+             # add_library({effective_prog}_ffi SHARED IMPORTED)\n\
+             # set_target_properties({effective_prog}_ffi PROPERTIES\n\
+             #     IMPORTED_LOCATION \"${{CMAKE_CURRENT_SOURCE_DIR}}/../../target/debug/lib{effective_prog}_ffi.so\")\n"
+        )
+    };
+
+    let ffi_link = if ffi_lib_path.is_some() {
+        format!("\x20   {effective_prog}_ffi\n")
+    } else {
+        format!("\x20   # {effective_prog}_ffi\n")
+    };
+
+    let rpath_section = if let Some(path) = ffi_lib_path {
+        let ffi_dir = path.rfind('/').map(|i| &path[..i]).unwrap_or(".");
+        format!(
+            "\nset_target_properties({class}App PROPERTIES\n\
+             \x20   BUILD_RPATH \"${{CMAKE_CURRENT_SOURCE_DIR}}/{ffi_dir}\"\n\
+             )\n"
+        )
+    } else {
+        String::new()
+    };
+
     format!(
         "cmake_minimum_required(VERSION 3.16)\n\
          project({class} VERSION 1.0 LANGUAGES CXX)\n\
@@ -1547,7 +1921,7 @@ fn gen_cmake_lists(class: &str, effective_prog: &str) -> String {
          set(CMAKE_AUTOMOC ON)\n\
          \n\
          find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickWidgets Concurrent)\n\
-         \n\
+         {ffi_imported}\n\
          # ── Plugin (loaded by Basecamp) ────────────────────────────────────────────\n\
          add_library({class}Plugin SHARED\n\
          \x20   src/{class}Backend.cpp\n\
@@ -1562,9 +1936,11 @@ fn gen_cmake_lists(class: &str, effective_prog: &str) -> String {
          \n\
          target_link_libraries({class}Plugin PRIVATE\n\
          \x20   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Concurrent\n\
-         \x20   # Add your FFI library here, e.g.:\n\
-         \x20   # {effective_prog}_ffi\n\
+         {ffi_link}\
          )\n\
+         \n\
+         # Output name must match manifest.json \"main\" value (lib<name>_plugin.so)\n\
+         set_target_properties({class}Plugin PROPERTIES OUTPUT_NAME \"{effective_prog}_plugin\")\n\
          \n\
          # ── Standalone preview app ─────────────────────────────────────────────────\n\
          add_executable({class}App\n\
@@ -1581,36 +1957,32 @@ fn gen_cmake_lists(class: &str, effective_prog: &str) -> String {
          \n\
          target_link_libraries({class}App PRIVATE\n\
          \x20   Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Qml Qt6::Quick Qt6::QuickWidgets Qt6::Concurrent\n\
-         \x20   # {effective_prog}_ffi\n\
-         )\n"
+         {ffi_link}\
+         )\n\
+         {rpath_section}"
     )
 }
 
-fn gen_metadata_json(idl: &SpelIdl, effective_prog: &str) -> String {
+fn gen_manifest_json(idl: &SpelIdl, effective_prog: &str) -> String {
     let desc = format!("Qt/QML Basecamp module for the {} program", idl.name);
     let ver = &idl.version;
-    let ffi = format!("{}_ffi", effective_prog);
-    let main_lib = format!("lib{effective_prog}_plugin");
+    let main_lib = format!("lib{effective_prog}_plugin.so");
     format!(
         "{{\n\
-         \x20 \"name\": \"{effective_prog}\",\n\
-         \x20 \"version\": \"{ver}\",\n\
-         \x20 \"description\": \"{desc}\",\n\
-         \x20 \"type\": \"ui\",\n\
+         \x20 \"author\": \"\",\n\
          \x20 \"category\": \"tools\",\n\
-         \x20 \"main\": \"{main_lib}\",\n\
-         \x20 \"view\": \"qml/Main.qml\",\n\
-         \x20 \"nix\": {{\n\
-         \x20   \"packages\": {{\n\
-         \x20     \"runtime\": [\"qt6.qtdeclarative\", \"qt6.qtwayland\"]\n\
-         \x20   }},\n\
-         \x20   \"external_libraries\": [\n\
-         \x20     {{\n\
-         \x20       \"name\": \"{ffi}\",\n\
-         \x20       \"vendor_path\": \"lib\"\n\
-         \x20     }}\n\
-         \x20   ]\n\
-         \x20 }}\n\
+         \x20 \"dependencies\": [],\n\
+         \x20 \"description\": \"{desc}\",\n\
+         \x20 \"icon\": \"\",\n\
+         \x20 \"main\": {{\n\
+         \x20   \"linux-amd64\": \"{main_lib}\",\n\
+         \x20   \"linux-amd64-dev\": \"{main_lib}\",\n\
+         \x20   \"linux-x86_64-dev\": \"{main_lib}\"\n\
+         \x20 }},\n\
+         \x20 \"manifestVersion\": \"0.2.0\",\n\
+         \x20 \"name\": \"{effective_prog}\",\n\
+         \x20 \"type\": \"ui\",\n\
+         \x20 \"version\": \"{ver}\"\n\
          }}\n"
     )
 }

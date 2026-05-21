@@ -46,14 +46,20 @@ pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
 }
 
 /// Generate a Logos Basecamp module scaffold from an IDL JSON string.
-/// `module_name` overrides the name derived from the IDL (e.g. `--module-name lez_multisig`).
+///
+/// - `module_name` overrides the name derived from the IDL (e.g. `--module-name lez_multisig`).
+/// - `ffi_lib_path` is the path to the compiled FFI `.so`, relative to the generated
+///   `CMakeLists.txt` output directory. When provided, the CMakeLists.txt is emitted with a
+///   proper IMPORTED target and RPATH so `make ui-build` links and runs without manual edits.
+///   Example: `"../../target/debug/libmy_program_ffi.so"`.
 pub fn generate_logos_module_from_idl_json(
     json: &str,
     module_name: Option<&str>,
+    ffi_lib_path: Option<&str>,
 ) -> Result<LogosModuleOutput, String> {
     let idl: SpelIdl = serde_json::from_str(json)
         .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
-    logos_module_codegen::generate_logos_module(&idl, module_name)
+    logos_module_codegen::generate_logos_module(&idl, module_name, ffi_lib_path)
 }
 
 /// Generate client + FFI code from a parsed IDL.

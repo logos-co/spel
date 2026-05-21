@@ -19,6 +19,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut out_dir: Option<PathBuf> = None;
     let mut target: Option<String> = None;
     let mut module_name: Option<String> = None;
+    let mut ffi_lib_path: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -39,17 +40,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 module_name = Some(args.get(i + 1).ok_or("--module-name requires value")?.clone());
                 i += 2;
             }
+            "--ffi-lib-path" => {
+                ffi_lib_path = Some(args.get(i + 1).ok_or("--ffi-lib-path requires value")?.clone());
+                i += 2;
+            }
             "--help" | "-h" => {
                 println!("spel-client-gen - Generate typed Rust client and C FFI from SPEL IDL");
                 println!();
                 println!("Usage:");
-                println!("  spel-client-gen --idl <path> --out-dir <dir> [--target <target>] [--module-name <name>]");
+                println!("  spel-client-gen --idl <path> --out-dir <dir> [--target <target>] [--module-name <name>] [--ffi-lib-path <path>]");
                 println!();
                 println!("Options:");
-                println!("  --idl <path>          Path to IDL JSON file");
-                println!("  --out-dir <dir>       Output directory for generated files");
-                println!("  --target <target>     Output target: rust+ffi (default) | logos-module");
-                println!("  --module-name <name>  Override class/file name for logos-module target");
+                println!("  --idl <path>           Path to IDL JSON file");
+                println!("  --out-dir <dir>        Output directory for generated files");
+                println!("  --target <target>      Output target: rust+ffi (default) | logos-module");
+                println!("  --module-name <name>   Override class/file name for logos-module target");
+                println!("  --ffi-lib-path <path>  Path to compiled FFI .so, relative to --out-dir");
+                println!("                         (logos-module only). Wires up CMakeLists.txt automatically.");
                 return Ok(());
             }
             other => return Err(format!("unknown argument: {other}").into()),
@@ -73,6 +80,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let output = spel_client_gen::generate_logos_module_from_idl_json(
                 &json,
                 module_name.as_deref(),
+                ffi_lib_path.as_deref(),
             )?;
 
             std::fs::create_dir_all(out_dir.join("src"))
@@ -92,7 +100,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ("src/main.cpp",                        &output.main_cpp),
                 ("qml/Main.qml",                        &output.main_qml),
                 ("module.yaml",                         &output.module_yaml),
-                ("metadata.json",                       &output.metadata_json),
+                ("manifest.json",                        &output.manifest_json),
                 ("CMakeLists.txt",                      &output.cmake_lists),
             ];
 

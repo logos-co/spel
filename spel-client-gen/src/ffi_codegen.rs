@@ -415,6 +415,128 @@ pub fn generate_ffi(idl: &SpelIdl) -> Result<String, String> {
     writeln!(out, "pub extern \"C\" fn {prefix}_version() -> *mut c_char {{").unwrap();
     writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    // program_id: returns null — the program ID is set at runtime via QSettings or env var,
+    // not compiled in. Backend.cpp checks for null and falls back gracefully.
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_program_id() -> *mut c_char {{").unwrap();
+    writeln!(out, "    std::ptr::null_mut()").unwrap();
+    writeln!(out, "}}").unwrap();
+
+    // Wallet connectivity helpers (always generated, not per-IDL)
+    writeln!(out).unwrap();
+    writeln!(out, "/// FFI: ping the sequencer to verify wallet + network connectivity.").unwrap();
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_check_connection(args_json: *const c_char) -> *mut c_char {{").unwrap();
+    writeln!(out, "    let args = match cstr_to_str(args_json) {{ Ok(s) => s, Err(e) => return error_json(&e) }};").unwrap();
+    writeln!(out, "    ffi_call(move || {prefix}_check_connection_impl(args))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn {prefix}_check_connection_impl(args: &str) -> Result<String, String> {{").unwrap();
+    writeln!(out, "    let v: Value = serde_json::from_str(args).map_err(|e| format!(\"invalid JSON: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let sequencer_url = v[\"sequencer_url\"].as_str().ok_or(\"missing sequencer_url\")?.to_string();").unwrap();
+    writeln!(out, "    let wallet = init_wallet(&v)?;").unwrap();
+    writeln!(out, "    let rt = get_runtime();").unwrap();
+    writeln!(out, "    rt.block_on(async {{").unwrap();
+    writeln!(out, "        wallet.get_accounts_nonces(vec![]).await.map_err(|e| format!(\"ping: {{}}\", e))").unwrap();
+    writeln!(out, "    }})?;").unwrap();
+    writeln!(out, "    Ok(json!({{\"success\": true, \"status\": \"ok\", \"sequencer_url\": sequencer_url}}).to_string())").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "/// FFI: inspect an account — returns data size, hex preview, and signing-key presence.").unwrap();
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_inspect_account(args_json: *const c_char) -> *mut c_char {{").unwrap();
+    writeln!(out, "    let args = match cstr_to_str(args_json) {{ Ok(s) => s, Err(e) => return error_json(&e) }};").unwrap();
+    writeln!(out, "    ffi_call(move || {prefix}_inspect_account_impl(args))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn {prefix}_inspect_account_impl(args: &str) -> Result<String, String> {{").unwrap();
+    writeln!(out, "    let v: Value = serde_json::from_str(args).map_err(|e| format!(\"invalid JSON: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let wallet = init_wallet(&v)?;").unwrap();
+    writeln!(out, "    let account_id = parse_account_id(v[\"account_id\"].as_str().ok_or(\"missing account_id\")?)?;").unwrap();
+    writeln!(out, "    let rt = get_runtime();").unwrap();
+    writeln!(out, "    let account = rt.block_on(async {{").unwrap();
+    writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
+    writeln!(out, "    }})?;").unwrap();
+    writeln!(out, "    let has_key = wallet.storage().user_data.get_pub_account_signing_key(account_id).is_some();").unwrap();
+    writeln!(out, "    let data_len = account.data.len();").unwrap();
+    writeln!(out, "    let preview_len = data_len.min(32);").unwrap();
+    writeln!(out, "    let data_preview = hex::encode(&account.data[..preview_len]);").unwrap();
+    writeln!(out, "    Ok(json!({{\"success\": true, \"data_len\": data_len, \"data_preview\": data_preview, \"has_signing_key\": has_key}}).to_string())").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    // Wallet CLI subprocess helpers
+    // TEMPORARY: until LEZ exposes account listing/creation via the wallet library API,
+    // these call the `wallet` CLI binary directly.  Remove once the native API exists.
+    writeln!(out, "/// FFI: list accounts in the wallet — delegates to `wallet account list --json`.").unwrap();
+    writeln!(out, "/// TEMPORARY: uses `wallet` CLI subprocess until the library API is available.").unwrap();
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_list_accounts(args_json: *const c_char) -> *mut c_char {{").unwrap();
+    writeln!(out, "    let args = match cstr_to_str(args_json) {{ Ok(s) => s, Err(e) => return error_json(&e) }};").unwrap();
+    writeln!(out, "    ffi_call(move || {prefix}_list_accounts_impl(args))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn {prefix}_list_accounts_impl(args: &str) -> Result<String, String> {{").unwrap();
+    writeln!(out, "    let v: Value = serde_json::from_str(args).map_err(|e| format!(\"invalid JSON: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let wallet_path = v[\"wallet_path\"].as_str().ok_or(\"missing wallet_path\")?;").unwrap();
+    writeln!(out, "    let output = std::process::Command::new(\"wallet\")").unwrap();
+    writeln!(out, "        .args([\"account\", \"list\"])").unwrap();
+    writeln!(out, "        .env(\"NSSA_WALLET_HOME_DIR\", wallet_path)").unwrap();
+    writeln!(out, "        .output()").unwrap();
+    writeln!(out, "        .map_err(|e| format!(\"wallet CLI: {{}}\", e))?;").unwrap();
+    writeln!(out, "    if !output.status.success() {{").unwrap();
+    writeln!(out, "        let stderr = String::from_utf8_lossy(&output.stderr);").unwrap();
+    writeln!(out, "        return Err(format!(\"wallet account list: {{}}\", stderr.trim()));").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    let stdout = String::from_utf8_lossy(&output.stdout);").unwrap();
+    writeln!(out, "    // Output format per line: `{{path}} {{Public|Private}}/{{id}} [optional-tag]`").unwrap();
+    writeln!(out, "    // path  = derivation path or 'Preconfigured' (before the account word)").unwrap();
+    writeln!(out, "    // tag   = optional user label in [brackets] after the account word").unwrap();
+    writeln!(out, "    let accounts: Vec<serde_json::Value> = stdout.lines()").unwrap();
+    writeln!(out, "        .filter_map(|line| {{").unwrap();
+    writeln!(out, "            let id = line.split_whitespace()").unwrap();
+    writeln!(out, "                .find(|s| s.starts_with(\"Public/\") || s.starts_with(\"Private/\"))?;").unwrap();
+    writeln!(out, "            let label = line.split_whitespace()").unwrap();
+    writeln!(out, "                .find(|s| s.starts_with('[') && s.ends_with(']'))").unwrap();
+    writeln!(out, "                .map(|s| s.trim_matches(|c: char| c == '[' || c == ']').to_string())").unwrap();
+    writeln!(out, "                .unwrap_or_default();").unwrap();
+    writeln!(out, "            let path = line.trim_end()").unwrap();
+    writeln!(out, "                .split(id).next().unwrap_or(\"\").trim().to_string();").unwrap();
+    writeln!(out, "            Some(json!({{\"id\": id, \"label\": label, \"path\": path}}))").unwrap();
+    writeln!(out, "        }})").unwrap();
+    writeln!(out, "        .collect();").unwrap();
+    writeln!(out, "    Ok(json!({{\"success\": true, \"accounts\": accounts}}).to_string())").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+
+    writeln!(out, "/// FFI: create a new public account — delegates to `wallet account new public`.").unwrap();
+    writeln!(out, "/// TEMPORARY: uses `wallet` CLI subprocess until the library API is available.").unwrap();
+    writeln!(out, "#[no_mangle]").unwrap();
+    writeln!(out, "pub extern \"C\" fn {prefix}_create_account(args_json: *const c_char) -> *mut c_char {{").unwrap();
+    writeln!(out, "    let args = match cstr_to_str(args_json) {{ Ok(s) => s, Err(e) => return error_json(&e) }};").unwrap();
+    writeln!(out, "    ffi_call(move || {prefix}_create_account_impl(args))").unwrap();
+    writeln!(out, "}}").unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "fn {prefix}_create_account_impl(args: &str) -> Result<String, String> {{").unwrap();
+    writeln!(out, "    let v: Value = serde_json::from_str(args).map_err(|e| format!(\"invalid JSON: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let wallet_path = v[\"wallet_path\"].as_str().ok_or(\"missing wallet_path\")?;").unwrap();
+    writeln!(out, "    let mut cmd = std::process::Command::new(\"wallet\");").unwrap();
+    writeln!(out, "    cmd.args([\"account\", \"new\", \"public\"]);").unwrap();
+    writeln!(out, "    if let Some(label) = v[\"label\"].as_str().filter(|s| !s.is_empty()) {{").unwrap();
+    writeln!(out, "        cmd.args([\"--label\", label]);").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    let output = cmd.env(\"NSSA_WALLET_HOME_DIR\", wallet_path)").unwrap();
+    writeln!(out, "        .output()").unwrap();
+    writeln!(out, "        .map_err(|e| format!(\"wallet CLI: {{}}\", e))?;").unwrap();
+    writeln!(out, "    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();").unwrap();
+    writeln!(out, "    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();").unwrap();
+    writeln!(out, "    if !output.status.success() {{").unwrap();
+    writeln!(out, "        return Err(format!(\"wallet account new: {{}}\", if stderr.is_empty() {{ &stdout }} else {{ &stderr }}));").unwrap();
+    writeln!(out, "    }}").unwrap();
+    writeln!(out, "    // stdout from `wallet account new public` is the new account ID").unwrap();
+    writeln!(out, "    Ok(json!({{\"success\": true, \"account_id\": stdout}}).to_string())").unwrap();
+    writeln!(out, "}}").unwrap();
 
     // PDA compute helpers
     out.push_str(&generate_pda_helpers(idl));
@@ -986,8 +1108,15 @@ pub fn generate_header(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out).unwrap();
     }
 
+    writeln!(out, "/* wallet helpers */").unwrap();
+    writeln!(out, "char* {prefix}_check_connection(const char* args_json);").unwrap();
+    writeln!(out, "char* {prefix}_inspect_account(const char* args_json);").unwrap();
+    writeln!(out, "char* {prefix}_list_accounts(const char* args_json);").unwrap();
+    writeln!(out, "char* {prefix}_create_account(const char* args_json);").unwrap();
+    writeln!(out).unwrap();
     writeln!(out, "void {prefix}_free_string(char* s);").unwrap();
     writeln!(out, "char* {prefix}_version(void);").unwrap();
+    writeln!(out, "char* {prefix}_program_id(void);").unwrap();
     writeln!(out).unwrap();
     writeln!(out, "#ifdef __cplusplus").unwrap();
     writeln!(out, "}}").unwrap();
