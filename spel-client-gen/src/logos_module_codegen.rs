@@ -1564,11 +1564,13 @@ fn qml_fetch_page(o: &mut String, f: &FetchAccount) {
     o.push_str(&format!("{ind}                    Button {{\n"));
     o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
     o.push_str(&format!("{ind}                        property var _v: backend.{prop}[modelData]\n"));
-    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(Array.isArray(_v) ? _v.join(\"\\n\") : (_v ?? \"\"))\n"));
+    o.push_str(&format!("{ind}                        property bool _copied: false\n"));
+    o.push_str(&format!("{ind}                        onClicked: {{ clipHelper.copyText(Array.isArray(_v) ? _v.join(\"\\n\") : (_v ?? \"\")); _copied = true; _copyReset.restart() }}\n"));
+    o.push_str(&format!("{ind}                        Timer {{ id: _copyReset; interval: 1500; onTriggered: parent._copied = false }}\n"));
     o.push_str(&format!("{ind}                        background: Item {{}}\n"));
     o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"\\u29C9\"\n")); // ⧉ copy glyph
-    o.push_str(&format!("{ind}                            color: root.colMuted\n"));
+    o.push_str(&format!("{ind}                            text: parent._copied ? \"\\u2713\" : \"\\u29C9\"\n"));
+    o.push_str(&format!("{ind}                            color: parent._copied ? root.colSuccess : root.colMuted\n"));
     o.push_str(&format!("{ind}                            font.pixelSize: 14\n"));
     o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter\n"));
     o.push_str(&format!("{ind}                            verticalAlignment: Text.AlignVCenter\n"));
@@ -1720,10 +1722,14 @@ fn qml_wallet_page(o: &mut String) {
     // Copy button
     o.push_str(&format!("{ind}                        Button {{\n"));
     o.push_str(&format!("{ind}                            implicitWidth: 28; implicitHeight: 28\n"));
-    o.push_str(&format!("{ind}                            onClicked: clipHelper.copyText(modelData[\"id\"] || \"\")\n"));
+    o.push_str(&format!("{ind}                            property bool _copied: false\n"));
+    o.push_str(&format!("{ind}                            onClicked: {{ clipHelper.copyText(modelData[\"id\"] || \"\"); _copied = true; _copyReset.restart() }}\n"));
+    o.push_str(&format!("{ind}                            Timer {{ id: _copyReset; interval: 1500; onTriggered: parent._copied = false }}\n"));
     o.push_str(&format!("{ind}                            background: Item {{}}\n"));
     o.push_str(&format!("{ind}                            contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                                text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                                text: parent._copied ? \"\\u2713\" : \"\\u29C9\"\n"));
+    o.push_str(&format!("{ind}                                color: parent._copied ? root.colSuccess : root.colMuted\n"));
+    o.push_str(&format!("{ind}                                font.pixelSize: 14\n"));
     o.push_str(&format!("{ind}                                horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
     o.push_str(&format!("{ind}                            }}\n"));
     o.push_str(&format!("{ind}                        }}\n")); // copy Button
@@ -1836,10 +1842,14 @@ fn qml_wallet_page(o: &mut String) {
     o.push_str(&format!("{ind}                    Button {{\n"));
     o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
     o.push_str(&format!("{ind}                        property var _v: backend.walletAccountInfo[modelData]\n"));
-    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(_v ?? \"\")\n"));
+    o.push_str(&format!("{ind}                        property bool _copied: false\n"));
+    o.push_str(&format!("{ind}                        onClicked: {{ clipHelper.copyText(_v ?? \"\"); _copied = true; _copyReset.restart() }}\n"));
+    o.push_str(&format!("{ind}                        Timer {{ id: _copyReset; interval: 1500; onTriggered: parent._copied = false }}\n"));
     o.push_str(&format!("{ind}                        background: Item {{}}\n"));
     o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            text: parent._copied ? \"\\u2713\" : \"\\u29C9\"\n"));
+    o.push_str(&format!("{ind}                            color: parent._copied ? root.colSuccess : root.colMuted\n"));
+    o.push_str(&format!("{ind}                            font.pixelSize: 14\n"));
     o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     o.push_str(&format!("{ind}                    }}\n")); // Button
@@ -1905,10 +1915,14 @@ fn qml_wallet_page(o: &mut String) {
     o.push_str(&format!("{ind}                    Button {{\n"));
     o.push_str(&format!("{ind}                        implicitWidth: 28; implicitHeight: 28\n"));
     o.push_str(&format!("{ind}                        property var _v: backend.walletDecodedAccount[\"fields\"][modelData]\n"));
-    o.push_str(&format!("{ind}                        onClicked: clipHelper.copyText(_v !== undefined ? String(_v) : \"\")\n"));
+    o.push_str(&format!("{ind}                        property bool _copied: false\n"));
+    o.push_str(&format!("{ind}                        onClicked: {{ clipHelper.copyText(_v !== undefined ? String(_v) : \"\"); _copied = true; _copyReset.restart() }}\n"));
+    o.push_str(&format!("{ind}                        Timer {{ id: _copyReset; interval: 1500; onTriggered: parent._copied = false }}\n"));
     o.push_str(&format!("{ind}                        background: Item {{}}\n"));
     o.push_str(&format!("{ind}                        contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"\\u29C9\"; color: root.colMuted; font.pixelSize: 14\n"));
+    o.push_str(&format!("{ind}                            text: parent._copied ? \"\\u2713\" : \"\\u29C9\"\n"));
+    o.push_str(&format!("{ind}                            color: parent._copied ? root.colSuccess : root.colMuted\n"));
+    o.push_str(&format!("{ind}                            font.pixelSize: 14\n"));
     o.push_str(&format!("{ind}                            horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     o.push_str(&format!("{ind}                    }}\n")); // copy button
