@@ -55,10 +55,12 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
 
-    // Embed IDL JSON for runtime decode (spel_framework_core::decode::decode_account_data_try_all)
-    // Four hashes make it impossible for any JSON value to accidentally close the raw literal.
+    // Embed IDL JSON for runtime decode (spel_framework_core::decode::decode_account_data_try_all).
+    // Use a normal string literal with escaping instead of a raw literal to avoid the r#"..."#
+    // delimiter collision if the JSON ever contains a matching sequence.
     writeln!(out).unwrap();
-    writeln!(out, "static PROGRAM_IDL_JSON: &str = r####\"{}\"####;", idl_json).unwrap();
+    let escaped = idl_json.replace('\\', "\\\\").replace('"', "\\\"");
+    writeln!(out, "static PROGRAM_IDL_JSON: &str = \"{}\";", escaped).unwrap();
 
     // Import or generate instruction type
     if let Some(ref itype) = idl.instruction_type {
