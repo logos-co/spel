@@ -288,7 +288,7 @@ define save_var
 	@mv $(STATE_FILE).tmp $(STATE_FILE)
 endef
 
-.PHONY: help all build idl cli deploy setup inspect status clean ffi-gen ffi ui-gen ui-build ui-run ui-package lgx lgx-sign install
+.PHONY: help all build idl cli deploy setup inspect status clean ffi-gen ffi ui-gen ui-regen ui-build ui-run ui-package lgx lgx-sign install
 
 help: ## Show this help
 	@echo "{project_name} — SPEL Program"
@@ -305,7 +305,8 @@ help: ## Show this help
 	@echo ""
 	@echo "  make ffi-gen     Generate FFI Rust source from IDL"
 	@echo "  make ffi         Build FFI shared library (.so)"
-	@echo "  make ui-gen      Generate Qt/QML Basecamp module scaffold from IDL"
+	@echo "  make ui-gen      Generate Qt/QML Basecamp module scaffold from IDL (full, first run)"
+	@echo "  make ui-regen    Regenerate C++ backend only; keep hand-written qml/Main.qml"
 	@echo "  make ui-build    Build the Qt/QML standalone preview app (needs Qt6 + CMake)"
 	@echo "  make ui-run      Run the standalone preview app"
 	@echo "  make install     Install plugin directly to Basecamp plugins directory"
@@ -386,12 +387,21 @@ ffi: ffi-gen ## Build the FFI shared library (.so)
 	@echo ""
 	@echo "✅ FFI library: $(FFI_LIB)"
 
-ui-gen: idl ffi ## Generate Qt/QML Basecamp module scaffold from IDL
+ui-gen: idl ffi ## Generate Qt/QML Basecamp module scaffold from IDL (overwrites all files)
 	$(SPEL_CLIENT_GEN) --idl $(IDL_FILE) --out-dir $(UI_OUT_DIR) --target logos-module \
 	    --ffi-lib-path $(FFI_LIB_REL)
 	@echo ""
 	@echo "✅ UI scaffold generated in $(UI_OUT_DIR)/"
 	@echo "   Next: make ui-build  (or make install)"
+	@echo "   Tip:  use 'make ui-regen' after the first run to keep hand-written qml/Main.qml"
+
+ui-regen: idl ffi ## Regenerate C++ backend + build files; preserve hand-written qml/Main.qml
+	@test -d "$(UI_OUT_DIR)" || (echo "ERROR: UI scaffold not found. Run 'make ui-gen' first."; exit 1)
+	$(SPEL_CLIENT_GEN) --idl $(IDL_FILE) --out-dir $(UI_OUT_DIR) --target logos-module \
+	    --ffi-lib-path $(FFI_LIB_REL) --skip-ui
+	@echo ""
+	@echo "✅ C++ backend regenerated in $(UI_OUT_DIR)/ (qml/Main.qml preserved)"
+	@echo "   Next: make ui-build"
 
 ui-build: ffi ## Build the Qt/QML standalone preview app (needs Qt6 + CMake)
 	@test -d "$(UI_OUT_DIR)" || (echo "ERROR: UI scaffold not found. Run 'make ui-gen' first."; exit 1)
@@ -502,7 +512,8 @@ make cli ARGS="--dry-run -- <command> --arg1 value1"
 | `make clean` | Remove saved state |
 | `make ffi-gen` | Generate FFI Rust source from IDL |
 | `make ffi` | Build FFI shared library (.so) |
-| `make ui-gen` | Generate Qt/QML Basecamp module scaffold |
+| `make ui-gen` | Generate Qt/QML Basecamp module scaffold (first run, overwrites all) |
+| `make ui-regen` | Regenerate C++ backend + build files; keep hand-written `qml/Main.qml` |
 | `make ui-build` | Build the Qt/QML standalone preview app |
 | `make ui-run` | Run the standalone preview app |
 | `make install` | Install plugin to Basecamp plugins directory |

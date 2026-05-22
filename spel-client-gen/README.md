@@ -143,6 +143,13 @@ spel-client-gen \
   --target logos-module \
   --module-name my_program
 
+# Re-generate after customising qml/Main.qml — skips the QML file, rewrites everything else
+spel-client-gen \
+  --idl my_program-idl.json \
+  --out-dir ui/my_program \
+  --target logos-module \
+  --skip-ui
+
 # Build the standalone preview app
 cd ui/my_program
 cmake -B build && cmake --build build
@@ -160,6 +167,7 @@ Or with `make` (if using a project scaffolded by `spel init`):
 make idl         # generate IDL from program source
 make ffi         # build FFI .so (ffi-gen → cargo build)
 make ui-gen      # generate scaffold (wires CMakeLists.txt to FFI .so automatically)
+make ui-regen    # re-generate C++ backend only; preserves hand-written qml/Main.qml
 make ui-build    # cmake build
 make ui-run      # run the standalone preview app
 make lgx         # build portable LGX archive for Basecamp distribution
