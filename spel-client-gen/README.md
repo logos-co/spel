@@ -148,7 +148,7 @@ cd ui/my_program
 cmake -B build && cmake --build build
 
 # Run it (set env vars or use the Settings page in the UI)
-MY_PROGRAM_PROGRAM_ID_HEX=<64-char-hex> \
+MY_PROGRAM_PROGRAM_ID=<64-char-hex> \
 NSSA_WALLET_HOME_DIR=~/.wallet \
 NSSA_SEQUENCER_URL=http://127.0.0.1:3040 \
 ./build/MyProgramApp
@@ -191,7 +191,7 @@ make lgx         # build portable LGX archive for Basecamp distribution
 The backend reads configuration from three sources in priority order:
 
 1. **`QSettings`** (persisted from the Settings page)
-2. **Environment variables**: `NSSA_WALLET_HOME_DIR`, `NSSA_SEQUENCER_URL`, `{PROGRAM}_PROGRAM_ID_HEX`
+2. **Environment variables**: `NSSA_WALLET_HOME_DIR`, `NSSA_SEQUENCER_URL`, `{PROGRAM}_PROGRAM_ID`
 3. **Compiled-in FFI constant** from `{prog}_program_id()`
 
 ### Wallet page

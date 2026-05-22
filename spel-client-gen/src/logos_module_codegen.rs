@@ -606,7 +606,7 @@ fn gen_backend_cpp(
             f.acc_name
         ));
     }
-    o.push_str(&format!("    char* {prog}_program_id();\n"));
+    o.push_str(&format!("    char* {effective_prog}_program_id();\n"));
     o.push_str(&format!("    void  {prog}_free_string(char* s);\n"));
     o.push_str(&format!("    char* {prog}_check_connection(const char* args_json);\n"));
     o.push_str(&format!("    char* {prog}_inspect_account(const char* args_json);\n"));
@@ -627,7 +627,7 @@ fn gen_backend_cpp(
     ));
     // Fallback: call the compiled-in FFI constant if still empty (priority 3)
     o.push_str(&format!("    if (m_programIdHex.isEmpty()) {{\n"));
-    o.push_str(&format!("        char* raw = {prog}_program_id();\n"));
+    o.push_str(&format!("        char* raw = {effective_prog}_program_id();\n"));
     o.push_str("        if (raw) {\n");
     o.push_str("            m_programIdHex = QJsonDocument::fromJson(QByteArray(raw))\n");
     o.push_str("                                 .object().value(\"program_id_hex\").toString();\n");
@@ -1359,62 +1359,74 @@ fn qml_account_picker(o: &mut String, id: &str, hist_key: &str, ind: &str) {
     o.push_str(&format!("{ind}                    contentItem: Text {{ text: parent.text; color: root.colMuted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }}\n"));
     o.push_str(&format!("{ind}                    onClicked: {popup}.open()\n"));
     o.push_str(&format!("{ind}                }}\n"));
-    // Popup
+    // Popup — padding:0 so Column.width === popup.width
     o.push_str(&format!("{ind}                Popup {{\n"));
     o.push_str(&format!("{ind}                    id: {popup}\n"));
-    o.push_str(&format!("{ind}                    y: parent.height\n"));
-    o.push_str(&format!("{ind}                    x: 0\n"));
+    o.push_str(&format!("{ind}                    y: parent.height; x: 0\n"));
     o.push_str(&format!("{ind}                    width: parent.width\n"));
-    o.push_str(&format!("{ind}                    padding: 4\n"));
+    o.push_str(&format!("{ind}                    padding: 0\n"));
     o.push_str(&format!("{ind}                    property var recentHistory: []\n"));
     o.push_str(&format!("{ind}                    onAboutToShow: recentHistory = backend.fieldHistory(\"{hist_key}\")\n"));
-    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colPanel; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
-    o.push_str(&format!("{ind}                    contentItem: Column {{\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colSidebar; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    // Column is a direct child — avoids contentItem width resolution issues
+    o.push_str(&format!("{ind}                    Column {{\n"));
     o.push_str(&format!("{ind}                        width: parent.width\n"));
     o.push_str(&format!("{ind}                        spacing: 0\n"));
-    // WALLET section header
+    o.push_str(&format!("{ind}                        topPadding: 4; bottomPadding: 4\n"));
+    // RECENT section (first — most immediately useful)
     o.push_str(&format!("{ind}                        Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"WALLET\"\n"));
-    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length > 0\n"));
+    o.push_str(&format!("{ind}                            text: \"RECENT\"\n"));
+    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0\n"));
     o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
-    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
-    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 2; bottomPadding: 2; width: parent.width\n"));
     o.push_str(&format!("{ind}                        }}\n"));
-    // WALLET items
     o.push_str(&format!("{ind}                        Repeater {{\n"));
-    o.push_str(&format!("{ind}                            model: backend.walletAccounts\n"));
-    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
-    o.push_str(&format!("{ind}                                width: parent.width\n"));
-    o.push_str(&format!("{ind}                                contentItem: Text {{\n"));
-    o.push_str(&format!("{ind}                                    text: (modelData.label ? modelData.label + \"  \" : \"\") + modelData.id\n"));
-    o.push_str(&format!("{ind}                                    color: root.colText; elide: Text.ElideMiddle\n"));
-    o.push_str(&format!("{ind}                                    verticalAlignment: Text.AlignVCenter; leftPadding: 8\n"));
+    o.push_str(&format!("{ind}                            model: {popup}.recentHistory\n"));
+    o.push_str(&format!("{ind}                            delegate: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width; height: 34\n"));
+    o.push_str(&format!("{ind}                                color: _ma.containsMouse ? root.colSurface : \"transparent\"\n"));
+    o.push_str(&format!("{ind}                                Text {{\n"));
+    o.push_str(&format!("{ind}                                    anchors.verticalCenter: parent.verticalCenter\n"));
+    o.push_str(&format!("{ind}                                    x: 8; width: parent.width - 8\n"));
+    o.push_str(&format!("{ind}                                    text: modelData; color: root.colText; elide: Text.ElideMiddle; font.pixelSize: 13\n"));
     o.push_str(&format!("{ind}                                }}\n"));
-    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
-    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData.id; backend.saveHistory(\"{hist_key}\", modelData.id); {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                                MouseArea {{\n"));
+    o.push_str(&format!("{ind}                                    id: _ma; anchors.fill: parent\n"));
+    o.push_str(&format!("{ind}                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor\n"));
+    o.push_str(&format!("{ind}                                    onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
     o.push_str(&format!("{ind}                            }}\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     // Separator
     o.push_str(&format!("{ind}                        Rectangle {{\n"));
     o.push_str(&format!("{ind}                            width: parent.width; height: 1; color: root.colBorder\n"));
-    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length > 0 && {popup}.recentHistory.length > 0\n"));
+    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0 && backend.walletAccounts.length > 0\n"));
     o.push_str(&format!("{ind}                        }}\n"));
-    // RECENT section header
+    // WALLET section
     o.push_str(&format!("{ind}                        Text {{\n"));
-    o.push_str(&format!("{ind}                            text: \"RECENT\"\n"));
-    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0\n"));
+    o.push_str(&format!("{ind}                            text: \"WALLET\"\n"));
+    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length > 0\n"));
     o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
-    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
-    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 2; bottomPadding: 2; width: parent.width\n"));
     o.push_str(&format!("{ind}                        }}\n"));
-    // RECENT items
+    // WALLET items — plain Rectangle+MouseArea avoids system styling
     o.push_str(&format!("{ind}                        Repeater {{\n"));
-    o.push_str(&format!("{ind}                            model: {popup}.recentHistory\n"));
-    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
-    o.push_str(&format!("{ind}                                width: parent.width\n"));
-    o.push_str(&format!("{ind}                                contentItem: Text {{ text: modelData; color: root.colText; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }}\n"));
-    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
-    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                            model: backend.walletAccounts\n"));
+    o.push_str(&format!("{ind}                            delegate: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width; height: 34\n"));
+    o.push_str(&format!("{ind}                                color: _ma.containsMouse ? root.colSurface : \"transparent\"\n"));
+    o.push_str(&format!("{ind}                                Text {{\n"));
+    o.push_str(&format!("{ind}                                    anchors.verticalCenter: parent.verticalCenter\n"));
+    o.push_str(&format!("{ind}                                    x: 8; width: parent.width - 8\n"));
+    o.push_str(&format!("{ind}                                    text: modelData.id + (modelData.label ? \" <b>[\" + modelData.label + \"]</b>\" : \"\")\n"));
+    o.push_str(&format!("{ind}                                    textFormat: Text.StyledText\n"));
+    o.push_str(&format!("{ind}                                    color: root.colText; elide: Text.ElideMiddle; font.pixelSize: 13\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
+    o.push_str(&format!("{ind}                                MouseArea {{\n"));
+    o.push_str(&format!("{ind}                                    id: _ma; anchors.fill: parent\n"));
+    o.push_str(&format!("{ind}                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor\n"));
+    o.push_str(&format!("{ind}                                    onClicked: {{ {id}.text = modelData.id; backend.saveHistory(\"{hist_key}\", modelData.id); {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
     o.push_str(&format!("{ind}                            }}\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     // Empty state
@@ -1476,33 +1488,40 @@ fn qml_textfield_with_history(
     o.push_str(&format!("{ind}                    contentItem: Text {{ text: parent.text; color: root.colMuted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }}\n"));
     o.push_str(&format!("{ind}                    onClicked: {popup}.open()\n"));
     o.push_str(&format!("{ind}                }}\n"));
-    // Popup
+    // Popup — padding:0 so Column.width === popup.width
     o.push_str(&format!("{ind}                Popup {{\n"));
     o.push_str(&format!("{ind}                    id: {popup}\n"));
-    o.push_str(&format!("{ind}                    y: parent.height\n"));
-    o.push_str(&format!("{ind}                    x: 0\n"));
+    o.push_str(&format!("{ind}                    y: parent.height; x: 0\n"));
     o.push_str(&format!("{ind}                    width: parent.width\n"));
-    o.push_str(&format!("{ind}                    padding: 4\n"));
+    o.push_str(&format!("{ind}                    padding: 0\n"));
     o.push_str(&format!("{ind}                    property var recentHistory: []\n"));
     o.push_str(&format!("{ind}                    onAboutToShow: recentHistory = backend.fieldHistory(\"{hist_key}\")\n"));
-    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colPanel; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
-    o.push_str(&format!("{ind}                    contentItem: Column {{\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colSidebar; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    o.push_str(&format!("{ind}                    Column {{\n"));
     o.push_str(&format!("{ind}                        width: parent.width\n"));
     o.push_str(&format!("{ind}                        spacing: 0\n"));
+    o.push_str(&format!("{ind}                        topPadding: 4; bottomPadding: 4\n"));
     o.push_str(&format!("{ind}                        Text {{\n"));
     o.push_str(&format!("{ind}                            text: \"RECENT\"\n"));
     o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0\n"));
     o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
-    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
-    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 2; bottomPadding: 2; width: parent.width\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     o.push_str(&format!("{ind}                        Repeater {{\n"));
     o.push_str(&format!("{ind}                            model: {popup}.recentHistory\n"));
-    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
-    o.push_str(&format!("{ind}                                width: parent.width\n"));
-    o.push_str(&format!("{ind}                                contentItem: Text {{ text: modelData; color: root.colText; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }}\n"));
-    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
-    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                            delegate: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width; height: 34\n"));
+    o.push_str(&format!("{ind}                                color: _ma.containsMouse ? root.colSurface : \"transparent\"\n"));
+    o.push_str(&format!("{ind}                                Text {{\n"));
+    o.push_str(&format!("{ind}                                    anchors.verticalCenter: parent.verticalCenter\n"));
+    o.push_str(&format!("{ind}                                    x: 8; width: parent.width - 8\n"));
+    o.push_str(&format!("{ind}                                    text: modelData; color: root.colText; elide: Text.ElideMiddle; font.pixelSize: 13\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
+    o.push_str(&format!("{ind}                                MouseArea {{\n"));
+    o.push_str(&format!("{ind}                                    id: _ma; anchors.fill: parent\n"));
+    o.push_str(&format!("{ind}                                    hoverEnabled: true; cursorShape: Qt.PointingHandCursor\n"));
+    o.push_str(&format!("{ind}                                    onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
     o.push_str(&format!("{ind}                            }}\n"));
     o.push_str(&format!("{ind}                        }}\n"));
     o.push_str(&format!("{ind}                        Item {{\n"));

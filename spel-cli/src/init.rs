@@ -23,12 +23,6 @@ pub fn init_project(name: &str, lez_tag: Option<&str>, spel_tag: Option<&str>, l
     println!("🚀 Creating SPEL project '{}'...", project_name);
 
     let snake_name = project_name.replace('-', "_");
-    let pascal_name: String = snake_name.split('_')
-        .map(|w| {
-            let mut c = w.chars();
-            c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
-        })
-        .collect();
 
     // Detect spel-client-gen: check the directory next to the running binary first
     // (covers `cargo run`, installed builds, and CI). Fall back to bare name (PATH lookup).
@@ -404,11 +398,13 @@ ui-build: ffi ## Build the Qt/QML standalone preview app (needs Qt6 + CMake)
 	cmake -B $(UI_OUT_DIR)/build $(UI_OUT_DIR)
 	cmake --build $(UI_OUT_DIR)/build --parallel
 	@echo ""
-	@echo "✅ Preview app built: $(UI_OUT_DIR)/build/{pascal_name}App"
+	@echo "✅ Preview app built in $(UI_OUT_DIR)/build/"
 	@echo "   Run with: make ui-run  or install with: make install"
 
 ui-run: ui-build ## Run the Qt/QML standalone preview app
-	$(UI_OUT_DIR)/build/{pascal_name}App
+	@APP=$$(find $(UI_OUT_DIR)/build -maxdepth 1 -name '*App' -type f | head -1); \
+	test -n "$$APP" || (echo "ERROR: no *App binary found in $(UI_OUT_DIR)/build/"; exit 1); \
+	exec "$$APP"
 
 ui-package: ui-build ## Package plugin + FFI .so for loading in Basecamp
 	mkdir -p $(UI_OUT_DIR)/lib

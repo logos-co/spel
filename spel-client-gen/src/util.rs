@@ -100,7 +100,7 @@ pub fn idl_type_to_json_parse(ty: &spel_framework_core::idl::IdlType, var: &str)
             }
             // i64 may arrive as a JSON string (same reason as u64).
             "i64" => {
-                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<i64>().map_err(|_| format!(\"invalid i64: {{}}\", _s))? }} else if let Some(_n) = _v.as_i64() {{ _n }} else {{ _v.as_u64().ok_or(\"expected i64\")? as i64 }} }}")
+                format!("{{ let _v = &{var}; if let Some(_s) = _v.as_str() {{ _s.parse::<i64>().map_err(|_| format!(\"invalid i64: {{}}\", _s))? }} else if let Some(_n) = _v.as_i64() {{ _n }} else {{ let _u = _v.as_u64().ok_or(\"expected i64\")?; if _u > i64::MAX as u64 {{ return Err(format!(\"i64 overflow: {{}}\", _u)); }} _u as i64 }} }}")
             }
             "i128" => {
                 // Accept either a JSON string (for values outside i64 range) or a JSON number.
