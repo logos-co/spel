@@ -20,6 +20,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut target: Option<String> = None;
     let mut module_name: Option<String> = None;
     let mut ffi_lib_path: Option<String> = None;
+    let mut skip_ui = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -44,6 +45,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 ffi_lib_path = Some(args.get(i + 1).ok_or("--ffi-lib-path requires value")?.clone());
                 i += 2;
             }
+            "--skip-ui" => {
+                skip_ui = true;
+                i += 1;
+            }
             "--help" | "-h" => {
                 println!("spel-client-gen - Generate typed Rust client and C FFI from SPEL IDL");
                 println!();
@@ -57,6 +62,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("  --module-name <name>   Override class/file name for logos-module target");
                 println!("  --ffi-lib-path <path>  Path to compiled FFI .so, relative to --out-dir");
                 println!("                         (logos-module only). Wires up CMakeLists.txt automatically.");
+                println!("  --skip-ui              Skip qml/Main.qml — preserves hand-written QML while still");
+                println!("                         regenerating the C++ backend, plugin, and build files.");
                 return Ok(());
             }
             other => return Err(format!("unknown argument: {other}").into()),
@@ -106,6 +113,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
             println!("Generated (--target logos-module):");
             for (rel, content) in files {
+                if skip_ui && *rel == "qml/Main.qml" {
+                    println!("  (skipped) qml/Main.qml  [--skip-ui]");
+                    continue;
+                }
                 let path = out_dir.join(rel);
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent)?;
