@@ -502,7 +502,9 @@ fn gen_backend_h(
     o.push_str("    Q_INVOKABLE void listAccounts();\n");
     o.push_str("    Q_INVOKABLE void createAccount(const QString& label);\n");
     o.push_str("    Q_INVOKABLE void inspectAccount(const QString& accountId);\n");
-    o.push_str("    Q_INVOKABLE void decodeAccount(const QString& accountId);\n\n");
+    o.push_str("    Q_INVOKABLE void decodeAccount(const QString& accountId);\n");
+    o.push_str("    Q_INVOKABLE QStringList fieldHistory(const QString& key) const;\n");
+    o.push_str("    Q_INVOKABLE void        saveHistory(const QString& key, const QString& value);\n\n");
     o.push_str("signals:\n");
     for f in fetches {
         let p = camel_case(&f.acc_name);
@@ -589,6 +591,7 @@ fn gen_backend_cpp(
     o.push_str("#include <QMetaObject>\n");
     o.push_str("#include <QSettings>\n");
     o.push_str("#include <QThreadPool>\n");
+    o.push_str("#include <QTimer>\n");
     o.push_str("#include <QtConcurrent/QtConcurrent>\n\n");
 
     // extern "C" declarations
@@ -631,6 +634,9 @@ fn gen_backend_cpp(
     o.push_str(&format!("            {prog}_free_string(raw);\n"));
     o.push_str("        }\n");
     o.push_str("    }\n");
+    o.push_str("    // Pre-populate account list so field pickers have data before wallet page is visited.\n");
+    o.push_str("    if (!m_walletPath.isEmpty())\n");
+    o.push_str("        QTimer::singleShot(0, this, [this] { listAccounts(); });\n");
     o.push_str("}\n\n");
     o.push_str(&format!("{backend}::~{backend}() = default;\n\n"));
 
@@ -646,6 +652,9 @@ fn gen_backend_cpp(
         o.push_str(&format!("    {field} = v;\n"));
         o.push_str(&format!("    QSettings(\"logos-co\", \"{effective_prog}\").setValue(\"{key}\", v);\n"));
         o.push_str(&format!("    emit {signal}();\n"));
+        if method == "setWalletPath" {
+            o.push_str("    if (!v.isEmpty()) listAccounts();\n");
+        }
         o.push_str("}\n\n");
     }
 
@@ -908,6 +917,22 @@ fn gen_backend_cpp(
     o.push_str("            emit walletDecodedAccountChanged();\n");
     o.push_str("        }, Qt::QueuedConnection);\n");
     o.push_str("    });\n}\n\n");
+
+    // ── Field history ─────────────────────────────────────────────────────────
+    o.push_str("// ── Field history ────────────────────────────────────────────────────────\n\n");
+    o.push_str(&format!("QStringList {backend}::fieldHistory(const QString& key) const {{\n"));
+    o.push_str(&format!("    return QSettings(\"logos-co\", \"{effective_prog}\")\n"));
+    o.push_str("               .value(\"history/\" + key, QStringList{}).toStringList();\n");
+    o.push_str("}\n\n");
+    o.push_str(&format!("void {backend}::saveHistory(const QString& key, const QString& value) {{\n"));
+    o.push_str("    if (value.trimmed().isEmpty()) return;\n");
+    o.push_str(&format!("    QSettings s(\"logos-co\", \"{effective_prog}\");\n"));
+    o.push_str("    QStringList h = s.value(\"history/\" + key, QStringList{}).toStringList();\n");
+    o.push_str("    h.removeAll(value);\n");
+    o.push_str("    h.prepend(value);\n");
+    o.push_str("    if (h.size() > 10) h.resize(10);\n");
+    o.push_str("    s.setValue(\"history/\" + key, h);\n");
+    o.push_str("}\n\n");
 
     o
 }
@@ -1265,42 +1290,6 @@ fn qml_option_label_row(o: &mut String, field_id: &str, label: &str, ind: &str) 
     o.push_str(&format!("{ind}            }}\n"));
 }
 
-/// TextField with type-appropriate placeholder, optional IntValidator / inputMethodHints,
-/// and optional enable-gating (for Option fields).
-fn qml_textfield_typed(
-    o: &mut String, id: &str, ty: &IdlType, is_opt: bool, ind: &str,
-) {
-    let placeholder = type_placeholder(ty);
-    let val = validator_str(ty);
-    let hints = input_hints_str(ty);
-    o.push_str(&format!("{ind}            TextField {{\n"));
-    o.push_str(&format!("{ind}                id: {id}\n"));
-    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
-    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
-    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
-    if !placeholder.is_empty() {
-        o.push_str(&format!("{ind}                placeholderText: \"{placeholder}\"\n"));
-    }
-    if is_opt {
-        o.push_str(&format!("{ind}                enabled: {id}_enabled.checked\n"));
-        o.push_str(&format!("{ind}                opacity: enabled ? 1.0 : 0.4\n"));
-    }
-    if let Some(v) = val {
-        o.push_str(&format!("{ind}                validator: {v}\n"));
-    }
-    if let Some(h) = hints {
-        o.push_str(&format!("{ind}                inputMethodHints: {h}\n"));
-    }
-    o.push_str(&format!("{ind}                color: root.colText\n"));
-    o.push_str(&format!("{ind}                placeholderTextColor: root.colMuted\n"));
-    o.push_str(&format!("{ind}                background: Rectangle {{\n"));
-    o.push_str(&format!("{ind}                    color: root.colSurface\n"));
-    o.push_str(&format!("{ind}                    border.color: root.colBorder\n"));
-    o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
-    o.push_str(&format!("{ind}                }}\n"));
-    o.push_str(&format!("{ind}            }}\n\n"));
-}
-
 /// ComboBox populated from known enum variants; optional enable-gating.
 fn qml_combobox(
     o: &mut String, id: &str, variants: &[&str], is_opt: bool, ind: &str,
@@ -1336,6 +1325,194 @@ fn qml_textfield_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
     o.push_str(&format!("{ind}                    radius: root.radius / 2\n"));
     o.push_str(&format!("{ind}                }}\n"));
     o.push_str(&format!("{ind}            }}\n\n"));
+}
+
+/// Account field: TextField + "▾" button that opens a two-section popup
+/// (WALLET accounts from backend + RECENT history per field key).
+fn qml_account_picker(o: &mut String, id: &str, hist_key: &str, ind: &str) {
+    let popup = format!("{id}Popup");
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
+    o.push_str(&format!("{ind}                spacing: 4\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
+    o.push_str(&format!("{ind}                TextField {{\n"));
+    o.push_str(&format!("{ind}                    id: {id}\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                    placeholderText: \"base58 or 0x… hex\"\n"));
+    o.push_str(&format!("{ind}                    color: root.colText\n"));
+    o.push_str(&format!("{ind}                    placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: root.colSurface\n"));
+    o.push_str(&format!("{ind}                        border.color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                        radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    onEditingFinished: if (text.trim() !== \"\") backend.saveHistory(\"{hist_key}\", text.trim())\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    // Drop-down button
+    o.push_str(&format!("{ind}                Button {{\n"));
+    o.push_str(&format!("{ind}                    id: {id}Btn\n"));
+    o.push_str(&format!("{ind}                    implicitWidth: 28\n"));
+    o.push_str(&format!("{ind}                    implicitHeight: {id}.implicitHeight\n"));
+    o.push_str(&format!("{ind}                    text: \"\\u25be\"\n")); // ▾
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colSurface; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Text {{ text: parent.text; color: root.colMuted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }}\n"));
+    o.push_str(&format!("{ind}                    onClicked: {popup}.open()\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    // Popup
+    o.push_str(&format!("{ind}                Popup {{\n"));
+    o.push_str(&format!("{ind}                    id: {popup}\n"));
+    o.push_str(&format!("{ind}                    y: parent.height\n"));
+    o.push_str(&format!("{ind}                    x: 0\n"));
+    o.push_str(&format!("{ind}                    width: parent.width\n"));
+    o.push_str(&format!("{ind}                    padding: 4\n"));
+    o.push_str(&format!("{ind}                    property var recentHistory: []\n"));
+    o.push_str(&format!("{ind}                    onAboutToShow: recentHistory = backend.fieldHistory(\"{hist_key}\")\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colPanel; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Column {{\n"));
+    o.push_str(&format!("{ind}                        width: parent.width\n"));
+    o.push_str(&format!("{ind}                        spacing: 0\n"));
+    // WALLET section header
+    o.push_str(&format!("{ind}                        Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"WALLET\"\n"));
+    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length > 0\n"));
+    o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
+    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    // WALLET items
+    o.push_str(&format!("{ind}                        Repeater {{\n"));
+    o.push_str(&format!("{ind}                            model: backend.walletAccounts\n"));
+    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width\n"));
+    o.push_str(&format!("{ind}                                contentItem: Text {{\n"));
+    o.push_str(&format!("{ind}                                    text: (modelData.label ? modelData.label + \"  \" : \"\") + modelData.id\n"));
+    o.push_str(&format!("{ind}                                    color: root.colText; elide: Text.ElideMiddle\n"));
+    o.push_str(&format!("{ind}                                    verticalAlignment: Text.AlignVCenter; leftPadding: 8\n"));
+    o.push_str(&format!("{ind}                                }}\n"));
+    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
+    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData.id; backend.saveHistory(\"{hist_key}\", modelData.id); {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    // Separator
+    o.push_str(&format!("{ind}                        Rectangle {{\n"));
+    o.push_str(&format!("{ind}                            width: parent.width; height: 1; color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length > 0 && {popup}.recentHistory.length > 0\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    // RECENT section header
+    o.push_str(&format!("{ind}                        Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"RECENT\"\n"));
+    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0\n"));
+    o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
+    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    // RECENT items
+    o.push_str(&format!("{ind}                        Repeater {{\n"));
+    o.push_str(&format!("{ind}                            model: {popup}.recentHistory\n"));
+    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width\n"));
+    o.push_str(&format!("{ind}                                contentItem: Text {{ text: modelData; color: root.colText; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }}\n"));
+    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
+    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    // Empty state
+    o.push_str(&format!("{ind}                        Item {{\n"));
+    o.push_str(&format!("{ind}                            visible: backend.walletAccounts.length === 0 && {popup}.recentHistory.length === 0\n"));
+    o.push_str(&format!("{ind}                            height: 36; width: parent.width\n"));
+    o.push_str(&format!("{ind}                            Text {{ anchors.centerIn: parent; text: \"No accounts or history yet.\"; color: root.colMuted; font.pixelSize: 11 }}\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // Column
+    o.push_str(&format!("{ind}                }}\n")); // Popup
+    o.push_str(&format!("{ind}            }}\n\n")); // RowLayout
+}
+
+/// Text field with a "▾" button that opens a RECENT-only history popup.
+/// Used for non-account arg fields (amounts, strings, etc.).
+fn qml_textfield_with_history(
+    o: &mut String, id: &str, ty: &IdlType, hist_key: &str, is_opt: bool, ind: &str,
+) {
+    let placeholder = type_placeholder(ty);
+    let val = validator_str(ty);
+    let hints = input_hints_str(ty);
+    let popup = format!("{id}Popup");
+    o.push_str(&format!("{ind}            RowLayout {{\n"));
+    o.push_str(&format!("{ind}                spacing: 4\n"));
+    o.push_str(&format!("{ind}                Layout.fillWidth: true\n"));
+    o.push_str(&format!("{ind}                Layout.leftMargin: 24\n"));
+    o.push_str(&format!("{ind}                Layout.rightMargin: 24\n"));
+    if is_opt {
+        o.push_str(&format!("{ind}                enabled: {id}_enabled.checked\n"));
+        o.push_str(&format!("{ind}                opacity: enabled ? 1.0 : 0.4\n"));
+    }
+    o.push_str(&format!("{ind}                TextField {{\n"));
+    o.push_str(&format!("{ind}                    id: {id}\n"));
+    o.push_str(&format!("{ind}                    Layout.fillWidth: true\n"));
+    if !placeholder.is_empty() {
+        o.push_str(&format!("{ind}                    placeholderText: \"{placeholder}\"\n"));
+    }
+    if let Some(v) = val {
+        o.push_str(&format!("{ind}                    validator: {v}\n"));
+    }
+    if let Some(h) = hints {
+        o.push_str(&format!("{ind}                    inputMethodHints: {h}\n"));
+    }
+    o.push_str(&format!("{ind}                    color: root.colText\n"));
+    o.push_str(&format!("{ind}                    placeholderTextColor: root.colMuted\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{\n"));
+    o.push_str(&format!("{ind}                        color: root.colSurface\n"));
+    o.push_str(&format!("{ind}                        border.color: root.colBorder\n"));
+    o.push_str(&format!("{ind}                        radius: root.radius / 2\n"));
+    o.push_str(&format!("{ind}                    }}\n"));
+    o.push_str(&format!("{ind}                    onEditingFinished: if (text.trim() !== \"\") backend.saveHistory(\"{hist_key}\", text.trim())\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    // Drop-down button
+    o.push_str(&format!("{ind}                Button {{\n"));
+    o.push_str(&format!("{ind}                    implicitWidth: 28\n"));
+    o.push_str(&format!("{ind}                    implicitHeight: {id}.implicitHeight\n"));
+    o.push_str(&format!("{ind}                    text: \"\\u25be\"\n")); // ▾
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colSurface; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Text {{ text: parent.text; color: root.colMuted; horizontalAlignment: Text.AlignHCenter; verticalAlignment: Text.AlignVCenter }}\n"));
+    o.push_str(&format!("{ind}                    onClicked: {popup}.open()\n"));
+    o.push_str(&format!("{ind}                }}\n"));
+    // Popup
+    o.push_str(&format!("{ind}                Popup {{\n"));
+    o.push_str(&format!("{ind}                    id: {popup}\n"));
+    o.push_str(&format!("{ind}                    y: parent.height\n"));
+    o.push_str(&format!("{ind}                    x: 0\n"));
+    o.push_str(&format!("{ind}                    width: parent.width\n"));
+    o.push_str(&format!("{ind}                    padding: 4\n"));
+    o.push_str(&format!("{ind}                    property var recentHistory: []\n"));
+    o.push_str(&format!("{ind}                    onAboutToShow: recentHistory = backend.fieldHistory(\"{hist_key}\")\n"));
+    o.push_str(&format!("{ind}                    background: Rectangle {{ color: root.colPanel; border.color: root.colBorder; radius: root.radius / 2 }}\n"));
+    o.push_str(&format!("{ind}                    contentItem: Column {{\n"));
+    o.push_str(&format!("{ind}                        width: parent.width\n"));
+    o.push_str(&format!("{ind}                        spacing: 0\n"));
+    o.push_str(&format!("{ind}                        Text {{\n"));
+    o.push_str(&format!("{ind}                            text: \"RECENT\"\n"));
+    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length > 0\n"));
+    o.push_str(&format!("{ind}                            color: root.colMuted; font.pixelSize: 10; font.bold: true\n"));
+    o.push_str(&format!("{ind}                            leftPadding: 8; topPadding: 4; bottomPadding: 2\n"));
+    o.push_str(&format!("{ind}                            width: parent.width\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                        Repeater {{\n"));
+    o.push_str(&format!("{ind}                            model: {popup}.recentHistory\n"));
+    o.push_str(&format!("{ind}                            delegate: ItemDelegate {{\n"));
+    o.push_str(&format!("{ind}                                width: parent.width\n"));
+    o.push_str(&format!("{ind}                                contentItem: Text {{ text: modelData; color: root.colText; elide: Text.ElideMiddle; verticalAlignment: Text.AlignVCenter; leftPadding: 8 }}\n"));
+    o.push_str(&format!("{ind}                                background: Rectangle {{ color: parent.hovered ? root.colSurface : \"transparent\" }}\n"));
+    o.push_str(&format!("{ind}                                onClicked: {{ {id}.text = modelData; {popup}.close() }}\n"));
+    o.push_str(&format!("{ind}                            }}\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                        Item {{\n"));
+    o.push_str(&format!("{ind}                            visible: {popup}.recentHistory.length === 0\n"));
+    o.push_str(&format!("{ind}                            height: 36; width: parent.width\n"));
+    o.push_str(&format!("{ind}                            Text {{ anchors.centerIn: parent; text: \"No recent values.\"; color: root.colMuted; font.pixelSize: 11 }}\n"));
+    o.push_str(&format!("{ind}                        }}\n"));
+    o.push_str(&format!("{ind}                    }}\n")); // Column
+    o.push_str(&format!("{ind}                }}\n")); // Popup
+    o.push_str(&format!("{ind}            }}\n\n")); // RowLayout
 }
 
 fn qml_textarea_page(o: &mut String, id: &str, placeholder: &str, ind: &str) {
@@ -1417,20 +1594,20 @@ fn qml_instruction_page(o: &mut String, ix: &IdlInstruction, idl: &SpelIdl) {
                 qml_option_label_row(o, &field_id, &p.qt_name, ind);
                 qml_combobox(o, &field_id, vs, true, ind);
             }
-            // ── Account signer: label + plain TextField ──────────────────────────
+            // ── Account signer: label + picker (WALLET accounts + RECENT history) ─
             (ParamKind::Account, None) => {
                 qml_field_label(o, &p.qt_name, ind);
-                qml_textfield_page(o, &field_id, "base58 or 0x… hex", ind);
+                qml_account_picker(o, &field_id, &field_id, ind);
             }
-            // ── Option<T>: checkbox label + disabled typed TextField ─────────────
+            // ── Option<T>: checkbox label + disabled field with history ───────────
             (ParamKind::Arg(_), None) if is_opt => {
                 qml_option_label_row(o, &field_id, &p.qt_name, ind);
-                qml_textfield_typed(o, &field_id, core_ty.unwrap(), true, ind);
+                qml_textfield_with_history(o, &field_id, core_ty.unwrap(), &field_id, true, ind);
             }
-            // ── Regular T: label + typed TextField ──────────────────────────────
+            // ── Regular T: label + field with history ────────────────────────────
             (ParamKind::Arg(ty), None) => {
                 qml_field_label(o, &p.qt_name, ind);
-                qml_textfield_typed(o, &field_id, ty, false, ind);
+                qml_textfield_with_history(o, &field_id, ty, &field_id, false, ind);
             }
         }
     }
