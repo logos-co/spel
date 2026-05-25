@@ -127,6 +127,44 @@ pub fn account_type(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Marks an instruction as requiring admin authority.
+///
+/// Place this on any `#[instruction]` function that should only be callable
+/// by the admin authority. The macro injects a runtime check that verifies
+/// the signer matches the admin key stored in the config PDA.
+///
+/// ## Usage
+///
+/// ```rust,ignore
+/// #[lez_program]
+/// mod my_program {
+///     #[instruction]
+///     #[require_admin(config)]
+///     pub fn set_value(
+///         #[account(mut, pda = literal("config"))]
+///         config: AccountWithMetadata,
+///         #[account(signer)]
+///         admin: AccountWithMetadata,
+///         value: u64,
+///     ) -> SpelResult {
+///         // admin check is injected automatically before this body runs
+///         // ...
+///     }
+/// }
+/// ```
+///
+/// The `config` argument names the account parameter that holds the
+/// `AdminConfig` state. The macro reads `AdminConfig` from that account
+/// and calls `assert_admin()` with the signer before the handler body runs.
+///
+/// This attribute is processed by `#[lez_program]`, not standalone.
+#[proc_macro_attribute]
+pub fn require_admin(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Marker only — actual injection is handled by #[lez_program] expansion
+    // which detects this attribute and wraps the handler body with the admin check.
+    item
+}
+
 /// Generate IDL from a program source file.
 ///
 /// Parses the given Rust source file, finds the `#[lez_program]` module,
@@ -158,6 +196,9 @@ struct InstructionInfo {
     /// True if this instruction has a ProgramContext parameter.
     /// The context is injected by the dispatcher and never appears in IDL/ABI.
     has_context: bool,
+    /// If Some(config_account_name), this instruction is gated by admin authority.
+    /// The named account must contain an AdminConfig with an AdminState.
+    require_admin: Option<String>,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
 }
@@ -527,11 +568,29 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         }
     }
 
+    // Check for #[require_admin(config_account)] attribute
+    let require_admin = func.attrs.iter().find_map(|attr| {
+        if attr.path().is_ident("require_admin") {
+            // Parse the account name from #[require_admin(config)]
+            let mut account_name = String::from("config"); // default
+            let _ = attr.parse_nested_meta(|meta| {
+                account_name = meta.path.get_ident()
+                    .map(|i| i.to_string())
+                    .unwrap_or_else(|| "config".to_string());
+                Ok(())
+            });
+            Some(account_name)
+        } else {
+            None
+        }
+    });
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
         args,
         has_context,
+        require_admin,
         func,
     })
 }
@@ -1139,11 +1198,45 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
+            func.attrs.retain(|a| !a.path().is_ident("require_admin"));
             for input in &mut func.sig.inputs {
                 if let FnArg::Typed(pat_type) = input {
                     pat_type.attrs.retain(|a| !a.path().is_ident("account"));
                 }
             }
+
+            // Inject admin authority check if #[require_admin] is present
+            if let Some(config_name) = &ix.require_admin {
+                let config_ident = format_ident!("{}", config_name);
+                // Find the signer account (first account with signer constraint)
+                let signer_name = ix.accounts.iter()
+                    .find(|a| a.constraints.signer)
+                    .map(|a| a.name.clone());
+
+                if let Some(signer_ident) = signer_name {
+                    // Prepend admin check to function body
+                    let original_block = func.block.clone();
+                    func.block = syn::parse_quote! {
+                        {
+                            // Injected by #[require_admin]: verify admin authority
+                            {
+                                let __admin_data = &#config_ident.account.data;
+                                let __admin_state = spel_admin_authority::AdminConfig::try_from_slice(__admin_data)
+                                    .map_err(|_| spel_framework::error::SpelError::Unauthorized {
+                                        message: "Failed to deserialize AdminConfig from config account".to_string(),
+                                    })?;
+                                let __signer_key = *#signer_ident.account_id.value();
+                                __admin_state.admin_state.assert_admin(&__signer_key)
+                                    .map_err(|e| spel_framework::error::SpelError::Unauthorized {
+                                        message: e.to_string(),
+                                    })?;
+                            }
+                            #original_block
+                        }
+                    };
+                }
+            }
+
             // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
             let mut transformer = ExecuteTransformer {
                 accounts: &ix.accounts,
