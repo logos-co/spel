@@ -20,7 +20,8 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)");
     println!();
     println!("COMMANDS:");
-    println!("  inspect <FILE> [FILE...]   Print ProgramId for ELF binary(ies)");
+    println!("  program-id <FILE> [FILE...]  Extract ProgramId from ELF binary(ies)");
+    println!("  inspect <ACCOUNT-ID> --type <TYPE>  Decode account data");
     println!("  generate-idl [PATH]        Generate IDL JSON (auto-detects methods/guest/src/bin/ if no path given)");
     println!("  idl                        Print IDL information");
 
