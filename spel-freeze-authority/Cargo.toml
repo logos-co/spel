@@ -1,0 +1,12 @@
+[package]
+name = "spel-freeze-authority"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Freeze authority library for SPEL/LEZ programs (RFP-002)"
+
+[dependencies]
+borsh = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+spel-admin-authority = { path = "../spel-admin-authority" }

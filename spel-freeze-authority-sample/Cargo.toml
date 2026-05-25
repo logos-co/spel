@@ -1,0 +1,14 @@
+[package]
+name = "spel-freeze-authority-sample"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Sample program demonstrating spel-freeze-authority usage (RFP-002)"
+
+[dependencies]
+borsh = { version = "1", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0-rc3" }
+spel-framework = { path = "../spel-framework" }
+spel-admin-authority = { path = "../spel-admin-authority" }
+spel-freeze-authority = { path = "../spel-freeze-authority" }

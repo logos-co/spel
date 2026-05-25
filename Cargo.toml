@@ -1,5 +1,9 @@
 [workspace]
 members = [
+    "spel-admin-authority",
+    "spel-admin-authority-sample",
+    "spel-freeze-authority",
+    "spel-freeze-authority-sample",
     "spel-framework",
     "spel-framework-core",
     "spel-framework-macros",
