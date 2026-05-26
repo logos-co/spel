@@ -1,7 +1,7 @@
 //! risc0-compatible serialization for IDL instruction data.
 
-use spel_framework_core::idl::IdlType;
 use crate::parse::ParsedValue;
+use spel_framework_core::idl::IdlType;
 
 #[derive(Debug)]
 pub enum SerializeError {
@@ -14,7 +14,7 @@ impl std::fmt::Display for SerializeError {
         match self {
             SerializeError::TypeMismatch { expected, got } => {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
-            }
+            },
             SerializeError::Risc0(msg) => write!(f, "risc0 serialization error: {}", msg),
         }
     }
@@ -51,7 +51,7 @@ impl serde::Serialize for DynamicValue {
                     tup.serialize_element(elem)?;
                 }
                 tup.end()
-            }
+            },
             DynamicValue::Seq(elems) => {
                 use serde::ser::SerializeSeq;
                 let mut seq = serializer.serialize_seq(Some(elems.len()))?;
@@ -59,7 +59,7 @@ impl serde::Serialize for DynamicValue {
                     seq.serialize_element(elem)?;
                 }
                 seq.end()
-            }
+            },
             DynamicValue::None => serializer.serialize_none(),
             DynamicValue::Some(inner) => serializer.serialize_some(inner.as_ref()),
         }
@@ -69,41 +69,44 @@ impl serde::Serialize for DynamicValue {
 fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, SerializeError> {
     match (ty, val) {
         (IdlType::Primitive(p), _) => primitive_to_dynamic(p.as_str(), val),
-        (IdlType::Array { .. }, ParsedValue::ByteArray(bytes)) => {
-            Ok(DynamicValue::Tuple(bytes.iter().map(|b| DynamicValue::U8(*b)).collect()))
-        }
-        (IdlType::Array { .. }, ParsedValue::U32Array(vals)) => {
-            Ok(DynamicValue::Tuple(vals.iter().map(|v| DynamicValue::U32(*v)).collect()))
-        }
-        (IdlType::Vec { vec: _ }, ParsedValue::ByteArray(bytes)) => {
-            Ok(DynamicValue::Seq(bytes.iter().map(|b| DynamicValue::U8(*b)).collect()))
-        }
-        (IdlType::Vec { vec: _ }, ParsedValue::U32Array(vals)) => {
-            Ok(DynamicValue::Seq(vals.iter().map(|v| DynamicValue::U32(*v)).collect()))
-        }
+        (IdlType::Array { .. }, ParsedValue::ByteArray(bytes)) => Ok(DynamicValue::Tuple(
+            bytes.iter().map(|b| DynamicValue::U8(*b)).collect(),
+        )),
+        (IdlType::Array { .. }, ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
+            vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
+        )),
+        (IdlType::Vec { vec: _ }, ParsedValue::ByteArray(bytes)) => Ok(DynamicValue::Seq(
+            bytes.iter().map(|b| DynamicValue::U8(*b)).collect(),
+        )),
+        (IdlType::Vec { vec: _ }, ParsedValue::U32Array(vals)) => Ok(DynamicValue::Seq(
+            vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
+        )),
         (IdlType::Vec { vec: elem_ty }, ParsedValue::ByteArrayVec(vecs)) => {
             let elements: Result<Vec<_>, _> = vecs
                 .iter()
                 .map(|v| to_dynamic_value(elem_ty, &ParsedValue::ByteArray(v.clone())))
                 .collect();
             Ok(DynamicValue::Seq(elements?))
-        }
-        (IdlType::Vec { vec }, ParsedValue::Raw(s)) if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "u32") => {
+        },
+        (IdlType::Vec { vec }, ParsedValue::Raw(s)) if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "u32") =>
+        {
             // Fallback: parse CSV of u32 values (e.g. "0,200,0,0,0")
             let vals: Vec<u32> = s
                 .split(',')
                 .filter_map(|x| x.trim().parse::<u32>().ok())
                 .collect();
-            Ok(DynamicValue::Seq(vals.iter().map(|v| DynamicValue::U32(*v)).collect()))
-        }
+            Ok(DynamicValue::Seq(
+                vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
+            ))
+        },
         (IdlType::Option { option: _ }, ParsedValue::None) => Ok(DynamicValue::None),
-        (IdlType::Option { option }, ParsedValue::Some(inner)) => {
-            Ok(DynamicValue::Some(Box::new(to_dynamic_value(option, inner)?)))
-        }
+        (IdlType::Option { option }, ParsedValue::Some(inner)) => Ok(DynamicValue::Some(Box::new(
+            to_dynamic_value(option, inner)?,
+        ))),
         (IdlType::Option { option }, _) => {
             // Non-None, non-Some value with Option type -> wrap as Some
             Ok(DynamicValue::Some(Box::new(to_dynamic_value(option, val)?)))
-        }
+        },
         _ => Err(SerializeError::TypeMismatch {
             expected: format!("{:?}", ty),
             got: format!("{:?}", val),
@@ -119,9 +122,9 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         ("u64", ParsedValue::U64(v)) => Ok(DynamicValue::U64(*v)),
         ("u128", ParsedValue::U128(v)) => Ok(DynamicValue::U128(*v)),
         ("string" | "String", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
-        ("program_id", ParsedValue::U32Array(vals)) => {
-            Ok(DynamicValue::Tuple(vals.iter().map(|v| DynamicValue::U32(*v)).collect()))
-        }
+        ("program_id", ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
+            vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
+        )),
         _ => Err(SerializeError::TypeMismatch {
             expected: prim.to_string(),
             got: format!("{:?}", val),
@@ -137,12 +140,8 @@ struct InstructionData<'a> {
 impl serde::Serialize for InstructionData<'_> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeTupleVariant;
-        let mut tv = serializer.serialize_tuple_variant(
-            "",
-            self.variant_index,
-            "",
-            self.fields.len(),
-        )?;
+        let mut tv =
+            serializer.serialize_tuple_variant("", self.variant_index, "", self.fields.len())?;
         for field in self.fields {
             tv.serialize_field(field)?;
         }
@@ -174,10 +173,10 @@ pub fn serialize_to_risc0(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spel_framework_core::idl::IdlType;
     use crate::parse::parse_value;
     use risc0_zkvm::serde::Deserializer;
     use serde::Deserialize;
+    use spel_framework_core::idl::IdlType;
 
     #[test]
     fn serialize_bytes32_one_word_per_byte() {
@@ -190,7 +189,8 @@ mod tests {
         let parsed = parse_value(
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             &idl_type,
-        ).unwrap();
+        )
+        .unwrap();
 
         let words = serialize_to_risc0(0, &[(&idl_type, &parsed)]).unwrap();
 
@@ -206,7 +206,9 @@ mod tests {
     fn serialize_vec_u8_one_word_per_byte() {
         // Vec<u8> in risc0 serde: length prefix + one u32 word per byte.
         let elem_type = IdlType::Primitive("u8".to_string());
-        let idl_type = IdlType::Vec { vec: Box::new(elem_type) };
+        let idl_type = IdlType::Vec {
+            vec: Box::new(elem_type),
+        };
 
         let bytes = ParsedValue::ByteArray(vec![0x3b, 0x50, 0x9c, 0x40]);
 
@@ -226,7 +228,9 @@ mod tests {
         let inner = IdlType::Array {
             array: (Box::new(IdlType::Primitive("u8".to_string())), 4),
         };
-        let idl_type = IdlType::Vec { vec: Box::new(inner) };
+        let idl_type = IdlType::Vec {
+            vec: Box::new(inner),
+        };
 
         let bytes = ParsedValue::ByteArrayVec(vec![
             vec![0x3b, 0x50, 0x9c, 0x40],
@@ -247,27 +251,37 @@ mod tests {
     #[test]
     fn risc0_reference_bytes32_format() {
         let seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
 
         #[derive(serde::Serialize)]
         enum TestInstruction {
-            CommitRun { seed: [u8; 32], class: u8, strength: u32 },
+            CommitRun {
+                seed: [u8; 32],
+                class: u8,
+                strength: u32,
+            },
         }
 
-        let reference = risc0_zkvm::serde::to_vec(
-            &TestInstruction::CommitRun { seed, class: 2, strength: 42 }
-        ).unwrap();
+        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::CommitRun {
+            seed,
+            class: 2,
+            strength: 42,
+        })
+        .unwrap();
 
         // Each u8 is its own u32 word (not packed)
         // word[0] = variant index (0)
         // word[1..33] = 32 u8 values, each as u32
         // word[33] = class (2)
         // word[34] = strength (42)
-        assert_eq!(reference.len(), 35, "expected 35 words: 1 variant + 32 seed + 1 class + 1 strength");
+        assert_eq!(
+            reference.len(),
+            35,
+            "expected 35 words: 1 variant + 32 seed + 1 class + 1 strength"
+        );
         assert_eq!(reference[0], 0, "variant index");
         assert_eq!(reference[1], 0x01, "seed[0]");
         assert_eq!(reference[2], 0x02, "seed[1]");
@@ -304,11 +318,15 @@ mod tests {
         let parsed_strength = parse_value("42", &strength_type).unwrap();
 
         // 3. Serialize to u32 words (variant_index=0 for CommitRun)
-        let words = serialize_to_risc0(0, &[
-            (&seed_type, &parsed_seed),
-            (&class_type, &parsed_class),
-            (&strength_type, &parsed_strength),
-        ]).unwrap();
+        let words = serialize_to_risc0(
+            0,
+            &[
+                (&seed_type, &parsed_seed),
+                (&class_type, &parsed_class),
+                (&strength_type, &parsed_strength),
+            ],
+        )
+        .unwrap();
 
         // 4. Deserialize using risc0's Deserializer — the SAME code the guest runs
         let instruction: TestInstruction =
@@ -317,10 +335,9 @@ mod tests {
 
         // 5. Assert values survived the roundtrip
         let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
         assert_eq!(
             instruction,
@@ -415,29 +432,37 @@ mod tests {
         let parsed_seed = parse_value(
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             &seed_type,
-        ).unwrap();
+        )
+        .unwrap();
         let parsed_class = parse_value("2", &class_type).unwrap();
         let parsed_strength = parse_value("42", &strength_type).unwrap();
 
-        let words = serialize_to_risc0(0, &[
-            (&seed_type, &parsed_seed),
-            (&class_type, &parsed_class),
-            (&strength_type, &parsed_strength),
-        ]).unwrap();
+        let words = serialize_to_risc0(
+            0,
+            &[
+                (&seed_type, &parsed_seed),
+                (&class_type, &parsed_class),
+                (&strength_type, &parsed_strength),
+            ],
+        )
+        .unwrap();
 
         let instruction: TestInstruction =
             TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
                 .expect("guest-side deserialization must succeed");
 
         let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-            0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10,
-            0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-            0x19, 0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0x20,
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
+            0x1d, 0x1e, 0x1f, 0x20,
         ];
         assert_eq!(
             instruction,
-            TestInstruction::CommitRun { seed: expected_seed, class: 2, strength: 42 }
+            TestInstruction::CommitRun {
+                seed: expected_seed,
+                class: 2,
+                strength: 42
+            }
         );
     }
 
@@ -469,8 +494,7 @@ mod tests {
             ParsedValue::U128(0x0102030405060708090a0b0c0d0e0f10),
         ];
 
-        let args: Vec<(&IdlType, &ParsedValue)> =
-            types.iter().zip(vals.iter()).collect();
+        let args: Vec<(&IdlType, &ParsedValue)> = types.iter().zip(vals.iter()).collect();
         let words = serialize_to_risc0(0, &args).unwrap();
 
         let instruction: TestInstruction =
@@ -503,10 +527,8 @@ mod tests {
         let some_val = ParsedValue::Some(Box::new(ParsedValue::U32(42)));
         let none_val = ParsedValue::None;
 
-        let words = serialize_to_risc0(0, &[
-            (&opt_type, &some_val),
-            (&opt_type, &none_val),
-        ]).unwrap();
+        let words =
+            serialize_to_risc0(0, &[(&opt_type, &some_val), (&opt_type, &none_val)]).unwrap();
 
         let instruction: TestInstruction =
             TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
@@ -514,7 +536,10 @@ mod tests {
 
         assert_eq!(
             instruction,
-            TestInstruction::Opts { a: Some(42), b: None }
+            TestInstruction::Opts {
+                a: Some(42),
+                b: None
+            }
         );
     }
 
@@ -535,10 +560,8 @@ mod tests {
         let val_u8 = ParsedValue::ByteArray(vec![0x3b, 0x50]);
         let val_u32 = ParsedValue::U32Array(vec![100, 200]);
 
-        let words = serialize_to_risc0(0, &[
-            (&vec_u8_type, &val_u8),
-            (&vec_u32_type, &val_u32),
-        ]).unwrap();
+        let words =
+            serialize_to_risc0(0, &[(&vec_u8_type, &val_u8), (&vec_u32_type, &val_u32)]).unwrap();
 
         let instruction: TestInstruction =
             TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
@@ -546,7 +569,10 @@ mod tests {
 
         assert_eq!(
             instruction,
-            TestInstruction::Vecs { a: vec![0x3b, 0x50], b: vec![100, 200] }
+            TestInstruction::Vecs {
+                a: vec![0x3b, 0x50],
+                b: vec![100, 200]
+            }
         );
     }
 
@@ -560,7 +586,9 @@ mod tests {
         let inner_type = IdlType::Array {
             array: (Box::new(IdlType::Primitive("u8".into())), 4),
         };
-        let vec_type = IdlType::Vec { vec: Box::new(inner_type) };
+        let vec_type = IdlType::Vec {
+            vec: Box::new(inner_type),
+        };
 
         let val = ParsedValue::ByteArrayVec(vec![
             vec![0x01, 0x02, 0x03, 0x04],

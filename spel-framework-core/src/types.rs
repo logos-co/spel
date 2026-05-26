@@ -3,7 +3,10 @@
 //! These are thin wrappers/adapters that bridge framework ergonomics
 //! with real SPEL core types.
 
-use nssa_core::program::{AccountPostState, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow, ValidityWindow};
+use nssa_core::program::{
+    AccountPostState, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow,
+    ValidityWindow,
+};
 
 /// Trait for types that can be converted into an [`AccountPostState`].
 ///
@@ -52,7 +55,9 @@ impl SpelOutput {
     ///
     /// Returns `Err(InvalidWindow)` if `window` is an empty range (e.g. `5..5` or `10..5`).
     /// For the infallible variant, see [`with_block_validity_window`](Self::with_block_validity_window).
-    pub fn try_with_block_validity_window<W: TryInto<BlockValidityWindow, Error = InvalidWindow>>(
+    pub fn try_with_block_validity_window<
+        W: TryInto<BlockValidityWindow, Error = InvalidWindow>,
+    >(
         mut self,
         window: W,
     ) -> Result<Self, InvalidWindow> {

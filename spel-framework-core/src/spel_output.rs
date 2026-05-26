@@ -5,8 +5,8 @@
 //! `(Account, AutoClaim)` pairs into the correct `AccountPostState` values.
 
 use nssa_core::account::Account;
-use nssa_core::{NullifierPublicKey};
 use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
+use nssa_core::NullifierPublicKey;
 
 use crate::types::{IntoPostState, SpelOutput};
 
@@ -55,12 +55,15 @@ impl AutoClaim {
         // Combine seeds into a single PdaSeed using the same logic as compute_pda
         let combined = if seeds.len() == 1 {
             // Single seed: use raw 32 bytes (no padding), consistent with compute_pda
-            assert!(seeds[0].len() == 32, "pda_from_seeds: single seed must be 32 bytes");
+            assert!(
+                seeds[0].len() == 32,
+                "pda_from_seeds: single seed must be 32 bytes"
+            );
             let mut buf = [0u8; 32];
             buf.copy_from_slice(seeds[0]);
             buf
         } else {
-            use sha2::{Sha256, Digest};
+            use sha2::{Digest, Sha256};
             let mut hasher = Sha256::new();
             for seed in seeds {
                 hasher.update(seed);
@@ -236,10 +239,7 @@ mod tests {
 
     #[test]
     fn execute_empty() {
-        let output = SpelOutput::execute(
-            Vec::<(Account, AutoClaim)>::new(),
-            vec![],
-        );
+        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![]);
         assert!(output.post_states.is_empty());
         assert!(output.chained_calls.is_empty());
     }
@@ -296,24 +296,21 @@ mod tests {
 
     #[test]
     fn with_block_validity_window_range_from() {
-        let output = empty_output()
-            .with_block_validity_window(42u64..);
+        let output = empty_output().with_block_validity_window(42u64..);
         assert_eq!(output.block_validity_window.start(), Some(42));
         assert_eq!(output.block_validity_window.end(), None);
     }
 
     #[test]
     fn with_block_validity_window_range_to() {
-        let output = empty_output()
-            .with_block_validity_window(..100u64);
+        let output = empty_output().with_block_validity_window(..100u64);
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), Some(100));
     }
 
     #[test]
     fn with_block_validity_window_unbounded() {
-        let output = empty_output()
-            .with_block_validity_window(..);
+        let output = empty_output().with_block_validity_window(..);
         assert_eq!(output.block_validity_window.start(), None);
         assert_eq!(output.block_validity_window.end(), None);
     }
@@ -329,15 +326,14 @@ mod tests {
 
     #[test]
     fn try_with_block_validity_window_empty_range_errors() {
-        let result = empty_output()
-            .try_with_block_validity_window(5u64..5);
+        let result = empty_output().try_with_block_validity_window(5u64..5);
         assert!(result.is_err(), "empty range should return Err");
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)]
     fn try_with_block_validity_window_inverted_range_errors() {
-        let result = empty_output()
-            .try_with_block_validity_window(10u64..5);
+        let result = empty_output().try_with_block_validity_window(10u64..5);
         assert!(result.is_err(), "inverted range should return Err");
     }
 
@@ -361,9 +357,11 @@ mod tests {
 
     #[test]
     fn with_timestamp_validity_window_range_from() {
-        let output = empty_output()
-            .with_timestamp_validity_window(1_700_000_000u64..);
-        assert_eq!(output.timestamp_validity_window.start(), Some(1_700_000_000));
+        let output = empty_output().with_timestamp_validity_window(1_700_000_000u64..);
+        assert_eq!(
+            output.timestamp_validity_window.start(),
+            Some(1_700_000_000)
+        );
         assert_eq!(output.timestamp_validity_window.end(), None);
     }
 
@@ -378,15 +376,14 @@ mod tests {
 
     #[test]
     fn try_with_timestamp_validity_window_empty_range_errors() {
-        let result = empty_output()
-            .try_with_timestamp_validity_window(99u64..99);
+        let result = empty_output().try_with_timestamp_validity_window(99u64..99);
         assert!(result.is_err());
     }
 
     #[test]
+    #[allow(clippy::reversed_empty_ranges)]
     fn try_with_timestamp_validity_window_inverted_range_errors() {
-        let result = empty_output()
-            .try_with_timestamp_validity_window(2_000u64..1_000);
+        let result = empty_output().try_with_timestamp_validity_window(2_000u64..1_000);
         assert!(result.is_err(), "inverted range should return Err");
     }
 

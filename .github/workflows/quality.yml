@@ -1,0 +1,61 @@
+name: quality
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: quality-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fmt:
+    name: Formatting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy
+        # spel and spel-ffi-compile-test have transitive deps (logos-blockchain-poq,
+        # logos-blockchain-cryptarchia-engine) that do not compile on stable 1.88 (they use
+        # unstable features). Exclude both until upstream fixes land.
+        # Warnings are collected but not treated as errors until the baseline is
+        # fully clean. Flip to `-- -D warnings` once all crates pass cleanly.
+        run: cargo clippy --workspace --all-targets --exclude spel --exclude spel-ffi-compile-test
+
+  test:
+    name: Unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        # spel and spel-ffi-compile-test excluded for same transitive dep reason as clippy job above.
+        run: cargo test --workspace --all-targets --exclude spel --exclude spel-ffi-compile-test

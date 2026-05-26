@@ -9,8 +9,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 fn fixture_manifest() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../tests/e2e/fixture_program/Cargo.toml")
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/fixture_program/Cargo.toml")
 }
 
 // ---------------------------------------------------------------------------
@@ -234,21 +233,51 @@ fn e2e_logos_module_codegen() {
         .expect("Logos module codegen should succeed");
 
     // All output files must be non-empty
-    assert!(!module.backend_h.is_empty(), "backend_h should be non-empty");
-    assert!(!module.backend_cpp.is_empty(), "backend_cpp should be non-empty");
+    assert!(
+        !module.backend_h.is_empty(),
+        "backend_h should be non-empty"
+    );
+    assert!(
+        !module.backend_cpp.is_empty(),
+        "backend_cpp should be non-empty"
+    );
     assert!(!module.plugin_h.is_empty(), "plugin_h should be non-empty");
-    assert!(!module.plugin_cpp.is_empty(), "plugin_cpp should be non-empty");
+    assert!(
+        !module.plugin_cpp.is_empty(),
+        "plugin_cpp should be non-empty"
+    );
     assert!(!module.main_cpp.is_empty(), "main_cpp should be non-empty");
     assert!(!module.main_qml.is_empty(), "main_qml should be non-empty");
-    assert!(!module.cmake_lists.is_empty(), "cmake_lists should be non-empty");
-    assert!(!module.module_yaml.is_empty(), "module_yaml should be non-empty");
-    assert!(!module.manifest_json.is_empty(), "manifest_json should be non-empty");
+    assert!(
+        !module.cmake_lists.is_empty(),
+        "cmake_lists should be non-empty"
+    );
+    assert!(
+        !module.module_yaml.is_empty(),
+        "module_yaml should be non-empty"
+    );
+    assert!(
+        !module.manifest_json.is_empty(),
+        "manifest_json should be non-empty"
+    );
 
     // Class name is PascalCase of the IDL name ("treasury" → "Treasury")
-    assert!(module.backend_h.contains("TreasuryBackend"), "backend_h should declare TreasuryBackend");
-    assert!(module.backend_h.contains("Q_INVOKABLE"), "backend_h should have Q_INVOKABLEs");
-    assert!(module.backend_h.contains("initialize"), "backend_h should expose initialize");
-    assert!(module.backend_h.contains("transfer"), "backend_h should expose transfer");
+    assert!(
+        module.backend_h.contains("TreasuryBackend"),
+        "backend_h should declare TreasuryBackend"
+    );
+    assert!(
+        module.backend_h.contains("Q_INVOKABLE"),
+        "backend_h should have Q_INVOKABLEs"
+    );
+    assert!(
+        module.backend_h.contains("initialize"),
+        "backend_h should expose initialize"
+    );
+    assert!(
+        module.backend_h.contains("transfer"),
+        "backend_h should expose transfer"
+    );
 
     // PDA account types generate fetch pages in the QML
     assert!(

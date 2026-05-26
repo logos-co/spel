@@ -23,7 +23,7 @@ fn test_program_context_construction() {
 fn test_program_context_clone_copy() {
     let ctx = ProgramContext::new([1u32; 8], [2u32; 8]);
     let ctx2 = ctx; // Copy
-    let ctx3 = ctx.clone(); // Clone
+    let ctx3 = ctx; // Clone
 
     assert_eq!(ctx.self_program_id, ctx2.self_program_id);
     assert_eq!(ctx.self_program_id, ctx3.self_program_id);
@@ -33,7 +33,7 @@ fn test_program_context_clone_copy() {
 #[test]
 fn test_program_context_debug() {
     let ctx = ProgramContext::new([1u32; 8], [2u32; 8]);
-    let debug_str = format!("{:?}", ctx);
+    let debug_str = format!("{ctx:?}");
     assert!(debug_str.contains("ProgramContext"));
 }
 
@@ -69,10 +69,7 @@ fn test_handler_uses_context_for_owner_check() {
     }
 
     // Handler that validates owner using context (as the macro would generate)
-    fn validate_owner(
-        ctx: &ProgramContext,
-        account: &MockAccount,
-    ) -> Result<(), String> {
+    fn validate_owner(ctx: &ProgramContext, account: &MockAccount) -> Result<(), String> {
         if account.program_owner != ctx.self_program_id {
             return Err(format!(
                 "Account owner mismatch: expected {:?}, got {:?}",

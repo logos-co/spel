@@ -1,23 +1,23 @@
 //! Transaction building and submission.
 
-use std::collections::HashMap;
-use std::fs;
-use std::process;
+use crate::cli::{snake_to_kebab, to_pascal_case};
+use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
+use crate::parse::{parse_value, ParsedValue};
+use crate::pda::compute_pda_from_seeds;
+use crate::serialize::serialize_to_risc0;
+use common::transaction::NSSATransaction;
+use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
-use nssa_core::program::ProgramId;
 use nssa_core::account::Nonce;
-use spel_framework_core::idl::{IdlSeed, SpelIdl, IdlInstruction};
-use crate::hex::{hex_encode, decode_bytes_32, parse_account_id};
-use crate::parse::{parse_value, ParsedValue};
-use crate::serialize::serialize_to_risc0;
-use crate::pda::compute_pda_from_seeds;
-use crate::cli::{snake_to_kebab, to_pascal_case};
-use common::transaction::NSSATransaction;
-use hex;
+use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
+use spel_framework_core::idl::{IdlInstruction, IdlSeed, SpelIdl};
+use std::collections::HashMap;
+use std::fs;
+use std::process;
 use wallet::WalletCore;
 
 /// Format PDA seeds into a display string for human-readable output.
@@ -111,7 +111,10 @@ pub async fn execute_instruction(
         let raw = args.get(&key).unwrap();
         match parse_value(raw, &arg.type_) {
             Ok(val) => parsed_args.push((&arg.name, &arg.type_, val)),
-            Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; }
+            Err(e) => {
+                eprintln!("❌ --{}: {}", key, e);
+                has_errors = true;
+            },
         }
     }
 
@@ -120,7 +123,9 @@ pub async fn execute_instruction(
     // rest accounts are variadic: each expands to 0 or more AccountIds
     let mut rest_accounts: Vec<(&str, Vec<(Vec<u8>, bool)>)> = Vec::new();
     for acc in &ix.accounts {
-        if acc.pda.is_some() { continue; }
+        if acc.pda.is_some() {
+            continue;
+        }
         let key = snake_to_kebab(&acc.name);
         if acc.rest {
             // variadic: optional, comma-separated list of account IDs (0 entries is valid).
@@ -132,7 +137,11 @@ pub async fn execute_instruction(
                     .filter(|s| !s.is_empty())
                     .filter_map(|s| match parse_account_id(s) {
                         Ok((bytes, is_priv)) => Some((bytes.to_vec(), is_priv)),
-                        Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; None }
+                        Err(e) => {
+                            eprintln!("❌ --{}: {}", key, e);
+                            has_errors = true;
+                            None
+                        },
                     })
                     .collect()
             } else {
@@ -143,53 +152,64 @@ pub async fn execute_instruction(
             let raw = args.get(&key).unwrap();
             match parse_account_id(raw) {
                 Ok((bytes, is_priv)) => parsed_accounts.push((&acc.name, bytes.to_vec(), is_priv)),
-                Err(e) => { eprintln!("❌ --{}: {}", key, e); has_errors = true; }
+                Err(e) => {
+                    eprintln!("❌ --{}: {}", key, e);
+                    has_errors = true;
+                },
             }
         }
     }
-    if has_errors { process::exit(1); }
+    if has_errors {
+        process::exit(1);
+    }
 
     // Build risc0 serialized data
-    let ix_index = idl.instructions.iter().position(|i| i.name == ix.name).unwrap_or(0);
+    let ix_index = idl
+        .instructions
+        .iter()
+        .position(|i| i.name == ix.name)
+        .unwrap_or(0);
     let risc0_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
-    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args)
-        .unwrap_or_else(|e| {
-            eprintln!("❌ Serialization error: {}", e);
-            process::exit(1);
-        });
+    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args).unwrap_or_else(|e| {
+        eprintln!("❌ Serialization error: {}", e);
+        process::exit(1);
+    });
 
     // ─── Resolve program_id (load binary if needed) ─────────────
-    let (program_id, program_obj): (ProgramId, Option<Program>) = match (program_id_hex, program_path) {
-        (Some(hex), _) => {
-            let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-                eprintln!("❌ Invalid program ID '{}': {}", hex, e);
+    let (program_id, program_obj): (ProgramId, Option<Program>) =
+        match (program_id_hex, program_path) {
+            (Some(hex), _) => {
+                let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid program ID '{}': {}", hex, e);
+                    process::exit(1);
+                });
+                let mut pid = [0u32; 8];
+                for (i, chunk) in bytes.chunks(4).enumerate() {
+                    pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                }
+                (pid, None)
+            },
+            (None, Some(path)) => {
+                let program_bytecode = fs::read(path).unwrap_or_else(|e| {
+                    eprintln!("❌ Failed to read program binary '{}': {}", path, e);
+                    eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary.");
+                    eprintln!("   Or configure in spel.toml.");
+                    process::exit(1);
+                });
+                let program = Program::new(program_bytecode).unwrap_or_else(|e| {
+                    eprintln!("❌ Failed to load program: {:?}", e);
+                    process::exit(1);
+                });
+                let pid = program.id();
+                (pid, Some(program))
+            },
+            (None, None) => {
+                eprintln!(
+                "❌ No program specified. Use --program <name|hex|path> or configure in spel.toml."
+            );
                 process::exit(1);
-            });
-            let mut pid = [0u32; 8];
-            for (i, chunk) in bytes.chunks(4).enumerate() {
-                pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-            }
-            (pid, None)
-        }
-        (None, Some(path)) => {
-            let program_bytecode = fs::read(path).unwrap_or_else(|e| {
-                eprintln!("❌ Failed to read program binary '{}': {}", path, e);
-                eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary.");
-                eprintln!("   Or configure in spel.toml.");
-                process::exit(1);
-            });
-            let program = Program::new(program_bytecode).unwrap_or_else(|e| {
-                eprintln!("❌ Failed to load program: {:?}", e);
-                process::exit(1);
-            });
-            let pid = program.id();
-            (pid, Some(program))
-        }
-        (None, None) => {
-            eprintln!("❌ No program specified. Use --program <name|hex|path> or configure in spel.toml.");
-            process::exit(1);
-        }
-    };
+            },
+        };
     let program_id_hex_str: String = program_id
         .iter()
         .flat_map(|w| w.to_le_bytes())
@@ -224,11 +244,17 @@ pub async fn execute_instruction(
                                 Ok(bytes) => {
                                     say!("  ℹ️  Using --{} for PDA seed '{}'", key, path);
                                     account_map.insert(path.clone(), AccountId::new(bytes));
-                                }
-                                Err(e) => { eprintln!("❌ --{}: {}", key, e); process::exit(1); }
+                                },
+                                Err(e) => {
+                                    eprintln!("❌ --{}: {}", key, e);
+                                    process::exit(1);
+                                },
                             }
                         } else {
-                            eprintln!("❌ PDA '{}' requires account '{}' — provide --{}", acc.name, path, key);
+                            eprintln!(
+                                "❌ PDA '{}' requires account '{}' — provide --{}",
+                                acc.name, path, key
+                            );
                             process::exit(1);
                         }
                     }
@@ -245,30 +271,50 @@ pub async fn execute_instruction(
     // Compute PDAs
     for acc in &ix.accounts {
         if let Some(pda) = &acc.pda {
-            match compute_pda_from_seeds(&pda.seeds, &program_id, &account_map, &parsed_arg_map, None) {
+            match compute_pda_from_seeds(
+                &pda.seeds,
+                &program_id,
+                &account_map,
+                &parsed_arg_map,
+                None,
+            ) {
                 Ok(id) => {
                     account_map.insert(acc.name.clone(), id);
-                }
+                },
                 Err(e) => {
                     eprintln!("❌ Failed to compute PDA for '{}': {}", acc.name, e);
                     process::exit(1);
-                }
+                },
             }
         }
     }
 
     // ─── Dry-run summary ────────────────────────────────────────
     if let Some(fmt) = dry_run {
-        let signer_names: Vec<&str> = ix.accounts.iter().filter(|a| a.signer).map(|a| a.name.as_str()).collect();
-        let signer_ids: Vec<AccountId> = signer_names.iter().filter_map(|n| account_map.get(*n).copied()).collect();
+        let signer_names: Vec<&str> = ix
+            .accounts
+            .iter()
+            .filter(|a| a.signer)
+            .map(|a| a.name.as_str())
+            .collect();
+        let signer_ids: Vec<AccountId> = signer_names
+            .iter()
+            .filter_map(|n| account_map.get(*n).copied())
+            .collect();
         let signer_nonces = fetch_nonces_best_effort(signer_ids).await;
 
         let summary = DryRunSummary {
             program_id_hex: &program_id_hex_str,
             ix,
             account_map: &account_map,
-            parsed_account_ids: &parsed_accounts.iter().map(|(n, b, _)| (*n, b.as_slice())).collect::<Vec<_>>(),
-            rest_account_ids: &rest_accounts.iter().map(|(n, es)| (*n, es.iter().map(|(b, _)| b.as_slice()).collect::<Vec<_>>())).collect::<Vec<_>>(),
+            parsed_account_ids: &parsed_accounts
+                .iter()
+                .map(|(n, b, _)| (*n, b.as_slice()))
+                .collect::<Vec<_>>(),
+            rest_account_ids: &rest_accounts
+                .iter()
+                .map(|(n, es)| (*n, es.iter().map(|(b, _)| b.as_slice()).collect::<Vec<_>>()))
+                .collect::<Vec<_>>(),
             parsed_args: &parsed_args,
             instruction_data: &instruction_data,
             signer_names: &signer_names,
@@ -285,7 +331,10 @@ pub async fn execute_instruction(
     say!("Accounts:");
     for acc in &ix.accounts {
         if let Some(pda) = &acc.pda {
-            let id = account_map.get(&acc.name).map(|a| format!("{}", a)).unwrap_or_else(|| UNRESOLVED.to_string());
+            let id = account_map
+                .get(&acc.name)
+                .map(|a| format!("{}", a))
+                .unwrap_or_else(|| UNRESOLVED.to_string());
             say!("  📦 {} → {} (PDA)", acc.name, id);
             say!("    seeds: {}", format_pda_seeds(&pda.seeds));
         } else if acc.rest {
@@ -299,7 +348,10 @@ pub async fn execute_instruction(
                 }
             }
         } else {
-            let account_bytes = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name).unwrap();
+            let account_bytes = parsed_accounts
+                .iter()
+                .find(|(n, _, _)| *n == acc.name)
+                .unwrap();
             say!("  📦 {} → 0x{}", acc.name, hex_encode(&account_bytes.1));
         }
     }
@@ -321,8 +373,14 @@ pub async fn execute_instruction(
     }
     say!("  }}");
     say!("");
-    say!("  Serialized instruction data ({} u32 words):", instruction_data.len());
-    let hex_words: Vec<String> = instruction_data.iter().map(|w| format!("{:08x}", w)).collect();
+    say!(
+        "  Serialized instruction data ({} u32 words):",
+        instruction_data.len()
+    );
+    let hex_words: Vec<String> = instruction_data
+        .iter()
+        .map(|w| format!("{:08x}", w))
+        .collect();
     say!("    [{}]", hex_words.join(", "));
     say!("");
 
@@ -337,15 +395,19 @@ pub async fn execute_instruction(
 
     // Check if any account has a Private/ prefix
     let has_private = parsed_accounts.iter().any(|(_, _, is_priv)| *is_priv)
-        || rest_accounts.iter().any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
+        || rest_accounts
+            .iter()
+            .any(|(_, entries)| entries.iter().any(|(_, is_priv)| *is_priv));
 
     if has_private {
         // ─── Privacy-preserving transaction ──────────────────
-        use wallet::PrivacyPreservingAccount;
         use nssa::privacy_preserving_transaction::circuit::ProgramWithDependencies;
+        use wallet::PrivacyPreservingAccount;
 
         let program = program_obj.unwrap_or_else(|| {
-            eprintln!("❌ Privacy-preserving transactions require the program binary (not --program-id)");
+            eprintln!(
+                "❌ Privacy-preserving transactions require the program binary (not --program-id)"
+            );
             process::exit(1);
         });
 
@@ -376,7 +438,9 @@ pub async fn execute_instruction(
                         }
                     }
                 }
-            } else if let Some((_, _, is_priv)) = parsed_accounts.iter().find(|(n, _, _)| *n == acc.name) {
+            } else if let Some((_, _, is_priv)) =
+                parsed_accounts.iter().find(|(n, _, _)| *n == acc.name)
+            {
                 let id = *account_map.get(&acc.name).unwrap_or_else(|| {
                     eprintln!("❌ Account '{}' not resolved", acc.name);
                     process::exit(1);
@@ -396,14 +460,16 @@ pub async fn execute_instruction(
             }
         }
 
-        let (response, _shared_secrets) = wallet_core.send_privacy_preserving_tx(
-            pp_accounts,
-            instruction_data,
-            &program_with_deps,
-        ).await.unwrap_or_else(|e| {
-            eprintln!("❌ Failed to submit privacy-preserving transaction: {:?}", e);
-            process::exit(1);
-        });
+        let (response, _shared_secrets) = wallet_core
+            .send_privacy_preserving_tx(pp_accounts, instruction_data, &program_with_deps)
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!(
+                    "❌ Failed to submit privacy-preserving transaction: {:?}",
+                    e
+                );
+                process::exit(1);
+            });
 
         say!("📤 Privacy-preserving transaction submitted!");
         say!("   tx_hash: {}", hex::encode(response.0));
@@ -419,7 +485,7 @@ pub async fn execute_instruction(
             Err(e) => {
                 eprintln!("❌ Transaction NOT confirmed: {e:#}");
                 process::exit(1);
-            }
+            },
         }
     } else {
         // ─── Public transaction (existing path) ──────────────
@@ -442,7 +508,9 @@ pub async fn execute_instruction(
             }
         }
 
-        let signer_accounts: Vec<AccountId> = ix.accounts.iter()
+        let signer_accounts: Vec<AccountId> = ix
+            .accounts
+            .iter()
             .filter(|a| a.signer)
             .map(|a| *account_map.get(&a.name).unwrap())
             .collect();
@@ -450,27 +518,41 @@ pub async fn execute_instruction(
         let nonces = if signer_accounts.is_empty() {
             vec![]
         } else {
-            wallet_core.get_accounts_nonces(signer_accounts.clone()).await.unwrap_or_else(|e| {
-                eprintln!("❌ Failed to fetch nonces: {:?}", e);
-                process::exit(1);
-            })
+            wallet_core
+                .get_accounts_nonces(signer_accounts.clone())
+                .await
+                .unwrap_or_else(|e| {
+                    eprintln!("❌ Failed to fetch nonces: {:?}", e);
+                    process::exit(1);
+                })
         };
 
-        let signing_keys: Vec<_> = signer_accounts.iter().map(|id| {
-            wallet_core.storage().user_data.get_pub_account_signing_key(*id).unwrap_or_else(|| {
-                eprintln!("❌ Signing key not found for account {}", id);
-                process::exit(1);
+        let signing_keys: Vec<_> = signer_accounts
+            .iter()
+            .map(|id| {
+                wallet_core
+                    .storage()
+                    .user_data
+                    .get_pub_account_signing_key(*id)
+                    .unwrap_or_else(|| {
+                        eprintln!("❌ Signing key not found for account {}", id);
+                        process::exit(1);
+                    })
             })
-        }).collect();
+            .collect();
 
         let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
         let witness_set = WitnessSet::for_message(&message, &signing_keys);
         let tx = PublicTransaction::new(message, witness_set);
 
-        let tx_hash = wallet_core.sequencer_client.send_transaction(NSSATransaction::Public(tx)).await.unwrap_or_else(|e| {
-            eprintln!("❌ Failed to submit transaction: {:?}", e);
-            process::exit(1);
-        });
+        let tx_hash = wallet_core
+            .sequencer_client
+            .send_transaction(NSSATransaction::Public(tx))
+            .await
+            .unwrap_or_else(|e| {
+                eprintln!("❌ Failed to submit transaction: {:?}", e);
+                process::exit(1);
+            });
 
         say!("📤 Transaction submitted!");
         say!("   tx_hash: {}", tx_hash);
@@ -486,7 +568,7 @@ pub async fn execute_instruction(
             Err(e) => {
                 eprintln!("❌ Transaction NOT confirmed: {e:#}");
                 process::exit(1);
-            }
+            },
         }
     }
 }
@@ -502,7 +584,8 @@ async fn fetch_nonces_best_effort(signer_ids: Vec<AccountId>) -> Vec<Option<Nonc
     let result = async {
         let wc = WalletCore::from_env().ok()?;
         wc.get_accounts_nonces(signer_ids).await.ok()
-    }.await;
+    }
+    .await;
     match result {
         Some(ns) => ns.into_iter().map(Some).collect(),
         None => vec![None; len],
@@ -525,13 +608,14 @@ struct DryRunSummary<'a> {
 }
 
 /// Render a non-rest account as JSON, including PDA seed metadata when applicable.
-fn account_to_json(
-    acc: &spel_framework_core::idl::IdlAccountItem,
-    id_str: String,
-) -> Value {
+fn account_to_json(acc: &spel_framework_core::idl::IdlAccountItem, id_str: String) -> Value {
     let mut flags: Vec<&str> = Vec::new();
-    if acc.signer { flags.push("signer"); }
-    if acc.writable { flags.push("writable"); }
+    if acc.signer {
+        flags.push("signer");
+    }
+    if acc.writable {
+        flags.push("writable");
+    }
 
     let mut obj = json!({
         "name": acc.name,
@@ -539,11 +623,15 @@ fn account_to_json(
         "flags": flags,
     });
     if let Some(pda) = &acc.pda {
-        let seeds: Vec<Value> = pda.seeds.iter().map(|s| match s {
-            IdlSeed::Const { value } => json!({"kind": "const", "value": value}),
-            IdlSeed::Account { path } => json!({"kind": "account", "path": path}),
-            IdlSeed::Arg { path } => json!({"kind": "arg", "path": path}),
-        }).collect();
+        let seeds: Vec<Value> = pda
+            .seeds
+            .iter()
+            .map(|s| match s {
+                IdlSeed::Const { value } => json!({"kind": "const", "value": value}),
+                IdlSeed::Account { path } => json!({"kind": "account", "path": path}),
+                IdlSeed::Arg { path } => json!({"kind": "arg", "path": path}),
+            })
+            .collect();
         obj["is_pda"] = json!(true);
         obj["seeds"] = json!(seeds);
     }
@@ -574,7 +662,11 @@ fn print_dry_run_json(s: &DryRunSummary<'_>) {
                 }
             }
         } else if acc.pda.is_some() {
-            let id_str = s.account_map.get(&acc.name).map(|a| format!("{}", a)).unwrap_or_else(|| UNRESOLVED.to_string());
+            let id_str = s
+                .account_map
+                .get(&acc.name)
+                .map(|a| format!("{}", a))
+                .unwrap_or_else(|| UNRESOLVED.to_string());
             accounts_json.push(account_to_json(acc, id_str));
         } else {
             // Non-rest, non-PDA accounts must be in parsed_account_ids by construction
@@ -582,35 +674,49 @@ fn print_dry_run_json(s: &DryRunSummary<'_>) {
             let id_str = match s.parsed_account_ids.iter().find(|(n, _)| *n == acc.name) {
                 Some((_, b)) => format!("0x{}", hex_encode(b)),
                 None => {
-                    debug_assert!(false, "non-rest non-PDA account '{}' missing from parsed_account_ids", acc.name);
+                    debug_assert!(
+                        false,
+                        "non-rest non-PDA account '{}' missing from parsed_account_ids",
+                        acc.name
+                    );
                     UNRESOLVED.to_string()
-                }
+                },
             };
             accounts_json.push(account_to_json(acc, id_str));
         }
     }
 
-    let args_json: serde_json::Map<String, Value> = s.parsed_args.iter().map(|(name, _, val)| {
-        let v = match val {
-            ParsedValue::U8(n) => json!(n),
-            ParsedValue::U32(n) => json!(n),
-            ParsedValue::U64(n) => json!(n),
-            // u128 exceeds JSON's 53-bit integer precision — encode as decimal string.
-            ParsedValue::U128(n) => json!(n.to_string()),
-            other => json!(other.to_string()),
-        };
-        (name.to_string(), v)
-    }).collect();
+    let args_json: serde_json::Map<String, Value> = s
+        .parsed_args
+        .iter()
+        .map(|(name, _, val)| {
+            let v = match val {
+                ParsedValue::U8(n) => json!(n),
+                ParsedValue::U32(n) => json!(n),
+                ParsedValue::U64(n) => json!(n),
+                // u128 exceeds JSON's 53-bit integer precision — encode as decimal string.
+                ParsedValue::U128(n) => json!(n.to_string()),
+                other => json!(other.to_string()),
+            };
+            (name.to_string(), v)
+        })
+        .collect();
 
-    let signers_json: serde_json::Map<String, Value> = s.signer_names.iter().enumerate().map(|(i, name)| {
-        let nonce_val = s.signer_nonces.get(i).and_then(|n| n.as_ref())
+    let signers_json: serde_json::Map<String, Value> = s
+        .signer_names
+        .iter()
+        .enumerate()
+        .map(|(i, name)| {
+            let nonce_val = s.signer_nonces.get(i).and_then(|n| n.as_ref())
             // u128 nonce — encode as decimal string to avoid silent truncation.
             .map(|n| json!(n.0.to_string()))
             .unwrap_or(Value::Null);
-        (name.to_string(), json!({"nonce": nonce_val}))
-    }).collect();
+            (name.to_string(), json!({"nonce": nonce_val}))
+        })
+        .collect();
 
-    let ix_data_hex: String = s.instruction_data
+    let ix_data_hex: String = s
+        .instruction_data
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))
@@ -635,13 +741,27 @@ fn print_dry_run_text(s: &DryRunSummary<'_>) {
     println!("Accounts:");
     for acc in &s.ix.accounts {
         let mut flags: Vec<&str> = Vec::new();
-        if acc.signer { flags.push("signer"); }
-        if acc.writable { flags.push("writable"); }
-        if acc.rest { flags.push("rest"); }
-        let flags_str = if flags.is_empty() { String::new() } else { format!(" [{}]", flags.join(", ")) };
+        if acc.signer {
+            flags.push("signer");
+        }
+        if acc.writable {
+            flags.push("writable");
+        }
+        if acc.rest {
+            flags.push("rest");
+        }
+        let flags_str = if flags.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", flags.join(", "))
+        };
 
         if let Some(pda) = &acc.pda {
-            let id = s.account_map.get(&acc.name).map(|a| format!("{}", a)).unwrap_or_else(|| UNRESOLVED.to_string());
+            let id = s
+                .account_map
+                .get(&acc.name)
+                .map(|a| format!("{}", a))
+                .unwrap_or_else(|| UNRESOLVED.to_string());
             println!("  PDA {} → {}{}", acc.name, id, flags_str);
             println!("    seeds: {}", format_pda_seeds(&pda.seeds));
         } else if acc.rest {
@@ -657,7 +777,11 @@ fn print_dry_run_text(s: &DryRunSummary<'_>) {
         } else if let Some((_, b)) = s.parsed_account_ids.iter().find(|(n, _)| *n == acc.name) {
             println!("  {} → 0x{}{}", acc.name, hex_encode(b), flags_str);
         } else {
-            debug_assert!(false, "non-rest non-PDA account '{}' missing from parsed_account_ids", acc.name);
+            debug_assert!(
+                false,
+                "non-rest non-PDA account '{}' missing from parsed_account_ids",
+                acc.name
+            );
             println!("  {} → {}{}", acc.name, UNRESOLVED, flags_str);
         }
     }
@@ -667,7 +791,8 @@ fn print_dry_run_text(s: &DryRunSummary<'_>) {
         println!("  --{} {}", snake_to_kebab(name), val);
     }
     println!();
-    let ix_data_hex: String = s.instruction_data
+    let ix_data_hex: String = s
+        .instruction_data
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))

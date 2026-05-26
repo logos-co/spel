@@ -12,7 +12,14 @@ mod simulated_external_instruction {
     use super::*;
 
     // This would come from multisig_core or similar external crate
-    #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, borsh::BorshSerialize, borsh::BorshDeserialize)]
+    #[derive(
+        Debug,
+        Clone,
+        serde::Serialize,
+        serde::Deserialize,
+        borsh::BorshSerialize,
+        borsh::BorshDeserialize,
+    )]
     pub enum MyInstruction {
         DoSomething { value: u64 },
         DoSomethingElse,

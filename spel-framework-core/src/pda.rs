@@ -1,10 +1,10 @@
 //! Generic PDA (Program Derived Address) computation utilities.
 
-use nssa_core::account::AccountId;
-use nssa_core::{NullifierPublicKey};
-use nssa_core::program::{PdaSeed, ProgramId};
-use sha2::{Sha256, Digest};
 use base58::FromBase58;
+use nssa_core::account::AccountId;
+use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::NullifierPublicKey;
+use sha2::{Digest, Sha256};
 
 /// Trait for converting a value into a 32-byte PDA seed.
 ///
@@ -57,7 +57,7 @@ impl ToSeed for &str {
 /// Panics if the string is longer than 32 bytes.
 pub fn seed_from_str(s: &str) -> [u8; 32] {
     let src = s.as_bytes();
-    assert!(src.len() <= 32, "seed string '{}' exceeds 32 bytes", s);
+    assert!(src.len() <= 32, "seed string '{s}' exceeds 32 bytes");
     let mut bytes = [0u8; 32];
     bytes[..src.len()].copy_from_slice(src);
     bytes
@@ -99,7 +99,11 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
 /// # Panics
 ///
 /// Panics if `seeds` is empty.
-pub fn compute_private_pda(program_id: &ProgramId, seeds: &[&[u8; 32]], npk: &NullifierPublicKey) -> AccountId {
+pub fn compute_private_pda(
+    program_id: &ProgramId,
+    seeds: &[&[u8; 32]],
+    npk: &NullifierPublicKey,
+) -> AccountId {
     assert!(!seeds.is_empty(), "PDA requires at least one seed");
 
     let combined = if seeds.len() == 1 {
@@ -167,7 +171,10 @@ pub fn parse_bytes32(input: &str) -> Result<[u8; 32], String> {
         .or_else(|| input.strip_prefix("Private/"))
         .unwrap_or(input);
 
-    let hex_part = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    let hex_part = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
     if hex_part.len() == 64 {
         let mut arr = [0u8; 32];
         let mut ok = true;
@@ -192,10 +199,15 @@ pub fn parse_bytes32(input: &str) -> Result<[u8; 32], String> {
             arr.copy_from_slice(&bytes);
             return Ok(arr);
         }
-        return Err(format!("base58 decoded to {} bytes, expected 32", bytes.len()));
+        return Err(format!(
+            "base58 decoded to {} bytes, expected 32",
+            bytes.len()
+        ));
     }
 
-    Err(format!("expected 32 bytes (64 hex chars or base58-encoded key), got: {input}"))
+    Err(format!(
+        "expected 32 bytes (64 hex chars or base58-encoded key), got: {input}"
+    ))
 }
 
 #[cfg(test)]
