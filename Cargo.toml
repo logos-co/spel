@@ -15,8 +15,8 @@ resolver = "2"
 # Per-crate overrides go in the crate's own [lints] block.
 #
 # Rollout: lints start as `warn` (visible but not blocking).
-# Promote to `deny` once the codebase is clean; meanwhile CI runs with
-# `-- -D warnings` only on the clean subset (see quality.yml).
+# Promote individual lints to `deny` as the codebase cleans up; flip CI to
+# `-- -D warnings` in quality.yml once all crates pass cleanly.
 # ────────────────────────────────────────────────────────────────────────────
 
 [workspace.lints.rust]

@@ -18,15 +18,22 @@ fn test_program_context_construction() {
     assert_eq!(ctx.caller_program_id, caller_id);
 }
 
-/// Verify ProgramContext is Clone and Copy.
+/// Verify ProgramContext implements Copy (original remains usable after assignment).
 #[test]
-fn test_program_context_clone_copy() {
+fn test_program_context_copy() {
     let ctx = ProgramContext::new([1u32; 8], [2u32; 8]);
-    let ctx2 = ctx; // Copy
-    let ctx3 = ctx; // Clone
-
+    let ctx2 = ctx; // Copy — ctx is still valid after this
     assert_eq!(ctx.self_program_id, ctx2.self_program_id);
-    assert_eq!(ctx.self_program_id, ctx3.self_program_id);
+    assert_eq!(ctx.caller_program_id, ctx2.caller_program_id);
+}
+
+/// Verify ProgramContext implements Clone (explicit trait call, independent of Copy).
+#[test]
+fn test_program_context_clone() {
+    let ctx = ProgramContext::new([1u32; 8], [2u32; 8]);
+    let cloned = ctx.clone();
+    assert_eq!(ctx.self_program_id, cloned.self_program_id);
+    assert_eq!(ctx.caller_program_id, cloned.caller_program_id);
 }
 
 /// Verify ProgramContext implements Debug.
