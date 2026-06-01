@@ -1753,7 +1753,7 @@ checksum = "a5b0c77c1b780822bc749a33e39aeb2c07584ab93332303babeabb645298a76e"
 [[package]]
 name = "nssa_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc3#cf3639d8252040d13b3d4e933feb19b42c76e14a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.1.2#cf3639d8252040d13b3d4e933feb19b42c76e14a"
 dependencies = [
  "base58",
  "borsh",
