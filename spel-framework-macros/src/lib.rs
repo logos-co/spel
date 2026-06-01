@@ -881,7 +881,8 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
             let validate_fn_name = format_ident!("__validate_{}", ix.fn_name);
 
             // When ClockContext is present, strip pre_states[0] as the clock account,
-            // decode it into ClockContext, and rebind `pre_states` to the remainder.
+            // validate its account_id against the well-known LEZ clock address, decode
+            // it into ClockContext, and rebind `pre_states` to the remainder.
             // The original pre_states[0] is saved so its post_state can be reinserted
             // at position 0 after the handler returns, keeping the zip in main() aligned.
             let clock_setup = if ix.has_clock_context {
@@ -892,8 +893,21 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                             panic!("SPEL ClockContext: expected clock account as first pre_state, found none");
                         }
                         let __c = __ps.remove(0);
-                        let __ctx = borsh::from_slice::<spel_framework::context::ClockContext>(&__c.account.data)
-                            .expect("SPEL ClockContext: failed to decode clock account data");
+                        // Reject pre_states[0] that isn't the expected LEZ clock account.
+                        // Without this check a caller could forge timestamp/block_id by
+                        // supplying an attacker-controlled account at position 0.
+                        const __EXPECTED_CLOCK_ID: nssa_core::account::AccountId =
+                            nssa_core::account::AccountId::new(*b"/LEZ/ClockProgramAccount/0000001");
+                        if __c.account_id != __EXPECTED_CLOCK_ID {
+                            panic!(
+                                "SPEL ClockContext: pre_states[0] is not the LEZ clock account \
+                                 (expected /LEZ/ClockProgramAccount/0000001)"
+                            );
+                        }
+                        let __ctx = borsh::from_slice::<spel_framework::context::ClockContext>(
+                            &__c.account.data,
+                        )
+                        .expect("SPEL ClockContext: failed to decode clock account data");
                         (__c, __ctx, __ps)
                     };
                 }

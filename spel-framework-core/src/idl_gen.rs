@@ -610,6 +610,20 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
                     // ProgramContext is injected by the dispatcher and never part of the IDL/ABI.
                 } else if is_clock_context_type(ty) {
                     // ClockContext is injected by the dispatcher and never part of the IDL/ABI.
+                    // Mirror the proc-macro constraints: at most one ClockContext, and it must
+                    // appear before any account or arg parameters.
+                    if has_clock_context {
+                        return Err(IdlGenError::Parse(syn::Error::new_spanned(
+                            ty,
+                            "instruction functions can have at most one ClockContext parameter",
+                        )));
+                    }
+                    if !accounts.is_empty() || !args.is_empty() {
+                        return Err(IdlGenError::Parse(syn::Error::new_spanned(
+                            ty,
+                            "ClockContext must appear before any account or arg parameters",
+                        )));
+                    }
                     has_clock_context = true;
                 } else {
                     args.push(ArgParam {
