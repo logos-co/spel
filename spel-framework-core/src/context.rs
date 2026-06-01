@@ -78,6 +78,9 @@ pub struct ClockContext {
 impl ClockContext {
     #[must_use]
     pub const fn new(block_id: BlockId, timestamp: Timestamp) -> Self {
-        Self { block_id, timestamp }
+        Self {
+            block_id,
+            timestamp,
+        }
     }
 }

@@ -32,6 +32,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: "e2e"
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build (all packages including spel)
         run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen -p spel
       - name: E2E tests
@@ -76,6 +81,12 @@ jobs:
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
           rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Clone LEZ at correct revision
         run: |
@@ -176,6 +187,18 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Restore spel CLI cache (PR-specific)
         uses: actions/cache@v4
         with:
@@ -199,6 +222,12 @@ jobs:
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
           rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run privacy smoke test
         env:
@@ -242,6 +271,18 @@ jobs:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
 
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Restore spel CLI cache (PR-specific)
         uses: actions/cache@v4
         with:
@@ -265,6 +306,12 @@ jobs:
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
           rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Run FFI call test
         env:
@@ -307,6 +354,12 @@ jobs:
         with:
           path: /tmp/lssa/target/release/wallet
           key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Restore spel CLI cache (PR-specific)
         uses: actions/cache@v4

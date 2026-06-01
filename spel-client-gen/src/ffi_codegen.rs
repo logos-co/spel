@@ -461,7 +461,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         )
         .unwrap();
         if ix.has_clock_context {
-            writeln!(out, "        AccountId::new(*b\"/LEZ/ClockProgramAccount/0000001\"),").unwrap();
+            writeln!(
+                out,
+                "        AccountId::new(*b\"/LEZ/ClockProgramAccount/0000001\"),"
+            )
+            .unwrap();
         }
         for acc in ix.accounts.iter().filter(|a| !a.rest) {
             writeln!(out, "        {},", rust_ident(&acc.name)).unwrap();

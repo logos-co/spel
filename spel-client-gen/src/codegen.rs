@@ -208,7 +208,11 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         // account so it lands at pre_states[0] as the dispatcher expects.
         writeln!(out, "        let mut account_ids: Vec<AccountId> = vec![").unwrap();
         if ix.has_clock_context {
-            writeln!(out, "            AccountId::new(*b\"/LEZ/ClockProgramAccount/0000001\"),").unwrap();
+            writeln!(
+                out,
+                "            AccountId::new(*b\"/LEZ/ClockProgramAccount/0000001\"),"
+            )
+            .unwrap();
         }
         for acc in ix.accounts.iter().filter(|a| !a.rest) {
             writeln!(out, "            accounts.{},", rust_ident(&acc.name)).unwrap();
