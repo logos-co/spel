@@ -1,25 +1,22 @@
 ## v0.5.0 (2026-06-01)
 
 ### ✨ Features
-add lint guardrails, rustfmt baseline, and CI quality gate (dd4e505)
-rename 'inspect <FILE>' to 'program-id' (1dc4dd0)
-extend rest-arg suffix matching beyond _accounts (276ae37)
-name-based rest-account arg derivation (#211) (9215bd2)
-feature-gate decode module (#215) (0b08a34)
---format hex/json + refactor: single-source parse_bytes32 / compute_pda_raw (1dd5a0e)
+
+- **`spel program-id`**: rename `inspect <FILE>` to `program-id` for clarity (1dc4dd0)
+- **Rest-arg matching**: extend suffix matching beyond `_accounts`; derive rest-account args by name (#211, 276ae37, 9215bd2)
+- **`--format hex|json`**: add output format flag to `decode`; unify `parse_bytes32` / `compute_pda_raw` (1dd5a0e)
+- **`decode` feature gate**: make the `decode` module opt-in behind a Cargo feature; `base58` dep is only pulled in when enabled (#215, 2209515)
+- **Workspace lint policy**: add rustfmt baseline, `clippy.toml`, and a `quality.yml` CI gate with per-crate lint configuration (dd4e505)
 
 ### 🐛 Fixes
-update remaining v0.2.0-rc3 references to v0.1.2 (7d1102e)
-pin logos-blockchain-circuits setup script to known-good commit (25cd1f8)
-address Copilot review comments on PR #222 (d981eed)
-address all review comments on #218 (ae84174)
-make base58 an optional dep gated on the decode feature (2209515)
-remove duplicate doc comment and tighten rest-arg test assertions (891868d)
 
-### 📦 Other
-- chore(deps): retag LEZ dependency from v0.2.0-rc3 to v0.1.2 (84f6cea)
-- chore: commit Cargo.lock files with ruint pinned to 1.17.x (e681260)
-- chore(codegen): normalize indentation in logos_module_codegen.rs (#216) (ac8d9b9)
+- Fix `--format` flag missing from `program-id` subcommand after rename (ae84174)
+
+### 📦 Maintenance
+
+- Pin `logos-blockchain-circuits` setup script to a known-good commit in all CI workflows (25cd1f8)
+- Retag LEZ dependency from `v0.2.0-rc3` to the equivalent published release `v0.1.2` (84f6cea)
+- Normalize indentation in `logos_module_codegen.rs` (#216)
 
 # Changelog
 
