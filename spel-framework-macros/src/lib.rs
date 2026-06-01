@@ -30,13 +30,14 @@
 //! ```
 
 use proc_macro::TokenStream;
-use sha2::{Sha256, Digest};
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
+use sha2::{Digest, Sha256};
 use syn::{
     parse::Parser,
-    parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
+    parse_macro_input,
     visit_mut::{self, VisitMut},
+    Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
 };
 
 mod account_types;
@@ -69,10 +70,17 @@ impl ProgramConfig {
         for meta in metas {
             if let syn::Meta::NameValue(nv) = &meta {
                 if nv.path.is_ident("instruction") {
-                    if let syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }) = &nv.value {
+                    if let syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }) = &nv.value
+                    {
                         config.external_instruction = Some(s.parse()?);
                     } else {
-                        return Err(syn::Error::new_spanned(&nv.value, "expected string literal"));
+                        return Err(syn::Error::new_spanned(
+                            &nv.value,
+                            "expected string literal",
+                        ));
                     }
                 } else {
                     return Err(syn::Error::new_spanned(&nv.path, "unknown attribute"));
@@ -219,10 +227,10 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 } else {
                     other_items.push(quote! { #func });
                 }
-            }
+            },
             other => {
                 other_items.push(quote! { #other });
-            }
+            },
         }
     }
 
@@ -353,18 +361,18 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
             // Check if a parsed file defines the target module
             let file_matches_module = |parsed_file: &syn::File| {
-                parsed_file.items.iter().any(|item| {
-                    matches!(item, syn::Item::Mod(item_mod) if item_mod.ident == *mod_name)
-                })
+                parsed_file.items.iter().any(
+                    |item| matches!(item, syn::Item::Mod(item_mod) if item_mod.ident == *mod_name),
+                )
             };
 
             let mut candidate_paths: Vec<std::path::PathBuf> = vec![
-                manifest.join("src/bin").join(format!("{}.rs", module_path)),          // src/bin/{name}.rs
-                manifest.join("src/bin").join(&module_path).join("main.rs"),           // src/bin/{name}/main.rs
-                manifest.join("src").join(format!("{}.rs", module_path)),              // src/{name}.rs
-                manifest.join("src").join(&module_path).join("mod.rs"),                // src/{name}/mod.rs
-                manifest.join("src").join("lib.rs"),                                   // src/lib.rs
-                manifest.join("src").join("main.rs"),                                  // src/main.rs
+                manifest.join("src/bin").join(format!("{module_path}.rs")), // src/bin/{name}.rs
+                manifest.join("src/bin").join(&module_path).join("main.rs"), // src/bin/{name}/main.rs
+                manifest.join("src").join(format!("{module_path}.rs")),      // src/{name}.rs
+                manifest.join("src").join(&module_path).join("mod.rs"),      // src/{name}/mod.rs
+                manifest.join("src").join("lib.rs"),                         // src/lib.rs
+                manifest.join("src").join("main.rs"),                        // src/main.rs
             ];
 
             // Scan src/bin/ for additional files and subdirectories
@@ -372,7 +380,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             if let Ok(entries) = std::fs::read_dir(&src_bin) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                    {
                         if !candidate_paths.iter().any(|p| p == &path) {
                             candidate_paths.push(path);
                         }
@@ -390,7 +399,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             if let Ok(entries) = std::fs::read_dir(&src) {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
+                    {
                         if !candidate_paths.iter().any(|p| p == &path) {
                             candidate_paths.push(path);
                         }
@@ -430,8 +440,20 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         result
     };
 
-    let idl_fn = generate_idl_fn(mod_name, &instructions, ext_instr_str.as_deref(), accounts.clone(), types.clone());
-    let idl_json = generate_idl_json(mod_name, &instructions, ext_instr_str.as_deref(), accounts, types);
+    let idl_fn = generate_idl_fn(
+        mod_name,
+        &instructions,
+        ext_instr_str.as_deref(),
+        accounts.clone(),
+        types.clone(),
+    );
+    let idl_json = generate_idl_json(
+        mod_name,
+        &instructions,
+        ext_instr_str.as_deref(),
+        accounts,
+        types,
+    );
 
     // Assemble everything
     let expanded = quote! {
@@ -517,13 +539,13 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                         ty: ty.clone(),
                     });
                 }
-            }
+            },
             FnArg::Receiver(_) => {
                 return Err(syn::Error::new_spanned(
                     input,
                     "instruction functions cannot have self parameter",
                 ));
-            }
+            },
         }
     }
 
@@ -651,7 +673,7 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
         }
         // Validate the npk arg name is a valid Rust identifier
         let npk_name = constraints.npk_arg.as_deref().unwrap();
-        if syn::parse_str::<syn::Ident>(npk_name).is_err() {
+        if syn::parse_str::<Ident>(npk_name).is_err() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 format!("`npk` arg name `{npk_name}` is not a valid Rust identifier"),
@@ -680,7 +702,7 @@ fn parse_pda_expr(expr: &syn::Expr) -> syn::Result<Vec<PdaSeedDef>> {
         syn::Expr::Call(call) => {
             let seed = parse_single_pda_seed(call)?;
             Ok(vec![seed])
-        }
+        },
         // Multiple seeds: [const("a"), account("b")]
         syn::Expr::Array(arr) => {
             let mut seeds = Vec::new();
@@ -695,7 +717,7 @@ fn parse_pda_expr(expr: &syn::Expr) -> syn::Result<Vec<PdaSeedDef>> {
                 }
             }
             Ok(seeds)
-        }
+        },
         _ => Err(syn::Error::new_spanned(
             expr,
             "PDA seed must be const(\"...\"), account(\"...\"), arg(\"...\"), or [seed, ...]",
@@ -738,8 +760,7 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> syn::Result<PdaSeedDef> {
         _ => Err(syn::Error::new_spanned(
             call,
             format!(
-                "Unknown PDA seed type '{}'. Use const(\"...\"), account(\"...\"), or arg(\"...\")",
-                func_name
+                "Unknown PDA seed type '{func_name}'. Use const(\"...\"), account(\"...\"), or arg(\"...\")"
             ),
         )),
     }
@@ -794,7 +815,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 let num_fixed = fixed_accounts.len();
                 let fixed_names: Vec<&Ident> = fixed_accounts.iter().map(|a| &a.name).collect();
                 let rest_name = &rest_account.name;
-                
+
                 quote! {
                     if pre_states.len() < #num_fixed {
                         panic!(
@@ -978,10 +999,13 @@ impl<'a> ExecuteTransformer<'a> {
                 }
             }
         }
-        names.iter().map(|name| {
-            let ident = format_ident!("{}", name);
-            quote! { &#ident }
-        }).collect()
+        names
+            .iter()
+            .map(|name| {
+                let ident = format_ident!("{}", name);
+                quote! { &#ident }
+            })
+            .collect()
     }
 
     /// Collect account-seed arguments for the vec![ident, ...] pattern.
@@ -1017,8 +1041,10 @@ impl<'a> ExecuteTransformer<'a> {
                     let name = path.split('.').next().unwrap_or(path.as_str()).to_string();
                     if !seen.contains(&name) {
                         seen.push(name.clone());
-                        let idx = self.accounts.iter()
-                            .position(|a| a.name.to_string() == name)
+                        let idx = self
+                            .accounts
+                            .iter()
+                            .position(|a| a.name == name)
                             .unwrap_or(0);
                         result.push(quote! { &*#binding[#idx].account_id.value() });
                     }
@@ -1036,7 +1062,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
         // Clone what we need before mutably borrowing expr below
         let (accounts_arg, chained_arg) = {
-            let call = if let syn::Expr::Call(c) = &*expr { c } else { return; };
+            let call = if let syn::Expr::Call(c) = &*expr {
+                c
+            } else {
+                return;
+            };
             if !is_spel_output_execute(&call.func) || call.args.len() != 2 {
                 return;
             }
@@ -1051,20 +1081,21 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             // Verify all account names are known before transforming
             let mut account_clones: Vec<TokenStream2> = Vec::new();
             for ident in &account_idents {
-                if self.accounts.iter().find(|a| a.name == *ident).is_none() {
+                if !self.accounts.iter().any(|a| a.name == *ident) {
                     return; // unknown account — don't transform
                 }
                 account_clones.push(quote! { #ident.account.clone() });
             }
             let account_seed_args = self.account_seed_args_from_idents(&account_idents);
-            let all_seed_args: Vec<TokenStream2> = arg_seed_args.into_iter()
-                .chain(account_seed_args)
-                .collect();
+            let all_seed_args: Vec<TokenStream2> =
+                arg_seed_args.into_iter().chain(account_seed_args).collect();
             if let syn::Expr::Call(call) = expr {
                 call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
                 call.args.clear();
-                call.args.push(syn::parse_quote! { &[#(#account_clones),*] });
-                call.args.push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+                call.args
+                    .push(syn::parse_quote! { &[#(#account_clones),*] });
+                call.args
+                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
                 call.args.push(syn::parse_quote! { #chained_arg });
             }
             return;
@@ -1076,9 +1107,8 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             let num_fixed = self.num_fixed();
             let accs = quote! { __accs };
             let account_seed_args = self.account_seed_args_for_rest(&accs);
-            let all_seed_args: Vec<TokenStream2> = arg_seed_args.into_iter()
-                .chain(account_seed_args)
-                .collect();
+            let all_seed_args: Vec<TokenStream2> =
+                arg_seed_args.into_iter().chain(account_seed_args).collect();
             *expr = syn::parse_quote! {
                 {
                     let __accs: ::std::vec::Vec<_> = #accounts_arg;
@@ -1103,7 +1133,8 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
             call.args.clear();
             call.args.push(syn::parse_quote! { &#accounts_arg });
-            call.args.push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+            call.args
+                .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
             call.args.push(syn::parse_quote! { #chained_arg });
         }
     }
@@ -1122,8 +1153,7 @@ fn is_spel_output_execute(func: &syn::Expr) -> bool {
 fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     if let syn::Expr::Macro(em) = expr {
         if em.mac.path.is_ident("vec") {
-            let parser =
-                syn::punctuated::Punctuated::<syn::Ident, syn::Token![,]>::parse_terminated;
+            let parser = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated;
             if let Ok(idents) = parser.parse2(em.mac.tokens.clone()) {
                 return Some(idents.into_iter().collect());
             }
@@ -1131,7 +1161,6 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     }
     None
 }
-
 
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
@@ -1171,18 +1200,18 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                     PdaSeedDef::Const(v) => {
                         let val = v.clone();
                         quote! { &spel_framework::pda::seed_from_str(#val) }
-                    }
+                    },
                     PdaSeedDef::Account(path) => {
                         // Use a runtime parameter holding the actual account ID bytes,
                         // matching how generate_validation resolves account seeds.
                         let account_name = path.split('.').next().unwrap_or(path.as_str());
                         let ident = format_ident!("__account_seed_{}", account_name);
-                        quote! { #ident }  // already &[u8; 32]
-                    }
+                        quote! { #ident } // already &[u8; 32]
+                    },
                     PdaSeedDef::Arg(name) => {
                         let ident = format_ident!("__pda_arg_{}", name);
                         quote! { &spel_framework::pda::ToSeed::to_seed(#ident) }
-                    }
+                    },
                 }
             })
             .collect();
@@ -1246,17 +1275,22 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             }
         }
     }
-    names.iter().map(|name| {
-        let ident = format_ident!("__pda_arg_{}", name);
-        let actual_type = ix.args.iter()
-            .find(|a| a.name.to_string() == *name)
-            .map(|a| &a.ty);
-        if let Some(ty) = actual_type {
-            quote! { #ident: &#ty }
-        } else {
-            quote! { #ident: &[u8; 32] }
-        }
-    }).collect()
+    names
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("__pda_arg_{}", name);
+            let actual_type = ix
+                .args
+                .iter()
+                .find(|a| a.name.to_string() == *name)
+                .map(|a| &a.ty);
+            if let Some(ty) = actual_type {
+                quote! { #ident: &#ty }
+            } else {
+                quote! { #ident: &[u8; 32] }
+            }
+        })
+        .collect()
 }
 
 /// Collect the unique PDA account seed parameters for a given instruction as typed
@@ -1273,10 +1307,13 @@ fn pda_account_seed_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             }
         }
     }
-    names.iter().map(|name| {
-        let ident = format_ident!("__account_seed_{}", name);
-        quote! { #ident: &[u8; 32] }
-    }).collect()
+    names
+        .iter()
+        .map(|name| {
+            let ident = format_ident!("__account_seed_{}", name);
+            quote! { #ident: &[u8; 32] }
+        })
+        .collect()
 }
 
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
@@ -1296,7 +1333,7 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .accounts
                     .iter()
                     .filter(|a| !a.is_rest)
-                    .map(|acc| generate_single_claim_expr(acc))
+                    .map(generate_single_claim_expr)
                     .collect();
 
                 let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
@@ -1316,7 +1353,7 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 let claim_exprs: Vec<TokenStream2> = ix
                     .accounts
                     .iter()
-                    .map(|acc| generate_single_claim_expr(acc))
+                    .map(generate_single_claim_expr)
                     .collect();
 
                 quote! {
@@ -1440,7 +1477,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                                     let account_idx = ix.accounts.iter()
                                         .position(|a| a.name == account_name)
                                         .unwrap_or_else(|| panic!(
-                                            "PDA seed references unknown account '{}'", account_name
+                                            "PDA seed references unknown account '{account_name}'"
                                         ));
                                     quote! { let #var = *accounts[#account_idx].account_id.value(); }
                                 }
@@ -1556,11 +1593,11 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => {
                     let name = ident.to_lowercase();
                     quote! { spel_framework::idl::IdlType::Primitive(#name.to_string()) }
-                }
+                },
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -1576,7 +1613,7 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
                     } else {
                         quote! { spel_framework::idl::IdlType::Primitive("vec<unknown>".to_string()) }
                     }
-                }
+                },
                 "Option" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -1592,19 +1629,19 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
                     } else {
                         quote! { spel_framework::idl::IdlType::Primitive("option<unknown>".to_string()) }
                     }
-                }
+                },
                 "ProgramId" => {
                     quote! { spel_framework::idl::IdlType::Primitive("program_id".to_string()) }
-                }
+                },
                 "AccountId" => {
                     quote! { spel_framework::idl::IdlType::Primitive("account_id".to_string()) }
-                }
+                },
                 other => {
                     let name = other.to_string();
                     quote! { spel_framework::idl::IdlType::Defined { defined: #name.to_string() } }
-                }
+                },
             }
-        }
+        },
         Type::Array(arr) => {
             let elem_tokens = rust_type_to_idl_type_tokens(&arr.elem);
             if let syn::Expr::Lit(lit) = &arr.len {
@@ -1621,10 +1658,10 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
             } else {
                 quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) }
             }
-        }
+        },
         _ => {
             quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) }
-        }
+        },
     }
 }
 
@@ -1636,10 +1673,10 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
             let segment = type_path.path.segments.last().unwrap();
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => {
                     format!("\"{}\"", ident.to_lowercase())
-                }
+                },
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -1650,21 +1687,21 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
                     } else {
                         "\"vec<unknown>\"".to_string()
                     }
-                }
+                },
                 "ProgramId" => "\"program_id\"".to_string(),
                 "AccountId" => "\"account_id\"".to_string(),
-                other => format!("{{\"defined\":\"{}\"}}", other),
+                other => format!("{{\"defined\":\"{other}\"}}"),
             }
-        }
+        },
         Type::Array(arr) => {
             let elem = rust_type_to_idl_json(&arr.elem);
             if let syn::Expr::Lit(lit) = &arr.len {
                 if let syn::Lit::Int(n) = &lit.lit {
-                    return format!("{{\"array\":[{},{}]}}", elem, n);
+                    return format!("{{\"array\":[{elem},{n}]}}");
                 }
             }
-            format!("{{\"array\":[{},0]}}", elem)
-        }
+            format!("{{\"array\":[{elem},0]}}")
+        },
         _ => "\"unknown\"".to_string(),
     }
 }
@@ -1674,17 +1711,27 @@ fn rust_type_to_idl_json(ty: &Type) -> String {
 /// Compute SHA256("global:{name}")[..8] discriminator at macro expansion time.
 fn compute_discriminator(name: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
-    hasher.update(format!("global:{}", name).as_bytes());
+    hasher.update(format!("global:{name}").as_bytes());
     let result = hasher.finalize();
     result[..8].to_vec()
 }
 
-fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>, accounts: Vec<spel_framework_core::idl::IdlAccountType>, types: Vec<spel_framework_core::idl::IdlTypeDef>) -> TokenStream2 {
+fn generate_idl_fn(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    external_instruction: Option<&str>,
+    accounts: Vec<spel_framework_core::idl::IdlAccountType>,
+    types: Vec<spel_framework_core::idl::IdlTypeDef>,
+) -> TokenStream2 {
     let program_name = mod_name.to_string();
 
     // Serialize accounts and types to JSON for embedding in generated code
-    let accounts_json = serde_json::to_string(&accounts).unwrap_or_else(|err| panic!("failed to serialize IDL accounts to JSON during macro expansion: {err}"));
-    let types_json = serde_json::to_string(&types).unwrap_or_else(|err| panic!("failed to serialize IDL types to JSON during macro expansion: {err}"));
+    let accounts_json = serde_json::to_string(&accounts).unwrap_or_else(|err| {
+        panic!("failed to serialize IDL accounts to JSON during macro expansion: {err}")
+    });
+    let types_json = serde_json::to_string(&types).unwrap_or_else(|err| {
+        panic!("failed to serialize IDL types to JSON during macro expansion: {err}")
+    });
 
     let instruction_literals: Vec<TokenStream2> = instructions
         .iter()
@@ -1851,12 +1898,22 @@ fn generate_idl_fn(mod_name: &Ident, instructions: &[InstructionInfo], external_
 
 // ─── IDL generation (JSON string, for PROGRAM_IDL_JSON const) ────────────
 
-fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], external_instruction: Option<&str>, accounts: Vec<spel_framework_core::idl::IdlAccountType>, types: Vec<spel_framework_core::idl::IdlTypeDef>) -> String {
+fn generate_idl_json(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    external_instruction: Option<&str>,
+    accounts: Vec<spel_framework_core::idl::IdlAccountType>,
+    types: Vec<spel_framework_core::idl::IdlTypeDef>,
+) -> String {
     let program_name = mod_name.to_string();
 
     // Serialize accounts and types to JSON
-    let accounts_json_str = serde_json::to_string(&accounts).unwrap_or_else(|err| panic!("failed to serialize IDL accounts to JSON during macro expansion: {err}"));
-    let types_json_str = serde_json::to_string(&types).unwrap_or_else(|err| panic!("failed to serialize IDL types to JSON during macro expansion: {err}"));
+    let accounts_json_str = serde_json::to_string(&accounts).unwrap_or_else(|err| {
+        panic!("failed to serialize IDL accounts to JSON during macro expansion: {err}")
+    });
+    let types_json_str = serde_json::to_string(&types).unwrap_or_else(|err| {
+        panic!("failed to serialize IDL types to JSON during macro expansion: {err}")
+    });
 
     let instructions_json: Vec<String> = instructions
         .iter()
@@ -1881,18 +1938,21 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                             .iter()
                             .map(|seed| match seed {
                                 PdaSeedDef::Const(val) => {
-                                    format!("{{\"kind\":\"const\",\"value\":\"{}\"}}", val)
-                                }
+                                    format!("{{\"kind\":\"const\",\"value\":\"{val}\"}}")
+                                },
                                 PdaSeedDef::Account(name) => {
-                                    format!("{{\"kind\":\"account\",\"path\":\"{}\"}}", name)
-                                }
+                                    format!("{{\"kind\":\"account\",\"path\":\"{name}\"}}")
+                                },
                                 PdaSeedDef::Arg(name) => {
-                                    format!("{{\"kind\":\"arg\",\"path\":\"{}\"}}", name)
-                                }
+                                    format!("{{\"kind\":\"arg\",\"path\":\"{name}\"}}")
+                                },
                             })
                             .collect();
                         if acc.constraints.private_pda {
-                            format!(",\"pda\":{{\"seeds\":[{}],\"private\":true}}", seeds.join(","))
+                            format!(
+                                ",\"pda\":{{\"seeds\":[{}],\"private\":true}}",
+                                seeds.join(",")
+                            )
                         } else {
                             format!(",\"pda\":{{\"seeds\":[{}]}}", seeds.join(","))
                         }
@@ -1903,10 +1963,13 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                     } else {
                         String::new()
                     };
-                    let rest_json = if acc.is_rest { ",\"rest\":true".to_string() } else { String::new() };
+                    let rest_json = if acc.is_rest {
+                        ",\"rest\":true".to_string()
+                    } else {
+                        String::new()
+                    };
                     format!(
-                        "{{\"name\":\"{}\",\"writable\":{},\"signer\":{},\"init\":{}{}{}{}}}",
-                        name, writable, signer, init, pda_json, rest_json, visibility_json
+                        "{{\"name\":\"{name}\",\"writable\":{writable},\"signer\":{signer},\"init\":{init}{pda_json}{rest_json}{visibility_json}}}"
                     )
                 })
                 .collect();
@@ -1917,7 +1980,7 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
                 .map(|arg| {
                     let name = arg.name.to_string().trim_start_matches('_').to_string();
                     let type_json = rust_type_to_idl_json(&arg.ty);
-                    format!("{{\"name\":\"{}\",\"type\":{}}}", name, type_json)
+                    format!("{{\"name\":\"{name}\",\"type\":{type_json}}}")
                 })
                 .collect();
 
@@ -1931,7 +1994,7 @@ fn generate_idl_json(mod_name: &Ident, instructions: &[InstructionInfo], externa
         .collect();
 
     let instruction_type_suffix = if let Some(ext) = external_instruction {
-        format!(",\"instruction_type\":\"{}\"", ext)
+        format!(",\"instruction_type\":\"{ext}\"")
     } else {
         String::new()
     };
@@ -1962,16 +2025,13 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let content = std::fs::read_to_string(&resolved_path).map_err(|e| {
         syn::Error::new_spanned(
             span_token,
-            format!("Failed to read '{}' (resolved: '{}'): {}", file_path, resolved_path, e),
+            format!("Failed to read '{file_path}' (resolved: '{resolved_path}'): {e}"),
         )
     })?;
 
     // Parse as a Rust file
     let file = syn::parse_file(&content).map_err(|e| {
-        syn::Error::new_spanned(
-            span_token,
-            format!("Failed to parse '{}': {}", file_path, e),
-        )
+        syn::Error::new_spanned(span_token, format!("Failed to parse '{file_path}': {e}"))
     })?;
 
     // Find the #[lez_program] module
@@ -1988,18 +2048,16 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let program_mod = program_mod.ok_or_else(|| {
         syn::Error::new_spanned(
             span_token,
-            format!(
-                "No #[lez_program] module found in '{}'",
-                file_path
-            ),
+            format!("No #[lez_program] module found in '{file_path}'"),
         )
     })?;
 
     let mod_name = &program_mod.ident;
 
-    let (_, items) = program_mod.content.as_ref().ok_or_else(|| {
-        syn::Error::new_spanned(span_token, "lez_program module has no body")
-    })?;
+    let (_, items) = program_mod
+        .content
+        .as_ref()
+        .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -2019,12 +2077,14 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     }
 
     // Detect external instruction type from the #[lez_program(...)] attr
-    let external_instruction_str: Option<String> = program_mod.attrs.iter()
+    let external_instruction_str: Option<String> = program_mod
+        .attrs
+        .iter()
         .find(|a| a.path().is_ident("lez_program"))
         .and_then(|attr| {
             // Try to parse as lez_program(instruction = "some::Path")
             let mut ext: Option<String> = None;
-            let _ = attr.parse_nested_meta(|meta| {
+            drop(attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("instruction") {
                     if let Ok(value) = meta.value() {
                         if let Ok(lit) = value.parse::<syn::LitStr>() {
@@ -2033,7 +2093,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
                     }
                 }
                 Ok(())
-            });
+            }));
             ext
         });
 
@@ -2048,8 +2108,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // in a shared core crate (e.g. my_program_core) and the program binary
     // depends on it via `path = "..."`.
     let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
-    let dep_dirs =
-        spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
+    let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
     let (extra_items, dep_source_files) =
         spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
     all_items.extend(extra_items);
@@ -2057,7 +2116,13 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let (accounts, types) = account_types::collect_account_types(&all_items);
 
     // Generate the IDL JSON
-    let idl_json = generate_idl_json(mod_name, &instructions, external_instruction_str.as_deref(), accounts, types);
+    let idl_json = generate_idl_json(
+        mod_name,
+        &instructions,
+        external_instruction_str.as_deref(),
+        accounts,
+        types,
+    );
 
     // Embed the resolved path for cargo tracking
     let resolved = resolved_path.clone();
@@ -2100,7 +2165,7 @@ mod tests {
     impl TempDir {
         fn new(label: &str) -> Self {
             let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let path = std::env::temp_dir().join(format!("spel-macro-test-{}-{}", label, n));
+            let path = std::env::temp_dir().join(format!("spel-macro-test-{label}-{n}"));
             std::fs::create_dir_all(&path).unwrap();
             TempDir(path)
         }
@@ -2119,7 +2184,7 @@ mod tests {
 
     impl Drop for TempDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            std::fs::remove_dir_all(&self.0).ok();
         }
     }
 
@@ -2127,10 +2192,8 @@ mod tests {
 
     #[test]
     fn has_account_type_attr_matches_bare_form() {
-        let file = syn::parse_file(
-            "#[account_type]\npub struct Vault { pub balance: u64 }",
-        )
-        .unwrap();
+        let file =
+            syn::parse_file("#[account_type]\npub struct Vault { pub balance: u64 }").unwrap();
         if let syn::Item::Struct(s) = &file.items[0] {
             assert!(account_types::has_account_type_attr(&s.attrs));
         } else {
@@ -2153,10 +2216,9 @@ mod tests {
 
     #[test]
     fn has_account_type_attr_matches_deeply_qualified_form() {
-        let file = syn::parse_file(
-            "#[foo::bar::account_type]\npub struct Vault { pub balance: u64 }",
-        )
-        .unwrap();
+        let file =
+            syn::parse_file("#[foo::bar::account_type]\npub struct Vault { pub balance: u64 }")
+                .unwrap();
         if let syn::Item::Struct(s) = &file.items[0] {
             assert!(account_types::has_account_type_attr(&s.attrs));
         } else {
@@ -2166,10 +2228,8 @@ mod tests {
 
     #[test]
     fn has_account_type_attr_rejects_other_attrs() {
-        let file = syn::parse_file(
-            "#[derive(Debug)]\npub struct Vault { pub balance: u64 }",
-        )
-        .unwrap();
+        let file =
+            syn::parse_file("#[derive(Debug)]\npub struct Vault { pub balance: u64 }").unwrap();
         if let syn::Item::Struct(s) = &file.items[0] {
             assert!(!account_types::has_account_type_attr(&s.attrs));
         } else {
@@ -2198,7 +2258,11 @@ mod tests {
 
         let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("core"), "expected core dir, got {:?}", dirs[0]);
+        assert!(
+            dirs[0].ends_with("core"),
+            "expected core dir, got {:?}",
+            dirs[0]
+        );
     }
 
     #[test]
@@ -2283,7 +2347,10 @@ mod tests {
 
         let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
         assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
-        let names: Vec<&str> = dirs.iter().map(|d| d.file_name().unwrap().to_str().unwrap()).collect();
+        let names: Vec<&str> = dirs
+            .iter()
+            .map(|d| d.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(names.contains(&"core"));
         assert!(names.contains(&"shared"));
     }
@@ -2348,11 +2415,11 @@ pub mod token {
         let output = tokens.to_string();
         assert!(
             output.contains("TokenHolding"),
-            "TokenHolding from path dep not found in generated IDL. Output: {}", output
+            "TokenHolding from path dep not found in generated IDL. Output: {output}"
         );
         assert!(
             output.contains("TokenDefinition"),
-            "TokenDefinition from path dep not found in generated IDL. Output: {}", output
+            "TokenDefinition from path dep not found in generated IDL. Output: {output}"
         );
     }
 
@@ -2403,7 +2470,7 @@ pub mod token {
         let output = tokens.to_string();
         assert!(
             output.contains("VaultConfig"),
-            "VaultConfig with qualified attribute not found in generated IDL. Output: {}", output
+            "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
         );
     }
 }

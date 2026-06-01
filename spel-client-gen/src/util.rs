@@ -34,18 +34,21 @@ pub fn pascal_case(s: &str) -> String {
             upper = true;
         }
     }
-    if out.is_empty() { "Program".to_string() } else { out }
+    if out.is_empty() {
+        "Program".to_string()
+    } else {
+        out
+    }
 }
 
 /// Make a valid Rust identifier.
 pub fn rust_ident(s: &str) -> String {
     let ident = snake_case(s);
     match ident.as_str() {
-        "type" | "match" | "mod" | "enum" | "struct" | "fn" | "crate"
-        | "self" | "super" | "pub" | "use" | "impl" | "trait" | "where"
-        | "async" | "await" | "move" | "ref" | "mut" | "const" | "static"
-        | "let" | "if" | "else" | "loop" | "while" | "for" | "in"
-        | "return" | "break" | "continue" => format!("r#{}", ident),
+        "type" | "match" | "mod" | "enum" | "struct" | "fn" | "crate" | "self" | "super"
+        | "pub" | "use" | "impl" | "trait" | "where" | "async" | "await" | "move" | "ref"
+        | "mut" | "const" | "static" | "let" | "if" | "else" | "loop" | "while" | "for" | "in"
+        | "return" | "break" | "continue" => format!("r#{ident}"),
         _ => ident,
     }
 }
@@ -63,9 +66,11 @@ pub fn idl_type_to_rust(ty: &spel_framework_core::idl::IdlType) -> String {
         IdlType::Vec { vec } => format!("Vec<{}>", idl_type_to_rust(vec)),
         IdlType::Option { option } => format!("Option<{}>", idl_type_to_rust(option)),
         IdlType::Defined { defined } => defined.clone(),
-        IdlType::Array { array: (elem, size) } => {
+        IdlType::Array {
+            array: (elem, size),
+        } => {
             format!("[{}; {}]", idl_type_to_rust(elem), size)
-        }
+        },
     }
 }
 
@@ -158,7 +163,11 @@ pub fn find_rest_arg<'a>(
         .find_map(|s| acc_name.strip_suffix(s))
         .unwrap_or(acc_name);
     let singular = base.strip_suffix('s').unwrap_or(base);
-    let plural = if base.ends_with('s') { base.to_string() } else { format!("{base}s") };
+    let plural = if base.ends_with('s') {
+        base.to_string()
+    } else {
+        format!("{base}s")
+    };
     for &arg in &candidates {
         let n = arg.name.as_str();
         if n == base || n == singular || n == plural.as_str() {

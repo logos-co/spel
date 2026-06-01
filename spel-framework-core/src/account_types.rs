@@ -9,9 +9,7 @@ use std::collections::HashSet;
 
 use syn::{Attribute, Item, ItemEnum, ItemStruct, Type};
 
-use crate::idl::{
-    IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef,
-};
+use crate::idl::{IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef};
 
 // ─── Account type scanning ────────────────────────────────────────────────
 
@@ -24,7 +22,10 @@ pub fn has_account_type_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| {
         let path = a.path();
         path.is_ident("account_type")
-            || path.segments.last().map_or(false, |s| s.ident == "account_type")
+            || path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "account_type")
     })
 }
 
@@ -38,8 +39,8 @@ pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
             };
             let ident = segment.ident.to_string();
             match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64"
-                | "i128" | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
                 "Vec" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -49,7 +50,7 @@ pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
                         }
                     }
                     IdlType::Primitive("vec<unknown>".to_string())
-                }
+                },
                 "Option" => {
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
@@ -59,14 +60,14 @@ pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
                         }
                     }
                     IdlType::Primitive("option<unknown>".to_string())
-                }
+                },
                 "ProgramId" => IdlType::Primitive("program_id".to_string()),
                 "AccountId" => IdlType::Primitive("account_id".to_string()),
                 other => IdlType::Defined {
                     defined: other.to_string(),
                 },
             }
-        }
+        },
         Type::Array(arr) => {
             let elem = syn_type_to_idl_type(&arr.elem);
             if let syn::Expr::Lit(lit) = &arr.len {
@@ -81,7 +82,7 @@ pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
             IdlType::Array {
                 array: (Box::new(elem), 0),
             }
-        }
+        },
         _ => IdlType::Primitive("unknown".to_string()),
     }
 }
@@ -173,7 +174,7 @@ fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
         IdlType::Vec { vec } => collect_defined_refs_from_type(vec, out),
         IdlType::Option { option } => collect_defined_refs_from_type(option, out),
         IdlType::Array { array: (inner, _) } => collect_defined_refs_from_type(inner, out),
-        IdlType::Primitive(_) => {}
+        IdlType::Primitive(_) => {},
     }
 }
 
@@ -187,13 +188,13 @@ fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
                     name: name.to_string(),
                     ..at.type_
                 });
-            }
+            },
             Item::Enum(e) if e.ident == name => {
                 let mut def = parse_enum_account_type(e).type_;
                 def.name = name.to_string();
                 return Some(def);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
     None
@@ -217,13 +218,13 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
                     annotated_names.insert(at.name.clone());
                     accounts.push(at);
                 }
-            }
+            },
             Item::Enum(e) if has_account_type_attr(&e.attrs) => {
                 let at = parse_enum_account_type(e);
                 annotated_names.insert(at.name.clone());
                 accounts.push(at);
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -240,7 +241,7 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
         .collect();
 
     while !queue.is_empty() {
-        let batch: Vec<String> = queue.drain(..).collect();
+        let batch: Vec<String> = std::mem::take(&mut queue);
         for name in batch {
             if visited.contains(&name) {
                 continue;

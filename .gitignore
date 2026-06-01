@@ -1,4 +1,3 @@
 /target
-Cargo.lock
 tests/e2e/fixture_program/target/
 test-spel-e2e/target/

@@ -1,8 +1,8 @@
 //! Account data inspection: fetch from sequencer, borsh-decode using IDL types,
 //! and pretty-print as JSON.
 
-use spel_framework_core::idl::SpelIdl;
 use spel_framework_core::decode;
+use spel_framework_core::idl::SpelIdl;
 use std::process;
 
 use crate::hex::{decode_bytes_32, hex_decode, hex_encode};
@@ -46,7 +46,7 @@ pub async fn inspect_account(
     match decode::decode_account_data(&data, type_name, idl) {
         Ok(value) => {
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
-        }
+        },
         Err(e) if e.contains("not found in IDL") => {
             eprintln!("Type '{}' not found in IDL.", type_name);
             eprintln!("Available account types:");
@@ -54,11 +54,11 @@ pub async fn inspect_account(
                 eprintln!("  {}", acc.name);
             }
             process::exit(1);
-        }
+        },
         Err(e) => {
             eprintln!("Borsh decode failed: {}", e);
             process::exit(1);
-        }
+        },
     }
 }
 
@@ -79,4 +79,3 @@ async fn fetch_account_data(account_id: nssa::AccountId) -> Vec<u8> {
 
     account.data.to_vec()
 }
-

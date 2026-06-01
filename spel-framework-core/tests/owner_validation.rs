@@ -30,14 +30,15 @@ fn __validate_initialize_holding(
     }
     // Account index 1 has #[account(init)]
     if accounts[1].account != Account::default() {
-        return Err(SpelError::AccountAlreadyInitialized {
-            account_index: 1,
-        });
+        return Err(SpelError::AccountAlreadyInitialized { account_index: 1 });
     }
     // Account index 1 has #[account(signer)]
     if !accounts[1].is_authorized {
         return Err(SpelError::Unauthorized {
-            message: format!("Account {} (index {}) must be a signer", "holding_account", 1),
+            message: format!(
+                "Account {} (index {}) must be a signer",
+                "holding_account", 1
+            ),
         });
     }
     Ok(())
@@ -57,7 +58,11 @@ fn make_program_id(bytes: [u8; 32]) -> ProgramId {
     id
 }
 
-fn make_account_with_owner(id: [u8; 32], owner: ProgramId, authorized: bool) -> AccountWithMetadata {
+fn make_account_with_owner(
+    id: [u8; 32],
+    owner: ProgramId,
+    authorized: bool,
+) -> AccountWithMetadata {
     let mut account = Account::default();
     account.program_owner = owner;
     AccountWithMetadata {
@@ -109,8 +114,8 @@ fn test_owner_mismatch_returns_error() {
     match result.unwrap_err() {
         SpelError::AccountOwnerMismatch { account_name } => {
             assert_eq!(account_name, "definition_account");
-        }
-        other => panic!("expected AccountOwnerMismatch, got: {:?}", other),
+        },
+        other => panic!("expected AccountOwnerMismatch, got: {other:?}"),
     }
 }
 
@@ -124,20 +129,15 @@ fn test_owner_check_runs_before_init_and_signer() {
         // definition_account owned by DIFFERENT program ✗
         make_account_with_owner([2u8; 32], other_program, false),
         // holding_account: NOT empty (init violated) and NOT authorized (signer violated)
-        make_initialized_account_with_owner(
-            [3u8; 32],
-            ProgramId::default(),
-            vec![1u8; 32],
-            false,
-        ),
+        make_initialized_account_with_owner([3u8; 32], ProgramId::default(), vec![1u8; 32], false),
     ];
     let result = __validate_initialize_holding(&accounts, &program_id);
     // Owner check runs first, so we should get AccountOwnerMismatch, not init/signer errors.
     match result.unwrap_err() {
         SpelError::AccountOwnerMismatch { account_name } => {
             assert_eq!(account_name, "definition_account");
-        }
-        other => panic!("expected AccountOwnerMismatch (owner check runs first), got: {:?}", other),
+        },
+        other => panic!("expected AccountOwnerMismatch (owner check runs first), got: {other:?}"),
     }
 }
 

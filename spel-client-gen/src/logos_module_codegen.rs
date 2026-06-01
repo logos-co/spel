@@ -28,7 +28,7 @@ pub fn generate_logos_module(
     // effective_prog is the module identity used for file/class/env-var names.
     // prog is the raw IDL snake_case name, used only for FFI function names.
     let effective_prog = module_name
-        .map(|n| snake_case(n))
+        .map(snake_case)
         .unwrap_or_else(|| snake_case(&idl.name));
     let class = pascal_case(&effective_prog);
     let prog = snake_case(&idl.name); // FFI symbol prefix (from IDL, unchanged)
@@ -75,7 +75,7 @@ fn qt_type(ty: &IdlType) -> (String, bool) {
                 ) =>
             {
                 ("QStringList".into(), true)
-            }
+            },
             _ => ("QVariantList".into(), true),
         },
         // Option<T> is always QVariant so the C++ layer can detect null (= unchecked).
@@ -122,7 +122,7 @@ fn type_placeholder(ty: &IdlType) -> &'static str {
         },
         IdlType::Array { array: (elem, 32) } if matches!(elem.as_ref(), IdlType::Primitive(p) if p == "u8") => {
             "base58 or 0x… hex"
-        }
+        },
         IdlType::Option { option } => type_placeholder(option),
         _ => "value",
     }
@@ -165,9 +165,9 @@ fn is_list_type(ty: &IdlType) -> bool {
 fn qt_param_decl(ty: &IdlType, name: &str) -> String {
     let (t, is_ref) = qt_type(ty);
     if is_ref {
-        format!("const {}& {}", t, name)
+        format!("const {t}& {name}")
     } else {
-        format!("{} {}", t, name)
+        format!("{t} {name}")
     }
 }
 
@@ -363,7 +363,7 @@ fn qml_type_expr(ty: &IdlType, field_id: &str, idl: &SpelIdl) -> String {
         },
         IdlType::Vec { .. } => {
             format!("{field_id}.text.split(\"\\n\").map(function(s){{ return s.trim() }}).filter(function(s){{ return s.length > 0 }})")
-        }
+        },
         IdlType::Option { option } => {
             let inner = if enum_variants(option, idl).is_some() {
                 format!("{field_id}.currentText")
@@ -371,7 +371,7 @@ fn qml_type_expr(ty: &IdlType, field_id: &str, idl: &SpelIdl) -> String {
                 qml_type_expr(option, field_id, idl)
             };
             format!("{field_id}_enabled.checked ? ({inner}) : null")
-        }
+        },
         _ => format!("{field_id}.text"),
     }
 }
@@ -657,7 +657,7 @@ fn gen_backend_cpp(
         "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID\")).toString();\n"
     ));
     // Fallback: call the compiled-in FFI constant if still empty (priority 3)
-    o.push_str(&format!("    if (m_programIdHex.isEmpty()) {{\n"));
+    o.push_str("    if (m_programIdHex.isEmpty()) {\n");
     o.push_str(&format!(
         "        char* raw = {effective_prog}_program_id();\n"
     ));
@@ -1222,7 +1222,7 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
     o.push_str("                    Layout.fillWidth: true\n");
     o.push_str("                    Layout.preferredHeight: 52\n");
     o.push_str("                    Layout.leftMargin: 16; Layout.rightMargin: 8\n");
-    o.push_str(&format!("                    Text {{\n"));
+    o.push_str("                    Text {\n");
     o.push_str(&format!("                        text: \"{prog_title}\"\n"));
     o.push_str("                        color: root.colText\n");
     o.push_str("                        font.pixelSize: 15; font.bold: true\n");
@@ -1290,10 +1290,8 @@ fn gen_main_qml(idl: &SpelIdl, fetches: &[FetchAccount], effective_prog: &str) -
         o.push_str("                        }\n");
     };
     let emit_section_label = |o: &mut String, text: &str| {
-        o.push_str(&format!("                        Text {{\n"));
-        o.push_str(&format!(
-            "                            x: 12; width: sidebar.width - 12; height: 28\n"
-        ));
+        o.push_str("                        Text {\n");
+        o.push_str("                            x: 12; width: sidebar.width - 12; height: 28\n");
         o.push_str(&format!("                            text: \"{text}\"\n"));
         o.push_str("                            color: root.colMuted\n");
         o.push_str("                            font.pixelSize: 10\n");
@@ -1874,37 +1872,37 @@ fn qml_instruction_page(o: &mut String, ix: &IdlInstruction, idl: &SpelIdl) {
                 ));
                 o.push_str(&format!("{ind}                Text {{ text: \"{}\"; color: root.colText; font.pixelSize: 13 }}\n", p.qt_name));
                 o.push_str(&format!("{ind}            }}\n\n"));
-            }
+            },
             // ── Vec<T>: label + multiline TextArea ──────────────────────────────
             (ParamKind::Arg(ty), None) if is_list_type(ty) => {
                 qml_field_label(o, &p.qt_name, ind);
                 qml_textarea_page(o, &field_id, &p.qt_name, ind);
-            }
+            },
             // ── Enum Defined (non-optional): label + ComboBox ───────────────────
             (_, Some(vs)) if !is_opt => {
                 qml_field_label(o, &p.qt_name, ind);
                 qml_combobox(o, &field_id, vs, false, ind);
-            }
+            },
             // ── Option<Enum>: checkbox label + disabled ComboBox ────────────────
             (_, Some(vs)) => {
                 qml_option_label_row(o, &field_id, &p.qt_name, ind);
                 qml_combobox(o, &field_id, vs, true, ind);
-            }
+            },
             // ── Account signer: label + picker (WALLET accounts + RECENT history) ─
             (ParamKind::Account, None) => {
                 qml_field_label(o, &p.qt_name, ind);
                 qml_account_picker(o, &field_id, &field_id, ind);
-            }
+            },
             // ── Option<T>: checkbox label + disabled field with history ───────────
             (ParamKind::Arg(_), None) if is_opt => {
                 qml_option_label_row(o, &field_id, &p.qt_name, ind);
                 qml_textfield_with_history(o, &field_id, core_ty.unwrap(), &field_id, true, ind);
-            }
+            },
             // ── Regular T: label + field with history ────────────────────────────
             (ParamKind::Arg(ty), None) => {
                 qml_field_label(o, &p.qt_name, ind);
                 qml_textfield_with_history(o, &field_id, ty, &field_id, false, ind);
-            }
+            },
         }
     }
 
@@ -2780,7 +2778,7 @@ fn qml_toast(o: &mut String) {
 fn gen_module_yaml(idl: &SpelIdl, effective_prog: &str, class: &str) -> String {
     let desc = format!("Qt/QML Basecamp module for the {} program", idl.name);
     let ver = &idl.version;
-    let ffi = format!("{}_ffi", effective_prog);
+    let ffi = format!("{effective_prog}_ffi");
     format!(
         "# Auto-generated by spel-client-gen --target logos-module.\n\
          name: {effective_prog}\n\

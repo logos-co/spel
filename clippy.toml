@@ -1,0 +1,33 @@
+msrv = "1.88"
+
+# Tests are not production code — panics there are signals, not bugs.
+allow-unwrap-in-tests           = true
+allow-expect-in-tests           = true
+allow-panic-in-tests            = true
+allow-dbg-in-tests              = true
+allow-indexing-slicing-in-tests = true
+allow-print-in-tests            = true
+
+# Thresholds.
+too-many-arguments-threshold   = 8
+cognitive-complexity-threshold = 30
+type-complexity-threshold      = 250
+
+# Domain-specific identifiers that clippy's doc_markdown should not flag.
+doc-valid-idents = [
+    "SPEL",
+    "IDL",
+    "FFI",
+    "PDA",
+    "LEZ",
+    "NSSA",
+    "RISC0",
+    "JSON",
+    "UTF-8",
+    "zkVM",
+    "QML",
+    "CMake",
+    "QObject",
+    "QString",
+    "QSettings",
+]

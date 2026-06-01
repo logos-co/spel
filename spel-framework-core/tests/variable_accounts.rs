@@ -1,7 +1,7 @@
 //! Test variable-length account lists (rest accounts).
 //! Verifies the IDL serialization round-trip with the `rest` field.
 
-use spel_framework_core::idl::{IdlAccountItem, IdlPda};
+use spel_framework_core::idl::IdlAccountItem;
 
 #[test]
 fn test_rest_account_serializes() {
@@ -16,7 +16,7 @@ fn test_rest_account_serializes() {
         visibility: vec!["public".to_string()],
     };
     let json = serde_json::to_string(&acc).unwrap();
-    assert!(json.contains("\"rest\":true"), "JSON: {}", json);
+    assert!(json.contains("\"rest\":true"), "JSON: {json}");
 }
 
 #[test]
@@ -32,7 +32,10 @@ fn test_non_rest_account_omits_rest() {
         visibility: vec![],
     };
     let json = serde_json::to_string(&acc).unwrap();
-    assert!(!json.contains("rest"), "rest=false should be omitted, JSON: {}", json);
+    assert!(
+        !json.contains("rest"),
+        "rest=false should be omitted, JSON: {json}"
+    );
 }
 
 #[test]

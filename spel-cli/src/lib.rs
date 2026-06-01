@@ -9,28 +9,28 @@
 //!
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
-pub mod hex;
-pub mod parse;
-pub mod serialize;
-pub mod pda;
-pub mod tx;
-pub mod inspect;
 pub mod account_inspect;
 pub mod cli;
 pub mod config;
-pub mod init;
 pub mod generate_idl;
+pub mod hex;
+pub mod init;
+pub mod inspect;
+pub mod parse;
+pub mod pda;
+pub mod serialize;
+pub mod tx;
 
-use cli::{print_help, parse_instruction_args, snake_to_kebab};
+use cli::{parse_instruction_args, print_help, snake_to_kebab};
 use config::SpelConfig;
 use init::init_project;
 use inspect::inspect_binaries;
-use tx::execute_instruction;
-use pda::compute_pda_from_seeds;
-use spel_framework_core::idl::{SpelIdl, IdlSeed};
 use parse::ParsedValue;
+use pda::compute_pda_from_seeds;
+use spel_framework_core::idl::{IdlSeed, SpelIdl};
 use std::collections::HashMap;
 use std::{env, fs, process};
+use tx::execute_instruction;
 
 /// Run the generic IDL-driven CLI. Call this from your program's main():
 ///
@@ -61,39 +61,54 @@ pub async fn run() {
                 used_separator = true;
                 remaining_args.extend_from_slice(&args[i + 1..]);
                 break;
-            }
+            },
             "--idl" | "-i" => {
                 i += 1;
-                if i < args.len() { idl_path = args[i].clone(); }
-            }
+                if i < args.len() {
+                    idl_path = args[i].clone();
+                }
+            },
             "--program" | "-p" => {
                 i += 1;
-                if i < args.len() { program_ref = Some(args[i].clone()); }
-            }
+                if i < args.len() {
+                    program_ref = Some(args[i].clone());
+                }
+            },
             "--program-id" => {
                 eprintln!("⚠️  --program-id is deprecated. Use --program <HEX> instead.");
                 i += 1;
-                if i < args.len() { program_ref = Some(args[i].clone()); }
-            }
+                if i < args.len() {
+                    program_ref = Some(args[i].clone());
+                }
+            },
             "--type" | "-t" => {
                 i += 1;
-                if i < args.len() { type_name = Some(args[i].clone()); }
-            }
+                if i < args.len() {
+                    type_name = Some(args[i].clone());
+                }
+            },
             "--data" | "-d" => {
                 i += 1;
-                if i < args.len() { data_hex = Some(args[i].clone()); }
-            }
-            "--dry-run" => { dry_run = Some(tx::DryRunFormat::Text); }
+                if i < args.len() {
+                    data_hex = Some(args[i].clone());
+                }
+            },
+            "--dry-run" => {
+                dry_run = Some(tx::DryRunFormat::Text);
+            },
             s if s.starts_with("--dry-run=") => {
                 dry_run = Some(match &s["--dry-run=".len()..] {
                     "text" => tx::DryRunFormat::Text,
                     "json" => tx::DryRunFormat::Json,
                     other => {
-                        eprintln!("❌ --dry-run=<fmt>: expected 'text' or 'json', got '{}'", other);
+                        eprintln!(
+                            "❌ --dry-run=<fmt>: expected 'text' or 'json', got '{}'",
+                            other
+                        );
                         process::exit(1);
-                    }
+                    },
                 });
-            }
+            },
             "--format" => {
                 i += 1;
                 if i >= args.len() || args[i].starts_with('-') {
@@ -101,7 +116,7 @@ pub async fn run() {
                     process::exit(1);
                 }
                 inspect_format = Some(args[i].clone());
-            }
+            },
             s if s.starts_with("--format=") => {
                 let val = &s["--format=".len()..];
                 if val.is_empty() {
@@ -109,14 +124,14 @@ pub async fn run() {
                     process::exit(1);
                 }
                 inspect_format = Some(val.to_string());
-            }
+            },
             s if s.starts_with("--bin-") => {
                 let name = s.strip_prefix("--bin-").unwrap().to_string();
                 i += 1;
                 if i < args.len() {
                     extra_bins.insert(format!("{}-program-id", name), args[i].clone());
                 }
-            }
+            },
             _ => remaining_args.push(args[i].clone()),
         }
         i += 1;
@@ -149,7 +164,10 @@ pub async fn run() {
                     idl_path = config_dir.join(idl).to_string_lossy().to_string();
                 }
             }
-            program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
+            program_path = prog
+                .binary
+                .as_ref()
+                .map(|b| config_dir.join(b).to_string_lossy().to_string());
         } else if is_hex_program_id(value) {
             program_id_hex = Some(value.clone());
         } else {
@@ -168,7 +186,10 @@ pub async fn run() {
                     }
                 }
                 if program_path.is_none() {
-                    program_path = prog.binary.as_ref().map(|b| config_dir.join(b).to_string_lossy().to_string());
+                    program_path = prog
+                        .binary
+                        .as_ref()
+                        .map(|b| config_dir.join(b).to_string_lossy().to_string());
                 }
             }
         }
@@ -179,8 +200,9 @@ pub async fn run() {
         match cmd {
             "init" => {
                 // Check for help flag
-                if remaining_args.get(2) == Some(&"-h".to_string()) 
-                    || remaining_args.get(2) == Some(&"--help".to_string()) {
+                if remaining_args.get(2) == Some(&"-h".to_string())
+                    || remaining_args.get(2) == Some(&"--help".to_string())
+                {
                     println!("Usage: spel init <project-name> [OPTIONS]");
                     println!();
                     println!("Create a new SPEL project");
@@ -193,7 +215,9 @@ pub async fn run() {
                     println!();
                     println!("Examples:");
                     println!("  spel init my-project");
-                    println!("  spel init my-project --lez-tag v0.2.0-rc3 --spel-rev refs/pull/122/head");
+                    println!(
+                        "  spel init my-project --lez-tag v0.2.0-rc3 --spel-rev refs/pull/122/head"
+                    );
                     return;
                 }
                 let mut lez_tag: Option<String> = None;
@@ -206,16 +230,24 @@ pub async fn run() {
                     let arg = &remaining_args[name_arg_idx];
                     if arg == "--lez-tag" {
                         name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() { lez_tag = Some(remaining_args[name_arg_idx].clone()); }
+                        if name_arg_idx < remaining_args.len() {
+                            lez_tag = Some(remaining_args[name_arg_idx].clone());
+                        }
                     } else if arg == "--spel-tag" {
                         name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() { spel_tag = Some(remaining_args[name_arg_idx].clone()); }
+                        if name_arg_idx < remaining_args.len() {
+                            spel_tag = Some(remaining_args[name_arg_idx].clone());
+                        }
                     } else if arg == "--lez-rev" {
                         name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() { lez_rev = Some(remaining_args[name_arg_idx].clone()); }
+                        if name_arg_idx < remaining_args.len() {
+                            lez_rev = Some(remaining_args[name_arg_idx].clone());
+                        }
                     } else if arg == "--spel-rev" {
                         name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() { spel_rev = Some(remaining_args[name_arg_idx].clone()); }
+                        if name_arg_idx < remaining_args.len() {
+                            spel_rev = Some(remaining_args[name_arg_idx].clone());
+                        }
                     } else {
                         break;
                     }
@@ -226,13 +258,19 @@ pub async fn run() {
                     eprintln!("Usage: {} init <project-name> [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>]", args[0]);
                     process::exit(1);
                 });
-                init_project(name, lez_tag.as_deref(), spel_tag.as_deref(), lez_rev.as_deref(), spel_rev.as_deref());
+                init_project(
+                    name,
+                    lez_tag.as_deref(),
+                    spel_tag.as_deref(),
+                    lez_rev.as_deref(),
+                    spel_rev.as_deref(),
+                );
                 return;
-            }
+            },
             "program-id" => {
                 inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
                 return;
-            }
+            },
             "inspect" => {
                 if idl_path.is_empty() {
                     eprintln!("Account inspection requires --idl <IDL_FILE>");
@@ -251,7 +289,7 @@ pub async fn run() {
                     Err(e) => {
                         eprintln!("Error reading IDL '{}': {}", idl_path, e);
                         process::exit(1);
-                    }
+                    },
                 };
                 let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
                     eprintln!("Error parsing IDL: {}", e);
@@ -262,12 +300,13 @@ pub async fn run() {
                     &idl,
                     type_name.as_ref().unwrap(),
                     data_hex.as_deref(),
-                ).await;
+                )
+                .await;
                 return;
-            }
+            },
             "generate-idl" => {
-                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
                 use generate_idl::{discover_sources, find_path_dep_dirs};
+                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
 
                 let arg = remaining_args.get(2).map(|s| s.as_str());
                 let sources = discover_sources(arg).unwrap_or_else(|e| {
@@ -285,7 +324,7 @@ pub async fn run() {
                         Err(e) => {
                             eprintln!("Error: {}", e);
                             process::exit(1);
-                        }
+                        },
                     }
                 } else {
                     // Multiple programs: write <name>-idl.json for each
@@ -298,18 +337,21 @@ pub async fn run() {
                         match generate_idl_from_file_with_deps(source, &dep_result.dirs) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
-                                match fs::write(&out_name, serde_json::to_string_pretty(&idl).unwrap()) {
+                                match fs::write(
+                                    &out_name,
+                                    serde_json::to_string_pretty(&idl).unwrap(),
+                                ) {
                                     Ok(_) => eprintln!("✅ {}", out_name),
                                     Err(e) => {
                                         eprintln!("Error writing {}: {}", out_name, e);
                                         had_error = true;
-                                    }
+                                    },
                                 }
-                            }
+                            },
                             Err(e) => {
                                 eprintln!("Error processing {}: {}", source.display(), e);
                                 had_error = true;
-                            }
+                            },
                         }
                     }
                     if had_error {
@@ -317,24 +359,30 @@ pub async fn run() {
                     }
                 }
                 return;
-            }
-            "pda" if program_id_hex.is_some() && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) => {
+            },
+            "pda"
+                if program_id_hex.is_some()
+                    && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) =>
+            {
                 // Raw PDA mode: no IDL needed
                 // Triggered when --program <hex> resolves to a program ID + pda command
                 // Usage: <bin> --program <hex> pda <seed1> [seed2] ...
-                let mut raw_args = vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
+                let mut raw_args =
+                    vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
                 raw_args.extend_from_slice(&remaining_args[2..]);
                 compute_pda_raw(&raw_args);
                 return;
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
     if idl_path.is_empty() {
         eprintln!("Usage: {} [OPTIONS] -- <COMMAND> [ARGS]", args[0]);
         eprintln!();
-        eprintln!("Tip: create a spel.toml with [program] or [programs.<name>] to avoid passing flags.");
+        eprintln!(
+            "Tip: create a spel.toml with [program] or [programs.<name>] to avoid passing flags."
+        );
         eprintln!();
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new SPEL project");
@@ -353,7 +401,7 @@ pub async fn run() {
         Err(e) => {
             eprintln!("Error reading IDL '{}': {}", idl_path, e);
             process::exit(1);
-        }
+        },
     };
     let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
         eprintln!("Error parsing IDL: {}", e);
@@ -369,16 +417,19 @@ pub async fn run() {
     match subcmd {
         Some("--help") | Some("-h") | None => {
             print_help(&idl, &binary_name);
-        }
+        },
         Some("idl") => {
             println!("{}", serde_json::to_string_pretty(&idl).unwrap());
-        }
+        },
         Some("program-id") => {
             inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
-        }
+        },
         Some("inspect") => {
             let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                eprintln!(
+                    "Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]",
+                    args[0]
+                );
                 process::exit(1);
             });
             account_inspect::inspect_account(
@@ -386,15 +437,22 @@ pub async fn run() {
                 &idl,
                 type_name.as_ref().unwrap(),
                 data_hex.as_deref(),
-            ).await;
-        }
+            )
+            .await;
+        },
         Some("pda") => {
-            compute_pda_command(&idl, program_path.as_deref(), program_id_hex.as_deref(), &remaining_args[2..]);
-        }
+            compute_pda_command(
+                &idl,
+                program_path.as_deref(),
+                program_id_hex.as_deref(),
+                &remaining_args[2..],
+            );
+        },
         Some(cmd) => {
-            let instruction = idl.instructions.iter().find(|ix| {
-                snake_to_kebab(&ix.name) == cmd || ix.name == cmd
-            });
+            let instruction = idl
+                .instructions
+                .iter()
+                .find(|ix| snake_to_kebab(&ix.name) == cmd || ix.name == cmd);
 
             match instruction {
                 Some(ix) => {
@@ -406,16 +464,23 @@ pub async fn run() {
                     }
                     let cli_args = parse_instruction_args(&remaining_args[2..], ix);
                     execute_instruction(
-                        &idl, ix, &cli_args, program_path.as_deref(), program_id_hex.as_deref(), dry_run, &extra_bins,
-                    ).await;
-                }
+                        &idl,
+                        ix,
+                        &cli_args,
+                        program_path.as_deref(),
+                        program_id_hex.as_deref(),
+                        dry_run,
+                        &extra_bins,
+                    )
+                    .await;
+                },
                 None => {
                     eprintln!("Unknown command: {}", cmd);
                     print_help(&idl, &binary_name);
                     process::exit(1);
-                }
+                },
             }
-        }
+        },
     }
 }
 
@@ -425,7 +490,12 @@ pub async fn run() {
 ///
 /// Looks up the named account across all instructions, finds its PDA seeds,
 /// resolves them using provided args, and prints the base58 AccountId.
-fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex: Option<&str>, args: &[String]) {
+fn compute_pda_command(
+    idl: &SpelIdl,
+    program_path: Option<&str>,
+    program_id_hex: Option<&str>,
+    args: &[String],
+) {
     let account_name = match args.first() {
         Some(n) => n.as_str(),
         None => {
@@ -440,16 +510,16 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 }
             }
             std::process::exit(1);
-        }
+        },
     };
 
     // Find account definition with PDA seeds and its owning instruction
-    let found = idl.instructions.iter()
-        .find_map(|ix| {
-            ix.accounts.iter()
-                .find(|acc| acc.name == account_name || snake_to_kebab(&acc.name) == account_name)
-                .and_then(|acc| acc.pda.as_ref().map(|pda| (ix, pda)))
-        });
+    let found = idl.instructions.iter().find_map(|ix| {
+        ix.accounts
+            .iter()
+            .find(|acc| acc.name == account_name || snake_to_kebab(&acc.name) == account_name)
+            .and_then(|acc| acc.pda.as_ref().map(|pda| (ix, pda)))
+    });
 
     let (owning_ix, pda_def) = match found {
         Some(pair) => pair,
@@ -464,7 +534,7 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 }
             }
             std::process::exit(1);
-        }
+        },
     };
 
     // Build a map from arg name to IDL type using the owning instruction's args
@@ -491,7 +561,12 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 let arg_name = key.replace('-', "_");
                 let parsed = if let Some(ty) = arg_types.get(arg_name.as_str()) {
                     parse::parse_value(raw, ty).unwrap_or_else(|e| {
-                        eprintln!("⚠️  Failed to parse --{} as {}: {}", key, format!("{:?}", ty), e);
+                        eprintln!(
+                            "⚠️  Failed to parse --{} as {}: {}",
+                            key,
+                            format!("{:?}", ty),
+                            e
+                        );
                         ParsedValue::Str(raw.clone())
                     })
                 } else {
@@ -509,8 +584,8 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
     }
 
     // Get program_id: from global --program-id flag, or by loading the binary
-    use nssa::program::Program;
     use crate::hex::decode_bytes_32;
+    use nssa::program::Program;
 
     let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
@@ -528,10 +603,12 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 eprintln!("❌ Cannot read program binary '{}': {}", path, e);
                 std::process::exit(1);
             });
-            Program::new(program_bytes).unwrap_or_else(|e| {
-                eprintln!("❌ Invalid program binary: {:?}", e);
-                std::process::exit(1);
-            }).id()
+            Program::new(program_bytes)
+                .unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid program binary: {:?}", e);
+                    std::process::exit(1);
+                })
+                .id()
         } else {
             eprintln!("❌ Program binary not found: {}", path);
             std::process::exit(1);
@@ -555,12 +632,17 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                     std::process::exit(1);
                 });
                 Some(NullifierPublicKey(bytes))
-            }
+            },
             None => {
-                eprintln!("❌ '{}' is a private PDA — pass --npk <64-char-hex>", account_name);
-                eprintln!("   The NullifierPublicKey is the recipient's npk from their wallet key.");
+                eprintln!(
+                    "❌ '{}' is a private PDA — pass --npk <64-char-hex>",
+                    account_name
+                );
+                eprintln!(
+                    "   The NullifierPublicKey is the recipient's npk from their wallet key."
+                );
                 std::process::exit(1);
-            }
+            },
         }
     } else {
         None
@@ -578,11 +660,13 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                     if j + 1 < args.len() {
                         let raw = &args[j + 1];
                         match raw.parse::<nssa::AccountId>() {
-                            Ok(id) => { account_map.insert(path.clone(), id); }
+                            Ok(id) => {
+                                account_map.insert(path.clone(), id);
+                            },
                             Err(_) => {
                                 eprintln!("❌ '{}' is not a valid base58 account ID", raw);
                                 std::process::exit(1);
-                            }
+                            },
                         }
                     }
                     break;
@@ -593,10 +677,16 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
     }
 
     // Compute PDA
-    match compute_pda_from_seeds(&pda_def.seeds, &program_id, &account_map, &seed_args, npk.as_ref()) {
+    match compute_pda_from_seeds(
+        &pda_def.seeds,
+        &program_id,
+        &account_map,
+        &seed_args,
+        npk.as_ref(),
+    ) {
         Ok(account_id) => {
             println!("{}", account_id);
-        }
+        },
         Err(e) => {
             eprintln!("❌ Failed to compute PDA: {}", e);
             eprintln!();
@@ -605,11 +695,14 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
                 match seed {
                     IdlSeed::Const { value } => eprintln!("  const: {:?}", value),
                     IdlSeed::Arg { path } => eprintln!("  arg: --{}", path.replace('_', "-")),
-                    IdlSeed::Account { path } => eprintln!("  account: --{} <base58-account-id>", path.replace('_', "-")),
+                    IdlSeed::Account { path } => eprintln!(
+                        "  account: --{} <base58-account-id>",
+                        path.replace('_', "-")
+                    ),
                 }
             }
             std::process::exit(1);
-        }
+        },
     }
 }
 
@@ -627,8 +720,8 @@ fn compute_pda_command(idl: &SpelIdl, program_path: Option<&str>, program_id_hex
 ///   multisig --program-id abc123... pda multisig_vault__ <create_key_hex>
 fn compute_pda_raw(args: &[String]) {
     use crate::hex::decode_bytes_32;
-    use nssa_core::program::{PdaSeed, ProgramId};
     use nssa::AccountId;
+    use nssa_core::program::{PdaSeed, ProgramId};
 
     // Parse --program-id
     let pid_hex = match args.windows(2).find(|w| w[0] == "--program-id") {
@@ -636,7 +729,7 @@ fn compute_pda_raw(args: &[String]) {
         None => {
             eprintln!("Usage: pda --program-id <64-char-hex> <seed1> [seed2] ...");
             std::process::exit(1);
-        }
+        },
     };
 
     let pid_bytes = decode_bytes_32(pid_hex).unwrap_or_else(|e| {
@@ -652,12 +745,21 @@ fn compute_pda_raw(args: &[String]) {
     let mut seeds: Vec<[u8; 32]> = Vec::new();
     let mut skip_next = false;
     for arg in args {
-        if skip_next { skip_next = false; continue; }
-        if arg == "--program-id" { skip_next = true; continue; }
-        if arg.starts_with("--") { continue; }
+        if skip_next {
+            skip_next = false;
+            continue;
+        }
+        if arg == "--program-id" {
+            skip_next = true;
+            continue;
+        }
+        if arg.starts_with("--") {
+            continue;
+        }
 
         // Try as 64-char hex first, then as zero-padded string
-        let seed_bytes: [u8; 32] = if arg.len() == 64 && arg.chars().all(|c| c.is_ascii_hexdigit()) {
+        let seed_bytes: [u8; 32] = if arg.len() == 64 && arg.chars().all(|c| c.is_ascii_hexdigit())
+        {
             decode_bytes_32(arg).unwrap_or_else(|e| {
                 eprintln!("❌ Invalid hex seed '{}': {}", arg, e);
                 std::process::exit(1);
@@ -687,8 +789,13 @@ fn compute_pda_raw(args: &[String]) {
         seeds[0]
     } else {
         let mut input = Vec::with_capacity(seeds.len() * 32);
-        for s in &seeds { input.extend_from_slice(s); }
-        Impl::hash_bytes(&input).as_bytes().try_into().expect("SHA-256 is 32 bytes")
+        for s in &seeds {
+            input.extend_from_slice(s);
+        }
+        Impl::hash_bytes(&input)
+            .as_bytes()
+            .try_into()
+            .expect("SHA-256 is 32 bytes")
     };
 
     let pda_seed = PdaSeed::new(combined);
