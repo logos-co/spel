@@ -5330,7 +5330,7 @@ dependencies = [
 
 [[package]]
 name = "spel"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base58",
  "borsh",
@@ -5351,7 +5351,7 @@ dependencies = [
 
 [[package]]
 name = "spel-client-gen"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "pretty_assertions",
  "serde",
@@ -5381,7 +5381,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "borsh",
  "nssa",
@@ -5394,7 +5394,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "base58",
  "borsh",
@@ -5411,7 +5411,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-macros"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "proc-macro2",
  "quote",
