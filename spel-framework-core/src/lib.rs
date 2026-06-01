@@ -39,7 +39,7 @@ pub mod prelude {
     pub use nssa_core::program::{read_nssa_inputs, InstructionData, ProgramInput, ProgramOutput};
 
     // Execution context for instruction handlers (issue #172)
-    pub use crate::context::ProgramContext;
+    pub use crate::context::{ClockContext, ProgramContext};
 
     // nssa::public_transaction (host-only)
     #[cfg(feature = "host")]

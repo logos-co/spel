@@ -166,6 +166,11 @@ struct InstructionInfo {
     /// True if this instruction has a ProgramContext parameter.
     /// The context is injected by the dispatcher and never appears in IDL/ABI.
     has_context: bool,
+    /// True if this instruction has a ClockContext parameter.
+    /// The dispatcher reads the clock account from pre_states[0] and injects it;
+    /// it never appears in the IDL/ABI. Transaction builders must prepend the
+    /// clock account (`/LEZ/ClockProgramAccount/0000001`) to the account list.
+    has_clock_context: bool,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
 }
@@ -497,6 +502,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     let mut accounts = Vec::new();
     let mut args = Vec::new();
     let mut has_context = false;
+    let mut has_clock_context = false;
 
     for (idx, input) in func.sig.inputs.iter().enumerate() {
         match input {
@@ -533,6 +539,21 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
                         ));
                     }
                     has_context = true;
+                } else if is_clock_context_type(ty) {
+                    // ClockContext — injected by dispatcher from the clock pre_state, not part of ABI/IDL.
+                    if has_clock_context {
+                        return Err(syn::Error::new_spanned(
+                            ty,
+                            "instruction functions can have at most one ClockContext parameter",
+                        ));
+                    }
+                    if !accounts.is_empty() || !args.is_empty() {
+                        return Err(syn::Error::new_spanned(
+                            ty,
+                            "ClockContext must appear before any account or arg parameters",
+                        ));
+                    }
+                    has_clock_context = true;
                 } else {
                     args.push(ArgParam {
                         name: param_name,
@@ -554,6 +575,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         accounts,
         args,
         has_context,
+        has_clock_context,
         func,
     })
 }
@@ -598,6 +620,16 @@ fn is_context_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "ProgramContext";
+        }
+    }
+    false
+}
+
+/// Check if a type is ClockContext (clock context injected from the clock pre_state).
+fn is_clock_context_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "ClockContext";
         }
     }
     false
@@ -848,6 +880,27 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
             });
             let validate_fn_name = format_ident!("__validate_{}", ix.fn_name);
 
+            // When ClockContext is present, strip pre_states[0] as the clock account,
+            // decode it into ClockContext, and rebind `pre_states` to the remainder.
+            // The original pre_states[0] is saved so its post_state can be reinserted
+            // at position 0 after the handler returns, keeping the zip in main() aligned.
+            let clock_setup = if ix.has_clock_context {
+                quote! {
+                    let (__clock_account_pre, __clock_context, pre_states) = {
+                        let mut __ps = pre_states;
+                        if __ps.is_empty() {
+                            panic!("SPEL ClockContext: expected clock account as first pre_state, found none");
+                        }
+                        let __c = __ps.remove(0);
+                        let __ctx = borsh::from_slice::<spel_framework::context::ClockContext>(&__c.account.data)
+                            .expect("SPEL ClockContext: failed to decode clock account data");
+                        (__c, __ctx, __ps)
+                    };
+                }
+            } else {
+                quote! {}
+            };
+
             let call_args: Vec<TokenStream2> = {
                 let mut args: Vec<TokenStream2> = Vec::new();
                 // Context is always first if present (enforced by parse_instruction).
@@ -860,6 +913,10 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                         )
                     });
                 }
+                // ClockContext comes after ProgramContext (enforced by parse_instruction).
+                if ix.has_clock_context {
+                    args.push(quote! { __clock_context });
+                }
                 args.extend(ix.accounts.iter().map(|a| {
                     let name = &a.name;
                     quote! { #name }
@@ -869,6 +926,26 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     quote! { #name }
                 }));
                 args
+            };
+
+            // Re-insert the clock account as an unchanged post_state at position 0 so
+            // that pre_states_clone[0] (the clock account) and post_states[0] align in
+            // the zip used to build ProgramOutput.
+            let map_output = if ix.has_clock_context {
+                quote! {
+                    .map(|output| {
+                        let mut __parts = output.into_parts();
+                        __parts.post_states.insert(
+                            0,
+                            nssa_core::program::AccountPostState::new(
+                                __clock_account_pre.account.clone()
+                            ),
+                        );
+                        __parts
+                    })
+                }
+            } else {
+                quote! { .map(|output| output.into_parts()) }
             };
 
             // Collect arg seed values to pass to validation
@@ -952,10 +1029,11 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
 
             quote! {
                 #pattern => {
+                    #clock_setup
                     #account_destructure
                     #validation_call
                     #mod_name::#fn_name(#(#call_args),*)
-                        .map(|output| output.into_parts())
+                        #map_output
                 }
             }
         })
@@ -1850,6 +1928,7 @@ fn generate_idl_fn(
                     .collect::<String>()
             };
 
+            let has_clock = ix.has_clock_context;
             quote! {
                 spel_framework::idl::IdlInstruction {
                     name: #ix_name.to_string(),
@@ -1861,6 +1940,7 @@ fn generate_idl_fn(
                         private_owned: false,
                     }),
                     variant: Some(#variant_name_str.to_string()),
+                    has_clock_context: #has_clock,
                 }
             }
         })
@@ -1984,11 +2064,17 @@ fn generate_idl_json(
                 })
                 .collect();
 
+            let clock_json = if ix.has_clock_context {
+                ",\"has_clock_context\":true".to_string()
+            } else {
+                String::new()
+            };
             format!(
-                "{{\"name\":\"{}\",\"accounts\":[{}],\"args\":[{}]}}",
+                "{{\"name\":\"{}\",\"accounts\":[{}],\"args\":[{}]{}}}",
                 ix_name,
                 accounts_json.join(","),
-                args_json.join(",")
+                args_json.join(","),
+                clock_json,
             )
         })
         .collect();

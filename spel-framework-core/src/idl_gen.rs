@@ -210,6 +210,7 @@ fn generate_idl_inner(
                 discriminator: None,
                 execution: None,
                 variant: None,
+                has_clock_context: ix.has_clock_context,
             }
         })
         .collect();
@@ -546,6 +547,7 @@ struct InstructionInfo {
     fn_name: Ident,
     accounts: Vec<AccountParam>,
     args: Vec<ArgParam>,
+    has_clock_context: bool,
 }
 
 struct AccountParam {
@@ -582,6 +584,7 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
     let fn_name = func.sig.ident.clone();
     let mut accounts = Vec::new();
     let mut args = Vec::new();
+    let mut has_clock_context = false;
 
     for input in &func.sig.inputs {
         match input {
@@ -605,6 +608,9 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
                     });
                 } else if is_context_type(ty) {
                     // ProgramContext is injected by the dispatcher and never part of the IDL/ABI.
+                } else if is_clock_context_type(ty) {
+                    // ClockContext is injected by the dispatcher and never part of the IDL/ABI.
+                    has_clock_context = true;
                 } else {
                     args.push(ArgParam {
                         name: param_name,
@@ -625,6 +631,7 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         fn_name,
         accounts,
         args,
+        has_clock_context,
     })
 }
 
@@ -642,6 +649,15 @@ fn is_context_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "ProgramContext";
+        }
+    }
+    false
+}
+
+fn is_clock_context_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "ClockContext";
         }
     }
     false
