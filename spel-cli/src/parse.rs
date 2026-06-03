@@ -98,6 +98,15 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             _ => Err(format!("Invalid bool '{}': expected true/false", raw)),
         },
         "string" | "String" => Ok(ParsedValue::Str(raw.to_string())),
+        // nssa AccountId is SerializeDisplay/DeserializeFromStr: a base58 string on the
+        // wire, not 32 raw bytes. Normalize any input (base58 / 0xhex / Public-prefixed)
+        // to canonical base58 and carry it as a string.
+        "account_id" => {
+            use base58::ToBase58 as _;
+            crate::hex::decode_bytes_32(raw)
+                .map(|b| ParsedValue::Str(b.to_base58()))
+                .map_err(|e| format!("Invalid account_id '{}': {}", raw, e))
+        }
         other => Ok(ParsedValue::Raw(format!("{}({})", other, raw))),
     }
 }
