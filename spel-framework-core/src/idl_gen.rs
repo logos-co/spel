@@ -13,10 +13,7 @@ use std::path::{Path, PathBuf};
 
 use syn::{Attribute, FnArg, Ident, ItemFn, Pat, PatType, Type};
 
-use crate::idl::{
-    IdlAccountItem, IdlArg, IdlInstruction, IdlPda,
-    IdlSeed, SpelIdl,
-};
+use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelIdl};
 
 use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
@@ -32,14 +29,14 @@ pub enum IdlGenError {
 impl fmt::Display for IdlGenError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            IdlGenError::Io(e) => write!(f, "IO error: {}", e),
-            IdlGenError::Parse(e) => write!(f, "Parse error: {}", e),
+            IdlGenError::Io(e) => write!(f, "IO error: {e}"),
+            IdlGenError::Parse(e) => write!(f, "Parse error: {e}"),
             IdlGenError::NoProgram(path) => {
-                write!(f, "No #[lez_program] module found in '{}'", path)
-            }
+                write!(f, "No #[lez_program] module found in '{path}'")
+            },
             IdlGenError::NoInstructions(path) => {
-                write!(f, "No #[instruction] functions found in '{}'", path)
-            }
+                write!(f, "No #[instruction] functions found in '{path}'")
+            },
         }
     }
 }
@@ -144,7 +141,7 @@ fn generate_idl_inner(
         .find(|a| a.path().is_ident("lez_program"))
         .and_then(|attr| {
             let mut ext: Option<String> = None;
-            let _ = attr.parse_nested_meta(|meta| {
+            drop(attr.parse_nested_meta(|meta| {
                 if meta.path.is_ident("instruction") {
                     if let Ok(value) = meta.value() {
                         if let Ok(lit) = value.parse::<syn::LitStr>() {
@@ -153,7 +150,7 @@ fn generate_idl_inner(
                     }
                 }
                 Ok(())
-            });
+            }));
             ext
         });
 
@@ -178,7 +175,10 @@ fn generate_idl_inner(
                                 PdaSeedDef::Arg(p) => IdlSeed::Arg { path: p.clone() },
                             })
                             .collect();
-                        Some(IdlPda { seeds, private: false })
+                        Some(IdlPda {
+                            seeds,
+                            private: false,
+                        })
                     };
 
                     IdlAccountItem {
@@ -312,7 +312,11 @@ fn mod_file_path(m: &syn::ItemMod, base_dir: &Path) -> Option<PathBuf> {
     for attr in &m.attrs {
         if attr.path().is_ident("path") {
             if let Ok(syn::MetaNameValue {
-                value: syn::Expr::Lit(syn::ExprLit { lit: syn::Lit::Str(s), .. }),
+                value:
+                    syn::Expr::Lit(syn::ExprLit {
+                        lit: syn::Lit::Str(s),
+                        ..
+                    }),
                 ..
             }) = attr.meta.require_name_value()
             {
@@ -367,10 +371,10 @@ fn collect_items_recursive(
                         collect_items_from_source_file(&p, out, visited, files_read);
                     }
                 }
-            }
+            },
             // Non-module items (structs, enums, etc.) — also skip if cfg-gated.
             other => {
-                let attrs: &[syn::Attribute] = match other {
+                let attrs: &[Attribute] = match other {
                     syn::Item::Struct(s) => &s.attrs,
                     syn::Item::Enum(e) => &e.attrs,
                     syn::Item::Fn(f) => &f.attrs,
@@ -387,7 +391,7 @@ fn collect_items_recursive(
                     continue;
                 }
                 out.push(other.clone());
-            }
+            },
         }
     }
 }
@@ -412,7 +416,7 @@ fn collect_items_recursive(
 /// Note: `#[cfg_attr(test, ...)]` is **not** treated as exclusion because it
 /// only conditionally applies attributes — it does not remove the item from
 /// compilation (e.g. `cfg_attr(test, derive(Debug))` is common and valid).
-fn is_cfg_excluded(attrs: &[syn::Attribute]) -> bool {
+fn is_cfg_excluded(attrs: &[Attribute]) -> bool {
     for attr in attrs {
         if !attr.path().is_ident("cfg") {
             continue;
@@ -433,17 +437,17 @@ fn cfg_meta_excludes(meta: &syn::Meta) -> bool {
         syn::Meta::Path(path) => {
             // Bare path: `#[cfg(test)]` (unlikely at top level, but handle it)
             path.is_ident("test") || path.is_ident("feature")
-        }
+        },
         syn::Meta::NameValue(nv) => {
             // Name-value: `#[cfg(feature = "...")]`
             nv.path.is_ident("feature")
-        }
+        },
         syn::Meta::List(list) if list.path.is_ident("cfg") => {
             // Scan the inner tokens of #[cfg(...)] for test/feature identifiers.
             // This handles all cases: bare `test`, `feature = "x"`, and
             // `any(test, feature = "x")` — because we recurse into nested groups.
             cfg_tokens_have_exclusion(&list.tokens, false)
-        }
+        },
         _ => false,
     }
 }
@@ -466,7 +470,7 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) ->
                 if let Some(proc_macro2::TokenTree::Group(_)) = iter.peek() {
                     iter.next(); // consume the group
                 }
-            }
+            },
             proc_macro2::TokenTree::Ident(ident) if ident == "any" => {
                 // Handle any(...) — check if ALL alternatives would exclude.
                 let next = iter.peek().cloned();
@@ -483,14 +487,14 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) ->
                                 if !cfg_tokens_have_exclusion(&alt_group.stream(), true) {
                                     all_exclude = false;
                                 }
-                            }
+                            },
                             proc_macro2::TokenTree::Ident(alt_ident) => {
                                 alt_count += 1;
                                 if alt_ident != "test" && alt_ident != "feature" {
                                     all_exclude = false;
                                 }
-                            }
-                            _ => {}
+                            },
+                            _ => {},
                         }
                     }
                     // If no alternatives found (parse issue), be conservative.
@@ -503,7 +507,7 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) ->
                         return true; // top-level: all alternatives exclude → exclude
                     }
                 }
-            }
+            },
             proc_macro2::TokenTree::Ident(ident) => {
                 if ident == "test" || ident == "feature" {
                     if in_any {
@@ -512,7 +516,7 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) ->
                         return true;
                     }
                 }
-            }
+            },
             proc_macro2::TokenTree::Group(group) => {
                 // Recurse into groups (parentheses, braces, brackets).
                 let result = cfg_tokens_have_exclusion(&group.stream(), in_any);
@@ -521,8 +525,8 @@ fn cfg_tokens_have_exclusion(tokens: &proc_macro2::TokenStream, in_any: bool) ->
                 } else if result {
                     return true;
                 }
-            }
-            _ => {}
+            },
+            _ => {},
         }
     }
 
@@ -608,13 +612,13 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
                         ty: ty.clone(),
                     });
                 }
-            }
+            },
             FnArg::Receiver(_) => {
                 return Err(IdlGenError::Parse(syn::Error::new_spanned(
                     input,
                     "instruction functions cannot have self parameter",
                 )));
-            }
+            },
         }
     }
 
@@ -709,7 +713,7 @@ fn parse_pda_expr(expr: &syn::Expr) -> Result<Vec<PdaSeedDef>, syn::Error> {
         syn::Expr::Call(call) => {
             let seed = parse_single_pda_seed(call)?;
             Ok(vec![seed])
-        }
+        },
         syn::Expr::Array(arr) => {
             let mut seeds = Vec::new();
             for elem in &arr.elems {
@@ -723,7 +727,7 @@ fn parse_pda_expr(expr: &syn::Expr) -> Result<Vec<PdaSeedDef>, syn::Error> {
                 }
             }
             Ok(seeds)
-        }
+        },
         _ => Err(syn::Error::new_spanned(
             expr,
             "PDA seed must be const(\"...\"), account(\"...\"), arg(\"...\"), or [seed, ...]",
@@ -766,8 +770,7 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
         _ => Err(syn::Error::new_spanned(
             call,
             format!(
-                "Unknown PDA seed type '{}'. Use const(\"...\"), account(\"...\"), or arg(\"...\")",
-                func_name
+                "Unknown PDA seed type '{func_name}'. Use const(\"...\"), account(\"...\"), or arg(\"...\")"
             ),
         )),
     }
@@ -809,7 +812,7 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
                 e
             ));
             return vec![];
-        }
+        },
     };
     let value: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
@@ -820,7 +823,7 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
                 e
             ));
             return vec![];
-        }
+        },
     };
 
     let manifest_dir = match manifest.parent() {
@@ -830,8 +833,7 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
 
     // Check if this is a workspace root — if so, it has no [dependencies] of its
     // own.  We need to find the actual crate manifest for the program binary.
-    let is_workspace = value.get("workspace").is_some()
-        && value.get("package").is_none();
+    let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
 
     if is_workspace {
         // Workspace root: search member directories for the crate that contains
@@ -841,7 +843,12 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
         if let Some(member_manifest) =
             _find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning)
         {
-            _resolve_path_deps_recursive(&member_manifest, &mut dirs, &mut visited, &mut on_warning);
+            _resolve_path_deps_recursive(
+                &member_manifest,
+                &mut dirs,
+                &mut visited,
+                &mut on_warning,
+            );
         }
         dirs
     } else {
@@ -885,7 +892,7 @@ fn _resolve_path_deps_recursive<F: FnMut(String)>(
                 e
             ));
             return;
-        }
+        },
     };
     let value: toml::Value = match toml::from_str(&content) {
         Ok(v) => v,
@@ -896,7 +903,7 @@ fn _resolve_path_deps_recursive<F: FnMut(String)>(
                 e
             ));
             return;
-        }
+        },
     };
 
     // Skip workspace roots — they have no [dependencies].
@@ -941,7 +948,12 @@ fn _find_member_manifest<F: FnMut(String)>(
         .get("workspace")
         .and_then(|w| w.get("members"))
         .and_then(|m| m.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .collect()
+        })
         .unwrap_or_default();
 
     // Expand glob patterns (e.g. "crates/*") into concrete directories.
@@ -955,7 +967,11 @@ fn _find_member_manifest<F: FnMut(String)>(
                 if let Ok(entries) = std::fs::read_dir(&dir) {
                     for entry in entries.flatten() {
                         if entry.file_type().map_or(true, |ft| ft.is_dir()) {
-                            expanded.push(format!("{}/{}", prefix, entry.file_name().to_string_lossy()));
+                            expanded.push(format!(
+                                "{}/{}",
+                                prefix,
+                                entry.file_name().to_string_lossy()
+                            ));
                         }
                     }
                 }
@@ -995,7 +1011,7 @@ fn _find_member_manifest<F: FnMut(String)>(
         // than returning the workspace root immediately.
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
-                if entry.file_type().map_or(false, |ft| ft.is_dir()) {
+                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
                     if let Some(found) = _search_recursive(&entry.path(), target_dir) {
                         return Some(found);
                     }
@@ -1023,7 +1039,11 @@ fn _find_member_manifest<F: FnMut(String)>(
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
 fn _find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> Option<PathBuf> {
-    let mut dir: &Path = if start.is_file() { start.parent()? } else { start };
+    let mut dir: &Path = if start.is_file() {
+        start.parent()?
+    } else {
+        start
+    };
     loop {
         let candidate = dir.join("Cargo.toml");
         if candidate.exists() {
@@ -1037,7 +1057,7 @@ fn _find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> O
                     start.display()
                 ));
                 return None;
-            }
+            },
         };
     }
 }
@@ -1109,7 +1129,10 @@ mod tests {
             }
         "#;
         let idl = ok(src);
-        assert_eq!(idl.instruction_type.as_deref(), Some("my_core::Instruction"));
+        assert_eq!(
+            idl.instruction_type.as_deref(),
+            Some("my_core::Instruction")
+        );
     }
 
     // ── Account constraints ───────────────────────────────────────────────────
@@ -1417,7 +1440,10 @@ mod tests {
         assert_eq!(idl.instructions[0].name, "alpha");
         assert_eq!(idl.instructions[1].name, "beta");
         // non-annotated function is excluded
-        assert!(!idl.instructions.iter().any(|i| i.name == "not_an_instruction"));
+        assert!(!idl
+            .instructions
+            .iter()
+            .any(|i| i.name == "not_an_instruction"));
     }
 
     // ── #[account_type] — basic discovery ─────────────────────────────────────
@@ -1554,8 +1580,15 @@ mod tests {
             }
         "#;
         let idl = ok(src);
-        assert_eq!(idl.accounts.len(), 2, "both annotated types should be in accounts");
-        assert!(idl.types.is_empty(), "annotated type should not also be in types");
+        assert_eq!(
+            idl.accounts.len(),
+            2,
+            "both annotated types should be in accounts"
+        );
+        assert!(
+            idl.types.is_empty(),
+            "annotated type should not also be in types"
+        );
     }
 
     #[test]

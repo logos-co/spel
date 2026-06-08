@@ -7,22 +7,22 @@
 pub use spel_framework_macros::{lez_program, instruction, account_type, generate_idl, event};
 
 // Re-export core types
-pub use spel_framework_core::*;
 pub use spel_framework_core::types::{SpelOutput, SpelOutputParts};
+pub use spel_framework_core::*;
 
 // Re-export serde_json for use in generated code
 pub use serde_json;
 
 pub mod prelude {
-    pub use crate::lez_program;
-    pub use crate::instruction;
     pub use crate::account_type;
     pub use crate::event;
-    pub use spel_framework_core::prelude::*;
-    pub use spel_framework_core::types::SpelOutput;
-    pub use spel_framework_core::spel_output::AutoClaim;
+    pub use crate::instruction;
+    pub use crate::lez_program;
+    pub use borsh::{BorshDeserialize, BorshSerialize};
     pub use spel_framework_core::error::{SpelError, SpelResult};
-    pub use borsh::{BorshSerialize, BorshDeserialize};
+    pub use spel_framework_core::prelude::*;
+    pub use spel_framework_core::spel_output::AutoClaim;
+    pub use spel_framework_core::types::SpelOutput;
 
     // nssa::public_transaction (host-only)
     #[cfg(feature = "host")]

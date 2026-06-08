@@ -14,7 +14,7 @@
 //! fs::write("src/generated_ffi.rs", &output.ffi_code)?;
 //! ```
 
-use spel_framework_core::idl::*;
+use spel_framework_core::idl::SpelIdl;
 
 mod codegen;
 mod ffi_codegen;
@@ -40,12 +40,16 @@ pub struct CodegenOutput {
 
 /// Generate client + FFI code from an IDL JSON string.
 pub fn generate_from_idl_json(json: &str) -> Result<CodegenOutput, String> {
-    let idl: SpelIdl = serde_json::from_str(json)
-        .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
+    let idl: SpelIdl =
+        serde_json::from_str(json).map_err(|e| format!("failed to parse IDL JSON: {e}"))?;
     let client_code = codegen::generate_client(&idl)?;
     let ffi_code = ffi_codegen::generate_ffi(&idl, json)?;
     let header = ffi_codegen::generate_header(&idl)?;
-    Ok(CodegenOutput { client_code, ffi_code, header })
+    Ok(CodegenOutput {
+        client_code,
+        ffi_code,
+        header,
+    })
 }
 
 /// Generate a Logos Basecamp module scaffold from an IDL JSON string.
@@ -60,8 +64,8 @@ pub fn generate_logos_module_from_idl_json(
     module_name: Option<&str>,
     ffi_lib_path: Option<&str>,
 ) -> Result<LogosModuleOutput, String> {
-    let idl: SpelIdl = serde_json::from_str(json)
-        .map_err(|e| format!("failed to parse IDL JSON: {}", e))?;
+    let idl: SpelIdl =
+        serde_json::from_str(json).map_err(|e| format!("failed to parse IDL JSON: {e}"))?;
     logos_module_codegen::generate_logos_module(&idl, module_name, ffi_lib_path)
 }
 
@@ -69,9 +73,13 @@ pub fn generate_logos_module_from_idl_json(
 /// Use `generate_from_idl_json` if you have the raw JSON — it embeds the JSON
 /// in the generated FFI for runtime decode support.
 pub fn generate_from_idl(idl: &SpelIdl) -> Result<CodegenOutput, String> {
-    let json = serde_json::to_string(idl).map_err(|e| format!("failed to serialise IDL: {}", e))?;
+    let json = serde_json::to_string(idl).map_err(|e| format!("failed to serialise IDL: {e}"))?;
     let client_code = codegen::generate_client(idl)?;
     let ffi_code = ffi_codegen::generate_ffi(idl, &json)?;
     let header = ffi_codegen::generate_header(idl)?;
-    Ok(CodegenOutput { client_code, ffi_code, header })
+    Ok(CodegenOutput {
+        client_code,
+        ffi_code,
+        header,
+    })
 }

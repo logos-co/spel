@@ -65,24 +65,22 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
             } else {
                 Err(format!("'{}' is not a .rs file or a directory", p))
             }
-        }
+        },
         None => {
             let cwd = std::env::current_dir().map_err(|e| e.to_string())?;
             let sources = search_methods_dir(&cwd)?;
             if !sources.is_empty() {
                 return Ok(sources);
             }
-            Err(
-                "No SPEL program sources found.\n\
+            Err("No SPEL program sources found.\n\
                  Searched: ./methods/guest/src/bin/*.rs\n\
                  \n\
                  Options:\n\
                  - Run from your project root (where 'methods/' lives)\n\
                  - Pass a project directory: generate-idl <path-to-project>\n\
                  - Pass a source file:       generate-idl <path-to-program.rs>"
-                    .to_string(),
-            )
-        }
+                .to_string())
+        },
     }
 }
 
@@ -117,8 +115,8 @@ pub fn search_methods_dir(root: &Path) -> Result<Vec<PathBuf>, String> {
     if !bin_dir.exists() {
         return Ok(vec![]);
     }
-    let entries = fs::read_dir(&bin_dir)
-        .map_err(|e| format!("Cannot read {}: {}", bin_dir.display(), e))?;
+    let entries =
+        fs::read_dir(&bin_dir).map_err(|e| format!("Cannot read {}: {}", bin_dir.display(), e))?;
     let mut sources: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
@@ -256,7 +254,10 @@ mod tests {
     fn directory_without_methods_errors() {
         let tmp = TempDir::new("dir-empty");
         let err = discover_sources(Some(tmp.path().to_str().unwrap())).unwrap_err();
-        assert!(err.contains("No .rs files found"), "unexpected error: {err}");
+        assert!(
+            err.contains("No .rs files found"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]
@@ -342,7 +343,10 @@ mod tests {
     fn find_path_dep_dirs_returns_local_path_deps() {
         let tmp = TempDir::new("find-path-deps");
 
-        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("core/src/lib.rs", "");
 
         tmp.write(
@@ -353,16 +357,27 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         assert_eq!(result.dirs.len(), 1);
-        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs[0]);
+        assert!(
+            result.dirs[0].ends_with("core"),
+            "expected core dir, got {:?}",
+            result.dirs[0]
+        );
     }
 
     #[test]
     fn find_path_dep_dirs_ignores_registry_and_git_deps() {
         let tmp = TempDir::new("find-path-deps-filter");
 
-        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("core/src/lib.rs", "");
 
         tmp.write(
@@ -376,7 +391,11 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         // Only the path dep (core) should be returned, not serde or nssa_core
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("core"));
@@ -386,11 +405,20 @@ mod tests {
     fn find_path_dep_dirs_ignores_dev_and_build_deps() {
         let tmp = TempDir::new("find-path-deps-dev-build");
 
-        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("core/src/lib.rs", "");
-        tmp.write("test_helpers/Cargo.toml", "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "test_helpers/Cargo.toml",
+            "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("test_helpers/src/lib.rs", "");
-        tmp.write("build_support/Cargo.toml", "[package]\nname = \"build_support\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "build_support/Cargo.toml",
+            "[package]\nname = \"build_support\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("build_support/src/lib.rs", "");
 
         tmp.write(
@@ -406,9 +434,18 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         // Only runtime path dep (core) should be returned
-        assert_eq!(result.dirs.len(), 1, "expected only core, got: {:?}", result.dirs);
+        assert_eq!(
+            result.dirs.len(),
+            1,
+            "expected only core, got: {:?}",
+            result.dirs
+        );
         assert!(result.dirs[0].ends_with("core"));
     }
 
@@ -427,7 +464,10 @@ mod tests {
             "[workspace]\nmembers = [\"core\", \"methods/guest\"]\n",
         );
 
-        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("core/src/lib.rs", "");
 
         tmp.write(
@@ -438,9 +478,17 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         assert_eq!(result.dirs.len(), 1);
-        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
+        assert!(
+            result.dirs[0].ends_with("core"),
+            "expected core dir, got {:?}",
+            result.dirs
+        );
     }
 
     /// Workspace with glob patterns in members: the glob is expanded and the
@@ -455,7 +503,10 @@ mod tests {
             "[workspace]\nmembers = [\"crates/*\", \"methods/guest\"]\n",
         );
 
-        tmp.write("crates/core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("crates/core/src/lib.rs", "");
 
         // Path is relative to methods/guest/, so needs ../.. to reach workspace root.
@@ -467,9 +518,17 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         assert_eq!(result.dirs.len(), 1);
-        assert!(result.dirs[0].ends_with("crates/core"), "expected crates/core dir, got {:?}", result.dirs);
+        assert!(
+            result.dirs[0].ends_with("crates/core"),
+            "expected crates/core dir, got {:?}",
+            result.dirs
+        );
     }
 
     /// When the program source has no intermediate Cargo.toml (only a workspace
@@ -486,7 +545,10 @@ mod tests {
             "[workspace]\nmembers = [\"core\", \"programs/guest\"]\n",
         );
 
-        tmp.write("core/Cargo.toml", "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("core/src/lib.rs", "");
 
         // The guest crate has its own Cargo.toml with dependencies.
@@ -501,9 +563,17 @@ mod tests {
         let program = tmp.write("programs/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         assert_eq!(result.dirs.len(), 1);
-        assert!(result.dirs[0].ends_with("core"), "expected core dir, got {:?}", result.dirs);
+        assert!(
+            result.dirs[0].ends_with("core"),
+            "expected core dir, got {:?}",
+            result.dirs
+        );
     }
 
     /// Test that exercises the workspace-root resolution path: the nearest
@@ -519,7 +589,10 @@ mod tests {
             "[workspace]\nmembers = [\"libs/*\", \"programs/*\"]\n",
         );
 
-        tmp.write("libs/common/Cargo.toml", "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "libs/common/Cargo.toml",
+            "[package]\nname = \"common\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("libs/common/src/lib.rs", "");
 
         // The program crate is NOT a workspace member — it lives in a dir with
@@ -534,7 +607,11 @@ mod tests {
         let program = tmp.write("programs/myprog/src/deep/nested/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         assert_eq!(result.dirs.len(), 1);
         assert!(
             result.dirs[0].ends_with("libs/common"),
@@ -550,7 +627,10 @@ mod tests {
         let tmp = TempDir::new("transitive-deps");
 
         // shared_types is a dependency of core, which is a dependency of guest
-        tmp.write("shared_types/Cargo.toml", "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+        tmp.write(
+            "shared_types/Cargo.toml",
+            "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
         tmp.write("shared_types/src/lib.rs", "");
 
         tmp.write(
@@ -568,10 +648,23 @@ mod tests {
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
-        assert!(result.warnings.is_empty(), "unexpected warnings: {:?}", result.warnings);
+        assert!(
+            result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            result.warnings
+        );
         // Should include both direct dep (core) and transitive dep (shared_types)
-        assert_eq!(result.dirs.len(), 2, "expected 2 dirs, got {:?}", result.dirs);
-        let names: Vec<&str> = result.dirs.iter().map(|d| d.file_name().unwrap().to_str().unwrap()).collect();
+        assert_eq!(
+            result.dirs.len(),
+            2,
+            "expected 2 dirs, got {:?}",
+            result.dirs
+        );
+        let names: Vec<&str> = result
+            .dirs
+            .iter()
+            .map(|d| d.file_name().unwrap().to_str().unwrap())
+            .collect();
         assert!(names.contains(&"core"));
         assert!(names.contains(&"shared_types"));
     }
@@ -591,8 +684,15 @@ mod tests {
 
         let result = find_path_dep_dirs(&program);
         assert!(result.dirs.is_empty());
-        assert!(!result.warnings.is_empty(), "expected warning for missing dep dir");
-        assert!(result.warnings[0].contains("non-existent"), "unexpected warning: {}", result.warnings[0]);
+        assert!(
+            !result.warnings.is_empty(),
+            "expected warning for missing dep dir"
+        );
+        assert!(
+            result.warnings[0].contains("non-existent"),
+            "unexpected warning: {}",
+            result.warnings[0]
+        );
     }
 
     #[test]
@@ -607,7 +707,10 @@ mod tests {
 
         let result = find_path_dep_dirs(&program);
         assert!(result.dirs.is_empty());
-        assert!(!result.warnings.is_empty(), "expected warning for invalid TOML");
+        assert!(
+            !result.warnings.is_empty(),
+            "expected warning for invalid TOML"
+        );
     }
 
     // ── account types from path-dep crates ────────────────────────────────
@@ -713,7 +816,11 @@ pub mod token {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert!(
+            dep_result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            dep_result.warnings
+        );
         assert_eq!(dep_result.dirs.len(), 1);
 
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
@@ -794,7 +901,11 @@ pub mod token {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert!(
+            dep_result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            dep_result.warnings
+        );
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
@@ -825,7 +936,10 @@ pub mod token {
             "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         );
         // lib.rs has an inline `mod outer` whose body declares an external `mod inner`
-        tmp.write("core/src/lib.rs", "pub mod outer {\n    pub mod inner;\n}\n");
+        tmp.write(
+            "core/src/lib.rs",
+            "pub mod outer {\n    pub mod inner;\n}\n",
+        );
         // inner.rs lives at core/src/outer/inner.rs
         tmp.write(
             "core/src/outer/inner.rs",
@@ -845,7 +959,11 @@ pub mod token {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert!(
+            dep_result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            dep_result.warnings
+        );
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
@@ -891,7 +1009,11 @@ pub mod token {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert!(
+            dep_result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            dep_result.warnings
+        );
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
@@ -983,7 +1105,11 @@ pub mod test_helpers {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        assert!(dep_result.warnings.is_empty(), "unexpected warnings: {:?}", dep_result.warnings);
+        assert!(
+            dep_result.warnings.is_empty(),
+            "unexpected warnings: {:?}",
+            dep_result.warnings
+        );
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
@@ -1261,7 +1387,12 @@ pub struct CoreAccount { pub balance: u128 }
 
         let dep_result = find_path_dep_dirs(&program);
         // Should include both direct and transitive deps
-        assert_eq!(dep_result.dirs.len(), 2, "expected 2 dep dirs, got {:?}", dep_result.dirs);
+        assert_eq!(
+            dep_result.dirs.len(),
+            2,
+            "expected 2 dep dirs, got {:?}",
+            dep_result.dirs
+        );
 
         let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
 

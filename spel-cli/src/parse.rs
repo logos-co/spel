@@ -1,7 +1,7 @@
 //! IDL type-aware value parsing from CLI strings.
 
-use spel_framework_core::idl::IdlType;
 use crate::hex::{hex_decode, hex_encode};
+use spel_framework_core::idl::IdlType;
 
 /// A parsed CLI value with type information preserved.
 #[derive(Debug, Clone)]
@@ -37,15 +37,18 @@ impl std::fmt::Display for ParsedValue {
                     }
                 }
                 write!(f, "0x{}", hex_encode(bytes))
-            }
+            },
             ParsedValue::U32Array(vals) => {
                 let strs: Vec<String> = vals.iter().map(|v| v.to_string()).collect();
                 write!(f, "[{}]", strs.join(", "))
-            }
+            },
             ParsedValue::ByteArrayVec(vecs) => {
-                let strs: Vec<String> = vecs.iter().map(|v| format!("0x{}", hex_encode(v))).collect();
+                let strs: Vec<String> = vecs
+                    .iter()
+                    .map(|v| format!("0x{}", hex_encode(v)))
+                    .collect();
                 write!(f, "[{}]", strs.join(", "))
-            }
+            },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
             ParsedValue::Raw(s) => write!(f, "{}", s),
@@ -65,17 +68,29 @@ pub fn parse_value(raw: &str, ty: &IdlType) -> Result<ParsedValue, String> {
             } else {
                 Ok(ParsedValue::Some(Box::new(parse_value(raw, option)?)))
             }
-        }
+        },
         IdlType::Defined { defined } => Ok(ParsedValue::Raw(format!("{}({})", defined, raw))),
     }
 }
 
 fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
     match prim {
-        "u8" => raw.parse::<u8>().map(ParsedValue::U8).map_err(|e| format!("Invalid u8 '{}': {}", raw, e)),
-        "u32" => raw.parse::<u32>().map(ParsedValue::U32).map_err(|e| format!("Invalid u32 '{}': {}", raw, e)),
-        "u64" => raw.parse::<u64>().map(ParsedValue::U64).map_err(|e| format!("Invalid u64 '{}': {}", raw, e)),
-        "u128" => raw.parse::<u128>().map(ParsedValue::U128).map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
+        "u8" => raw
+            .parse::<u8>()
+            .map(ParsedValue::U8)
+            .map_err(|e| format!("Invalid u8 '{}': {}", raw, e)),
+        "u32" => raw
+            .parse::<u32>()
+            .map(ParsedValue::U32)
+            .map_err(|e| format!("Invalid u32 '{}': {}", raw, e)),
+        "u64" => raw
+            .parse::<u64>()
+            .map(ParsedValue::U64)
+            .map_err(|e| format!("Invalid u64 '{}': {}", raw, e)),
+        "u128" => raw
+            .parse::<u128>()
+            .map(ParsedValue::U128)
+            .map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
         "program_id" => parse_program_id(raw),
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),
@@ -111,7 +126,10 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
         }
         Ok(ParsedValue::U32Array(vals))
     } else {
-        Err(format!("Invalid ProgramId '{}': expected 8 comma-separated u32s or 64 hex chars", raw))
+        Err(format!(
+            "Invalid ProgramId '{}': expected 8 comma-separated u32s or 64 hex chars",
+            raw
+        ))
     }
 }
 
@@ -128,19 +146,29 @@ fn parse_array(raw: &str, elem_type: &IdlType, size: usize) -> Result<ParsedValu
                 let hex = &raw[2..];
                 let bytes = hex_decode(hex)?;
                 if bytes.len() != size {
-                    return Err(format!("Expected {} bytes from hex, got {}", size, bytes.len()));
+                    return Err(format!(
+                        "Expected {} bytes from hex, got {}",
+                        size,
+                        bytes.len()
+                    ));
                 }
                 Ok(ParsedValue::ByteArray(bytes))
             } else {
                 let str_bytes = raw.as_bytes();
                 if str_bytes.len() > size {
-                    return Err(format!("String '{}' is {} bytes, max {} for [u8; {}]", raw, str_bytes.len(), size, size));
+                    return Err(format!(
+                        "String '{}' is {} bytes, max {} for [u8; {}]",
+                        raw,
+                        str_bytes.len(),
+                        size,
+                        size
+                    ));
                 }
                 let mut bytes = vec![0u8; size];
                 bytes[..str_bytes.len()].copy_from_slice(str_bytes);
                 Ok(ParsedValue::ByteArray(bytes))
             }
-        }
+        },
         IdlType::Primitive(p) if p == "u32" => {
             let parts: Vec<&str> = raw.split(',').map(|s| s.trim()).collect();
             if parts.len() != size {
@@ -148,10 +176,13 @@ fn parse_array(raw: &str, elem_type: &IdlType, size: usize) -> Result<ParsedValu
             }
             let mut vals = Vec::with_capacity(size);
             for p in &parts {
-                vals.push(p.parse::<u32>().map_err(|e| format!("Invalid u32 '{}': {}", p, e))?);
+                vals.push(
+                    p.parse::<u32>()
+                        .map_err(|e| format!("Invalid u32 '{}': {}", p, e))?,
+                );
             }
             Ok(ParsedValue::U32Array(vals))
-        }
+        },
         _ => Ok(ParsedValue::Raw(raw.to_string())),
     }
 }
@@ -172,38 +203,46 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
                             .map_err(|e| format!("Element [{}]: {}", i, e))?;
                         result.push(bytes.to_vec());
                     } else {
-                        let hex = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")).unwrap_or(part);
-                        let bytes = hex_decode(hex).map_err(|e| format!("Element [{}]: {}", i, e))?;
+                        let hex = part
+                            .strip_prefix("0x")
+                            .or_else(|| part.strip_prefix("0X"))
+                            .unwrap_or(part);
+                        let bytes =
+                            hex_decode(hex).map_err(|e| format!("Element [{}]: {}", i, e))?;
                         if bytes.len() != size {
-                            return Err(format!("Element [{}]: expected {} bytes, got {} from '{}'", i, size, bytes.len(), part));
+                            return Err(format!(
+                                "Element [{}]: expected {} bytes, got {} from '{}'",
+                                i,
+                                size,
+                                bytes.len(),
+                                part
+                            ));
                         }
                         result.push(bytes);
                     }
                 }
                 Ok(ParsedValue::ByteArrayVec(result))
-            }
+            },
             _ => Ok(ParsedValue::Raw(raw.to_string())),
         },
         // Vec<u8> — comma-separated decimal values
         IdlType::Primitive(p) if p == "u8" => {
-            let bytes: Result<Vec<u8>, _> = raw.split(',')
-                .map(|s| s.trim().parse::<u8>())
-                .collect();
+            let bytes: Result<Vec<u8>, _> =
+                raw.split(',').map(|s| s.trim().parse::<u8>()).collect();
             match bytes {
                 Ok(b) => Ok(ParsedValue::ByteArray(b)),
                 Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
             }
-        }
+        },
         // Vec<u32> — comma-separated decimal values
         IdlType::Primitive(p) if p == "u32" => {
-            let vals: Result<Vec<u32>, _> = raw.split(',')
-                .map(|s| s.trim().parse::<u32>())
-                .collect();
+            let vals: Result<Vec<u32>, _> =
+                raw.split(',').map(|s| s.trim().parse::<u32>()).collect();
             match vals {
                 Ok(v) => Ok(ParsedValue::U32Array(v)),
                 Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
             }
-        }
+        },
         _ => Ok(ParsedValue::Raw(raw.to_string())),
     }
 }
@@ -233,7 +272,7 @@ mod tests {
             ParsedValue::ByteArray(bytes) => {
                 assert_eq!(bytes.len(), 32);
                 assert_eq!(bytes[0], 0x43);
-            }
+            },
             other => panic!("expected ByteArray, got {:?}", other),
         }
     }
@@ -251,7 +290,8 @@ mod tests {
         // With Primitive("[u8; 32]"), parse_primitive doesn't recognize it → Raw
         assert!(
             matches!(&parsed, ParsedValue::Raw(_)),
-            "Primitive('[u8; 32]') should fall through to Raw, got {:?}", parsed
+            "Primitive('[u8; 32]') should fall through to Raw, got {:?}",
+            parsed
         );
     }
 }

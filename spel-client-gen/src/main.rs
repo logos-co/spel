@@ -26,29 +26,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     while i < args.len() {
         match args[i].as_str() {
             "--idl" => {
-                idl_path = Some(PathBuf::from(args.get(i + 1).ok_or("--idl requires value")?));
+                idl_path = Some(PathBuf::from(
+                    args.get(i + 1).ok_or("--idl requires value")?,
+                ));
                 i += 2;
-            }
+            },
             "--out-dir" => {
-                out_dir = Some(PathBuf::from(args.get(i + 1).ok_or("--out-dir requires value")?));
+                out_dir = Some(PathBuf::from(
+                    args.get(i + 1).ok_or("--out-dir requires value")?,
+                ));
                 i += 2;
-            }
+            },
             "--target" => {
                 target = Some(args.get(i + 1).ok_or("--target requires value")?.clone());
                 i += 2;
-            }
+            },
             "--module-name" => {
-                module_name = Some(args.get(i + 1).ok_or("--module-name requires value")?.clone());
+                module_name = Some(
+                    args.get(i + 1)
+                        .ok_or("--module-name requires value")?
+                        .clone(),
+                );
                 i += 2;
-            }
+            },
             "--ffi-lib-path" => {
-                ffi_lib_path = Some(args.get(i + 1).ok_or("--ffi-lib-path requires value")?.clone());
+                ffi_lib_path = Some(
+                    args.get(i + 1)
+                        .ok_or("--ffi-lib-path requires value")?
+                        .clone(),
+                );
                 i += 2;
-            }
+            },
             "--skip-ui" => {
                 skip_ui = true;
                 i += 1;
-            }
+            },
             "--help" | "-h" => {
                 println!("spel-client-gen - Generate typed Rust client and C FFI from SPEL IDL");
                 println!();
@@ -58,14 +70,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 println!("Options:");
                 println!("  --idl <path>           Path to IDL JSON file");
                 println!("  --out-dir <dir>        Output directory for generated files");
-                println!("  --target <target>      Output target: rust+ffi (default) | logos-module");
-                println!("  --module-name <name>   Override class/file name for logos-module target");
-                println!("  --ffi-lib-path <path>  Path to compiled FFI .so, relative to --out-dir");
+                println!(
+                    "  --target <target>      Output target: rust+ffi (default) | logos-module"
+                );
+                println!(
+                    "  --module-name <name>   Override class/file name for logos-module target"
+                );
+                println!(
+                    "  --ffi-lib-path <path>  Path to compiled FFI .so, relative to --out-dir"
+                );
                 println!("                         (logos-module only). Wires up CMakeLists.txt automatically.");
                 println!("  --skip-ui              Skip qml/Main.qml — preserves hand-written QML while still");
                 println!("                         regenerating the C++ backend, plugin, and build files.");
                 return Ok(());
-            }
+            },
             other => return Err(format!("unknown argument: {other}").into()),
         }
     }
@@ -100,15 +118,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let class = pascal_case(effective);
 
             let files: &[(&str, &str)] = &[
-                (&format!("src/{}Backend.h", class),   &output.backend_h),
-                (&format!("src/{}Backend.cpp", class), &output.backend_cpp),
-                (&format!("src/{}Plugin.h", class),    &output.plugin_h),
-                (&format!("src/{}Plugin.cpp", class),  &output.plugin_cpp),
-                ("src/main.cpp",                        &output.main_cpp),
-                ("qml/Main.qml",                        &output.main_qml),
-                ("module.yaml",                         &output.module_yaml),
-                ("manifest.json",                        &output.manifest_json),
-                ("CMakeLists.txt",                      &output.cmake_lists),
+                (&format!("src/{class}Backend.h"), &output.backend_h),
+                (&format!("src/{class}Backend.cpp"), &output.backend_cpp),
+                (&format!("src/{class}Plugin.h"), &output.plugin_h),
+                (&format!("src/{class}Plugin.cpp"), &output.plugin_cpp),
+                ("src/main.cpp", &output.main_cpp),
+                ("qml/Main.qml", &output.main_qml),
+                ("module.yaml", &output.module_yaml),
+                ("manifest.json", &output.manifest_json),
+                ("CMakeLists.txt", &output.cmake_lists),
             ];
 
             println!("Generated (--target logos-module):");
@@ -124,7 +142,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 std::fs::write(&path, content)?;
                 println!("  {}", path.display());
             }
-        }
+        },
         None | Some("rust+ffi") | Some("default") => {
             let output = spel_client_gen::generate_from_idl_json(&json)?;
 
@@ -132,23 +150,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 .map_err(|e| format!("failed to create {}: {}", out_dir.display(), e))?;
 
             let client_path = out_dir.join(format!("{prog}_client.rs"));
-            let ffi_path    = out_dir.join(format!("{prog}_ffi.rs"));
+            let ffi_path = out_dir.join(format!("{prog}_ffi.rs"));
             let header_path = out_dir.join(format!("{prog}.h"));
 
             std::fs::write(&client_path, &output.client_code)?;
-            std::fs::write(&ffi_path,    &output.ffi_code)?;
+            std::fs::write(&ffi_path, &output.ffi_code)?;
             std::fs::write(&header_path, &output.header)?;
 
             println!("Generated:");
             println!("  Client: {}", client_path.display());
             println!("  FFI:    {}", ffi_path.display());
             println!("  Header: {}", header_path.display());
-        }
+        },
         Some(other) => {
             return Err(format!("unknown target: {other} (known: rust+ffi, logos-module)").into());
-        }
+        },
     }
 
     Ok(())
 }
-

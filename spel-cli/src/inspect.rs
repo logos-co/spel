@@ -1,7 +1,7 @@
 //! Binary inspection — extract ProgramId from ELF binaries.
 
-use nssa::program::Program;
 use crate::hex::hex_encode;
+use nssa::program::Program;
 use std::fs;
 
 /// Extract and print ProgramIds from one or more ELF binary files.
@@ -23,7 +23,10 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
     }
     let fmt = format.unwrap_or("text");
     if !matches!(fmt, "text" | "hex" | "json") {
-        eprintln!("❌ --format: unknown format '{}'. Expected: text, hex, json", fmt);
+        eprintln!(
+            "❌ --format: unknown format '{}'. Expected: text, hex, json",
+            fmt
+        );
         std::process::exit(1);
     }
     if fmt == "json" && paths.len() > 1 {
@@ -36,7 +39,7 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
             Err(e) => {
                 eprintln!("❌ {}: {}", path, e);
                 continue;
-            }
+            },
         };
         match Program::new(bytes) {
             Ok(program) => {
@@ -49,7 +52,9 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
                         let id_strs: Vec<String> = id.iter().map(|w| w.to_string()).collect();
                         let id_hex: Vec<String> = id.iter().map(|w| format!("{:08x}", w)).collect();
                         if paths.len() > 1 {
-                            if !first { print!(","); }
+                            if !first {
+                                print!(",");
+                            }
                             println!();
                         }
                         let obj = serde_json::json!({
@@ -60,7 +65,7 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
                         });
                         print!("{}", obj);
                         first = false;
-                    }
+                    },
                     _ => {
                         let id_strs: Vec<String> = id.iter().map(|w| w.to_string()).collect();
                         let id_hex: Vec<String> = id.iter().map(|w| format!("{:08x}", w)).collect();
@@ -69,12 +74,12 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
                         println!("   ProgramId (hex):     {}", id_hex.join(","));
                         println!("   ImageID (hex bytes): {}", image_id_hex);
                         println!();
-                    }
+                    },
                 }
-            }
+            },
             Err(e) => {
                 eprintln!("❌ {}: failed to load as program: {:?}", path, e);
-            }
+            },
         }
     }
     if fmt == "json" && paths.len() > 1 {

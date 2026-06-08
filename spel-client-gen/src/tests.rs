@@ -77,7 +77,9 @@ fn test_parse_and_generate() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
 
     // Client code checks
-    assert!(output.client_code.contains("pub enum MyMultisigInstruction"));
+    assert!(output
+        .client_code
+        .contains("pub enum MyMultisigInstruction"));
     assert!(output.client_code.contains("Create {"));
     assert!(output.client_code.contains("Approve {"));
     assert!(output.client_code.contains("pub struct CreateAccounts"));
@@ -87,8 +89,9 @@ fn test_parse_and_generate() {
     assert!(output.client_code.contains("async fn approve("));
 
     // PDA computation — standalone function
-    assert!(output.client_code.contains("pub fn compute_multisig_state_pda("));
-
+    assert!(output
+        .client_code
+        .contains("pub fn compute_multisig_state_pda("));
 
     // Correct endianness — in client's parse_program_id_hex
     assert!(output.client_code.contains("from_le_bytes"));
@@ -99,10 +102,18 @@ fn test_ffi_generation() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
 
     // FFI function names
-    assert!(output.ffi_code.contains("pub extern \"C\" fn my_multisig_create("));
-    assert!(output.ffi_code.contains("pub extern \"C\" fn my_multisig_approve("));
-    assert!(output.ffi_code.contains("pub extern \"C\" fn my_multisig_free_string("));
-    assert!(output.ffi_code.contains("pub extern \"C\" fn my_multisig_version("));
+    assert!(output
+        .ffi_code
+        .contains("pub extern \"C\" fn my_multisig_create("));
+    assert!(output
+        .ffi_code
+        .contains("pub extern \"C\" fn my_multisig_approve("));
+    assert!(output
+        .ffi_code
+        .contains("pub extern \"C\" fn my_multisig_free_string("));
+    assert!(output
+        .ffi_code
+        .contains("pub extern \"C\" fn my_multisig_version("));
 
     // AccountId parsing helper emitted in FFI
     assert!(output.ffi_code.contains("parse_account_id"));
@@ -125,9 +136,15 @@ fn test_header_generation() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
 
     assert!(output.header.contains("MY_MULTISIG_FFI_H"));
-    assert!(output.header.contains("char* my_multisig_create(const char* args_json)"));
-    assert!(output.header.contains("char* my_multisig_approve(const char* args_json)"));
-    assert!(output.header.contains("void my_multisig_free_string(char* s)"));
+    assert!(output
+        .header
+        .contains("char* my_multisig_create(const char* args_json)"));
+    assert!(output
+        .header
+        .contains("char* my_multisig_approve(const char* args_json)"));
+    assert!(output
+        .header
+        .contains("void my_multisig_free_string(char* s)"));
 }
 
 #[test]
@@ -144,8 +161,14 @@ fn test_account_order_in_client() {
     let prop_pos = approve_section.find("proposal").unwrap();
     let member_pos = approve_section.find("member").unwrap();
 
-    assert!(ms_pos < prop_pos, "multisig_state should come before proposal in ApproveAccounts");
-    assert!(prop_pos < member_pos, "proposal should come before member in ApproveAccounts");
+    assert!(
+        ms_pos < prop_pos,
+        "multisig_state should come before proposal in ApproveAccounts"
+    );
+    assert!(
+        prop_pos < member_pos,
+        "proposal should come before member in ApproveAccounts"
+    );
 }
 
 #[test]
@@ -155,8 +178,14 @@ fn test_ffi_calls_client_methods() {
     // The FFI impl builds instruction enum and submits transaction inline
     let ffi = &output.ffi_code;
     assert!(ffi.contains("Message::try_new"), "FFI should build Message");
-    assert!(ffi.contains("send_transaction"), "FFI should submit transaction");
-    assert!(ffi.contains("MyMultisigInstruction"), "FFI should reference instruction enum");
+    assert!(
+        ffi.contains("send_transaction"),
+        "FFI should submit transaction"
+    );
+    assert!(
+        ffi.contains("MyMultisigInstruction"),
+        "FFI should reference instruction enum"
+    );
 }
 
 #[test]
@@ -203,8 +232,8 @@ fn test_rest_accounts() {
 
 #[test]
 fn test_pda_helpers_single_arg_seed() {
-    use spel_framework_core::idl::*;
     use crate::ffi_codegen::generate_pda_helpers;
+    use spel_framework_core::idl::*;
 
     let idl = SpelIdl {
         version: "0.1.0".to_string(),
@@ -217,8 +246,11 @@ fn test_pda_helpers_single_arg_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
-                    seeds: vec![IdlSeed::Arg { path: "create_key".to_string() }],
+                pda: Some(IdlPda {
+                    private: false,
+                    seeds: vec![IdlSeed::Arg {
+                        path: "create_key".to_string(),
+                    }],
                 }),
                 rest: false,
                 visibility: vec![],
@@ -226,7 +258,6 @@ fn test_pda_helpers_single_arg_seed() {
             args: vec![IdlArg {
                 name: "create_key".to_string(),
                 type_: IdlType::Primitive("[u8; 32]".to_string()),
-
             }],
             discriminator: None,
             execution: None,
@@ -244,23 +275,44 @@ fn test_pda_helpers_single_arg_seed() {
     let output = generate_pda_helpers(&idl);
 
     // Function signature
-    assert!(output.contains("pub fn compute_multisig_state_pda("), "missing fn signature: {}", output);
-    assert!(output.contains("program_id: &ProgramId"), "missing program_id param: {}", output);
-    assert!(output.contains("create_key: &[u8; 32]"), "missing create_key param: {}", output);
-    assert!(output.contains("-> AccountId"), "missing return type: {}", output);
+    assert!(
+        output.contains("pub fn compute_multisig_state_pda("),
+        "missing fn signature: {output}"
+    );
+    assert!(
+        output.contains("program_id: &ProgramId"),
+        "missing program_id param: {output}"
+    );
+    assert!(
+        output.contains("create_key: &[u8; 32]"),
+        "missing create_key param: {output}"
+    );
+    assert!(
+        output.contains("-> AccountId"),
+        "missing return type: {output}"
+    );
 
     // Single-seed: use directly (no SHA256)
-    assert!(output.contains("PdaSeed::new(seed_bytes)"), "missing PdaSeed::new: {}", output);
-    assert!(output.contains("AccountId::for_public_pda(program_id, &pda_seed)"), "missing AccountId::for_public_pda: {}", output);
+    assert!(
+        output.contains("PdaSeed::new(seed_bytes)"),
+        "missing PdaSeed::new: {output}"
+    );
+    assert!(
+        output.contains("AccountId::for_public_pda(program_id, &pda_seed)"),
+        "missing AccountId::for_public_pda: {output}"
+    );
 
     // Single seed means no SHA256 hasher
-    assert!(!output.contains("Sha256"), "single-seed should not use SHA256: {}", output);
+    assert!(
+        !output.contains("Sha256"),
+        "single-seed should not use SHA256: {output}"
+    );
 }
 
 #[test]
 fn test_pda_helpers_multi_seed() {
-    use spel_framework_core::idl::*;
     use crate::ffi_codegen::generate_pda_helpers;
+    use spel_framework_core::idl::*;
 
     let idl = SpelIdl {
         version: "0.1.0".to_string(),
@@ -273,10 +325,15 @@ fn test_pda_helpers_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda {
+                    private: false,
                     seeds: vec![
-                        IdlSeed::Const { value: "multisig_state__".to_string() },
-                        IdlSeed::Arg { path: "create_key".to_string() },
+                        IdlSeed::Const {
+                            value: "multisig_state__".to_string(),
+                        },
+                        IdlSeed::Arg {
+                            path: "create_key".to_string(),
+                        },
                     ],
                 }),
                 rest: false,
@@ -285,7 +342,6 @@ fn test_pda_helpers_multi_seed() {
             args: vec![IdlArg {
                 name: "create_key".to_string(),
                 type_: IdlType::Primitive("[u8; 32]".to_string()),
-
             }],
             discriminator: None,
             execution: None,
@@ -303,23 +359,44 @@ fn test_pda_helpers_multi_seed() {
     let output = generate_pda_helpers(&idl);
 
     // Function signature
-    assert!(output.contains("pub fn compute_multisig_state_pda("), "missing fn signature: {}", output);
-    assert!(output.contains("create_key: &[u8; 32]"), "missing create_key param: {}", output);
+    assert!(
+        output.contains("pub fn compute_multisig_state_pda("),
+        "missing fn signature: {output}"
+    );
+    assert!(
+        output.contains("create_key: &[u8; 32]"),
+        "missing create_key param: {output}"
+    );
 
     // Multi-seed: must use SHA256
-    assert!(output.contains("Sha256"), "multi-seed must use SHA256: {}", output);
-    assert!(output.contains("hasher.update"), "must call hasher.update: {}", output);
-    assert!(output.contains("multisig_state__"), "must inline const seed: {}", output);
+    assert!(
+        output.contains("Sha256"),
+        "multi-seed must use SHA256: {output}"
+    );
+    assert!(
+        output.contains("hasher.update"),
+        "must call hasher.update: {output}"
+    );
+    assert!(
+        output.contains("multisig_state__"),
+        "must inline const seed: {output}"
+    );
 
     // Doc comment seeds annotation
-    assert!(output.contains("Seeds: ["), "missing Seeds doc comment: {}", output);
-    assert!(output.contains("arg(create_key)"), "missing arg seed in doc: {}", output);
+    assert!(
+        output.contains("Seeds: ["),
+        "missing Seeds doc comment: {output}"
+    );
+    assert!(
+        output.contains("arg(create_key)"),
+        "missing arg seed in doc: {output}"
+    );
 }
 
 #[test]
 fn test_pda_helpers_deduplication() {
-    use spel_framework_core::idl::*;
     use crate::ffi_codegen::generate_pda_helpers;
+    use spel_framework_core::idl::*;
 
     // Same account name appears in two instructions — should only generate one helper
     let make_ix = |name: &str| IdlInstruction {
@@ -330,8 +407,11 @@ fn test_pda_helpers_deduplication() {
             signer: false,
             init: false,
             owner: None,
-            pda: Some(IdlPda { private: false,
-                seeds: vec![IdlSeed::Arg { path: "my_key".to_string() }],
+            pda: Some(IdlPda {
+                private: false,
+                seeds: vec![IdlSeed::Arg {
+                    path: "my_key".to_string(),
+                }],
             }),
             rest: false,
             visibility: vec![],
@@ -362,7 +442,10 @@ fn test_pda_helpers_deduplication() {
 
     // Should appear exactly once
     let count = output.matches("pub fn compute_shared_state_pda(").count();
-    assert_eq!(count, 1, "account PDA helper should be generated exactly once, got {}", count);
+    assert_eq!(
+        count, 1,
+        "account PDA helper should be generated exactly once, got {count}"
+    );
 }
 
 #[test]
@@ -372,7 +455,9 @@ fn test_pda_helpers_in_ffi_output() {
 
     // The SAMPLE_IDL has multisig_state with a 2-seed PDA (const + arg)
     assert!(
-        output.ffi_code.contains("pub fn compute_multisig_state_pda("),
+        output
+            .ffi_code
+            .contains("pub fn compute_multisig_state_pda("),
         "FFI output must include PDA helper function"
     );
     assert!(
@@ -387,8 +472,8 @@ fn test_pda_helpers_in_ffi_output() {
 
 #[test]
 fn test_pda_helpers_u64_single_seed() {
-    use spel_framework_core::idl::*;
     use crate::ffi_codegen::generate_pda_helpers;
+    use spel_framework_core::idl::*;
 
     // A PDA with a single u64 arg seed (e.g. proposal_index)
     let idl = SpelIdl {
@@ -402,8 +487,11 @@ fn test_pda_helpers_u64_single_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
-                    seeds: vec![IdlSeed::Arg { path: "proposal_index".to_string() }],
+                pda: Some(IdlPda {
+                    private: false,
+                    seeds: vec![IdlSeed::Arg {
+                        path: "proposal_index".to_string(),
+                    }],
                 }),
                 rest: false,
                 visibility: vec![],
@@ -428,21 +516,42 @@ fn test_pda_helpers_u64_single_seed() {
     let output = generate_pda_helpers(&idl);
 
     // Function signature: u64 passed by value (no &)
-    assert!(output.contains("pub fn compute_proposal_pda("), "missing fn signature: {}", output);
-    assert!(output.contains("proposal_index: u64"), "u64 param should be by value: {}", output);
-    assert!(!output.contains("proposal_index: &u64"), "u64 param must not be by reference: {}", output);
-    assert!(output.contains("-> AccountId"), "missing return type: {}", output);
+    assert!(
+        output.contains("pub fn compute_proposal_pda("),
+        "missing fn signature: {output}"
+    );
+    assert!(
+        output.contains("proposal_index: u64"),
+        "u64 param should be by value: {output}"
+    );
+    assert!(
+        !output.contains("proposal_index: &u64"),
+        "u64 param must not be by reference: {output}"
+    );
+    assert!(
+        output.contains("-> AccountId"),
+        "missing return type: {output}"
+    );
 
     // Single u64 seed: uses to_le_bytes() padded into [u8; 32]
-    assert!(output.contains("to_le_bytes()"), "u64 seed must use to_le_bytes: {}", output);
-    assert!(output.contains("seed_bytes[..8].copy_from_slice"), "must copy 8 bytes of u64: {}", output);
-    assert!(output.contains("PdaSeed::new(seed_bytes)"), "must create PdaSeed: {}", output);
+    assert!(
+        output.contains("to_le_bytes()"),
+        "u64 seed must use to_le_bytes: {output}"
+    );
+    assert!(
+        output.contains("seed_bytes[..8].copy_from_slice"),
+        "must copy 8 bytes of u64: {output}"
+    );
+    assert!(
+        output.contains("PdaSeed::new(seed_bytes)"),
+        "must create PdaSeed: {output}"
+    );
 }
 
 #[test]
 fn test_pda_helpers_u64_multi_seed() {
-    use spel_framework_core::idl::*;
     use crate::ffi_codegen::generate_pda_helpers;
+    use spel_framework_core::idl::*;
 
     // A PDA with const + u64 arg seeds (e.g. proposal with index)
     let idl = SpelIdl {
@@ -456,10 +565,15 @@ fn test_pda_helpers_u64_multi_seed() {
                 signer: false,
                 init: true,
                 owner: None,
-                pda: Some(IdlPda { private: false,
+                pda: Some(IdlPda {
+                    private: false,
                     seeds: vec![
-                        IdlSeed::Arg { path: "create_key".to_string() },
-                        IdlSeed::Arg { path: "proposal_index".to_string() },
+                        IdlSeed::Arg {
+                            path: "create_key".to_string(),
+                        },
+                        IdlSeed::Arg {
+                            path: "proposal_index".to_string(),
+                        },
                     ],
                 }),
                 rest: false,
@@ -491,21 +605,48 @@ fn test_pda_helpers_u64_multi_seed() {
     let output = generate_pda_helpers(&idl);
 
     // Function signature: [u8;32] by ref, u64 by value
-    assert!(output.contains("pub fn compute_proposal_pda("), "missing fn signature: {}", output);
-    assert!(output.contains("create_key: &[u8; 32]"), "create_key should be by reference: {}", output);
-    assert!(output.contains("proposal_index: u64"), "u64 param should be by value: {}", output);
-    assert!(!output.contains("proposal_index: &u64"), "u64 param must not be by reference: {}", output);
+    assert!(
+        output.contains("pub fn compute_proposal_pda("),
+        "missing fn signature: {output}"
+    );
+    assert!(
+        output.contains("create_key: &[u8; 32]"),
+        "create_key should be by reference: {output}"
+    );
+    assert!(
+        output.contains("proposal_index: u64"),
+        "u64 param should be by value: {output}"
+    );
+    assert!(
+        !output.contains("proposal_index: &u64"),
+        "u64 param must not be by reference: {output}"
+    );
 
     // Multi-seed: uses SHA256
-    assert!(output.contains("Sha256"), "multi-seed must use SHA256: {}", output);
-    assert!(output.contains("hasher.update"), "must call hasher.update: {}", output);
+    assert!(
+        output.contains("Sha256"),
+        "multi-seed must use SHA256: {output}"
+    );
+    assert!(
+        output.contains("hasher.update"),
+        "must call hasher.update: {output}"
+    );
 
     // u64 seed uses to_le_bytes, not as &[u8]
-    assert!(output.contains("proposal_index.to_le_bytes()"), "u64 seed must use to_le_bytes: {}", output);
-    assert!(!output.contains("proposal_index as &[u8]"), "u64 must not use as &[u8]: {}", output);
+    assert!(
+        output.contains("proposal_index.to_le_bytes()"),
+        "u64 seed must use to_le_bytes: {output}"
+    );
+    assert!(
+        !output.contains("proposal_index as &[u8]"),
+        "u64 must not use as &[u8]: {output}"
+    );
 
     // [u8;32] seed uses as &[u8]
-    assert!(output.contains("create_key as &[u8]"), "byte array seed must use as &[u8]: {}", output);
+    assert!(
+        output.contains("create_key as &[u8]"),
+        "byte array seed must use as &[u8]: {output}"
+    );
 }
 
 #[test]
@@ -714,14 +855,14 @@ fn test_string_type_lowercased() {
         }]
     }"#;
     let output = generate_from_idl_json(idl).expect("codegen should succeed");
-    
+
     // Client code should use `String` (uppercase), not `string` (lowercase)
     assert!(
         output.client_code.contains("msg: String"),
         "client code should have msg: String, got:\n{}",
         output.client_code
     );
-    
+
     // FFI code should also use `String`
     assert!(
         output.ffi_code.contains("msg: String"),
@@ -737,22 +878,43 @@ fn test_ffi_has_catch_unwind() {
 
     // ffi_call helper must be present and use AssertUnwindSafe (no UnwindSafe bound on caller)
     assert!(ffi.contains("catch_unwind"), "must use catch_unwind: {ffi}");
-    assert!(ffi.contains("AssertUnwindSafe"), "must wrap with AssertUnwindSafe, not require UnwindSafe bound: {ffi}");
+    assert!(
+        ffi.contains("AssertUnwindSafe"),
+        "must wrap with AssertUnwindSafe, not require UnwindSafe bound: {ffi}"
+    );
     // The import `use std::panic::UnwindSafe` must not appear; AssertUnwindSafe is fine.
-    assert!(!ffi.contains("use std::panic::UnwindSafe"), "must not import UnwindSafe as a bound: {ffi}");
+    assert!(
+        !ffi.contains("use std::panic::UnwindSafe"),
+        "must not import UnwindSafe as a bound: {ffi}"
+    );
 
     // Helper signature takes a plain FnOnce — no UnwindSafe bound on f
-    assert!(ffi.contains("fn ffi_call(f: impl FnOnce() -> Result<String, String>)"), "ffi_call must not have UnwindSafe bound: {ffi}");
+    assert!(
+        ffi.contains("fn ffi_call(f: impl FnOnce() -> Result<String, String>)"),
+        "ffi_call must not have UnwindSafe bound: {ffi}"
+    );
 
     // All instruction entry points must delegate through ffi_call
-    assert!(ffi.contains("ffi_call(move || my_multisig_create_impl(args))"), "create must use ffi_call: {ffi}");
+    assert!(
+        ffi.contains("ffi_call(move || my_multisig_create_impl(args))"),
+        "create must use ffi_call: {ffi}"
+    );
 
     // Panic payload must be extracted and surfaced, not swallowed
-    assert!(ffi.contains("downcast_ref::<&str>"), "must attempt to extract panic message: {ffi}");
-    assert!(ffi.contains("downcast_ref::<String>"), "must attempt to extract String panic message: {ffi}");
+    assert!(
+        ffi.contains("downcast_ref::<&str>"),
+        "must attempt to extract panic message: {ffi}"
+    );
+    assert!(
+        ffi.contains("downcast_ref::<String>"),
+        "must attempt to extract String panic message: {ffi}"
+    );
 
     // _version is a static string — must NOT go through ffi_call
-    assert!(!ffi.contains("ffi_call(move || Ok("), "_version must not use ffi_call: {ffi}");
+    assert!(
+        !ffi.contains("ffi_call(move || Ok("),
+        "_version must not use ffi_call: {ffi}"
+    );
 }
 
 #[test]
@@ -762,7 +924,9 @@ fn test_ffi_parse_account_id_strips_prefix() {
     // parse_account_id and parse_bytes32 now delegate to spel_framework_core which
     // handles Public/ and Private/ prefix stripping — no inline logic needed.
     assert!(
-        output.ffi_code.contains("spel_framework_core::pda::parse_bytes32"),
+        output
+            .ffi_code
+            .contains("spel_framework_core::pda::parse_bytes32"),
         "parse_account_id must delegate to spel_framework_core::pda::parse_bytes32: {}",
         output.ffi_code
     );
@@ -987,10 +1151,16 @@ fn test_ffi_fetch_arg_seeded_pda_uses_args_accessor() {
 
     // Must NOT use a bare `vault_id` variable that was never declared
     // (The parse line must set `let vault_id = ...` before using it in compute_pda)
-    let fetch_impl_start = ffi.find("fn vault_prog_fetch_vault_state_impl").unwrap_or(0);
+    let fetch_impl_start = ffi
+        .find("fn vault_prog_fetch_vault_state_impl")
+        .unwrap_or(0);
     let fetch_section = &ffi[fetch_impl_start..];
-    let args_access_pos = fetch_section.find(r#"args["vault_id"]"#).unwrap_or(usize::MAX);
-    let vault_id_in_pda_pos = fetch_section.find("vault_id.as_ref()").unwrap_or(usize::MAX);
+    let args_access_pos = fetch_section
+        .find(r#"args["vault_id"]"#)
+        .unwrap_or(usize::MAX);
+    let vault_id_in_pda_pos = fetch_section
+        .find("vault_id.as_ref()")
+        .unwrap_or(usize::MAX);
     assert!(
         args_access_pos < vault_id_in_pda_pos,
         "args[\"vault_id\"] parse must come before vault_id use in PDA: {ffi}"
@@ -1102,8 +1272,14 @@ fn test_ffi_fetch_deduplication() {
         "errors": []
     }"#;
     let output = generate_from_idl_json(idl).expect("codegen should succeed");
-    let count = output.ffi_code.matches("pub extern \"C\" fn multi_ix_fetch_shared_state(").count();
-    assert_eq!(count, 1, "fetch function should be generated exactly once, got {count}");
+    let count = output
+        .ffi_code
+        .matches("pub extern \"C\" fn multi_ix_fetch_shared_state(")
+        .count();
+    assert_eq!(
+        count, 1,
+        "fetch function should be generated exactly once, got {count}"
+    );
 }
 
 #[test]
@@ -1112,8 +1288,11 @@ fn test_ffi_fetch_pda_account_generates_function() {
     // handles the type-matching at runtime.
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
     assert!(
-        output.ffi_code.contains("fn my_multisig_fetch_multisig_state"),
-        "fetch function must be generated for any PDA account: {}", output.ffi_code
+        output
+            .ffi_code
+            .contains("fn my_multisig_fetch_multisig_state"),
+        "fetch function must be generated for any PDA account: {}",
+        output.ffi_code
     );
 }
 
@@ -1122,7 +1301,9 @@ fn test_header_includes_fetch_declaration() {
     let output = generate_from_idl_json(WHISPER_WALL_IDL).expect("codegen should succeed");
 
     assert!(
-        output.header.contains("char* whisper_wall_fetch_wall_state(const char* args_json)"),
+        output
+            .header
+            .contains("char* whisper_wall_fetch_wall_state(const char* args_json)"),
         "C header must include fetch function declaration: {}",
         output.header
     );
@@ -1171,8 +1352,10 @@ fn assert_parses_as_rust(label: &str, src: &str) {
     // This validates syntax structure without requiring the full dependency tree
     // or successful type checking during tests.
     match syn::parse_str::<syn::File>(src) {
-        Ok(_) => {}
-        Err(e) => panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}"),
+        Ok(_) => {},
+        Err(e) => {
+            panic!("{label}: generated code is not valid Rust syntax:\n{e}\n\nSource:\n{src}")
+        },
     }
 }
 
@@ -1202,9 +1385,11 @@ fn test_account_seed_pda_binding_order() {
     let output = generate_from_idl_json(ACCOUNT_SEED_IDL).expect("codegen should succeed");
     let ffi = &output.ffi_code;
 
-    let pos_creator = ffi.find("let creator = parse_account_id")
+    let pos_creator = ffi
+        .find("let creator = parse_account_id")
         .expect("must bind creator from JSON args");
-    let pos_pool_state = ffi.find("let pool_state = compute_pda_with_program")
+    let pos_pool_state = ffi
+        .find("let pool_state = compute_pda_with_program")
         .expect("must compute pool_state PDA");
 
     assert!(
@@ -1297,21 +1482,48 @@ fn test_defined_types_emitted() {
     let ffi = &output.ffi_code;
 
     // Borsh type definitions must be emitted (for potential direct use)
-    assert!(ffi.contains("enum ProposalStatus"), "must emit ProposalStatus enum");
-    assert!(ffi.contains("Active,"), "ProposalStatus must have Active variant");
-    assert!(ffi.contains("enum ConfigAction"), "must emit ConfigAction enum");
-    assert!(ffi.contains("AddMember"), "ConfigAction must have AddMember variant");
+    assert!(
+        ffi.contains("enum ProposalStatus"),
+        "must emit ProposalStatus enum"
+    );
+    assert!(
+        ffi.contains("Active,"),
+        "ProposalStatus must have Active variant"
+    );
+    assert!(
+        ffi.contains("enum ConfigAction"),
+        "must emit ConfigAction enum"
+    );
+    assert!(
+        ffi.contains("AddMember"),
+        "ConfigAction must have AddMember variant"
+    );
 
     // Account struct must be emitted with Defined fields
-    assert!(ffi.contains("struct ProposalState"), "must emit ProposalState struct");
-    assert!(ffi.contains("pub status: ProposalStatus"), "ProposalState must have status: ProposalStatus");
-    assert!(ffi.contains("pub action: Option<ConfigAction>"), "ProposalState must have action: Option<ConfigAction>");
+    assert!(
+        ffi.contains("struct ProposalState"),
+        "must emit ProposalState struct"
+    );
+    assert!(
+        ffi.contains("pub status: ProposalStatus"),
+        "ProposalState must have status: ProposalStatus"
+    );
+    assert!(
+        ffi.contains("pub action: Option<ConfigAction>"),
+        "ProposalState must have action: Option<ConfigAction>"
+    );
 
     // Fetch function must be emitted (keyed by parameter name "proposal")
-    assert!(ffi.contains("fn test_program_fetch_proposal_impl"), "must emit fetch_proposal_impl");
+    assert!(
+        ffi.contains("fn test_program_fetch_proposal_impl"),
+        "must emit fetch_proposal_impl"
+    );
 
     // Decode via try_all (not Borsh field-by-field serialization)
-    assert!(ffi.contains("decode_account_data_try_all"), "fetch must use decode_account_data_try_all");
+    assert!(
+        ffi.contains("decode_account_data_try_all"),
+        "fetch must use decode_account_data_try_all"
+    );
 }
 
 #[test]
@@ -1346,11 +1558,20 @@ fn test_bytes32_arg_uses_parse_bytes32() {
     let ffi = &output.ffi_code;
 
     // [u8; 32] arg must use parse_bytes32, not parse_account_id
-    assert!(ffi.contains("parse_bytes32("), "must emit parse_bytes32 helper");
-    assert!(ffi.contains("let create_key = parse_bytes32("), "create_key must use parse_bytes32");
+    assert!(
+        ffi.contains("parse_bytes32("),
+        "must emit parse_bytes32 helper"
+    );
+    assert!(
+        ffi.contains("let create_key = parse_bytes32("),
+        "create_key must use parse_bytes32"
+    );
 
     // account_id arg still uses parse_account_id
-    assert!(ffi.contains("let owner = parse_account_id("), "owner must use parse_account_id");
+    assert!(
+        ffi.contains("let owner = parse_account_id("),
+        "owner must use parse_account_id"
+    );
 }
 
 #[test]
@@ -1368,15 +1589,30 @@ fn test_logos_module_all_files_non_empty() {
     // generate_logos_module must produce all 9 artifacts for a minimal IDL.
     let output = generate_logos_module_from_idl_json(SAMPLE_IDL, None, None)
         .expect("logos-module codegen should succeed");
-    assert!(!output.backend_h.is_empty(),     "backend_h must not be empty");
-    assert!(!output.backend_cpp.is_empty(),   "backend_cpp must not be empty");
-    assert!(!output.plugin_h.is_empty(),      "plugin_h must not be empty");
-    assert!(!output.plugin_cpp.is_empty(),    "plugin_cpp must not be empty");
-    assert!(!output.main_cpp.is_empty(),      "main_cpp must not be empty");
-    assert!(!output.main_qml.is_empty(),      "main_qml must not be empty");
-    assert!(!output.module_yaml.is_empty(),   "module_yaml must not be empty");
-    assert!(!output.manifest_json.is_empty(), "manifest_json must not be empty");
-    assert!(!output.cmake_lists.is_empty(),   "cmake_lists must not be empty");
+    assert!(!output.backend_h.is_empty(), "backend_h must not be empty");
+    assert!(
+        !output.backend_cpp.is_empty(),
+        "backend_cpp must not be empty"
+    );
+    assert!(!output.plugin_h.is_empty(), "plugin_h must not be empty");
+    assert!(
+        !output.plugin_cpp.is_empty(),
+        "plugin_cpp must not be empty"
+    );
+    assert!(!output.main_cpp.is_empty(), "main_cpp must not be empty");
+    assert!(!output.main_qml.is_empty(), "main_qml must not be empty");
+    assert!(
+        !output.module_yaml.is_empty(),
+        "module_yaml must not be empty"
+    );
+    assert!(
+        !output.manifest_json.is_empty(),
+        "manifest_json must not be empty"
+    );
+    assert!(
+        !output.cmake_lists.is_empty(),
+        "cmake_lists must not be empty"
+    );
 }
 
 #[test]
@@ -1384,11 +1620,26 @@ fn test_logos_module_instruction_becomes_invokable() {
     // Each IDL instruction must appear as a Q_INVOKABLE in the generated header.
     let output = generate_logos_module_from_idl_json(SAMPLE_IDL, None, None)
         .expect("logos-module codegen should succeed");
-    assert!(output.backend_h.contains("Q_INVOKABLE"), "backend_h must have Q_INVOKABLE");
-    assert!(output.backend_h.contains("void create("), "backend_h must expose create()");
-    assert!(output.backend_h.contains("void approve("), "backend_h must expose approve()");
-    assert!(output.backend_cpp.contains("create("), "backend_cpp must implement create()");
-    assert!(output.backend_cpp.contains("approve("), "backend_cpp must implement approve()");
+    assert!(
+        output.backend_h.contains("Q_INVOKABLE"),
+        "backend_h must have Q_INVOKABLE"
+    );
+    assert!(
+        output.backend_h.contains("void create("),
+        "backend_h must expose create()"
+    );
+    assert!(
+        output.backend_h.contains("void approve("),
+        "backend_h must expose approve()"
+    );
+    assert!(
+        output.backend_cpp.contains("create("),
+        "backend_cpp must implement create()"
+    );
+    assert!(
+        output.backend_cpp.contains("approve("),
+        "backend_cpp must implement approve()"
+    );
 }
 
 #[test]
@@ -1402,7 +1653,8 @@ fn test_logos_module_pda_account_generates_fetch_page() {
 
     // Backend must expose a fetch method for the wall_state PDA
     assert!(
-        output.backend_h.contains("fetchWallState") || output.backend_h.contains("fetch_wall_state"),
+        output.backend_h.contains("fetchWallState")
+            || output.backend_h.contains("fetch_wall_state"),
         "backend_h must expose a fetch method for wall_state PDA: {}",
         output.backend_h
     );
@@ -1440,10 +1692,12 @@ fn test_logos_module_pda_fetch_deduplicated() {
     let output = generate_logos_module_from_idl_json(idl, None, None)
         .expect("logos-module codegen should succeed");
     let qml = &output.main_qml;
-    let count = qml.matches("fetchSharedState").count()
-        + qml.matches("fetch_shared_state").count();
+    let count = qml.matches("fetchSharedState").count() + qml.matches("fetch_shared_state").count();
     // The fetch should appear at most a small number of times (header + call), not doubled
-    assert!(count <= 3, "fetch page must not be duplicated for same PDA in two instructions: appeared {count}x");
+    assert!(
+        count <= 3,
+        "fetch page must not be duplicated for same PDA in two instructions: appeared {count}x"
+    );
 }
 
 #[test]
@@ -1451,9 +1705,18 @@ fn test_logos_module_class_name_is_pascal_case() {
     // The generated C++ class must use PascalCase derived from the IDL name.
     let output = generate_logos_module_from_idl_json(SAMPLE_IDL, None, None)
         .expect("logos-module codegen should succeed");
-    assert!(output.backend_h.contains("MyMultisigBackend"),  "class must be MyMultisigBackend");
-    assert!(output.plugin_h.contains("MyMultisigPlugin"),    "plugin class must be MyMultisigPlugin");
-    assert!(output.manifest_json.contains("my_multisig"),    "manifest must use snake_case program name");
+    assert!(
+        output.backend_h.contains("MyMultisigBackend"),
+        "class must be MyMultisigBackend"
+    );
+    assert!(
+        output.plugin_h.contains("MyMultisigPlugin"),
+        "plugin class must be MyMultisigPlugin"
+    );
+    assert!(
+        output.manifest_json.contains("my_multisig"),
+        "manifest must use snake_case program name"
+    );
 }
 
 #[test]
@@ -1462,12 +1725,18 @@ fn test_ffi_no_inline_pda_or_parse_helpers() {
     let output = generate_from_idl_json(SAMPLE_IDL).expect("codegen should succeed");
     let ffi = &output.ffi_code;
 
-    assert!(!ffi.contains("fn pda_seed_bytes("),
-        "pda_seed_bytes must not be emitted inline; use spel_framework_core::pda::compute_pda_raw");
-    assert!(ffi.contains("spel_framework_core::pda::compute_pda_raw"),
-        "compute_pda_with_program must delegate to spel_framework_core::pda::compute_pda_raw");
-    assert!(ffi.contains("spel_framework_core::pda::parse_bytes32"),
-        "parse_account_id / parse_bytes32 must delegate to spel_framework_core::pda::parse_bytes32");
+    assert!(
+        !ffi.contains("fn pda_seed_bytes("),
+        "pda_seed_bytes must not be emitted inline; use spel_framework_core::pda::compute_pda_raw"
+    );
+    assert!(
+        ffi.contains("spel_framework_core::pda::compute_pda_raw"),
+        "compute_pda_with_program must delegate to spel_framework_core::pda::compute_pda_raw"
+    );
+    assert!(
+        ffi.contains("spel_framework_core::pda::parse_bytes32"),
+        "parse_account_id / parse_bytes32 must delegate to spel_framework_core::pda::parse_bytes32"
+    );
 }
 
 #[test]

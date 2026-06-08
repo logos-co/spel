@@ -98,7 +98,9 @@ pub struct IdlAccountItem {
     pub visibility: Vec<String>,
 }
 
-fn is_false(v: &bool) -> bool { !v }
+fn is_false(v: &bool) -> bool {
+    !v
+}
 
 /// PDA derivation specification.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,9 +209,9 @@ pub struct IdlEvent {
 ///
 /// This is SHA256("global:{name}")[..8], matching lssa-lang's convention.
 pub fn compute_discriminator(name: &str) -> Vec<u8> {
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
-    hasher.update(format!("global:{}", name).as_bytes());
+    hasher.update(format!("global:{name}").as_bytes());
     let result = hasher.finalize();
     result[..8].to_vec()
 }

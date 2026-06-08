@@ -34,7 +34,7 @@ jobs:
           prefix-key: "e2e"
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       - name: Build (all packages including spel)
@@ -84,7 +84,7 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -189,13 +189,13 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -225,7 +225,7 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -273,13 +273,13 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -309,7 +309,7 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -357,7 +357,7 @@ jobs:
 
       - name: Install logos-blockchain-circuits
         run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/main/scripts/setup-logos-blockchain-circuits.sh | bash
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

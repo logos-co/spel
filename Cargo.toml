@@ -9,3 +9,61 @@ members = [
 ]
 exclude = ["tests/e2e/fixture_program"]
 resolver = "2"
+
+# ── Workspace-wide lint policy ──────────────────────────────────────────────
+# Individual crates opt in with `[lints] workspace = true`.
+# Per-crate overrides go in the crate's own [lints] block.
+#
+# Rollout: lints start as `warn` (visible but not blocking).
+# Promote individual lints to `deny` as the codebase cleans up; flip CI to
+# `-- -D warnings` in quality.yml once all crates pass cleanly.
+# ────────────────────────────────────────────────────────────────────────────
+
+[workspace.lints.rust]
+# --- Safety ---
+unsafe_op_in_unsafe_fn = "warn"
+unused_must_use         = "deny"
+unused_imports          = "warn"
+dead_code               = "warn"
+# --- Style (soft; helps AI-generated code stay idiomatic) ---
+unused_lifetimes        = "warn"
+unused_qualifications   = "warn"
+
+[workspace.lints.rustdoc]
+broken_intra_doc_links = "deny"
+private_intra_doc_links = "warn"
+
+[workspace.lints.clippy]
+# Base groups (lower priority so individual overrides below win)
+all     = { level = "warn", priority = -1 }
+
+# ── Pedantic picks (noise-to-signal controlled subset) ─────────────────────
+# module_name_repetitions: SpelOutput, SpelResult etc are intentional
+module_name_repetitions = "allow"
+# must_use_candidate: too noisy on every public getter
+must_use_candidate      = "allow"
+# struct_field_names: e.g. SpelError { spel_source } is fine
+struct_field_names      = "allow"
+
+# ── Don't Panic ─────────────────────────────────────────────────────────────
+# Critical for zkVM guests: a panic aborts the proof.
+# Start as warn; promote to deny per-crate (especially guest code).
+unwrap_used          = "warn"
+expect_used          = "warn"
+indexing_slicing     = "warn"
+get_unwrap           = "warn"
+unwrap_in_result     = "warn"
+panic_in_result_fn   = "warn"
+
+# ── Don't Fail Silently ─────────────────────────────────────────────────────
+let_underscore_must_use = "deny"
+map_err_ignore          = "warn"
+ok_expect               = "warn"
+
+# ── Maintainability / AI smells ─────────────────────────────────────────────
+dbg_macro        = "deny"
+wildcard_imports = "warn"
+
+# ── Documentation ───────────────────────────────────────────────────────────
+missing_errors_doc  = "warn"
+missing_panics_doc  = "warn"
