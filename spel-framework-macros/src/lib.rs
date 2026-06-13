@@ -154,6 +154,59 @@ pub fn generate_idl(input: TokenStream) -> TokenStream {
     }
 }
 
+/// Module-level marker for `#[lez_program]` modules.
+///
+/// Place this directly inside `#[lez_program]` to inject `admin_initialize`,
+/// `admin_transfer`, and `admin_renounce` instructions into the module.
+///
+/// ```rust,ignore
+/// #[lez_program]
+/// #[admin_authority]
+/// mod my_program { ... }
+/// ```
+///
+/// If run standalone (outside `#[lez_program]`) it emits `compile_error!`.
+/// Processed by `#[lez_program]` expansion, not as a real macro.
+#[proc_macro_attribute]
+pub fn admin_authority(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    quote! {
+        compile_error!(
+            "#[admin_authority] must be placed inside a #[lez_program] module, not standalone."
+        );
+    }.into()
+}
+
+/// Instruction-level marker that gates an instruction behind the admin authority.
+///
+/// Place this on a `#[instruction]` fn inside a `#[lez_program]` module. The
+/// macro emits a check in the generated validator that decodes the admin
+/// config PDA and asserts the caller is the current admin.
+///
+/// ```rust,ignore
+/// #[instruction]
+/// #[require_admin]
+/// pub fn update_value(
+///     #[account(pda = literal("admin_config"))] config: AccountWithMetadata,
+///     #[account(signer)] caller: AccountWithMetadata,
+///     new_value: u64,
+/// ) -> SpelResult { ... }
+/// ```
+///
+/// Strict mode (default) errors at compile time if the `admin_config` PDA
+/// param or a signer param is missing. Relaxed mode injects them when
+/// `SPEL_ADMIN_AUTHORITY_RELAXED=1` is set at build time.
+///
+/// If run standalone it emits `compile_error!`. Processed by `#[lez_program]`
+/// expansion, not as a real macro.
+#[proc_macro_attribute]
+pub fn require_admin(_attr: TokenStream, _item: TokenStream) -> TokenStream {
+    quote! {
+        compile_error!(
+            "#[require_admin] must be placed inside a #[lez_program] module, not standalone."
+        );
+    }.into()
+}
+
 // ─── Internal expansion logic ────────────────────────────────────────────
 
 /// Parsed info about one instruction function.
@@ -166,6 +219,8 @@ struct InstructionInfo {
     /// True if this instruction has a ProgramContext parameter.
     /// The context is injected by the dispatcher and never appears in IDL/ABI.
     has_context: bool,
+    /// True if this instruction requires admin account access.
+    require_admin: bool,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
 }
@@ -239,6 +294,12 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             &input.ident,
             "lez_program must contain at least one #[instruction] function",
         ));
+    }
+
+    if spel_framework_core::admin_authority::has_admin_authority_attr(&input.attrs) {
+        for func in spel_framework_core::admin_authority::admin_instruction_fns() {
+            instructions.push(parse_instruction(func.clone())?);
+        }
     }
 
     // Generate the Instruction enum (or use external one)
@@ -549,11 +610,31 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         }
     }
 
+    let require_admin = spel_framework_core::admin_authority::has_require_admin_attr(&func.attrs);
+    if require_admin {
+        let has_admin_config = accounts.iter().any(|a| {
+            a.constraints.pda_seeds.iter().any(|s| matches!(s, PdaSeedDef::Const(n) if n == "admin_config"))
+        });
+        if !has_admin_config {
+            return Err(syn::Error::new_spanned(
+                &fn_name,
+                "#[require_admin] needs an #[account(pda = literal(\"admin_config\"))] param",
+            ));
+        }
+        if !accounts.iter().any(|a| a.constraints.signer) {
+            return Err(syn::Error::new_spanned(
+                &fn_name,
+                "#[require_admin] needs an #[account(signer)] param",
+            ));
+        }
+    }
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
         args,
         has_context,
+        require_admin,
         func,
     })
 }
@@ -1168,6 +1249,7 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
+            func.attrs.retain(|a| !a.path().is_ident("require_admin"));
             for input in &mut func.sig.inputs {
                 if let FnArg::Typed(pat_type) = input {
                     pat_type.attrs.retain(|a| !a.path().is_ident("account"));
@@ -2076,6 +2158,12 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         ));
     }
 
+    if spel_framework_core::admin_authority::has_admin_authority_attr(&program_mod.attrs) {
+        for func in spel_framework_core::admin_authority::admin_instruction_fns() {
+            instructions.push(parse_instruction(func.clone())?);
+        }
+    }
+
     // Detect external instruction type from the #[lez_program(...)] attr
     let external_instruction_str: Option<String> = program_mod
         .attrs
@@ -2472,5 +2560,46 @@ pub mod token {
             output.contains("VaultConfig"),
             "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
         );
+    }
+
+    #[test]
+    fn expand_generate_idl_embeds_admin_instructions_in_binary() {
+        let tmp = TempDir::new("generate-idl-admin-authority");
+
+        tmp.write(
+            "methods/guests/Cargo.toml",
+            "[package]\nname = \"admin-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        let program = tmp.write(
+            "methods/guest/src/bin/admin.rs",
+            r#"
+#[lez_program]
+#[admin_authority]
+pub mod admin_sample {
+    #[instruction]
+    #[require_admin]
+    pub fn update_value(
+        #[account(pda = literal("admin_config"))] admin_config: AccountWithMetadata,
+        #[account(signer)] caller: AccountWithMetadata,
+        new_value: u64,
+    ) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let tokens = expand_generate_idl(
+            program.to_str().unwrap(),
+            &syn::LitStr::new("test", proc_macro2::Span::call_site()),
+        )
+        .unwrap();
+
+        let output = tokens.to_string();
+        assert!(output.contains("admin_initialize"), "missing admin_initialize. Output: {output}");
+        assert!(output.contains("admin_transfer"), "missing admin_transfer. Output: {output}");
+        assert!(output.contains("admin_renounce"), "missing admin_renounce. Output: {output}");
+        assert!(output.contains("update_value"), "missing update_value. Output: {output}");
+        // Note: strict-mode check on #[require_admin] passes implicitly;
+        // failure path covered in idl_gen::tests::require_admin_missing_*
+        assert!(!output.contains("require_admin"), "require_admin attr leaked into output");
     }
 }

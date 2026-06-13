@@ -134,6 +134,12 @@ fn generate_idl_inner(
         return Err(IdlGenError::NoInstructions(path_str));
     }
 
+    if crate::admin_authority::has_admin_authority_attr(&program_mod.attrs) {
+        for func in crate::admin_authority::admin_instruction_fns() {
+            instructions.push(parse_instruction(func.clone())?);
+        }
+    }
+
     // Detect external instruction type from #[lez_program(instruction = "...")]
     let external_instruction = program_mod
         .attrs
@@ -546,6 +552,7 @@ struct InstructionInfo {
     fn_name: Ident,
     accounts: Vec<AccountParam>,
     args: Vec<ArgParam>,
+    require_admin: bool,
 }
 
 struct AccountParam {
@@ -621,10 +628,31 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         }
     }
 
+    let require_admin = crate::admin_authority::has_require_admin_attr(&func.attrs);
+    if require_admin {
+        let has_admin_config = accounts.iter().any(|a| {
+            a.constraints.pda_seeds.iter().any(|s| matches!(s, PdaSeedDef::Const(n) if n == "admin_config"))
+        });
+        if !has_admin_config {
+            return Err(IdlGenError::Parse(syn::Error::new_spanned(
+                &fn_name,
+                "#[require_admin] needs an #[account(pda = literal(\"admin_config\"))] param",
+            )));
+        }
+        if !accounts.iter().any(|a| a.constraints.signer) {
+            return Err(IdlGenError::Parse(syn::Error::new_spanned(
+                &fn_name,
+                "#[require_admin] needs an #[account(signer)] param",
+            )));
+        }
+    }
+
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
         args,
+        require_admin
     })
 }
 
@@ -1672,5 +1700,149 @@ mod tests {
         assert!(matches!(&fields[5].type_, IdlType::Primitive(s) if s == "account_id"));
         assert!(matches!(&fields[6].type_, IdlType::Option { .. }));
         assert!(matches!(&fields[7].type_, IdlType::Vec { .. }));
+    }
+
+    // ── #[admin_authority] — injection ─────────────────────────────────────────
+
+    #[test]
+    fn admin_authority_attr_injects_three_instructions() {
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+                #[instruction]
+                pub fn update_value() {}
+            }
+        "#;
+        let idl = ok(src);
+        let names: Vec<&str> = idl.instructions.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"update_value"));
+        assert!(names.contains(&"admin_initialize"));
+        assert!(names.contains(&"admin_transfer"));
+        assert!(names.contains(&"admin_renounce"));
+        assert_eq!(idl.instructions.len(), 4);
+    }
+
+    #[test]
+    fn no_admin_authority_attr_skips_injection() {
+        let src = r#"
+            #[lez_program]
+            pub mod my_program {
+                #[instruction]
+                pub fn update_value() {}
+            }
+        "#;
+        let idl = ok(src);
+        let names: Vec<&str> = idl.instructions.iter().map(|i| i.name.as_str()).collect();
+        assert!(names.contains(&"update_value"));
+        assert_eq!(idl.instructions.len(), 1);
+    }
+
+    #[test]
+    fn admin_authority_alone_without_user_instr_errors() {
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+            }
+        "#;
+        assert!(matches!(err(src), IdlGenError::NoInstructions(_)));
+    }
+
+    #[test]
+    fn require_admin_with_admin_config_and_signer_ok() {
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+                #[instruction]
+                #[require_admin]
+                pub fn update_value(
+                    #[account(pda = literal("admin_config"))] admin_config: AccountWithMetadata,
+                    #[account(signer)] caller: AccountWithMetadata,
+                ) {}
+            }
+        "#;
+
+        let idl = ok(src);
+        let instruction = idl
+            .instructions
+            .iter()
+            .find(|i| i.name == "update_value")
+            .expect("update_value instruction should exist");
+        assert_eq!(instruction.accounts.len(), 2);
+        assert_eq!(instruction.accounts[0].name, "admin_config");
+        assert!(instruction.accounts[0].pda.is_some());
+        assert_eq!(instruction.accounts[1].name, "caller");
+        assert!(instruction.accounts[1].signer);
+    }
+
+    #[test]
+    fn require_admin_missing_admin_config_errors() {
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+                #[instruction]
+                #[require_admin]
+                pub fn update_value(
+                    #[account(signer)] caller: AccountWithMetadata,
+                ) {}
+            }
+        "#;
+
+        let error = err(src);
+        match error {
+            IdlGenError::Parse(error) => {
+                assert!(
+                    error.to_string().contains("admin_config"),
+                    "expected admin_config error, got: {error}"
+                );
+            }
+            other => panic!("expected parse error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn require_admin_missing_signer_errors() {
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+                #[instruction]
+                #[require_admin]
+                pub fn update_value(
+                    #[account(pda = literal("admin_config"))] admin_config: AccountWithMetadata,
+                ) {}
+            }
+        "#;
+
+        let error = err(src);
+        match error {
+            IdlGenError::Parse(error) => {
+                assert!(
+                    error.to_string().contains("signer"),
+                    "expected signer error, got: {error}"
+                );
+            }
+            other => panic!("expected parse error, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn no_require_admin_skips_check() {
+        // No #[require_admin] -> shape check not enforced even though
+        // the fn has no admin_config PDA or signer params.
+        let src = r#"
+            #[lez_program]
+            #[admin_authority]
+            pub mod my_program {
+                #[instruction]
+                pub fn open_action() {}
+            }
+        "#;
+
+        let idl = ok(src);
+        assert!(idl.instructions.iter().any(|i| i.name == "open_action"));
     }
 }
