@@ -22,16 +22,9 @@ pub fn admin_instruction_fns() -> Vec<ItemFn> {
                 new_admin_account: AccountWithMetadata,
                 new_admin: ::admin_authority::AdminCandidate,
             ) -> SpelResult {
-                let resolved = new_admin.validate_with_account(&new_admin_account)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                let state = ::admin_authority::AdminConfig::initialize(resolved)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                let bytes = state.encode()
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                config.account.data = bytes.try_into()
-                    .map_err(|_| SpelError::SerializationError {
-                        message: "AdminConfig too large for account data".to_string(),
-                    })?;
+                let resolved = new_admin.validate_with_account(&new_admin_account)?;
+                let state = ::admin_authority::AdminConfig::initialize(resolved)?;
+                state.write_to(&mut config)?;
                 Ok(SpelOutput::execute(vec![config, caller, new_admin_account], vec![]))
             }
         },
@@ -43,16 +36,9 @@ pub fn admin_instruction_fns() -> Vec<ItemFn> {
                 new_admin_account: AccountWithMetadata,
                 new_admin: ::admin_authority::AdminCandidate,
             ) -> SpelResult {
-                let mut state = ::admin_authority::AdminConfig::from_account(&config)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                state.transfer(&caller, new_admin, &new_admin_account)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                let bytes = state.encode()
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                config.account.data = bytes.try_into()
-                    .map_err(|_| SpelError::SerializationError {
-                        message: "AdminConfig too large for account data".to_string(),
-                    })?;
+                let mut state = ::admin_authority::AdminConfig::from_account(&config)?;
+                state.transfer(&caller, new_admin, &new_admin_account)?;
+                state.write_to(&mut config)?;
                 Ok(SpelOutput::execute(vec![config, caller, new_admin_account], vec![]))
             }
         },
@@ -62,16 +48,9 @@ pub fn admin_instruction_fns() -> Vec<ItemFn> {
                 #[account(mut, pda = literal("admin_config"))] mut config: AccountWithMetadata,
                 #[account(signer)] caller: AccountWithMetadata,
             ) -> SpelResult {
-                let mut state = ::admin_authority::AdminConfig::from_account(&config)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                state.renounce(&caller)
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                let bytes = state.encode()
-                    .map_err(|e| SpelError::Unauthorized { message: e.to_string()})?;
-                config.account.data = bytes.try_into()
-                    .map_err(|_| SpelError::SerializationError {
-                        message: "AdminConfig too large for account data".to_string(),
-                    })?;
+                let mut state = ::admin_authority::AdminConfig::from_account(&config)?;
+                state.renounce(&caller)?;
+                state.write_to(&mut config)?;
                 Ok(SpelOutput::execute(vec![config, caller], vec![]))
             }
         },
