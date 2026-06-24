@@ -4,7 +4,7 @@
 //! similar to Anchor for Solana.
 
 // Re-export the proc macros
-pub use spel_framework_macros::{account_type, admin_authority, generate_idl, instruction, lez_program, require_admin};
+pub use spel_framework_macros::{account_type, generate_idl, instruction, lez_program};
 
 // Re-export core types
 pub use spel_framework_core::types::{SpelOutput, SpelOutputParts};
@@ -15,8 +15,6 @@ pub use serde_json;
 
 pub mod prelude {
     pub use crate::account_type;
-    pub use crate::admin_authority;
-    pub use crate::require_admin;
     pub use crate::instruction;
     pub use crate::lez_program;
     pub use borsh::{BorshDeserialize, BorshSerialize};

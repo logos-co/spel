@@ -215,6 +215,20 @@ Each account field includes:
 
 These fields are optional and backward-compatible -- existing IDL consumers that do not know about them will simply ignore them.
 
+### Extension Libraries
+
+Third-party libraries can ship `#[instruction]` fns that are auto-discovered by the framework and merged into a consuming program's dispatcher and IDL. Discovery is driven by metadata in the library's `Cargo.toml`:
+
+```toml
+[package.metadata.spel]
+extension_attr = "admin_authority"
+instruction_attrs = ["require_admin"]
+```
+
+When a consumer's `#[lez_program]` module carries the declared `extension_attr` (e.g. `#[admin_authority]`), the framework scans the library's `src/lib.rs` for `#[instruction]` fns and merges them with cross-crate dispatcher calls. The `instruction_attrs` list names per-instruction marker attributes the library owns (e.g. `#[require_admin]`) so the framework can strip them from emitted handler fns to prevent re-expansion.
+
+The framework holds no library-specific knowledge. Multiple extensions stack on one program without coordination. First consumer of this mechanism is [`admin-authority`](https://github.com/mmlado/spel-admin-authority).
+
 ## CLI Usage
 
 ```bash
