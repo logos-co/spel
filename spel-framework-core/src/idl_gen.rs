@@ -954,6 +954,14 @@ fn _resolve_path_deps_recursive<F: FnMut(String)>(
                     ));
                     continue;
                 }
+                // Deduplicate by canonical path.
+                let canonical = match &dep_dir.canonicalize() {
+                    Ok(c) => c.clone(),
+                    Err(_) => dep_dir.clone(),
+                };
+                if visited.contains(&canonical) {
+                    continue;
+                }
                 dirs.push(dep_dir.clone());
 
                 // Recurse into the dependency's own Cargo.toml for transitive deps.
@@ -1995,5 +2003,88 @@ lib-no-meta = { path = "../lib-no-meta" }
 
         let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
         assert!(found.is_empty(), "non-extension deps must not be scanned");
-}
+    }
+
+    #[test]
+    fn find_path_dep_dirs_dedups_diamond_graph() {
+        // Diamond dep graph: sample → ext_a (direct), sample → ext_b → ext_a (transitive).
+        // The buggy version of `_resolve_path_deps_recursive` pushes ext_a to the
+        // returned Vec twice — once via the direct edge, once via ext_b's transitive
+        // edge — because the push happens before the visited-set check in the
+        // recursive call. Latent on `main` because downstream callers
+        // (`collect_items_from_crate_dirs`) have a second dedup layer keyed by
+        // canonical source-file path, but a caller that skips that layer sees the
+        // duplicate dir and produces duplicate items.
+        //
+        // This test reproduces the diamond and asserts the returned Vec contains
+        // no duplicates by canonical path. Fails on buggy code, passes on the fix.
+
+        let tmp = TempDir::new("diamond");
+
+        tmp.write(
+            "ext-a/Cargo.toml",
+            r#"
+[package]
+name = "ext-a"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        tmp.write("ext-a/src/lib.rs", "");
+
+        tmp.write(
+            "ext-b/Cargo.toml",
+            r#"
+[package]
+name = "ext-b"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext-a = { path = "../ext-a" }
+"#,
+        );
+        tmp.write("ext-b/src/lib.rs", "");
+
+        tmp.write(
+            "sample/Cargo.toml",
+            r#"
+[package]
+name = "sample"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext-a = { path = "../ext-a" }
+ext-b = { path = "../ext-b" }
+"#,
+        );
+        tmp.write("sample/src/lib.rs", "");
+
+        let dirs = find_path_dep_dirs(&tmp.path().join("sample"), |_| {});
+
+        // Canonicalise every returned dir, count unique canonical paths.
+        // The dirs Vec MUST have no duplicate canonical paths — including ext-a,
+        // which is reachable via both the direct edge and ext-b's transitive edge.
+        let unique: std::collections::HashSet<PathBuf> = dirs
+            .iter()
+            .map(|p| p.canonicalize().unwrap_or_else(|_| p.clone()))
+            .collect();
+
+        assert_eq!(
+            unique.len(),
+            dirs.len(),
+            "find_path_dep_dirs returned duplicate canonical paths: {:?}",
+            dirs
+        );
+
+        // Also assert ext-a is in the result (paranoia: the diamond graph
+        // actually got walked, not just an empty result).
+        let ext_a_canonical = tmp.path().join("ext-a").canonicalize().unwrap();
+        assert!(
+            unique.contains(&ext_a_canonical),
+            "ext-a not in result; diamond walk failed: {:?}",
+            dirs
+        );
+    }
 }
