@@ -19,6 +19,9 @@ pub mod extension;
 #[cfg(feature = "idl-gen")]
 pub mod idl_gen;
 
+#[cfg(test)]
+mod test_utils;
+
 pub mod prelude {
     pub use crate::error::{SpelError, SpelResult};
     pub use crate::pda::{compute_pda, compute_pda_multi, seed_from_str, ToSeed};
