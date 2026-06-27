@@ -245,7 +245,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    for (func, crate_path) in spel_framework_core::idl_gen::discover_extension_instructions(&manifest_dir, &input.attrs) {
+    for (func, crate_path) in spel_framework_core::extension::discover_extension_instructions(&manifest_dir, &input.attrs) {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -273,7 +273,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let match_arms = generate_match_arms(mod_name, &instructions);
 
     // Generate the handler functions (with #[instruction] stripped, account attrs stripped)
-    let strip_attrs = spel_framework_core::idl_gen::discover_extension_instruction_attrs(
+    let strip_attrs = spel_framework_core::extension::discover_extension_instruction_attrs(
         &manifest_dir,
         &input.attrs,
     );
@@ -2103,7 +2103,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     }
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    for (func, crate_path) in spel_framework_core::idl_gen::discover_extension_instructions(&manifest_dir, &program_mod.attrs) {
+    for (func, crate_path) in spel_framework_core::extension::discover_extension_instructions(&manifest_dir, &program_mod.attrs) {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
