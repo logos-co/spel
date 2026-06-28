@@ -502,8 +502,8 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         .unwrap();
         writeln!(out, "        let mut signing_keys = Vec::new();").unwrap();
         writeln!(out, "        for sid in &signer_ids {{").unwrap();
-        writeln!(out, "            let key = wallet.storage().user_data").unwrap();
-        writeln!(out, "                .get_pub_account_signing_key(*sid)").unwrap();
+        writeln!(out, "            let key = wallet").unwrap();
+        writeln!(out, "                .get_account_public_signing_key(*sid)").unwrap();
         writeln!(
             out,
             "                .ok_or_else(|| format!(\"signing key not found for {{}}\", sid))?;"
@@ -531,7 +531,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
+        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"submit: {{}}\", e))?;"
@@ -609,7 +609,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         "    let data = match data {{ Some(d) => d, None => return std::ptr::null_mut() }};"
     )
     .unwrap();
-    writeln!(out, "    let program = match Program::new(data) {{ Ok(p) => p, Err(_) => return std::ptr::null_mut() }};").unwrap();
+    writeln!(out, "    let program = match Program::new(data.into()) {{ Ok(p) => p, Err(_) => return std::ptr::null_mut() }};").unwrap();
     writeln!(out, "    let id = program.id();").unwrap();
     writeln!(out, "    let hex: String = id.iter().flat_map(|w| w.to_le_bytes()).map(|b| format!(\"{{:02x}}\", b)).collect();").unwrap();
     out.push_str("    let json = json!({\"program_id_hex\": hex}).to_string();\n");
@@ -691,7 +691,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let account = rt.block_on(async {{").unwrap();
     writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
     writeln!(out, "    }})?;").unwrap();
-    writeln!(out, "    let has_key = wallet.storage().user_data.get_pub_account_signing_key(account_id).is_some();").unwrap();
+    writeln!(out, "    let has_key = wallet.get_account_public_signing_key(account_id).is_some();").unwrap();
     writeln!(out, "    let data_len = account.data.len();").unwrap();
     writeln!(out, "    let preview_len = data_len.min(32);").unwrap();
     writeln!(

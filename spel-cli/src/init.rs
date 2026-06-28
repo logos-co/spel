@@ -97,7 +97,7 @@ ui/
     let lez_ref_ffi = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.1.2\"".to_string(),
+        _ => "tag = \"lez-core-v0.2.0\"".to_string(),
     };
     let spel_ref_ffi = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -117,8 +117,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-nssa        = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
+nssa        = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee" }}
+nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee_core" }}
 common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
 sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
 wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
@@ -688,7 +688,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.1.2\"".to_string(),
+        _ => "tag = \"lez-core-v0.2.0\"".to_string(),
     };
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -713,7 +713,7 @@ path = "src/bin/{snake_name}.rs"
 
 [dependencies]
 spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -804,7 +804,7 @@ path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
 spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref} }}
+nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
 spel = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"

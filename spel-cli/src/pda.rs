@@ -128,7 +128,10 @@ pub fn compute_pda_from_seeds(
 
     let pda_seed = PdaSeed::new(combined);
     if let Some(npk) = npk {
-        Ok(AccountId::for_private_pda(program_id, &pda_seed, npk))
+        // The chain now derives private PDAs with a u128 `identifier`; spel has
+        // no way to specify it yet, so default to 0 (the common case).
+        // TODO: thread a `--identifier` flag through for non-zero identifiers.
+        Ok(AccountId::for_private_pda(program_id, &pda_seed, npk, 0))
     } else {
         Ok(AccountId::for_public_pda(program_id, &pda_seed))
     }
@@ -242,7 +245,7 @@ mod tests {
         // Verify it matches a direct for_private_pda call with the same inputs
         let mut combined = [0u8; 32];
         combined[.."vault".len()].copy_from_slice(b"vault");
-        let expected = AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk);
+        let expected = AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk, 0);
         assert_eq!(private, expected, "private PDA must match for_private_pda");
     }
 
