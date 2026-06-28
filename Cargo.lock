@@ -73,7 +73,7 @@ checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 [[package]]
 name = "amm_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -433,6 +433,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4858a9d740c5007a9069007c3b4e91152d0506f13c1b31dd49051fd537656156"
 
 [[package]]
+name = "associated_token_account_core"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
+dependencies = [
+ "lee_core",
+ "risc0-zkvm",
+ "serde",
+]
+
+[[package]]
 name = "astro-float"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -552,16 +562,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "ata_core"
-version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
-dependencies = [
- "lee_core",
- "risc0-zkvm",
- "serde",
-]
-
-[[package]]
 name = "atomic-waker"
 version = "1.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -593,7 +593,7 @@ dependencies = [
 [[package]]
 name = "authenticated_transfer_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "serde",
 ]
@@ -827,7 +827,7 @@ dependencies = [
 [[package]]
 name = "bridge_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "lee_core",
  "serde",
@@ -840,6 +840,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf88ba1141d185c399bee5288d850d63b8369520c1eafc32a0430b5b6c287bf4"
 dependencies = [
  "tinyvec",
+]
+
+[[package]]
+name = "build_utils"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
+dependencies = [
+ "anyhow",
+ "risc0-binfmt",
 ]
 
 [[package]]
@@ -1048,7 +1057,7 @@ checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 [[package]]
 name = "clock_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1088,7 +1097,7 @@ dependencies = [
 [[package]]
 name = "common"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "anyhow",
  "authenticated_transfer_core",
@@ -1100,9 +1109,11 @@ dependencies = [
  "lee_core",
  "log",
  "logos-blockchain-common-http-client",
+ "programs",
  "serde",
  "serde_with",
  "sha2",
+ "system_accounts",
  "thiserror 2.0.18",
 ]
 
@@ -1874,7 +1885,7 @@ checksum = "9f1f227452a390804cdb637b74a86990f2a7d7ba4b7d5693aac9b4dd6defd8d6"
 [[package]]
 name = "faucet_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "lee_core",
  "serde",
@@ -3213,7 +3224,7 @@ dependencies = [
 [[package]]
 name = "key_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "aes-gcm",
  "anyhow",
@@ -3235,7 +3246,7 @@ dependencies = [
 [[package]]
 name = "keycard_wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "lee",
  "log",
@@ -3286,20 +3297,17 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lee"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "anyhow",
  "borsh",
- "bridge_core",
- "clock_core",
- "faucet_core",
+ "build_utils",
  "hex",
  "k256",
  "lee_core",
  "log",
  "rand 0.8.6",
  "risc0-binfmt",
- "risc0-build",
  "risc0-zkvm",
  "serde",
  "serde_with",
@@ -3310,7 +3318,7 @@ dependencies = [
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "base58",
  "borsh",
@@ -5404,6 +5412,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "programs"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
+dependencies = [
+ "build_utils",
+ "lee",
+]
+
+[[package]]
 name = "prometheus-client"
 version = "0.22.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6486,17 +6503,19 @@ checksum = "cd0b0ec5f1c1ca621c432a25813d8d60c88abe6d3e08a3eb9cf37d97a0fe3d73"
 [[package]]
 name = "sequencer_service_protocol"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "common",
+ "hex",
  "lee",
  "lee_core",
+ "serde_with",
 ]
 
 [[package]]
 name = "sequencer_service_rpc"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "jsonrpsee",
  "sequencer_service_protocol",
@@ -7070,6 +7089,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "system_accounts"
+version = "0.1.0"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
+dependencies = [
+ "bridge_core",
+ "clock_core",
+ "faucet_core",
+ "lee_core",
+ "programs",
+]
+
+[[package]]
 name = "tagptr"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7108,13 +7139,14 @@ dependencies = [
 [[package]]
 name = "testnet_initial_state"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
- "common",
  "key_protocol",
  "lee",
  "lee_core",
+ "programs",
  "serde",
+ "system_accounts",
 ]
 
 [[package]]
@@ -7234,7 +7266,7 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 [[package]]
 name = "token_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "borsh",
  "lee_core",
@@ -7863,7 +7895,7 @@ checksum = "ba73ea9cf16a25df0c8caa16c51acb937d5712a8429db78a3ee29d5dcacd3a65"
 [[package]]
 name = "vault_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "lee_core",
  "risc0-zkvm",
@@ -7889,12 +7921,12 @@ dependencies = [
 [[package]]
 name = "wallet"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.0-rc6#e37876a64028a335eb693198a1ed6a0e875ec5b4"
 dependencies = [
  "amm_core",
  "anyhow",
+ "associated_token_account_core",
  "async-stream",
- "ata_core",
  "authenticated_transfer_core",
  "base58",
  "bip39",
@@ -7915,6 +7947,7 @@ dependencies = [
  "lee_core",
  "log",
  "optfield",
+ "programs",
  "pyo3",
  "rand 0.8.6",
  "rpassword",
@@ -7922,6 +7955,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "system_accounts",
  "testnet_initial_state",
  "thiserror 2.0.18",
  "token_core",
