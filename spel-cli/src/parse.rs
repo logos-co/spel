@@ -92,6 +92,12 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             .map(ParsedValue::U128)
             .map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
         "program_id" => parse_program_id(raw),
+        // `AccountId` serializes via `SerializeDisplay` (base58 string), so normalize the
+        // input (base58 or 0x-hex) to canonical base58 and carry it as a string.
+        "account_id" => {
+            let bytes = crate::hex::decode_bytes_32(raw)?;
+            Ok(ParsedValue::Str(nssa::AccountId::new(bytes).to_string()))
+        },
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),
             "false" | "0" | "no" => Ok(ParsedValue::Bool(false)),
