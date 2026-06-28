@@ -132,10 +132,19 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
         }
         Ok(ParsedValue::U32Array(vals))
     } else {
-        Err(format!(
-            "Invalid ProgramId '{}': expected 8 comma-separated u32s or 64 hex chars",
-            raw
-        ))
+        // base58 (or 0x-prefixed hex) ImageID → little-endian u32 limbs, matching the bare-hex
+        // branch above so all representations of the same ProgramId agree.
+        let bytes = crate::hex::decode_bytes_32(raw).map_err(|_| {
+            format!(
+                "Invalid ProgramId '{}': expected 8 comma-separated u32s, a 64-char hex ImageID, or base58",
+                raw
+            )
+        })?;
+        let mut vals = Vec::with_capacity(8);
+        for chunk in bytes.chunks(4) {
+            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(ParsedValue::U32Array(vals))
     }
 }
 
