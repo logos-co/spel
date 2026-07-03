@@ -560,7 +560,7 @@ fn compute_pda_command(
                 }
                 let arg_name = key.replace('-', "_");
                 let parsed = if let Some(ty) = arg_types.get(arg_name.as_str()) {
-                    parse::parse_value(raw, ty).unwrap_or_else(|e| {
+                    parse::parse_value(raw, ty, &idl.types).unwrap_or_else(|e| {
                         eprintln!(
                             "⚠️  Failed to parse --{} as {}: {}",
                             key,
