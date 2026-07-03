@@ -389,7 +389,7 @@ pub async fn execute_instruction(
 
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
-        eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
+        eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
 

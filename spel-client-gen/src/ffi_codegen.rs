@@ -257,7 +257,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     // Global mutex to serialise env-var mutation + wallet init across FFI threads.
     // std::env::set_var is not thread-safe on its own; all FFI entry points that
     // call init_wallet hold this lock for the duration of the mutation + WalletCore
-    // construction so they cannot race on NSSA_WALLET_HOME_DIR / NSSA_SEQUENCER_URL.
+    // construction so they cannot race on LEE_WALLET_HOME_DIR / NSSA_SEQUENCER_URL.
     writeln!(
         out,
         "static WALLET_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());"
@@ -285,7 +285,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let sequencer_url = v[\"sequencer_url\"].as_str().ok_or(\"missing required field: sequencer_url\")?;").unwrap();
     writeln!(
         out,
-        "    std::env::set_var(\"NSSA_WALLET_HOME_DIR\", wallet_path);"
+        "    std::env::set_var(\"LEE_WALLET_HOME_DIR\", wallet_path);"
     )
     .unwrap();
     writeln!(
@@ -796,7 +796,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     )
     .unwrap();
     writeln!(out, "        .args([\"account\", \"list\"])").unwrap();
-    writeln!(out, "        .env(\"NSSA_WALLET_HOME_DIR\", wallet_path)").unwrap();
+    writeln!(out, "        .env(\"LEE_WALLET_HOME_DIR\", wallet_path)").unwrap();
     writeln!(out, "        .output()").unwrap();
     writeln!(
         out,
@@ -992,7 +992,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    }}").unwrap();
     writeln!(
         out,
-        "    let output = cmd.env(\"NSSA_WALLET_HOME_DIR\", wallet_path)"
+        "    let output = cmd.env(\"LEE_WALLET_HOME_DIR\", wallet_path)"
     )
     .unwrap();
     writeln!(out, "        .output()").unwrap();

@@ -65,7 +65,7 @@ pub async fn inspect_account(
 async fn fetch_account_data(account_id: nssa::AccountId) -> Vec<u8> {
     let wallet_core = wallet::WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("Failed to initialize wallet: {:?}", e);
-        eprintln!("Set NSSA_WALLET_HOME_DIR or use --data <hex>");
+        eprintln!("Set LEE_WALLET_HOME_DIR or use --data <hex>");
         process::exit(1);
     });
 
