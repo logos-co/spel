@@ -691,7 +691,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let account = rt.block_on(async {{").unwrap();
     writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
     writeln!(out, "    }})?;").unwrap();
-    writeln!(out, "    let has_key = wallet.get_account_public_signing_key(account_id).is_some();").unwrap();
+    writeln!(
+        out,
+        "    let has_key = wallet.get_account_public_signing_key(account_id).is_some();"
+    )
+    .unwrap();
     writeln!(out, "    let data_len = account.data.len();").unwrap();
     writeln!(out, "    let preview_len = data_len.min(32);").unwrap();
     writeln!(
