@@ -30,6 +30,12 @@ fn main() {
         return;
     };
 
+    // Ignore the output unless the interpreter exited cleanly; a non-zero exit
+    // that still wrote to stdout would otherwise be injected as an rpath arg.
+    if !output.status.success() {
+        return;
+    }
+
     let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if !prefix.is_empty() {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{prefix}");
