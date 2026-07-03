@@ -200,6 +200,40 @@ fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
     None
 }
 
+/// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
+/// → `AccountWithMetadata`. `None` for non-path types (references, tuples).
+fn last_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// True for instruction params that are accounts rather than data args:
+/// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
+fn is_account_shaped(ty: &Type) -> bool {
+    match last_ident(ty).as_deref() {
+        Some("AccountWithMetadata") | Some("ProgramContext") => true,
+        Some("Vec") => {
+            // reach into Vec<...>'s generic argument
+            if let Type::Path(p) = ty {
+                if let Some(seg) = p.path.segments.last() {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return matches!(
+                                last_ident(inner).as_deref(),
+                                Some("AccountWithMetadata")
+                            );
+                        }
+                    }
+                }
+            }
+            false
+        },
+        _ => false,
+    }
+}
+
 /// Scan `items` for `#[account_type]`-annotated types and return:
 /// - `accounts`: directly annotated types (primary account data layouts)
 /// - `types`: helper types referenced by account types but not themselves annotated
@@ -242,6 +276,24 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
         for name in collect_defined_refs(&account.type_) {
             if !visited.contains(&name) && queued.insert(name.clone()) {
                 queue.push(name);
+            }
+        }
+    }
+
+    // Pass 1.5: seed the queue from #[instruction] fn argument types, so
+    // defined types used only as instruction args (e.g. an enum argument)
+    // also end up in the IDL's `types` section.
+    for item in items {
+        let Item::Fn(f) = item else { continue };
+        if !f.attrs.iter().any(|a| a.path().is_ident("instruction")) { continue; }
+        for input in &f.sig.inputs {
+            let syn::FnArg::Typed(pt) = input else { continue };
+            if is_account_shaped(&pt.ty) { continue; }
+            let idl_ty = syn_type_to_idl_type(&pt.ty);
+            let mut refs = Vec::new();
+            collect_defined_refs_from_type(&idl_ty, &mut refs);
+            for name in refs {
+                if !visited.contains(&name) { queue.push(name); }
             }
         }
     }
@@ -306,5 +358,25 @@ mod tests {
         assert_eq!(accounts.len(), 1);
         let names: Vec<&str> = helpers.iter().map(|t| t.name.as_str()).collect();
         assert_eq!(names, vec!["Alpha", "Mu", "Zeta"]);
+    }
+
+    #[test]
+    fn instruction_arg_defined_types_are_collected() {
+        let file: syn::File = syn::parse_quote! {
+            pub enum MyChoice {
+                A,
+                B { x: u64 },
+            }
+
+            #[instruction]
+            pub fn do_it(caller: AccountWithMetadata, choice: MyChoice) -> SpelResult {
+                todo!()
+            }
+        };
+        let (accounts, types) = collect_account_types(&file.items);
+        assert!(accounts.is_empty());
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].name, "MyChoice");
+        assert_eq!(types[0].kind, "enum");
     }
 }

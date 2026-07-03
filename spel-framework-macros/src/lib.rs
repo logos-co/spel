@@ -468,6 +468,11 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                                     }
                                 }
                             }
+                            // Also include items from path-dependency crates, so types defined in
+                            // extension libraries (account types, instruction-arg types) reach the IDL.
+                            let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&manifest, |_| {});
+                            let (extra_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
+                            all_items.extend(extra_items);
                             result = account_types::collect_account_types(&all_items);
                             break;
                         }
