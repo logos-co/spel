@@ -146,6 +146,16 @@ log "  ✓ Project scaffolded"
 cargo generate-lockfile > "$LOG_DIR/root-lockfile.log" 2>&1 \
     || warn "Root lockfile regeneration failed"
 
+# Re-pin the enum-ordinalize crates to LEZ's version (4.3.2) in the guest lockfile.
+# generate-lockfile above re-resolves educe's `^4` to 4.4.1, which requires
+# rustc 1.89, but the guest builds with the risc0 toolchain (rustc 1.88).
+# spel init already pins these, but the regeneration above undoes it, so redo it.
+# Both enum-ordinalize and enum-ordinalize-derive resolve independently.
+(cd methods/guest \
+    && cargo update -p enum-ordinalize --precise 4.3.2 >> "$LOG_DIR/guest-lockfile.log" 2>&1 \
+    && cargo update -p enum-ordinalize-derive --precise 4.3.2 >> "$LOG_DIR/guest-lockfile.log" 2>&1) \
+    || warn "enum-ordinalize pin failed (guest build may hit rustc 1.89)"
+
 # Print the actual LEZ version resolved
 log "  LEZ nssa_core resolved:"
 grep -A2 'name = "nssa_core"' methods/guest/Cargo.lock 2>/dev/null | head -5 || true

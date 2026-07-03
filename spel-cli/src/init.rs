@@ -856,6 +856,32 @@ async fn main() {
         ),
     }
 
+    // Pin the enum-ordinalize crates to the version LEZ uses (4.3.2).
+    // `educe`'s `^4` range otherwise resolves to 4.4.1, which requires rustc
+    // 1.89, but the guest is built with the risc0 zkVM toolchain (rustc 1.88).
+    // Both enum-ordinalize and its companion proc-macro enum-ordinalize-derive
+    // resolve independently, so each needs its own pin. LEZ's own lockfile
+    // pins 4.3.2, so this keeps the guest in sync and buildable under risc0.
+    // Best-effort: init still succeeds if a pin fails (e.g. a future LEZ drops
+    // the dep, or raises educe's floor above 4.3.2), in which case cargo prints
+    // the reason on stderr just above this warning.
+    for pkg in ["enum-ordinalize", "enum-ordinalize-derive"] {
+        let status = std::process::Command::new("cargo")
+            .args(["update", "-p", pkg, "--precise", "4.3.2"])
+            .current_dir(&guest_dir)
+            .status();
+        match status {
+            Ok(s) if s.success() => {},
+            Ok(s) => eprintln!(
+                "⚠️  Could not pin {} to 4.3.2 (cargo exited {}); see cargo output above. If the guest fails to build under risc0, check the resolved enum-ordinalize versions.",
+                pkg, s
+            ),
+            Err(e) => {
+                eprintln!("⚠️  Failed to pin {} (cargo not found?): {}", pkg, e)
+            },
+        }
+    }
+
     println!("✅ Project '{}' created!", project_name);
     println!();
     println!("Next steps:");
