@@ -141,7 +141,22 @@ if [ ! -f "$SEQ_CONFIGS" ]; then
 fi
 [ -n "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
-cd "$LSSA_DIR"
+# LEZ v0.2.0-rc6+ writes a bedrock_signing_key (and rocksdb) under config.home,
+# which defaults to "." — i.e. the sequencer's cwd. The LEZ checkout is
+# read-only in CI, so launching from there fails with "Permission denied".
+# Copy the config into the writable work dir with home rewritten to it.
+SEQ_HOME="$WORK_DIR/seq-home"
+mkdir -p "$SEQ_HOME"
+SEQ_CONFIG_PATCHED="$WORK_DIR/sequencer_config.json"
+python3 -c "
+import json, sys
+cfg = json.load(open('$SEQ_CONFIGS'))
+cfg['home'] = '$SEQ_HOME'
+json.dump(cfg, open('$SEQ_CONFIG_PATCHED', 'w'))
+" || fail "Failed to patch sequencer config home"
+SEQ_CONFIGS="$SEQ_CONFIG_PATCHED"
+
+cd "$SEQ_HOME"
 RUST_LOG=info $SEQUENCER_BIN --port "$SEQUENCER_PORT" "$SEQ_CONFIGS" \
     > "$WORK_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
