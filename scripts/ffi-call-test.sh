@@ -173,12 +173,15 @@ fi
 SEQ_HOME="$WORK_DIR/seq-home"
 mkdir -p "$SEQ_HOME"
 SEQ_CONFIG_PATCHED="$WORK_DIR/sequencer_config.json"
-python3 -c "
+# Paths are passed as argv (not interpolated into the source) so a path
+# containing quotes or other special characters can't break the script.
+python3 -c '
 import json, sys
-cfg = json.load(open('$SEQ_CONFIGS'))
-cfg['home'] = '$SEQ_HOME'
-json.dump(cfg, open('$SEQ_CONFIG_PATCHED', 'w'))
-" || fail "Failed to patch sequencer config home"
+src, home, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(src))
+cfg["home"] = home
+json.dump(cfg, open(dst, "w"))
+' "$SEQ_CONFIGS" "$SEQ_HOME" "$SEQ_CONFIG_PATCHED" || fail "Failed to patch sequencer config home"
 SEQ_CONFIGS="$SEQ_CONFIG_PATCHED"
 
 cd "$SEQ_HOME"
