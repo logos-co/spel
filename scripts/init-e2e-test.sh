@@ -64,7 +64,7 @@ WALLET_BIN="${LSSA_DIR}/target/release/wallet"
 SPEL_BIN="/tmp/lssa/target/release/spel"
 [ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
 
-# LEZ v0.2.0-rc6 moved the debug configs under a lez/ subdirectory. Prefer the
+# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
 # new location, fall back to the pre-rc6 path for older LEZ revisions.
 if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
     if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
@@ -74,7 +74,7 @@ if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
     fi
 fi
 export NSSA_WALLET_HOME_DIR
-# LEZ v0.2.0-rc6 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
+# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
 # Export both so the wallet finds its config on old and new LEZ revisions.
 export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
@@ -147,7 +147,7 @@ pgrep -f 'sequencer_service.*configs' | xargs -r kill 2>/dev/null || true
 sleep 1
 rm -rf "${LSSA_DIR}/rocksdb-${SEQUENCER_PORT}"
 
-# LEZ v0.2.0-rc6 moved this under lez/; prefer it, fall back to the old path.
+# LEZ v0.2.0 moved this under lez/; prefer it, fall back to the old path.
 SEQ_CONFIGS="${LSSA_DIR}/lez/sequencer/service/configs/debug/sequencer_config.json"
 if [ ! -f "$SEQ_CONFIGS" ]; then
     SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
@@ -157,7 +157,7 @@ if [ ! -f "$SEQ_CONFIGS" ]; then
 fi
 [ -n "$SEQ_CONFIGS" ] && [ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
-# LEZ v0.2.0-rc6+ writes a bedrock_signing_key (and rocksdb) under config.home,
+# LEZ v0.2.0 writes a bedrock_signing_key (and rocksdb) under config.home,
 # which defaults to "." — i.e. the sequencer's cwd. The LEZ checkout is
 # read-only in CI, so launching from there fails with "Permission denied".
 # Copy the config into the writable work dir with home rewritten to it.
