@@ -12,6 +12,23 @@ use wallet::WalletCore;
 use crate::blob::{TxBlob, WitnessEntry};
 use crate::hex::{decode_bytes_32, hex_encode};
 
+/// Of the missing signer ids, those the key lookup answers for.
+/// Fails on a id that does not decode.
+fn detect_signable(
+    missing: &[String],
+    hold_keys: impl Fn(AccountId) -> bool,
+) -> Result<Vec<String>, String> {
+    let mut out = Vec::new();
+    for id_str in missing {
+        let bytes = decode_bytes_32(id_str)
+            .map_err(|e| format!("invalid signer id '{}': {}", id_str, e))?;
+        if hold_keys(AccountId::new(bytes)) {
+            out.push(id_str.clone());
+        }
+    }
+    Ok(out)
+}
+
 /// Load a blob, verify it, show what it is, and append witnesses for
 /// every required signer whose key the local wallet holds.
 pub fn sign_command(path: &str) {
@@ -24,12 +41,12 @@ pub fn sign_command(path: &str) {
     // stale nonces, tampering, or corruption;
     blob.verify_witnesses().unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
-        process::exit(1);      
+        process::exit(1);
     });
-    
+
     let message = blob.message().unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
-        process::exit(1);      
+        process::exit(1);
     });
 
     // What the exporter claims this transaction does.
@@ -79,33 +96,29 @@ pub fn sign_command(path: &str) {
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
-        process::exit(1);    
+        process::exit(1);
     });
 
     let missing: Vec<String> = blob.missing_signers().into_iter().cloned().collect();
-    let mut signable: Vec<(String, &nssa::PrivateKey)> = Vec::new();
-    for id_str in &missing {
-        let bytes = decode_bytes_32(id_str).unwrap_or_else(|e| {
-            eprintln!("❌ invalid signer id '{}': {}", id_str, e);
-            process::exit(1);
-        });
-
-        if let Some(key) = wallet_core
+    let signable = detect_signable(&missing, |id| {
+        wallet_core
             .storage()
             .user_data
-            .get_pub_account_signing_key(AccountId::new(bytes))
-        {
-            signable.push((id_str.clone(), key));
-        }
-    }
+            .get_pub_account_signing_key(id)
+            .is_some()
+    })
+    .unwrap_or_else(|e| {
+        eprintln!("❌ {}", e);
+        process::exit(1);
+    });
 
     if signable.is_empty() {
         eprintln!("❌ This wallet holds no key for any missing signer.");
-        process::exit(1);        
+        process::exit(1);
     }
 
     println!("This wallet can sign for:");
-    for (id, _) in &signable {
+    for id in &signable {
         println!("  {}", id);
     }
     print!("Sign and update the file? [y/N] ");
@@ -121,16 +134,22 @@ pub fn sign_command(path: &str) {
         eprintln!("❌ {}", e);
         process::exit(1);
     });
-    for (id, key) in signable {
+    for id in signable {
+        let bytes = decode_bytes_32(&id).unwrap();
+        let key = wallet_core
+            .storage()
+            .user_data
+            .get_pub_account_signing_key(AccountId::new(bytes))
+            .expect("key vanished between detection and signing");
         let signature = Signature::new(key, &message_bytes);
         let pubkey = PublicKey::new_from_private_key(key);
         blob.witnesses.insert(
-            id, 
-        WitnessEntry {
+            id,
+            WitnessEntry {
                 pubkey,
                 signature: signature.to_string(),
-            }
-        ); 
+            },
+        );
     }
 
     blob.save(path).unwrap_or_else(|e| {
@@ -160,33 +179,23 @@ pub async fn submit_command(path: &str) {
     // stale nonces, tampering, or corruption;
     blob.verify_witnesses().unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
-        process::exit(1);      
+        process::exit(1);
     });
 
     let message = blob.message().unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
-        process::exit(1);      
+        process::exit(1);
     });
 
     if !blob.missing_signers().is_empty() {
         eprintln!("❌ missing signers. run: spel sign <file>");
-        process::exit(1);      
+        process::exit(1);
     }
 
-    let mut witnesses_pairs: Vec<(Signature, PublicKey)>  = Vec::new();
-    for id in &blob.signers {
-        let entry = blob.witnesses.get(id).unwrap_or_else(|| {
-            eprintln!("❌ no witness for '{}'", id);
-            process::exit(1);      
-        });
-        let sig = entry.signature.parse::<Signature>().unwrap_or_else(|e| {
-            eprintln!("❌ {}", e);
-            process::exit(1);
-        });
-        witnesses_pairs.push((sig, entry.pubkey.clone()));
-    }
-
-    let witness_set = WitnessSet::from_raw_parts(witnesses_pairs);
+    let witness_set = blob.witness_set().unwrap_or_else(|e| {
+        eprintln!("❌ {}", e);
+        process::exit(1);
+    });
     let tx = PublicTransaction::new(message, witness_set);
 
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
@@ -207,10 +216,8 @@ pub async fn submit_command(path: &str) {
     println!("   tx_hash: {}", tx_hash);
     println!("   Waiting for confirmation...");
 
-    let poller = wallet::poller::TxPoller::new(
-        wallet_core.config(),
-        wallet_core.sequencer_client.clone(),
-    );
+    let poller =
+        wallet::poller::TxPoller::new(wallet_core.config(), wallet_core.sequencer_client.clone());
 
     match poller.poll_tx(tx_hash).await {
         Ok(_) => println!("✅ Transaction confirmed — included in a block."),
@@ -218,5 +225,36 @@ pub async fn submit_command(path: &str) {
             eprintln!("❌ Transaction NOT confirmed: {e:#}");
             process::exit(1);
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn detect_signable_filters_by_held_keys() {
+        let held = AccountId::new([0xaa; 32]);
+        let missing = vec![
+            format!("0x{}", "aa".repeat(32)),
+            format!("0x{}", "bb".repeat(32)),
+        ];
+
+        let signable = detect_signable(&missing, |id| id == held).unwrap();
+
+        assert_eq!(signable, vec![format!("0x{}", "aa".repeat(32))]);
+    }
+
+    #[test]
+    fn detect_signable_rejects_undecodable_id() {
+        let missing = vec!["0xzz".to_string()];
+
+        let err = detect_signable(&missing, |_| true).unwrap_err();
+
+        assert!(
+            err.contains("invalid signer id"),
+            "unexpected error: {}",
+            err
+        );
     }
 }

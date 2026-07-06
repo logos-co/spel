@@ -10,8 +10,8 @@ use common::transaction::LeeTransaction;
 use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
-use nssa::{PublicKey, Signature};
 use nssa::{AccountId, PublicTransaction};
+use nssa::{PublicKey, Signature};
 use nssa_core::account::Nonce;
 use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
@@ -574,7 +574,7 @@ pub async fn execute_instruction(
         };
 
         let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
-        
+
         if let Some(export_path) = export {
             // (1) the exact bytes every signer signs
             let message_bytes = borsh::to_vec(&message).unwrap_or_else(|e| {
@@ -598,7 +598,8 @@ pub async fn execute_instruction(
                 .copied()
                 .chain(co_signer_labels.iter().map(|s| s.as_str()))
                 .collect();
-            let signer_nonces: Vec<Option<Nonce>> = message.nonces.iter().copied().map(Some).collect();
+            let signer_nonces: Vec<Option<Nonce>> =
+                message.nonces.iter().copied().map(Some).collect();
             let summary_data = DryRunSummary {
                 program_id_hex: &program_id_hex_str,
                 ix,
@@ -905,7 +906,8 @@ fn render_dry_run_text(s: &DryRunSummary<'_>) -> String {
                     writeln!(out, "  {} → (none — variadic rest){}", acc.name, flags_str).unwrap();
                 } else {
                     for bytes in entries {
-                        writeln!(out, "  {} → 0x{}{}", acc.name, hex_encode(bytes), flags_str).unwrap();
+                        writeln!(out, "  {} → 0x{}{}", acc.name, hex_encode(bytes), flags_str)
+                            .unwrap();
                     }
                 }
             }

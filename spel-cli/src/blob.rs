@@ -44,7 +44,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 
-use nssa::public_transaction::Message;
+use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicKey, Signature};
 use serde::{Deserialize, Serialize};
 
@@ -156,13 +156,44 @@ impl TxBlob {
         }
         Ok(())
     }
+
+    /// Assemble the final witness set IN SIGNERS ORDER, which matches the
+    /// nonce order inside the message. Fails if any signer has no witness.
+    pub fn witness_set(&self) -> Result<WitnessSet, String> {
+        let mut witnesses_pairs: Vec<(Signature, PublicKey)> = Vec::new();
+        for id in &self.signers {
+            let entry = self
+                .witnesses
+                .get(id)
+                .ok_or_else(|| format!("no witness for '{}'", id))?;
+            let sig = entry
+                .signature
+                .parse::<Signature>()
+                .map_err(|e| format!("witness for '{}' has malformed signature: {}", id, e))?;
+            witnesses_pairs.push((sig, entry.pubkey.clone()));
+        }
+
+        Ok(WitnessSet::from_raw_parts(witnesses_pairs))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hex::{hex_decode, hex_encode};
     use nssa::PrivateKey;
+
+    use crate::hex::hex_encode;
+
+    fn witness_entry(message: &Message, key: &PrivateKey) -> WitnessEntry {
+        let bytes = borsh::to_vec(&message).unwrap();
+        let signature = Signature::new(&key, &bytes);
+
+        let pubkey = PublicKey::new_from_private_key(&key);
+        WitnessEntry {
+            pubkey,
+            signature: signature.to_string(),
+        }
+    }
 
     /// A valid one-signer blob with a correct witness, plus the key that signed it.
     fn signed_blob() -> (TxBlob, PrivateKey) {
@@ -177,17 +208,10 @@ mod tests {
         )
         .unwrap();
         let bytes = borsh::to_vec(&message).unwrap();
-        let signature = Signature::new(&key, &bytes);
 
         let id = format!("0x{}", hex_encode(account_id.value()));
         let mut witnesses = BTreeMap::new();
-        witnesses.insert(
-            id.clone(),
-            WitnessEntry {
-                pubkey,
-                signature: signature.to_string(),
-            },
-        );
+        witnesses.insert(id.clone(), witness_entry(&message, &key));
         let blob = TxBlob {
             version: 1,
             summary: "test".to_string(),
@@ -304,5 +328,77 @@ mod tests {
         // Remove the witness: its signer must show up.
         blob.witnesses.clear();
         assert_eq!(blob.missing_signers(), vec![&blob.signers[0]]);
+    }
+
+    #[test]
+    fn witness_set_assembles_in_signers_order() {
+        let key = PrivateKey::try_new([1; 32]).unwrap();
+        let pubkey = PublicKey::new_from_private_key(&key);
+
+        // Two made-up ids with KNOWN sort order: "bb..." > "aa...".
+        // signers lists bb first, the map iterates aa first — orders differ.
+        let id_hi = format!("0x{}", "bb".repeat(32));
+        let id_lo = format!("0x{}", "aa".repeat(32));
+
+        let mut witnesses = BTreeMap::new();
+        // Distinct fake signatures so order is observable in the output.
+        witnesses.insert(
+            id_hi.clone(),
+            WitnessEntry {
+                pubkey: pubkey.clone(),
+                signature: "11".repeat(64),
+            },
+        );
+        witnesses.insert(
+            id_lo.clone(),
+            WitnessEntry {
+                pubkey,
+                signature: "22".repeat(64),
+            },
+        );
+        let blob = TxBlob {
+            version: 1,
+            summary: String::new(),
+            message_hex: String::new(), // witness_set never reads it
+            signers: vec![id_hi, id_lo],
+            witnesses,
+        };
+
+        let ws = blob.witness_set().unwrap();
+        let pairs = ws.signatures_and_public_keys();
+        assert_eq!(pairs[0].0.to_string(), "11".repeat(64));
+        assert_eq!(pairs[1].0.to_string(), "22".repeat(64));
+    }
+
+    #[test]
+    fn witness_set_fails_on_missing_witness() {
+        let key = PrivateKey::try_new([1; 32]).unwrap();
+        let pubkey = PublicKey::new_from_private_key(&key);
+
+        // Two made-up ids with KNOWN sort order: "bb..." > "aa...".
+        // signers lists bb first, the map iterates aa first — orders differ.
+        let id_hi = format!("0x{}", "bb".repeat(32));
+        let id_lo = format!("0x{}", "aa".repeat(32));
+
+        let mut witnesses = BTreeMap::new();
+        // Distinct fake signatures so order is observable in the output.
+        witnesses.insert(
+            id_hi.clone(),
+            WitnessEntry {
+                pubkey: pubkey.clone(),
+                signature: "11".repeat(64),
+            },
+        );
+
+        let blob = TxBlob {
+            version: 1,
+            summary: String::new(),
+            message_hex: String::new(), // witness_set never reads it
+            signers: vec![id_hi, id_lo],
+            witnesses,
+        };
+
+        let err = blob.witness_set().unwrap_err();
+        assert!(err.contains("no witness for"), "unexpected error: {}", err)
     }
 }
