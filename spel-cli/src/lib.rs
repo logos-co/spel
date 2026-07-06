@@ -10,8 +10,10 @@
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
 pub mod account_inspect;
+pub mod blob;
 pub mod cli;
 pub mod config;
+pub mod exchange;
 pub mod generate_idl;
 pub mod hex;
 pub mod init;
@@ -50,6 +52,8 @@ pub async fn run() {
     let mut data_hex: Option<String> = None;
     let mut inspect_format: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
+    let mut co_signers: Vec<String> = Vec::new();
+    let mut export_path: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut used_separator = false;
     let mut i = 1;
@@ -132,9 +136,34 @@ pub async fn run() {
                     extra_bins.insert(format!("{}-program-id", name), args[i].clone());
                 }
             },
+            "--co-signer" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --co-signer requires an account id");
+                    process::exit(1);
+                }
+                co_signers.push(args[i].clone());
+            },
+            "--export" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --export requires a file path");
+                    process::exit(1);
+                }
+                if export_path.is_some() {
+                    eprintln!("❌ --export given twice");
+                    process::exit(1);
+                }
+                export_path = Some(args[i].clone());
+            },
             _ => remaining_args.push(args[i].clone()),
         }
         i += 1;
+    }
+
+    if export_path.is_some() && dry_run.is_some() {
+        eprintln!("❌ --export and --dry-run cannot be combined");
+        process::exit(1);
     }
 
     // Load spel.toml config
@@ -389,6 +418,22 @@ pub async fn run() {
                 compute_pda_raw(&raw_args);
                 return;
             },
+            "sign" => {
+                let path = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("Usage: {} sign <blob-file>", args[0]);
+                    process::exit(1);
+                });
+                exchange::sign_command(path);
+                return;
+            },
+            "submit" => {
+                let path = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("Usage: {} submit <blob-file>", args[0]);
+                    process::exit(1);
+                });
+                exchange::submit_command(path).await;
+                return;
+            },
             _ => {},
         }
     }
@@ -487,6 +532,8 @@ pub async fn run() {
                         program_id_hex.as_deref(),
                         dry_run,
                         &extra_bins,
+                        &co_signers,
+                        export_path.as_deref(),
                     )
                     .await;
                 },
