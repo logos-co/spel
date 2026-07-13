@@ -4,7 +4,7 @@
 
 Developer framework for building SPEL programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
-Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
+Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, a Wallet-ready transaction-resolution API, and project scaffolding for free.
 
 ## Quick Start
 
@@ -157,6 +157,42 @@ This provides:
 - Transaction building and submission with wallet integration
 - `--dry-run` mode for testing
 - `inspect` subcommand to extract ProgramId from binaries
+
+### Transaction Resolution API
+
+Use `spel::tx` when an application owns `WalletCore` and needs validated inputs
+for a direct Wallet build call. The resolvers select one IDL instruction, resolve
+accounts and PDAs, and serialize its arguments in IDL declaration order.
+
+Argument text accepts canonical scalars and JSON containers. It also accepts
+the established CLI forms for boolean aliases, options, arrays and vectors,
+and program IDs, so applications can use the same values accepted by `spel`.
+Canonical JSON remains the preferred representation for structured values.
+
+```rust
+use std::collections::BTreeMap;
+
+use spel::tx::{resolve_public_instruction, SpelInstructionRequest};
+
+// `idl`, `program_id`, and `wallet` are owned by the application.
+let request = SpelInstructionRequest {
+    idl: &idl,
+    instruction: "initialize",
+    accounts: BTreeMap::new(),
+    arguments: BTreeMap::new(),
+};
+let resolved = resolve_public_instruction(request, program_id)?;
+let (program_id, accounts, instruction_data) = resolved.into_parts();
+let _build = wallet
+    .build_pub_tx(accounts, instruction_data, program_id)
+    .await?;
+```
+
+For private programs, use `resolve_private_instruction` with a
+`ProgramWithDependencies`, then pass the resolved parts to
+`WalletCore::build_privacy_preserving_tx`. Resolvers return `SpelTxError` for
+invalid IDL or caller input. They do not initialize a wallet, build, prove,
+sign, submit, poll, print, or change CLI behavior; WalletCore owns those steps.
 
 ### Account Types
 

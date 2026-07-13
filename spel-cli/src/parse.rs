@@ -1,6 +1,7 @@
 //! IDL type-aware value parsing from CLI strings.
 
 use crate::hex::{hex_decode, hex_encode};
+use nssa_core::program::ProgramId;
 use spel_framework_core::idl::IdlType;
 
 /// A parsed CLI value with type information preserved.
@@ -96,7 +97,7 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             .parse::<u128>()
             .map(ParsedValue::U128)
             .map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
-        "program_id" => parse_program_id(raw),
+        "program_id" => parse_program_id(raw).map(|value| ParsedValue::U32Array(value.to_vec())),
         // `AccountId` serializes via `SerializeDisplay` (base58 string), so normalize the
         // input (base58 or 0x-hex) to canonical base58 and carry it as a string.
         "account_id" => {
@@ -113,29 +114,29 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
     }
 }
 
-fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
+/// Parse established ProgramId text into little-endian u32 limbs.
+pub(crate) fn parse_program_id(raw: &str) -> Result<ProgramId, String> {
     if raw.contains(',') {
         let parts: Vec<&str> = raw.split(',').map(|s| s.trim()).collect();
         if parts.len() != 8 {
             return Err(format!("ProgramId needs 8 u32 values, got {}", parts.len()));
         }
-        let mut vals = Vec::with_capacity(8);
+        let mut program_id = [0; 8];
         for (i, p) in parts.iter().enumerate() {
             let v = if p.starts_with("0x") || p.starts_with("0X") {
                 u32::from_str_radix(&p[2..], 16)
             } else {
                 p.parse::<u32>()
             };
-            vals.push(v.map_err(|e| format!("ProgramId[{}] invalid u32 '{}': {}", i, p, e))?);
+            program_id[i] =
+                v.map_err(|e| format!("ProgramId[{}] invalid u32 '{}': {}", i, p, e))?;
         }
-        Ok(ParsedValue::U32Array(vals))
+        Ok(program_id)
     } else if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
-        let bytes = hex_decode(raw)?;
-        let mut vals = Vec::with_capacity(8);
-        for chunk in bytes.chunks(4) {
-            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        Ok(ParsedValue::U32Array(vals))
+        let bytes: [u8; 32] = hex_decode(raw)?
+            .try_into()
+            .map_err(|_| format!("Invalid ProgramId '{}': expected 32 bytes", raw))?;
+        Ok(program_id_from_bytes(bytes))
     } else {
         // base58 (or 0x-prefixed hex) ImageID → little-endian u32 limbs, matching the bare-hex
         // branch above so all representations of the same ProgramId agree.
@@ -178,12 +179,22 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
                 ));
             }
         }
-        let mut vals = Vec::with_capacity(8);
-        for chunk in bytes.chunks(4) {
-            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        Ok(ParsedValue::U32Array(vals))
+        Ok(program_id_from_bytes(bytes))
     }
+}
+
+fn program_id_from_bytes(bytes: [u8; 32]) -> ProgramId {
+    let mut program_id = [0; 8];
+    for (index, word) in program_id.iter_mut().enumerate() {
+        let offset = index * 4;
+        *word = u32::from_le_bytes([
+            bytes[offset],
+            bytes[offset + 1],
+            bytes[offset + 2],
+            bytes[offset + 3],
+        ]);
+    }
+    program_id
 }
 
 fn parse_array(raw: &str, elem_type: &IdlType, size: usize) -> Result<ParsedValue, String> {
@@ -433,5 +444,31 @@ mod tests {
         // Fail-closed for junk that doesn't decode to a 32-byte ImageID.
         assert!(parse_program_id("not-a-program-id").is_err());
         assert!(parse_program_id("deadbeef").is_err());
+    }
+
+    #[test]
+    fn shared_program_id_decoder_preserves_cli_forms() {
+        let bytes = [0x11; 32];
+        let expected = [0x1111_1111; 8];
+        let csv = expected
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join(",");
+        let inputs = [
+            csv,
+            format!("0x{}", "11".repeat(32)),
+            nssa::AccountId::new(bytes).to_string(),
+        ];
+        let ty = IdlType::Primitive("program_id".to_string());
+
+        for input in inputs {
+            assert_eq!(parse_program_id(&input).unwrap(), expected);
+            let parsed = parse_value(&input, &ty).unwrap();
+            assert!(matches!(
+                parsed,
+                ParsedValue::U32Array(values) if values == expected.to_vec()
+            ));
+        }
     }
 }
