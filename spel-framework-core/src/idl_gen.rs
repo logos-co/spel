@@ -820,27 +820,38 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
     }
 }
 
-// ─── Path-dependency scanning (shared by CLI and proc-macro) ─────────────
+// ─── Dependency scanning (shared by CLI and proc-macro) ─────────────
 
-/// Return the crate-root directories of all `path = "..."` entries in the
-/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+/// Return the crate-root directories of every runtime dependency of the
+/// `Cargo.toml` nearest to `source_path`.
 ///
-/// Only runtime dependencies are considered.  `[dev-dependencies]` and
-/// `[build-dependencies]` are deliberately excluded: types defined in those
-/// crates are not part of the program's on-chain interface and must not appear
-/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
-/// are also excluded so that only project-local crates are scanned.
+/// Path dependencies are resolved transitively via a direct manifest walk
+/// (fast, no subprocess). Git and registry dependencies are additionally
+/// enumerated via a single `cargo metadata --format-version 1` call so that
+/// extensions shipped through git URLs or crates.io remain discoverable by
+/// name-based lookups (extension attrs, wrap specs, inject specs). Results
+/// from both sources are merged and deduplicated by canonical path.
 ///
-/// **Transitive path-dependencies** are resolved: if a discovered dependency
-/// itself declares path-based dependencies, those are included as well (with
-/// cycle detection).
+/// **Transitive path-dependencies** are resolved: if a discovered path
+/// dependency itself declares further path-based dependencies, those are
+/// included as well (with cycle detection).
 ///
-/// In workspace projects the function detects when the nearest `Cargo.toml` is
-/// a workspace root manifest and searches for the actual crate manifest
-/// containing `[dependencies]`.
+/// `[dev-dependencies]` and `[build-dependencies]` are deliberately
+/// excluded: types defined in those crates are not part of the program's
+/// on-chain interface and must not appear in the generated IDL. The
+/// `cargo metadata` merge only reads the runtime resolve tree, so dev and
+/// build deps are naturally filtered out.
+///
+/// In workspace projects the function detects when the nearest `Cargo.toml`
+/// is a workspace root manifest and searches for the actual crate manifest
+/// containing `[dependencies]`; `cargo metadata` is invoked against that
+/// member manifest so its dep graph is what gets enumerated.
 ///
 /// `on_warning` is called for non-fatal issues (missing dep directories,
-/// unparseable manifests, etc.).  Pass `|_| {}` to ignore warnings.
+/// unparseable manifests, `cargo metadata` failures, etc.). Pass `|_| {}`
+/// to ignore warnings. If `cargo metadata` fails or is unavailable the
+/// function silently returns only the path-dep results so downstream
+/// expansion stays deterministic.
 pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: F) -> Vec<PathBuf> {
     let manifest = match _find_crate_manifest(source_path, &mut on_warning) {
         Some(m) => m,
@@ -879,29 +890,32 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
     // own.  We need to find the actual crate manifest for the program binary.
     let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
 
-    if is_workspace {
-        // Workspace root: search member directories for the crate that contains
-        // the source file.
-        let mut dirs = Vec::new();
-        let mut visited = HashSet::new();
-        if let Some(member_manifest) =
-            _find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning)
-        {
-            _resolve_path_deps_recursive(
-                &member_manifest,
-                &mut dirs,
-                &mut visited,
-                &mut on_warning,
-            );
+    let mut dirs = Vec::new();
+    let mut visited = HashSet::new();
+    let metadata_manifest: Option<PathBuf> = if is_workspace {
+        let member = _find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning);
+        if let Some(m) = &member {
+            _resolve_path_deps_recursive(&m, &mut dirs, &mut visited, &mut on_warning);
         }
-        dirs
+        member
     } else {
-        // Regular crate manifest — extract path deps directly.
-        let mut dirs = Vec::new();
-        let mut visited = HashSet::new();
         _resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, &mut on_warning);
-        dirs
+        Some(manifest.clone())
+    };
+
+    // Merge in git and registry dep dirs via `cargo metadata`. Best-effort:
+    // any failure falls back to path-only results.
+
+    if let Some(m) = &metadata_manifest {
+        for dir in _find_dep_dirs_via_cargo_metadata(m, &mut on_warning) {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if visited.insert(canonical) {
+                dirs.push(dir);
+            }
+        }
     }
+
+    dirs
 }
 
 /// Recursively extract path-based dependencies from a manifest, following
@@ -1115,6 +1129,72 @@ pub(crate) fn _find_crate_manifest<F: FnMut(String)>(
             },
         };
     }
+}
+
+fn _find_dep_dirs_via_cargo_metadata<F: FnMut(String)>(
+    manifest:&Path,
+    on_warning: &mut F,
+) -> Vec<PathBuf> {
+    let output = match std::process::Command::new("cargo")
+        .args(["metadata", "--format-version", "1", "--manifest-path"])
+        .arg(manifest)
+        .output()
+    {
+        Ok(o) => o,
+        Err(e) => {
+            on_warning(format!("could not run `cargo metadata`: {e}"));
+            return Vec::new();
+        }
+    };
+    if !output.status.success() {
+        on_warning(format!("`cargo metadata` failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        return Vec::new();
+    }
+    
+    let meta: serde_json::Value = match serde_json::from_slice(&output.stdout) {
+        Ok(v) => v,
+        Err(e) => {
+            on_warning(format!("failed to parse metadata: {e}"));
+            return Vec::new();
+        }
+    };
+
+    let workspace_members: HashSet<String> = meta
+        .get("workspace_members")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+
+    let source_canonical = manifest.canonicalize().ok();
+    let mut dirs = Vec::new();
+
+    let empty = Vec::new();
+    let packages = meta.get("packages").and_then(|v| v.as_array()).unwrap_or(&empty);
+    for pkg in packages {
+        if let Some(id) = pkg.get("id").and_then(|v| v.as_str()) {
+            if workspace_members.contains(id) {
+                continue;
+            }
+        }
+
+        let Some(mp) = pkg.get("manifest_path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let pkg_manifest = PathBuf::from(mp);
+
+        if let (Some(src), Ok(pkg_c)) = (&source_canonical, pkg_manifest.canonicalize()) {
+            if src == &pkg_c {
+                continue;
+            }
+        }
+        if let Some(dir) = pkg_manifest.parent() {
+            dirs.push(dir.to_path_buf());
+        }
+    }
+
+    dirs
 }
 
 #[cfg(test)]

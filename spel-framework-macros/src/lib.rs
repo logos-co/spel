@@ -2353,7 +2353,12 @@ mod tests {
     }
 
     #[test]
-    fn find_path_dep_dirs_ignores_registry_and_git_deps() {
+    fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
+        // The fake `https://example.com/repo.git` URL makes `cargo metadata`
+        // fail (cannot resolve the git dep). The registry version dep on
+        // `serde` also fails because the temporary workspace has no
+        // Cargo.lock. `find_path_dep_dirs` should degrade gracefully and
+        // still return the path-dep, proving the fallback path works.
         let tmp = TempDir::new("find-path-deps-filter-macro");
 
         tmp.write(
