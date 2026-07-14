@@ -139,12 +139,45 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
     } else {
         // base58 (or 0x-prefixed hex) ImageID → little-endian u32 limbs, matching the bare-hex
         // branch above so all representations of the same ProgramId agree.
+        //
+        // #243: `decode_bytes_32` strips `Public/`/`Private/` prefixes and accepts any
+        // base58 string that decodes to 32 bytes. Left unchecked that silently reinterprets
+        // an account id (or a mistyped value) as a ProgramId and builds the transaction
+        // against the wrong program with no diagnostic. A ProgramId is an ImageID — never
+        // account-prefixed — so reject account prefixes, and require base58 input to be
+        // canonical (re-encode to exactly the input) instead of accepting junk that merely
+        // happens to decode to 32 bytes.
+        if raw.starts_with("Public/") || raw.starts_with("Private/") {
+            return Err(format!(
+                "Invalid ProgramId '{}': that is an account id (Public/Private prefix). A ProgramId \
+                 is an ImageID: 8 comma-separated u32s, a 64-char hex string, or base58.",
+                raw
+            ));
+        }
         let bytes = crate::hex::decode_bytes_32(raw).map_err(|_| {
             format!(
                 "Invalid ProgramId '{}': expected 8 comma-separated u32s, a 64-char hex ImageID, or base58",
                 raw
             )
         })?;
+        // Hex is unambiguous (fixed 64-char length, validated on decode); base58 is dense,
+        // so require the decoded bytes to re-encode to exactly the input — rejecting
+        // non-canonical / accidentally-32-byte-decodable strings rather than accepting them.
+        let hex_body = raw
+            .strip_prefix("0x")
+            .or_else(|| raw.strip_prefix("0X"))
+            .unwrap_or(raw);
+        let is_hex = hex_body.len() == 64 && hex_body.bytes().all(|b| b.is_ascii_hexdigit());
+        if !is_hex {
+            use base58::ToBase58;
+            let canonical = bytes.to_base58();
+            if canonical != raw {
+                return Err(format!(
+                    "Invalid ProgramId '{}': not a canonical base58 ImageID (its 32 bytes re-encode to '{}')",
+                    raw, canonical
+                ));
+            }
+        }
         let mut vals = Vec::with_capacity(8);
         for chunk in bytes.chunks(4) {
             vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -358,5 +391,47 @@ mod tests {
             "Primitive('[u8; 32]') should fall through to Raw, got {:?}",
             parsed
         );
+    }
+
+    #[test]
+    fn program_id_accepts_hex_and_canonical_base58() {
+        // All legitimate ProgramId encodings still resolve to the same u32 limbs.
+        let hex = "0000000100000002000000030000000400000005000000060000000700000008";
+        let from_bare = parse_program_id(hex).expect("bare 64-char hex");
+        let from_0x = parse_program_id(&format!("0x{hex}")).expect("0x-prefixed hex");
+        assert_eq!(format!("{from_bare:?}"), format!("{from_0x:?}"));
+
+        use base58::ToBase58;
+        let bytes: [u8; 32] = crate::hex::decode_bytes_32(hex).unwrap();
+        let from_b58 = parse_program_id(&bytes.to_base58()).expect("canonical base58 accepted");
+        assert_eq!(format!("{from_b58:?}"), format!("{from_bare:?}"));
+    }
+
+    #[test]
+    fn program_id_rejects_account_prefixed_input() {
+        // #243: an account id (Public/Private prefix) must not be silently accepted
+        // as a ProgramId — that would build the tx against the wrong program.
+        use base58::ToBase58;
+        let id = [7u8; 32].to_base58();
+
+        let err = parse_program_id(&format!("Public/{id}"))
+            .expect_err("Public/-prefixed account id must be rejected");
+        assert!(err.contains("account id"), "unexpected error: {err}");
+
+        assert!(
+            parse_program_id(&format!("Private/{id}")).is_err(),
+            "Private/-prefixed account id must be rejected"
+        );
+
+        // The bare 32-byte value is still a structurally valid ImageID (indistinguishable
+        // from a program id without the prefix), so it is accepted.
+        assert!(parse_program_id(&id).is_ok());
+    }
+
+    #[test]
+    fn program_id_rejects_unrecognized_input() {
+        // Fail-closed for junk that doesn't decode to a 32-byte ImageID.
+        assert!(parse_program_id("not-a-program-id").is_err());
+        assert!(parse_program_id("deadbeef").is_err());
     }
 }
