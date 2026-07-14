@@ -10,11 +10,15 @@ path = "src/bin/main.rs"
 
 [dependencies]
 spel-framework-core = { path = "../spel-framework-core", features = ["idl-gen"] }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2", features = ["client"] }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
+# Pinned to lez-core-v0.2.0, which matches the live testnet: `/LEE/v0.3` public-tx
+# signing (spel/co issue #234) and the wallet storage schema written by the wallet
+# CLI (#235). nssa_core/nssa were renamed to lee_core/lee upstream — aliased back
+# via `package` so spel's source keeps compiling.
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", package = "lee_core" }
+nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", package = "lee" }
+common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", features = ["client"] }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }
