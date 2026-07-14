@@ -125,6 +125,8 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         ("program_id", ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
             vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
         )),
+        // `AccountId` serializes via `SerializeDisplay`, i.e. as its base58 string.
+        ("account_id", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
         _ => Err(SerializeError::TypeMismatch {
             expected: prim.to_string(),
             got: format!("{:?}", val),

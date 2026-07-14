@@ -257,7 +257,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     // Global mutex to serialise env-var mutation + wallet init across FFI threads.
     // std::env::set_var is not thread-safe on its own; all FFI entry points that
     // call init_wallet hold this lock for the duration of the mutation + WalletCore
-    // construction so they cannot race on NSSA_WALLET_HOME_DIR / NSSA_SEQUENCER_URL.
+    // construction so they cannot race on LEE_WALLET_HOME_DIR / NSSA_SEQUENCER_URL.
     writeln!(
         out,
         "static WALLET_INIT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());"
@@ -285,7 +285,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let sequencer_url = v[\"sequencer_url\"].as_str().ok_or(\"missing required field: sequencer_url\")?;").unwrap();
     writeln!(
         out,
-        "    std::env::set_var(\"NSSA_WALLET_HOME_DIR\", wallet_path);"
+        "    std::env::set_var(\"LEE_WALLET_HOME_DIR\", wallet_path);"
     )
     .unwrap();
     writeln!(
@@ -511,8 +511,8 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         .unwrap();
         writeln!(out, "        let mut signing_keys = Vec::new();").unwrap();
         writeln!(out, "        for sid in &signer_ids {{").unwrap();
-        writeln!(out, "            let key = wallet.storage().user_data").unwrap();
-        writeln!(out, "                .get_pub_account_signing_key(*sid)").unwrap();
+        writeln!(out, "            let key = wallet").unwrap();
+        writeln!(out, "                .get_account_public_signing_key(*sid)").unwrap();
         writeln!(
             out,
             "                .ok_or_else(|| format!(\"signing key not found for {{}}\", sid))?;"
@@ -540,7 +540,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
+        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"submit: {{}}\", e))?;"
@@ -618,7 +618,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         "    let data = match data {{ Some(d) => d, None => return std::ptr::null_mut() }};"
     )
     .unwrap();
-    writeln!(out, "    let program = match Program::new(data) {{ Ok(p) => p, Err(_) => return std::ptr::null_mut() }};").unwrap();
+    writeln!(out, "    let program = match Program::new(data.into()) {{ Ok(p) => p, Err(_) => return std::ptr::null_mut() }};").unwrap();
     writeln!(out, "    let id = program.id();").unwrap();
     writeln!(out, "    let hex: String = id.iter().flat_map(|w| w.to_le_bytes()).map(|b| format!(\"{{:02x}}\", b)).collect();").unwrap();
     out.push_str("    let json = json!({\"program_id_hex\": hex}).to_string();\n");
@@ -700,7 +700,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let account = rt.block_on(async {{").unwrap();
     writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
     writeln!(out, "    }})?;").unwrap();
-    writeln!(out, "    let has_key = wallet.storage().user_data.get_pub_account_signing_key(account_id).is_some();").unwrap();
+    writeln!(
+        out,
+        "    let has_key = wallet.get_account_public_signing_key(account_id).is_some();"
+    )
+    .unwrap();
     writeln!(out, "    let data_len = account.data.len();").unwrap();
     writeln!(out, "    let preview_len = data_len.min(32);").unwrap();
     writeln!(
@@ -801,7 +805,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     )
     .unwrap();
     writeln!(out, "        .args([\"account\", \"list\"])").unwrap();
-    writeln!(out, "        .env(\"NSSA_WALLET_HOME_DIR\", wallet_path)").unwrap();
+    writeln!(out, "        .env(\"LEE_WALLET_HOME_DIR\", wallet_path)").unwrap();
     writeln!(out, "        .output()").unwrap();
     writeln!(
         out,
@@ -997,7 +1001,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    }}").unwrap();
     writeln!(
         out,
-        "    let output = cmd.env(\"NSSA_WALLET_HOME_DIR\", wallet_path)"
+        "    let output = cmd.env(\"LEE_WALLET_HOME_DIR\", wallet_path)"
     )
     .unwrap();
     writeln!(out, "        .output()").unwrap();

@@ -651,7 +651,7 @@ fn gen_backend_cpp(
     o.push_str(&format!(
         "    QSettings s(\"logos-co\", \"{effective_prog}\");\n"
     ));
-    o.push_str("    m_walletPath   = s.value(\"walletPath\",   qEnvironmentVariable(\"NSSA_WALLET_HOME_DIR\",  \".scaffold/wallet\")).toString();\n");
+    o.push_str("    m_walletPath   = s.value(\"walletPath\",   qEnvironmentVariable(\"LEE_WALLET_HOME_DIR\",  \".scaffold/wallet\")).toString();\n");
     o.push_str("    m_sequencerUrl = s.value(\"sequencerUrl\", qEnvironmentVariable(\"NSSA_SEQUENCER_URL\",   \"http://127.0.0.1:3040\")).toString();\n");
     o.push_str(&format!(
         "    m_programIdHex = s.value(\"programIdHex\", qEnvironmentVariable(\"{env_base}_PROGRAM_ID\")).toString();\n"

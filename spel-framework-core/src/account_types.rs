@@ -232,13 +232,19 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
     let mut helper_types: Vec<IdlTypeDef> = Vec::new();
     let mut visited: HashSet<String> = annotated_names.clone();
 
-    let mut queue: Vec<String> = accounts
-        .iter()
-        .flat_map(|a| collect_defined_refs(&a.type_))
-        .filter(|n| !visited.contains(n))
-        .collect::<HashSet<_>>() // deduplicate the initial queue
-        .into_iter()
-        .collect();
+    // Seed the queue with references from annotated types, deduplicated while
+    // preserving discovery order. A `HashSet` round-trip here would make the
+    // discovery order — and therefore the emitted IDL — non-deterministic
+    // across processes (hash seeds are randomized per run).
+    let mut queued: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = Vec::new();
+    for account in &accounts {
+        for name in collect_defined_refs(&account.type_) {
+            if !visited.contains(&name) && queued.insert(name.clone()) {
+                queue.push(name);
+            }
+        }
+    }
 
     while !queue.is_empty() {
         let batch: Vec<String> = std::mem::take(&mut queue);
@@ -262,5 +268,43 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
         }
     }
 
+    // Emit helper types in a canonical (name-sorted) order so the generated IDL
+    // is byte-stable across processes and independent of source declaration
+    // order. Directly annotated `accounts` already follow source item order.
+    helper_types.sort_by(|a, b| a.name.cmp(&b.name));
+
     (accounts, helper_types)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn items(src: &str) -> Vec<Item> {
+        syn::parse_file(src).expect("failed to parse source").items
+    }
+
+    #[test]
+    fn helper_types_returned_in_sorted_order() {
+        // Helper types are discovered via a BFS whose order must not depend on
+        // `HashSet` iteration (randomized per process). They are returned in a
+        // canonical name-sorted order so the generated IDL is byte-stable across
+        // processes. The account references helpers in non-alphabetical order.
+        let src = r#"
+            pub struct Zeta { pub x: u8 }
+            pub struct Alpha { pub x: u8 }
+            pub struct Mu { pub x: u8 }
+
+            #[account_type]
+            pub struct VaultState {
+                pub zeta: Zeta,
+                pub alpha: Alpha,
+                pub mu: Mu,
+            }
+        "#;
+        let (accounts, helpers) = collect_account_types(&items(src));
+        assert_eq!(accounts.len(), 1);
+        let names: Vec<&str> = helpers.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpha", "Mu", "Zeta"]);
+    }
 }

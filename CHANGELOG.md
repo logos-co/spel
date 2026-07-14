@@ -1,3 +1,23 @@
+## v0.5.0 (2026-06-01)
+
+### ✨ Features
+
+- **`spel program-id`**: rename `inspect <FILE>` to `program-id` for clarity (1dc4dd0)
+- **Rest-arg matching**: extend suffix matching beyond `_accounts`; derive rest-account args by name (#211, 276ae37, 9215bd2)
+- **`--format hex|json`**: add output format flag to `decode`; unify `parse_bytes32` / `compute_pda_raw` (1dd5a0e)
+- **`decode` feature gate**: make the `decode` module opt-in behind a Cargo feature; `base58` dep is only pulled in when enabled (#215, 2209515)
+- **Workspace lint policy**: add rustfmt baseline, `clippy.toml`, and a `quality.yml` CI gate with per-crate lint configuration (dd4e505)
+
+### 🐛 Fixes
+
+- Fix `--format` flag missing from `program-id` subcommand after rename (ae84174)
+
+### 📦 Maintenance
+
+- Pin `logos-blockchain-circuits` setup script to a known-good commit in all CI workflows (25cd1f8)
+- Retag LEZ dependency from `v0.2.0-rc3` to the equivalent published release `v0.1.2` (84f6cea)
+- Normalize indentation in `logos_module_codegen.rs` (#216)
+
 # Changelog
 
 ## v0.4.0 (2026-05-22)
