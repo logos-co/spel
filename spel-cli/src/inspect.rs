@@ -41,7 +41,7 @@ pub fn inspect_binaries(paths: &[String], format: Option<&str>) {
                 continue;
             },
         };
-        match Program::new(bytes) {
+        match Program::new(bytes.into()) {
             Ok(program) => {
                 let id = program.id();
                 let id_bytes: Vec<u8> = id.iter().flat_map(|w| w.to_le_bytes()).collect();

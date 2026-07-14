@@ -7,12 +7,12 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-nssa        = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-nssa_core   = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-common      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2", features = ["client"] }
-wallet      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.1.2" }
-spel-framework-core = { git = "https://github.com/logos-co/spel.git", tag = "v0.3.0" }
+nssa        = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", package = "lee" }
+nssa_core   = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", package = "lee_core" }
+common      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0" }
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", features = ["client"] }
+wallet      = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0" }
+spel-framework-core = { path = "../../spel-framework-core" }
 serde_json  = "1"
 serde       = { version = "1", features = ["derive"] }
 borsh       = "1.5"

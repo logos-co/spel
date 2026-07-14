@@ -5,7 +5,7 @@ use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
 use crate::parse::{parse_string_vec, parse_value, ParsedValue};
 use crate::pda::compute_pda_from_seeds;
 use crate::serialize::serialize_to_risc0;
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
@@ -86,7 +86,7 @@ pub async fn execute_instruction(
     for (key, bin_path) in extra_bins {
         if !args.contains_key(key) {
             if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(program) = Program::new(bytes) {
+                if let Ok(program) = Program::new(bytes.into()) {
                     let id = program.id();
                     let id_str: Vec<String> = id.iter().map(|w| w.to_string()).collect();
                     let val = id_str.join(",");
@@ -219,7 +219,7 @@ pub async fn execute_instruction(
                     eprintln!("   Or configure in spel.toml.");
                     process::exit(1);
                 });
-                let program = Program::new(program_bytecode).unwrap_or_else(|e| {
+                let program = Program::new(program_bytecode.into()).unwrap_or_else(|e| {
                     eprintln!("❌ Failed to load program: {:?}", e);
                     process::exit(1);
                 });
@@ -412,7 +412,7 @@ pub async fn execute_instruction(
 
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
-        eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
+        eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
 
@@ -425,7 +425,7 @@ pub async fn execute_instruction(
     if has_private {
         // ─── Privacy-preserving transaction ──────────────────
         use nssa::privacy_preserving_transaction::circuit::ProgramWithDependencies;
-        use wallet::PrivacyPreservingAccount;
+        use wallet::AccountIdentity;
 
         let program = program_obj.unwrap_or_else(|| {
             eprintln!(
@@ -438,7 +438,7 @@ pub async fn execute_instruction(
         let mut dependencies = HashMap::new();
         for (_, bin_path) in extra_bins {
             if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(dep_program) = Program::new(bytes) {
+                if let Ok(dep_program) = Program::new(bytes.into()) {
                     dependencies.insert(dep_program.id(), dep_program);
                 }
             }
@@ -446,7 +446,7 @@ pub async fn execute_instruction(
         let program_with_deps = ProgramWithDependencies::new(program, dependencies);
 
         // Build privacy-preserving account list
-        let mut pp_accounts: Vec<PrivacyPreservingAccount> = Vec::new();
+        let mut pp_accounts: Vec<AccountIdentity> = Vec::new();
         for acc in &ix.accounts {
             if acc.rest {
                 if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
@@ -455,9 +455,9 @@ pub async fn execute_instruction(
                         arr.copy_from_slice(bytes);
                         let account_id = AccountId::new(arr);
                         if *is_priv {
-                            pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(account_id));
+                            pp_accounts.push(AccountIdentity::PrivateOwned(account_id));
                         } else {
-                            pp_accounts.push(PrivacyPreservingAccount::Public(account_id));
+                            pp_accounts.push(AccountIdentity::Public(account_id));
                         }
                     }
                 }
@@ -469,9 +469,9 @@ pub async fn execute_instruction(
                     process::exit(1);
                 });
                 if *is_priv {
-                    pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(id));
+                    pp_accounts.push(AccountIdentity::PrivateOwned(id));
                 } else {
-                    pp_accounts.push(PrivacyPreservingAccount::Public(id));
+                    pp_accounts.push(AccountIdentity::Public(id));
                 }
             } else {
                 // PDA account — always public
@@ -479,7 +479,7 @@ pub async fn execute_instruction(
                     eprintln!("❌ Account '{}' not resolved", acc.name);
                     process::exit(1);
                 });
-                pp_accounts.push(PrivacyPreservingAccount::Public(id));
+                pp_accounts.push(AccountIdentity::Public(id));
             }
         }
 
@@ -554,9 +554,7 @@ pub async fn execute_instruction(
             .iter()
             .map(|id| {
                 wallet_core
-                    .storage()
-                    .user_data
-                    .get_pub_account_signing_key(*id)
+                    .get_account_public_signing_key(*id)
                     .unwrap_or_else(|| {
                         eprintln!("❌ Signing key not found for account {}", id);
                         process::exit(1);
@@ -570,7 +568,7 @@ pub async fn execute_instruction(
 
         let tx_hash = wallet_core
             .sequencer_client
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .unwrap_or_else(|e| {
                 eprintln!("❌ Failed to submit transaction: {:?}", e);
