@@ -3,7 +3,7 @@
 use std::io::Write;
 use std::{io, process};
 
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use nssa::public_transaction::WitnessSet;
 use nssa::{AccountId, PublicKey, PublicTransaction, Signature};
 use sequencer_service_rpc::RpcClient as _;
@@ -101,11 +101,7 @@ pub fn sign_command(path: &str) {
 
     let missing: Vec<String> = blob.missing_signers().into_iter().cloned().collect();
     let signable = detect_signable(&missing, |id| {
-        wallet_core
-            .storage()
-            .user_data
-            .get_pub_account_signing_key(id)
-            .is_some()
+        wallet_core.get_account_public_signing_key(id).is_some()
     })
     .unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
@@ -130,18 +126,20 @@ pub fn sign_command(path: &str) {
         process::exit(1);
     }
 
-    let message_bytes = blob.message_bytes().unwrap_or_else(|e| {
-        eprintln!("❌ {}", e);
-        process::exit(1);
-    });
+    // v0.2.0: sign the 32-byte message hash, matching WitnessSet::is_valid_for.
+    let message_hash = blob
+        .message()
+        .unwrap_or_else(|e| {
+            eprintln!("❌ {}", e);
+            process::exit(1);
+        })
+        .hash();
     for id in signable {
         let bytes = decode_bytes_32(&id).unwrap();
         let key = wallet_core
-            .storage()
-            .user_data
-            .get_pub_account_signing_key(AccountId::new(bytes))
+            .get_account_public_signing_key(AccountId::new(bytes))
             .expect("key vanished between detection and signing");
-        let signature = Signature::new(key, &message_bytes);
+        let signature = Signature::new(key, &message_hash);
         let pubkey = PublicKey::new_from_private_key(key);
         blob.witnesses.insert(
             id,
@@ -205,7 +203,7 @@ pub async fn submit_command(path: &str) {
     });
     let tx_hash = wallet_core
         .sequencer_client
-        .send_transaction(NSSATransaction::Public(tx))
+        .send_transaction(LeeTransaction::Public(tx))
         .await
         .unwrap_or_else(|e| {
             eprintln!("❌ Failed to submit transaction: {:?}", e);

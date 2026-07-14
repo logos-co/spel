@@ -128,7 +128,8 @@ impl TxBlob {
     /// Check every collected witness: signature must verify over the stored
     /// message bytes, and pubkey must derive the claimed account id.
     pub fn verify_witnesses(&self) -> Result<(), String> {
-        let bytes = self.message_bytes()?;
+        // v0.2.0: witnesses sign the 32-byte message hash, not the raw bytes.
+        let message_hash = self.message()?.hash();
         for (account_id, entry) in &self.witnesses {
             let sig = entry.signature.parse::<Signature>().map_err(|e| {
                 format!(
@@ -136,7 +137,7 @@ impl TxBlob {
                     account_id, e
                 )
             })?;
-            if !sig.is_valid_for(&bytes, &entry.pubkey) {
+            if !sig.is_valid_for(&message_hash, &entry.pubkey) {
                 return Err(format!(
                     "witness for '{}' does not verify against the message \
                     (stale nonce or corrupted blob?)",
@@ -185,10 +186,9 @@ mod tests {
     use crate::hex::hex_encode;
 
     fn witness_entry(message: &Message, key: &PrivateKey) -> WitnessEntry {
-        let bytes = borsh::to_vec(&message).unwrap();
-        let signature = Signature::new(&key, &bytes);
+        let signature = Signature::new(key, &message.hash());
 
-        let pubkey = PublicKey::new_from_private_key(&key);
+        let pubkey = PublicKey::new_from_private_key(key);
         WitnessEntry {
             pubkey,
             signature: signature.to_string(),
@@ -283,9 +283,20 @@ mod tests {
 
     #[test]
     fn verify_rejects_tampered_message() {
-        let (mut blob, _key) = signed_blob();
+        let (mut blob, key) = signed_blob();
 
-        blob.message_hex = "11".to_string();
+        // Tamper: swap in a different (still-decodable) message. Its hash no
+        // longer matches what the witness signed, so verification must reject it.
+        let pubkey = PublicKey::new_from_private_key(&key);
+        let account_id = AccountId::from(&pubkey);
+        let tampered = Message::try_new(
+            [0; 8],
+            vec![account_id],
+            vec![1_u128.into()],
+            vec![9, 9, 9, 9],
+        )
+        .unwrap();
+        blob.message_hex = hex_encode(&borsh::to_vec(&tampered).unwrap());
 
         let err = blob.verify_witnesses().unwrap_err();
         assert!(
@@ -302,7 +313,7 @@ mod tests {
         // Attacker: different key, but a perfectly VALID signature over the message.
         let attacker_key = PrivateKey::try_new([2; 32]).unwrap();
         let attacker_pubkey = PublicKey::new_from_private_key(&attacker_key);
-        let signature = Signature::new(&attacker_key, &blob.message_bytes().unwrap());
+        let signature = Signature::new(&attacker_key, &blob.message().unwrap().hash());
 
         // Claim it as the legitimate signer's witness.
         let victim_id = blob.signers[0].clone();

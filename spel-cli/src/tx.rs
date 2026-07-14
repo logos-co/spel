@@ -619,15 +619,14 @@ pub async fn execute_instruction(
             };
             let summary = render_dry_run_text(&summary_data);
 
-            // (3) sign with every required key this wallet holds, skip the rest
+            // (3) sign with every required key this wallet holds, skip the rest.
+            // v0.2.0: witnesses sign the 32-byte message hash, matching
+            // WitnessSet::is_valid_for at submit.
+            let message_hash = message.hash();
             let mut witnesses = BTreeMap::new();
             for account_id in &signer_accounts {
-                if let Some(key) = wallet_core
-                    .storage()
-                    .user_data
-                    .get_pub_account_signing_key(*account_id)
-                {
-                    let signature = Signature::new(key, &message_bytes);
+                if let Some(key) = wallet_core.get_account_public_signing_key(*account_id) {
+                    let signature = Signature::new(key, &message_hash);
                     let pubkey = PublicKey::new_from_private_key(key);
                     witnesses.insert(
                         format!("0x{}", hex_encode(account_id.value())),
