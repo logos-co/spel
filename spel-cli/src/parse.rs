@@ -15,6 +15,7 @@ pub enum ParsedValue {
     ByteArray(Vec<u8>),         // [u8; N]
     U32Array(Vec<u32>),         // [u32; N] / ProgramId
     ByteArrayVec(Vec<Vec<u8>>), // Vec<[u8; 32]>
+    StringVec(Vec<String>),     // Vec<String>
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
     Raw(String),                // fallback
@@ -48,6 +49,10 @@ impl std::fmt::Display for ParsedValue {
                     .map(|v| format!("0x{}", hex_encode(v)))
                     .collect();
                 write!(f, "[{}]", strs.join(", "))
+            },
+            ParsedValue::StringVec(strs) => {
+                let quoted: Vec<String> = strs.iter().map(|s| format!("\"{}\"", s)).collect();
+                write!(f, "[{}]", quoted.join(", "))
             },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
@@ -262,6 +267,14 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
     }
 }
 
+/// Build a `ParsedValue::StringVec` from one or more repeated `--flag <value>`
+/// occurrences on the CLI.  The caller is expected to have collected every
+/// occurrence of the flag — empty input yields an empty vec, matching the
+/// IDL contract `Vec<String>`.
+pub fn parse_string_vec(values: &[String]) -> ParsedValue {
+    ParsedValue::StringVec(values.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -289,6 +302,43 @@ mod tests {
                 assert_eq!(bytes[0], 0x43);
             },
             other => panic!("expected ByteArray, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_multiple_values() {
+        let parsed = parse_string_vec(&["foo".to_string(), "bar".to_string(), "baz".to_string()]);
+        match parsed {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["foo", "bar", "baz"]),
+            other => panic!("expected StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_empty_input_yields_empty_vec() {
+        match parse_string_vec(&[]) {
+            ParsedValue::StringVec(v) => assert!(v.is_empty()),
+            other => panic!("expected empty StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_single_element_yields_singleton() {
+        match parse_string_vec(&["bafybeionly".to_string()]) {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["bafybeionly"]),
+            other => panic!("expected StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_preserves_commas_in_elements() {
+        // Repetition contract: an element containing a comma is one element,
+        // never split.  This is the user-facing difference from the previous
+        // CSV approach.
+        let parsed = parse_string_vec(&["foo,bar".to_string(), "baz".to_string()]);
+        match parsed {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["foo,bar", "baz"]),
+            other => panic!("expected StringVec, got {:?}", other),
         }
     }
 

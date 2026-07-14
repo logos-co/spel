@@ -61,6 +61,7 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("  [u8; N]               Hex string (2*N hex chars) or UTF-8 string (≤N chars, right-padded)");
     println!("  [u32; 8] / program_id Comma-separated u32s: \"0,0,0,0,0,0,0,0\"");
     println!("  Vec<[u8; 32]>         Comma-separated hex strings: \"aabb...00,ccdd...00\"");
+    println!("  Vec<String>           Repeat the flag, one element per occurrence: --foo a --foo b --foo c");
     println!();
     println!("CONFIG:");
     println!("  Create a spel.toml in your project root to avoid passing --idl and --program:");
@@ -126,18 +127,40 @@ pub fn print_instruction_help(ix: &IdlInstruction) {
     }
 }
 
-/// Parse CLI args for an instruction into a key-value map.
-pub fn parse_instruction_args(args: &[String], ix: &IdlInstruction) -> HashMap<String, String> {
-    let mut map = HashMap::new();
+/// Parse CLI args for an instruction into a key → list-of-values map.
+///
+/// Each `--key value` occurrence is appended to the entry for `key`, so a
+/// flag may be repeated.  Scalar args take the last value; `Vec<String>`
+/// args consume every value supplied.  A bare `--flag` with no value is
+/// only legal for boolean args (per the IDL) or the universal `--help`/
+/// `-h`; for anything else we exit with a `missing value` error so a
+/// missing CLI value can't be silently stored as the literal "true".
+pub fn parse_instruction_args(
+    args: &[String],
+    ix: &IdlInstruction,
+) -> HashMap<String, Vec<String>> {
+    let mut map: HashMap<String, Vec<String>> = HashMap::new();
     let mut i = 0;
     while i < args.len() {
         if args[i].starts_with("--") {
             let key = args[i][2..].to_string();
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                map.insert(key, args[i + 1].clone());
+                map.entry(key).or_default().push(args[i + 1].clone());
                 i += 2;
             } else {
-                map.insert(key, "true".to_string());
+                // Bare flag (no value follows).  Only valid for bool args
+                // or --help/-h; everything else is a user error.
+                let is_bool = ix.args.iter().any(|a| {
+                    snake_to_kebab(&a.name) == key
+                        && matches!(&a.type_, IdlType::Primitive(p) if p == "bool")
+                });
+                let is_help = key == "help" || key == "h";
+                if is_bool || is_help {
+                    map.entry(key).or_default().push("true".to_string());
+                } else {
+                    eprintln!("❌ --{}: missing value", key);
+                    std::process::exit(1);
+                }
                 i += 1;
             }
         } else {

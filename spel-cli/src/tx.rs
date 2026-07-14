@@ -2,7 +2,7 @@
 
 use crate::cli::{snake_to_kebab, to_pascal_case};
 use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
-use crate::parse::{parse_value, ParsedValue};
+use crate::parse::{parse_string_vec, parse_value, ParsedValue};
 use crate::pda::compute_pda_from_seeds;
 use crate::serialize::serialize_to_risc0;
 use common::transaction::LeeTransaction;
@@ -14,7 +14,7 @@ use nssa_core::account::Nonce;
 use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
-use spel_framework_core::idl::{IdlInstruction, IdlSeed, SpelIdl};
+use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
 use std::collections::HashMap;
 use std::fs;
 use std::process;
@@ -48,10 +48,26 @@ const UNRESOLVED: &str = "(unresolved)";
 ///   - `None`                       — submit to the sequencer
 ///   - `Some(DryRunFormat::Text)`   — resolve & print a human-readable summary
 ///   - `Some(DryRunFormat::Json)`   — resolve & emit JSON to stdout
+/// Pull the most-recently-supplied value for `key`.  Scalar flags consume
+/// the last `--key value` they see; `Vec<String>` args bypass this helper
+/// and consume the whole vec.
+fn last_value<'a>(map: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
+    map.get(key).and_then(|v| v.last().map(|s| s.as_str()))
+}
+
+/// True if this IDL type is `Vec<String>` — the one shape that opts in to
+/// flag repetition on the CLI.
+fn is_vec_string(ty: &IdlType) -> bool {
+    matches!(
+        ty,
+        IdlType::Vec { vec } if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "string" || p == "String"),
+    )
+}
+
 pub async fn execute_instruction(
     idl: &SpelIdl,
     ix: &IdlInstruction,
-    args: &HashMap<String, String>,
+    args: &HashMap<String, Vec<String>>,
     program_path: Option<&str>,
     program_id_hex: Option<&str>,
     dry_run: Option<DryRunFormat>,
@@ -75,7 +91,7 @@ pub async fn execute_instruction(
                     let id_str: Vec<String> = id.iter().map(|w| w.to_string()).collect();
                     let val = id_str.join(",");
                     say!("  ℹ️  Auto-filled --{} from {}", key, bin_path);
-                    args.insert(key.clone(), val);
+                    args.insert(key.clone(), vec![val]);
                 }
             }
         }
@@ -103,13 +119,20 @@ pub async fn execute_instruction(
         process::exit(1);
     }
 
-    // Parse instruction args
+    // Parse instruction args.
+    // Vec<String> is the one shape that consumes every repeated --flag
+    // value; every other type takes the last occurrence (scalar semantics).
     let mut parsed_args: Vec<(&str, &spel_framework_core::idl::IdlType, ParsedValue)> = Vec::new();
     let mut has_errors = false;
     for arg in &ix.args {
         let key = snake_to_kebab(&arg.name);
-        let raw = args.get(&key).unwrap();
-        match parse_value(raw, &arg.type_) {
+        let values = args.get(&key).unwrap();
+        let result = if is_vec_string(&arg.type_) {
+            Ok(parse_string_vec(values))
+        } else {
+            parse_value(values.last().map(|s| s.as_str()).unwrap_or(""), &arg.type_)
+        };
+        match result {
             Ok(val) => parsed_args.push((&arg.name, &arg.type_, val)),
             Err(e) => {
                 eprintln!("❌ --{}: {}", key, e);
@@ -131,7 +154,7 @@ pub async fn execute_instruction(
             // variadic: optional, comma-separated list of account IDs (0 entries is valid).
             // Failed entries are skipped (not pushed as placeholders) so downstream
             // consumers never see a zero-length Vec where a 32-byte AccountId is expected.
-            let entries: Vec<(Vec<u8>, bool)> = if let Some(raw) = args.get(&key) {
+            let entries: Vec<(Vec<u8>, bool)> = if let Some(raw) = last_value(&args, &key) {
                 raw.split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
@@ -149,7 +172,7 @@ pub async fn execute_instruction(
             };
             rest_accounts.push((&acc.name, entries));
         } else {
-            let raw = args.get(&key).unwrap();
+            let raw = last_value(&args, &key).unwrap();
             match parse_account_id(raw) {
                 Ok((bytes, is_priv)) => parsed_accounts.push((&acc.name, bytes.to_vec(), is_priv)),
                 Err(e) => {
@@ -239,7 +262,7 @@ pub async fn execute_instruction(
                 if let IdlSeed::Account { path } = seed {
                     if !account_map.contains_key(path) {
                         let key = snake_to_kebab(path);
-                        if let Some(raw) = args.get(&key) {
+                        if let Some(raw) = last_value(&args, &key) {
                             match decode_bytes_32(raw) {
                                 Ok(bytes) => {
                                     say!("  ℹ️  Using --{} for PDA seed '{}'", key, path);

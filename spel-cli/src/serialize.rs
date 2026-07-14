@@ -88,6 +88,11 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
                 .collect();
             Ok(DynamicValue::Seq(elements?))
         },
+        (IdlType::Vec { vec: elem_ty }, ParsedValue::StringVec(strs)) if matches!(elem_ty.as_ref(), IdlType::Primitive(p) if p == "string" || p == "String") => {
+            Ok(DynamicValue::Seq(
+                strs.iter().cloned().map(DynamicValue::Str).collect(),
+            ))
+        },
         (IdlType::Vec { vec }, ParsedValue::Raw(s)) if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "u32") =>
         {
             // Fallback: parse CSV of u32 values (e.g. "0,200,0,0,0")
@@ -175,7 +180,7 @@ pub fn serialize_to_risc0(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::parse::parse_value;
+    use crate::parse::{parse_string_vec, parse_value};
     use risc0_zkvm::serde::Deserializer;
     use serde::Deserialize;
     use spel_framework_core::idl::IdlType;
@@ -402,6 +407,57 @@ mod tests {
         let dv = to_dynamic_value(&ty, &val).unwrap();
         let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
         assert_eq!(words, vec![3, 1, 2, 3]); // length=3, then values
+    }
+
+    #[test]
+    fn to_dynamic_value_vec_string_emits_seq_of_str() {
+        let ty = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("string".to_string())),
+        };
+        let parsed = parse_string_vec(&["foo".to_string(), "bar".to_string(), "baz".to_string()]);
+        let dv = to_dynamic_value(&ty, &parsed).unwrap();
+        let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
+        // Seq of 3 strings: length=3, then each string is its own length + bytes
+        // (one u32 word per byte, then padded to next word boundary).
+        // We assert the length prefix here and rely on serde_roundtrip_vec_string
+        // for the full bit-level contract check.
+        assert_eq!(words[0], 3, "Seq length prefix");
+    }
+
+    /// The critical contract test for Vec<String>: bytes the CLI emits must
+    /// deserialize as Vec<String> via the same risc0 Deserializer the guest uses.
+    #[test]
+    fn serde_roundtrip_vec_string() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        enum TestInstruction {
+            AnchorBatch { cids: Vec<String> },
+        }
+
+        let ty = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("string".to_string())),
+        };
+        let parsed = parse_string_vec(&[
+            "bafy1".to_string(),
+            "bafy2".to_string(),
+            "bafy3".to_string(),
+        ]);
+
+        let words = serialize_to_risc0(0, &[(&ty, &parsed)]).unwrap();
+
+        let instruction: TestInstruction =
+            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
+                .expect("guest-side Vec<String> deserialization must succeed");
+
+        assert_eq!(
+            instruction,
+            TestInstruction::AnchorBatch {
+                cids: vec![
+                    "bafy1".to_string(),
+                    "bafy2".to_string(),
+                    "bafy3".to_string()
+                ],
+            }
+        );
     }
 
     #[test]
