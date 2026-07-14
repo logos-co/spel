@@ -238,8 +238,8 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         .unwrap();
         writeln!(out, "        let mut signing_keys = Vec::new();").unwrap();
         writeln!(out, "        for sid in &signer_ids {{").unwrap();
-        writeln!(out, "            let key = self.wallet.storage().user_data").unwrap();
-        writeln!(out, "                .get_pub_account_signing_key(*sid)").unwrap();
+        writeln!(out, "            let key = self.wallet").unwrap();
+        writeln!(out, "                .get_account_public_signing_key(*sid)").unwrap();
         writeln!(
             out,
             "                .ok_or_else(|| format!(\"signing key not found for {{}}\", sid))?;"
@@ -263,7 +263,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let response = self.wallet.sequencer_client.send_transaction(common::transaction::NSSATransaction::Public(tx)).await").unwrap();
+        writeln!(out, "        let response = self.wallet.sequencer_client.send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"submit: {{}}\", e))?;"

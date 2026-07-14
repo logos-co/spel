@@ -87,7 +87,19 @@ for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
 done
 [ -n "$WALLET_BIN" ] || fail "wallet not found"
 
-export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
+# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
+# new location, fall back to the pre-rc6 path for older LEZ revisions.
+if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
+    if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
+        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
+    else
+        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
+    fi
+fi
+export NSSA_WALLET_HOME_DIR
+# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
+# Export both so the wallet finds its config on old and new LEZ revisions.
+export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # ─── Verify LSSA version matches LEZ_TAG ──────────────────────────────────
@@ -145,6 +157,16 @@ log "  ✓ Project scaffolded"
     || warn "Guest lockfile regeneration failed"
 cargo generate-lockfile > "$LOG_DIR/root-lockfile.log" 2>&1 \
     || warn "Root lockfile regeneration failed"
+
+# Re-pin the enum-ordinalize crates to LEZ's version (4.3.2) in the guest lockfile.
+# generate-lockfile above re-resolves educe's `^4` to 4.4.1, which requires
+# rustc 1.89, but the guest builds with the risc0 toolchain (rustc 1.88).
+# spel init already pins these, but the regeneration above undoes it, so redo it.
+# Both enum-ordinalize and enum-ordinalize-derive resolve independently.
+(cd methods/guest \
+    && cargo update -p enum-ordinalize --precise 4.3.2 >> "$LOG_DIR/guest-lockfile.log" 2>&1 \
+    && cargo update -p enum-ordinalize-derive --precise 4.3.2 >> "$LOG_DIR/guest-lockfile.log" 2>&1) \
+    || warn "enum-ordinalize pin failed (guest build may hit rustc 1.89)"
 
 # Print the actual LEZ version resolved
 log "  LEZ nssa_core resolved:"
@@ -222,10 +244,35 @@ pgrep -f 'sequencer_service.*configs' | xargs -r kill 2>/dev/null || true
 sleep 1
 rm -rf "${LSSA_DIR}/rocksdb"
 
-SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
-[ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found at $SEQ_CONFIGS"
+# LEZ v0.2.0 moved this under lez/; prefer it, fall back to the old path.
+SEQ_CONFIGS="${LSSA_DIR}/lez/sequencer/service/configs/debug/sequencer_config.json"
+if [ ! -f "$SEQ_CONFIGS" ]; then
+    SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
+fi
+if [ ! -f "$SEQ_CONFIGS" ]; then
+    SEQ_CONFIGS=$(find "$LSSA_DIR" -name "sequencer_config.json" 2>/dev/null | head -1)
+fi
+[ -n "$SEQ_CONFIGS" ] && [ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
 
-cd "$LSSA_DIR"
+# LEZ v0.2.0 writes a bedrock_signing_key (and rocksdb) under config.home,
+# which defaults to "." — i.e. the sequencer's cwd. The LEZ checkout is
+# read-only in CI, so launching from there fails with "Permission denied".
+# Copy the config into the writable work dir with home rewritten to it.
+SEQ_HOME="$WORK_DIR/seq-home"
+mkdir -p "$SEQ_HOME"
+SEQ_CONFIG_PATCHED="$WORK_DIR/sequencer_config.json"
+# Paths are passed as argv (not interpolated into the source) so a path
+# containing quotes or other special characters can't break the script.
+python3 -c '
+import json, sys
+src, home, dst = sys.argv[1], sys.argv[2], sys.argv[3]
+cfg = json.load(open(src))
+cfg["home"] = home
+json.dump(cfg, open(dst, "w"))
+' "$SEQ_CONFIGS" "$SEQ_HOME" "$SEQ_CONFIG_PATCHED" || fail "Failed to patch sequencer config home"
+SEQ_CONFIGS="$SEQ_CONFIG_PATCHED"
+
+cd "$SEQ_HOME"
 RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 sleep 2
