@@ -15,6 +15,7 @@ pub enum ParsedValue {
     ByteArray(Vec<u8>),         // [u8; N]
     U32Array(Vec<u32>),         // [u32; N] / ProgramId
     ByteArrayVec(Vec<Vec<u8>>), // Vec<[u8; 32]>
+    StringVec(Vec<String>),     // Vec<String>
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
     Raw(String),                // fallback
@@ -48,6 +49,10 @@ impl std::fmt::Display for ParsedValue {
                     .map(|v| format!("0x{}", hex_encode(v)))
                     .collect();
                 write!(f, "[{}]", strs.join(", "))
+            },
+            ParsedValue::StringVec(strs) => {
+                let quoted: Vec<String> = strs.iter().map(|s| format!("\"{}\"", s)).collect();
+                write!(f, "[{}]", quoted.join(", "))
             },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
@@ -92,6 +97,12 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             .map(ParsedValue::U128)
             .map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
         "program_id" => parse_program_id(raw),
+        // `AccountId` serializes via `SerializeDisplay` (base58 string), so normalize the
+        // input (base58 or 0x-hex) to canonical base58 and carry it as a string.
+        "account_id" => {
+            let bytes = crate::hex::decode_bytes_32(raw)?;
+            Ok(ParsedValue::Str(nssa::AccountId::new(bytes).to_string()))
+        },
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),
             "false" | "0" | "no" => Ok(ParsedValue::Bool(false)),
@@ -126,10 +137,19 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
         }
         Ok(ParsedValue::U32Array(vals))
     } else {
-        Err(format!(
-            "Invalid ProgramId '{}': expected 8 comma-separated u32s or 64 hex chars",
-            raw
-        ))
+        // base58 (or 0x-prefixed hex) ImageID → little-endian u32 limbs, matching the bare-hex
+        // branch above so all representations of the same ProgramId agree.
+        let bytes = crate::hex::decode_bytes_32(raw).map_err(|_| {
+            format!(
+                "Invalid ProgramId '{}': expected 8 comma-separated u32s, a 64-char hex ImageID, or base58",
+                raw
+            )
+        })?;
+        let mut vals = Vec::with_capacity(8);
+        for chunk in bytes.chunks(4) {
+            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+        }
+        Ok(ParsedValue::U32Array(vals))
     }
 }
 
@@ -247,6 +267,14 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
     }
 }
 
+/// Build a `ParsedValue::StringVec` from one or more repeated `--flag <value>`
+/// occurrences on the CLI.  The caller is expected to have collected every
+/// occurrence of the flag — empty input yields an empty vec, matching the
+/// IDL contract `Vec<String>`.
+pub fn parse_string_vec(values: &[String]) -> ParsedValue {
+    ParsedValue::StringVec(values.to_vec())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -274,6 +302,43 @@ mod tests {
                 assert_eq!(bytes[0], 0x43);
             },
             other => panic!("expected ByteArray, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_multiple_values() {
+        let parsed = parse_string_vec(&["foo".to_string(), "bar".to_string(), "baz".to_string()]);
+        match parsed {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["foo", "bar", "baz"]),
+            other => panic!("expected StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_empty_input_yields_empty_vec() {
+        match parse_string_vec(&[]) {
+            ParsedValue::StringVec(v) => assert!(v.is_empty()),
+            other => panic!("expected empty StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_single_element_yields_singleton() {
+        match parse_string_vec(&["bafybeionly".to_string()]) {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["bafybeionly"]),
+            other => panic!("expected StringVec, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_string_vec_preserves_commas_in_elements() {
+        // Repetition contract: an element containing a comma is one element,
+        // never split.  This is the user-facing difference from the previous
+        // CSV approach.
+        let parsed = parse_string_vec(&["foo,bar".to_string(), "baz".to_string()]);
+        match parsed {
+            ParsedValue::StringVec(v) => assert_eq!(v, vec!["foo,bar", "baz"]),
+            other => panic!("expected StringVec, got {:?}", other),
         }
     }
 

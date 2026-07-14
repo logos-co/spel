@@ -1,0 +1,5 @@
+# Kept in sync with the logos-execution-zone (lez) toolchain, since spel-cli now
+# builds lez crates (wallet, lee, …) that rely on APIs stabilized in 1.94.0.
+[toolchain]
+channel = "1.94.0"
+profile = "default"

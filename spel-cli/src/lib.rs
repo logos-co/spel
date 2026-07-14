@@ -603,7 +603,7 @@ fn compute_pda_command(
                 eprintln!("❌ Cannot read program binary '{}': {}", path, e);
                 std::process::exit(1);
             });
-            Program::new(program_bytes)
+            Program::new(program_bytes.into())
                 .unwrap_or_else(|e| {
                     eprintln!("❌ Invalid program binary: {:?}", e);
                     std::process::exit(1);

@@ -2,10 +2,10 @@
 
 use crate::cli::{snake_to_kebab, to_pascal_case};
 use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
-use crate::parse::{parse_value, ParsedValue};
+use crate::parse::{parse_string_vec, parse_value, ParsedValue};
 use crate::pda::compute_pda_from_seeds;
 use crate::serialize::serialize_to_risc0;
-use common::transaction::NSSATransaction;
+use common::transaction::LeeTransaction;
 use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
@@ -14,7 +14,7 @@ use nssa_core::account::Nonce;
 use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
-use spel_framework_core::idl::{IdlInstruction, IdlSeed, SpelIdl};
+use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
 use std::collections::HashMap;
 use std::fs;
 use std::process;
@@ -48,10 +48,26 @@ const UNRESOLVED: &str = "(unresolved)";
 ///   - `None`                       — submit to the sequencer
 ///   - `Some(DryRunFormat::Text)`   — resolve & print a human-readable summary
 ///   - `Some(DryRunFormat::Json)`   — resolve & emit JSON to stdout
+/// Pull the most-recently-supplied value for `key`.  Scalar flags consume
+/// the last `--key value` they see; `Vec<String>` args bypass this helper
+/// and consume the whole vec.
+fn last_value<'a>(map: &'a HashMap<String, Vec<String>>, key: &str) -> Option<&'a str> {
+    map.get(key).and_then(|v| v.last().map(|s| s.as_str()))
+}
+
+/// True if this IDL type is `Vec<String>` — the one shape that opts in to
+/// flag repetition on the CLI.
+fn is_vec_string(ty: &IdlType) -> bool {
+    matches!(
+        ty,
+        IdlType::Vec { vec } if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "string" || p == "String"),
+    )
+}
+
 pub async fn execute_instruction(
     idl: &SpelIdl,
     ix: &IdlInstruction,
-    args: &HashMap<String, String>,
+    args: &HashMap<String, Vec<String>>,
     program_path: Option<&str>,
     program_id_hex: Option<&str>,
     dry_run: Option<DryRunFormat>,
@@ -70,12 +86,12 @@ pub async fn execute_instruction(
     for (key, bin_path) in extra_bins {
         if !args.contains_key(key) {
             if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(program) = Program::new(bytes) {
+                if let Ok(program) = Program::new(bytes.into()) {
                     let id = program.id();
                     let id_str: Vec<String> = id.iter().map(|w| w.to_string()).collect();
                     let val = id_str.join(",");
                     say!("  ℹ️  Auto-filled --{} from {}", key, bin_path);
-                    args.insert(key.clone(), val);
+                    args.insert(key.clone(), vec![val]);
                 }
             }
         }
@@ -103,13 +119,20 @@ pub async fn execute_instruction(
         process::exit(1);
     }
 
-    // Parse instruction args
+    // Parse instruction args.
+    // Vec<String> is the one shape that consumes every repeated --flag
+    // value; every other type takes the last occurrence (scalar semantics).
     let mut parsed_args: Vec<(&str, &spel_framework_core::idl::IdlType, ParsedValue)> = Vec::new();
     let mut has_errors = false;
     for arg in &ix.args {
         let key = snake_to_kebab(&arg.name);
-        let raw = args.get(&key).unwrap();
-        match parse_value(raw, &arg.type_) {
+        let values = args.get(&key).unwrap();
+        let result = if is_vec_string(&arg.type_) {
+            Ok(parse_string_vec(values))
+        } else {
+            parse_value(values.last().map(|s| s.as_str()).unwrap_or(""), &arg.type_)
+        };
+        match result {
             Ok(val) => parsed_args.push((&arg.name, &arg.type_, val)),
             Err(e) => {
                 eprintln!("❌ --{}: {}", key, e);
@@ -131,7 +154,7 @@ pub async fn execute_instruction(
             // variadic: optional, comma-separated list of account IDs (0 entries is valid).
             // Failed entries are skipped (not pushed as placeholders) so downstream
             // consumers never see a zero-length Vec where a 32-byte AccountId is expected.
-            let entries: Vec<(Vec<u8>, bool)> = if let Some(raw) = args.get(&key) {
+            let entries: Vec<(Vec<u8>, bool)> = if let Some(raw) = last_value(&args, &key) {
                 raw.split(',')
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
@@ -149,7 +172,7 @@ pub async fn execute_instruction(
             };
             rest_accounts.push((&acc.name, entries));
         } else {
-            let raw = args.get(&key).unwrap();
+            let raw = last_value(&args, &key).unwrap();
             match parse_account_id(raw) {
                 Ok((bytes, is_priv)) => parsed_accounts.push((&acc.name, bytes.to_vec(), is_priv)),
                 Err(e) => {
@@ -196,7 +219,7 @@ pub async fn execute_instruction(
                     eprintln!("   Or configure in spel.toml.");
                     process::exit(1);
                 });
-                let program = Program::new(program_bytecode).unwrap_or_else(|e| {
+                let program = Program::new(program_bytecode.into()).unwrap_or_else(|e| {
                     eprintln!("❌ Failed to load program: {:?}", e);
                     process::exit(1);
                 });
@@ -239,7 +262,7 @@ pub async fn execute_instruction(
                 if let IdlSeed::Account { path } = seed {
                     if !account_map.contains_key(path) {
                         let key = snake_to_kebab(path);
-                        if let Some(raw) = args.get(&key) {
+                        if let Some(raw) = last_value(&args, &key) {
                             match decode_bytes_32(raw) {
                                 Ok(bytes) => {
                                     say!("  ℹ️  Using --{} for PDA seed '{}'", key, path);
@@ -389,7 +412,7 @@ pub async fn execute_instruction(
 
     let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
-        eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
+        eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
 
@@ -402,7 +425,7 @@ pub async fn execute_instruction(
     if has_private {
         // ─── Privacy-preserving transaction ──────────────────
         use nssa::privacy_preserving_transaction::circuit::ProgramWithDependencies;
-        use wallet::PrivacyPreservingAccount;
+        use wallet::AccountIdentity;
 
         let program = program_obj.unwrap_or_else(|| {
             eprintln!(
@@ -415,7 +438,7 @@ pub async fn execute_instruction(
         let mut dependencies = HashMap::new();
         for (_, bin_path) in extra_bins {
             if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(dep_program) = Program::new(bytes) {
+                if let Ok(dep_program) = Program::new(bytes.into()) {
                     dependencies.insert(dep_program.id(), dep_program);
                 }
             }
@@ -423,7 +446,7 @@ pub async fn execute_instruction(
         let program_with_deps = ProgramWithDependencies::new(program, dependencies);
 
         // Build privacy-preserving account list
-        let mut pp_accounts: Vec<PrivacyPreservingAccount> = Vec::new();
+        let mut pp_accounts: Vec<AccountIdentity> = Vec::new();
         for acc in &ix.accounts {
             if acc.rest {
                 if let Some((_, entries)) = rest_accounts.iter().find(|(n, _)| *n == acc.name) {
@@ -432,9 +455,9 @@ pub async fn execute_instruction(
                         arr.copy_from_slice(bytes);
                         let account_id = AccountId::new(arr);
                         if *is_priv {
-                            pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(account_id));
+                            pp_accounts.push(AccountIdentity::PrivateOwned(account_id));
                         } else {
-                            pp_accounts.push(PrivacyPreservingAccount::Public(account_id));
+                            pp_accounts.push(AccountIdentity::Public(account_id));
                         }
                     }
                 }
@@ -446,9 +469,9 @@ pub async fn execute_instruction(
                     process::exit(1);
                 });
                 if *is_priv {
-                    pp_accounts.push(PrivacyPreservingAccount::PrivateOwned(id));
+                    pp_accounts.push(AccountIdentity::PrivateOwned(id));
                 } else {
-                    pp_accounts.push(PrivacyPreservingAccount::Public(id));
+                    pp_accounts.push(AccountIdentity::Public(id));
                 }
             } else {
                 // PDA account — always public
@@ -456,7 +479,7 @@ pub async fn execute_instruction(
                     eprintln!("❌ Account '{}' not resolved", acc.name);
                     process::exit(1);
                 });
-                pp_accounts.push(PrivacyPreservingAccount::Public(id));
+                pp_accounts.push(AccountIdentity::Public(id));
             }
         }
 
@@ -531,9 +554,7 @@ pub async fn execute_instruction(
             .iter()
             .map(|id| {
                 wallet_core
-                    .storage()
-                    .user_data
-                    .get_pub_account_signing_key(*id)
+                    .get_account_public_signing_key(*id)
                     .unwrap_or_else(|| {
                         eprintln!("❌ Signing key not found for account {}", id);
                         process::exit(1);
@@ -547,7 +568,7 @@ pub async fn execute_instruction(
 
         let tx_hash = wallet_core
             .sequencer_client
-            .send_transaction(NSSATransaction::Public(tx))
+            .send_transaction(LeeTransaction::Public(tx))
             .await
             .unwrap_or_else(|e| {
                 eprintln!("❌ Failed to submit transaction: {:?}", e);
