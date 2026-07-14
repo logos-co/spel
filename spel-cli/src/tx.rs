@@ -2,11 +2,16 @@
 
 mod pda_resolution;
 mod resolution;
+mod runtime;
 mod value;
 
 pub use resolution::{
     resolve_private_instruction, resolve_public_instruction, ResolvedPrivateInstruction,
     ResolvedPublicInstruction, SpelInstructionRequest, SpelTxError,
+};
+pub use runtime::{
+    BoundSpelProgram, PrivateInstructionBuilder, PublicInstructionBuilder, SpelBuildError,
+    SpelInput, SpelProgram, SpelProgramBinding,
 };
 
 use crate::cli::{snake_to_kebab, to_pascal_case};

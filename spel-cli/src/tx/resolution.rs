@@ -127,6 +127,38 @@ pub enum SpelTxError {
         /// Number of matching instruction declarations.
         matches: usize,
     },
+    /// A public instruction builder was requested from a private program binding.
+    #[error("public instruction requires a public program binding")]
+    PublicProgramRequired,
+    /// A private instruction builder was requested from a public program binding.
+    #[error("private instruction requires a private program binding")]
+    PrivateProgramRequired,
+    /// A named fluent input matches neither an account nor an argument.
+    #[error("unknown input `{name}`")]
+    UnknownInput {
+        /// Exact caller-supplied input name.
+        name: String,
+    },
+    /// A named fluent input matches both an account and an argument.
+    #[error("ambiguous input `{name}`")]
+    AmbiguousInput {
+        /// Exact caller-supplied input name.
+        name: String,
+    },
+    /// A named fluent input was supplied more than once.
+    #[error("duplicate input `{name}`")]
+    DuplicateInput {
+        /// Exact caller-supplied input name.
+        name: String,
+    },
+    /// A fluent input has a shape incompatible with its selected IDL position.
+    #[error("invalid input `{name}`: {reason}")]
+    InvalidInput {
+        /// Exact caller-supplied input name.
+        name: String,
+        /// Redacted, human-readable explanation.
+        reason: String,
+    },
     /// The selected IDL instruction has an unsupported or malformed shape.
     #[error("invalid IDL for instruction `{instruction}` at `{path}`: {reason}")]
     InvalidIdl {
@@ -294,12 +326,21 @@ pub fn resolve_private_instruction(
     request: SpelInstructionRequest<'_>,
     program: ProgramWithDependencies,
 ) -> Result<ResolvedPrivateInstruction, SpelTxError> {
-    let resolved = resolve(request, program.program.id(), ResolverPath::Private)?;
+    let (accounts, instruction_data) =
+        resolve_private_instruction_parts(request, program.program.id())?;
     Ok(ResolvedPrivateInstruction {
         program,
-        accounts: resolved.accounts,
-        instruction_data: resolved.instruction_data,
+        accounts,
+        instruction_data,
     })
+}
+
+pub(crate) fn resolve_private_instruction_parts(
+    request: SpelInstructionRequest<'_>,
+    program_id: ProgramId,
+) -> Result<(Vec<AccountIdentity>, InstructionData), SpelTxError> {
+    let resolved = resolve(request, program_id, ResolverPath::Private)?;
+    Ok((resolved.accounts, resolved.instruction_data))
 }
 
 enum ResolverPath {
@@ -329,9 +370,8 @@ fn resolve(
         accounts: inputs,
         arguments: raw_arguments,
     } = request;
-    let (instruction_index, instruction) = select_instruction(idl, instruction_name)?;
-
-    validate_selected_instruction(instruction, path.is_private())?;
+    let (instruction_index, instruction) =
+        select_and_validate_instruction(idl, instruction_name, path.is_private())?;
     validate_account_inputs(instruction, &inputs)?;
     let arguments = parse_arguments(instruction, &raw_arguments)?;
     validate_identities(instruction, &inputs, path.is_private())?;
@@ -368,6 +408,16 @@ fn resolve(
         accounts,
         instruction_data,
     })
+}
+
+pub(crate) fn select_and_validate_instruction<'a>(
+    idl: &'a SpelIdl,
+    instruction: &str,
+    private_path: bool,
+) -> Result<(usize, &'a IdlInstruction), SpelTxError> {
+    let (index, selected) = select_instruction(idl, instruction)?;
+    validate_selected_instruction(selected, private_path)?;
+    Ok((index, selected))
 }
 
 fn select_instruction<'a>(
