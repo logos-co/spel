@@ -34,6 +34,11 @@ if [ -z "${LEZ_TAG:-}" ]; then
     exit 1
 fi
 
+LEZ_INIT_OPTION=--lez-tag
+if [[ "$LEZ_TAG" =~ ^[[:xdigit:]]{7,40}$ ]]; then
+    LEZ_INIT_OPTION=--lez-rev
+fi
+
 # SPEL_TAG defaults to current local state (for local testing) or can be set explicitly
 SPEL_TAG="${SPEL_TAG:-local}"
 SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -147,7 +152,7 @@ log "  Using local spel: $SPEL_BIN"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+"$SPEL_BIN" init "$LEZ_INIT_OPTION" "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
     > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✓ Project scaffolded"
@@ -320,33 +325,19 @@ log "  ✓ Program deployed"
 
 log "Step 7: Generating test accounts..."
 
-# Create a public account (random)
-PUBLIC_ACCOUNT="0x$(openssl rand -hex 32)"
-log "  Public account: ${PUBLIC_ACCOUNT:0:20}..."
-
 # Create a private account via wallet (wallet holds the ZK keys)
 PRIVATE_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new private 2>&1 | grep -o "Private/[^ ]*" | head -1)
 [ -n "$PRIVATE_ACCOUNT" ] || fail "Could not create private account from wallet"
 log "  Private account: ${PRIVATE_ACCOUNT:0:30}..."
 
-# ─── Step 8: Test PUBLIC transaction ────────────────────────────────────
-
-log "Step 8: Testing PUBLIC transaction..."
+# Create a public account owned by Wallet for the build-only and CLI checks.
 FRESH_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new public 2>&1 | grep -o "Public/[^ ]*" | head -1)
 [ -n "$FRESH_ACCOUNT" ] || fail "Could not create public account from wallet"
 log "  Fresh account: ${FRESH_ACCOUNT:0:20}..."
 
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
-    greet \
-    --account "$FRESH_ACCOUNT" \
-    --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
-    > "$LOG_DIR/public-tx.log" 2>&1 || fail "Public TX failed (see $LOG_DIR/public-tx.log)"
+# ─── Step 8: Init auth-transfer for private account ─────────────────────
 
-log "  ✓ Public TX submitted and confirmed"
-
-# ─── Step 9: Init auth-transfer for private account ─────────────────────
-
-log "Step 9: Initializing auth-transfer for private account..."
+log "Step 8: Initializing auth-transfer for private account..."
 echo "$WALLET_PASSWORD" | $WALLET_BIN auth-transfer init --account-id "$PRIVATE_ACCOUNT" \
     > "$LOG_DIR/auth-transfer.log" 2>&1 || fail "auth-transfer init failed (see $LOG_DIR/auth-transfer.log)"
 log "  ✓ auth-transfer initialized"
@@ -355,9 +346,33 @@ log "  ✓ auth-transfer initialized"
 log "  Waiting for auth-transfer to be confirmed..."
 sleep 20
 
-# ─── Step 10: Test PRIVACY-PRESERVING transaction ───────────────────────
+# ─── Step 9: Test runtime-IDL build-only API ─────────────────────────────
 
-log "Step 10: Testing PRIVACY-PRESERVING transaction..."
+log "Step 9: Testing runtime-IDL build-only API..."
+SPEL_RUNTIME_IDL_SMOKE_IDL="$IDL_ABS" \
+SPEL_RUNTIME_IDL_SMOKE_GUEST_BIN="$GUEST_BIN_ABS" \
+SPEL_RUNTIME_IDL_SMOKE_PUBLIC_ACCOUNT="$FRESH_ACCOUNT" \
+SPEL_RUNTIME_IDL_SMOKE_PRIVATE_ACCOUNT="$PRIVATE_ACCOUNT" \
+cargo test --manifest-path "$SPEL_DIR/Cargo.toml" -p spel \
+    --test runtime_idl_wallet_smoke runtime_idl_builds_do_not_submit_or_change_state \
+    -- --ignored --exact \
+    > "$LOG_DIR/runtime-idl-build.log" 2>&1 || { cat "$LOG_DIR/runtime-idl-build.log"; fail "Runtime-IDL build-only smoke failed"; }
+log "  ✓ Runtime-IDL transactions built without submission"
+
+# ─── Step 10: Test PUBLIC transaction ───────────────────────────────────
+
+log "Step 10: Testing PUBLIC transaction..."
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+    greet \
+    --account "$FRESH_ACCOUNT" \
+    --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
+    > "$LOG_DIR/public-tx.log" 2>&1 || fail "Public TX failed (see $LOG_DIR/public-tx.log)"
+
+log "  ✓ Public TX submitted and confirmed"
+
+# ─── Step 11: Test PRIVACY-PRESERVING transaction ───────────────────────
+
+log "Step 11: Testing PRIVACY-PRESERVING transaction..."
 SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
     greet \
     --account "$PRIVATE_ACCOUNT" \
@@ -370,6 +385,7 @@ log "  ✓ Privacy-preserving TX submitted and confirmed"
 
 log ""
 log "🎉 Privacy smoke test PASSED!"
+log "  Runtime-IDL:     $LOG_DIR/runtime-idl-build.log"
 log "  Public TX:       $LOG_DIR/public-tx.log"
 log "  Auth-transfer:   $LOG_DIR/auth-transfer.log"
 log "  Private TX:      $LOG_DIR/private-tx.log"

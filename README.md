@@ -4,7 +4,7 @@
 
 Developer framework for building SPEL programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
-Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
+Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, a Wallet-ready transaction-resolution API, and project scaffolding for free.
 
 ## Quick Start
 
@@ -157,6 +157,75 @@ This provides:
 - Transaction building and submission with wallet integration
 - `--dry-run` mode for testing
 - `inspect` subcommand to extract ProgramId from binaries
+
+### Transaction Resolution API
+
+Use `spel::tx` when your application owns `WalletCore`. Start with
+`SpelProgram` to select an IDL instruction, provide named inputs, and build a
+native Wallet transaction.
+
+```rust
+use spel::tx::SpelProgram;
+
+// `idl`, `program_id`, `owner_account_id`, and `wallet` are owned by the
+// application.
+let transaction = SpelProgram::new(&idl)
+    .program(program_id)
+    .public("initialize")?
+    .input("owner", owner_account_id)?
+    .build(&wallet)
+    .await?;
+```
+
+`build` resolves the selected instruction and delegates native transaction
+construction to `WalletCore`. It returns `PublicTransaction` for public
+programs. For privacy-preserving programs, bind a borrowed
+`ProgramWithDependencies`, select `.private(...)`, and receive Wallet's native
+`(PrivacyPreservingTransaction, Vec<SharedSecretKey>)` result.
+
+Bare `AccountId` inputs infer public signing intent from the IDL. Use an
+explicit `AccountIdentity` when the caller needs private, shared, keycard, or
+other explicit Wallet identity intent.
+
+#### Direct resolver escape hatch
+
+Use `SpelInstructionRequest` when your application needs direct control over
+the account and argument maps before calling Wallet. The resolver selects one
+IDL instruction, resolves accounts and PDAs, and serializes arguments in IDL
+declaration order.
+
+Argument text accepts canonical scalars and JSON containers. It also accepts
+the established CLI forms for boolean aliases, options, arrays and vectors,
+and program IDs, so applications can use the same values accepted by `spel`.
+Canonical JSON remains the preferred representation for structured values.
+
+```rust
+use std::collections::BTreeMap;
+
+use spel::tx::{resolve_public_instruction, SpelInstructionRequest};
+
+// `idl`, `program_id`, and `wallet` are owned by the application.
+let request = SpelInstructionRequest {
+    idl: &idl,
+    instruction: "initialize",
+    accounts: BTreeMap::new(),
+    arguments: BTreeMap::new(),
+};
+let resolved = resolve_public_instruction(request, program_id)?;
+let (program_id, accounts, instruction_data) = resolved.into_parts();
+let _build = wallet
+    .build_pub_tx(accounts, instruction_data, program_id)
+    .await?;
+```
+
+For private programs, use `resolve_private_instruction` with a
+`ProgramWithDependencies`, then pass the resolved parts to
+`WalletCore::build_privacy_preserving_tx`. Direct resolvers return `SpelTxError`
+for invalid IDL or caller input.
+
+Neither `SpelProgram::build` nor the direct resolver API submits, polls, prints,
+or changes CLI behavior. `WalletCore` owns native construction, proving,
+signing, submission, and confirmation through its separate APIs.
 
 ### Account Types
 
