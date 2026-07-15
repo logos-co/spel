@@ -1,3 +1,42 @@
+## v0.6.0 (2026-07-15)
+
+### 💥 Breaking Changes
+
+- **Upgrade to LEZ v0.2.0.** The Logos Execution Zone dependency moves to `v0.2.0`: the
+  `nssa` / `nssa_core` crates are now `lee` / `lee_core`, and public transactions are signed
+  over the `/LEE/v0.3` preimage the live testnet accepts. The wallet-home environment
+  variable is **renamed `NSSA_WALLET_HOME_DIR` → `LEE_WALLET_HOME_DIR`** — update any
+  scripts, CI, or FFI callers. (#238)
+
+### ✨ Features
+
+- **`Vec<String>` instruction arguments** — repeat a flag (`--tag a --tag b`) to build a
+  `Vec<String>` argument for an instruction. (#189)
+
+### 🐛 Fixes
+
+- **LEZ v0.2.0 compatibility.** SPEL now builds against LEZ v0.2.0 and its public
+  transactions are accepted by the live testnet — fixing both the `nssa_core`-not-found
+  build break and the `InvalidSignature` rejection on public transactions. Verified
+  end-to-end against `https://testnet.lez.logos.co/`. (#238; closes #234, #237, #247)
+- **Deterministic IDL output.** Account helper types are emitted in a stable, name-sorted
+  order, so the generated IDL is byte-identical across runs (previously randomized by
+  `HashSet` iteration order — a source of spurious diffs and flaky committed-IDL checks).
+  (#232)
+- **Hardened ProgramId parsing.** `parse_program_id` now rejects `Public/`/`Private/`
+  account ids and non-canonical base58 rather than silently reinterpreting them as a
+  ProgramId, so a mistyped or wrong-encoding value errors instead of building a transaction
+  against the wrong program. (#250; closes #243)
+
+### ✅ Also resolved (fixed by the LEZ v0.2.0 upgrade)
+
+- Wallet storage schema now matches the `wallet` CLI — SPEL reads `storage.json` created by
+  the wallet without a deserialization error. (closes #235)
+- Guest builds no longer pull `bonsai-sdk → reqwest → rustls → ring`; riscv32
+  cross-compilation of programs using `spel-framework` is clean. (closes #165)
+
+---
+
 ## v0.5.0 (2026-06-01)
 
 ### ✨ Features

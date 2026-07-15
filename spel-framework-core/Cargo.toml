@@ -1,6 +1,6 @@
 [package]
 name = "spel-framework-core"
-version = "0.5.0"
+version = "0.6.0"
 edition = "2021"
 description = "Core types for the SPEL program framework"
 
