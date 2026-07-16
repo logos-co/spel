@@ -257,6 +257,21 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }
+    spel_framework_core::extension::check_duplicate_instruction_names(instructions.iter().map(
+        |i| {
+            (
+                i.fn_name.to_string(),
+                match &i.external_call_path {
+                    Some(p) => match p.segments.first() {
+                        Some(seg) => format!("extension {}", seg.ident),
+                        None => "an extension".to_string(),
+                    },
+                    None => "this module".to_string(),
+                },
+            )
+        },
+    ))
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Generate the Instruction enum (or use external one)
     let enum_def = if config.external_instruction.is_none() {
@@ -2123,6 +2138,21 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }
+    spel_framework_core::extension::check_duplicate_instruction_names(instructions.iter().map(
+        |i| {
+            (
+                i.fn_name.to_string(),
+                match &i.external_call_path {
+                    Some(p) => match p.segments.first() {
+                        Some(seg) => format!("extension {}", seg.ident),
+                        None => "an extension".to_string(),
+                    },
+                    None => "this module".to_string(),
+                },
+            )
+        },
+    ))
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Detect external instruction type from the #[lez_program(...)] attr
     let external_instruction_str: Option<String> = program_mod

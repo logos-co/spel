@@ -11,6 +11,10 @@
 //! - [`discover_extension_instruction_attrs`] returns the library-owned
 //!   gate attribute names that the framework strips from emitted
 //!   handler fns to prevent re-expansion.
+//! - [`check_duplicate_instruction_names`] rejects name collisions
+//!   between user fns and discovered extensions (or two extensions)
+//!   before they become colliding enum variants, match arms, or IDL
+//!   discriminators. All producers run it after assembly.
 //!
 //! # Trust model
 //!
@@ -214,11 +218,43 @@ pub fn discover_extension_instruction_attrs<F: FnMut(String)>(
     Ok(out)
 }
 
+/// Reject duplicate instruction names across user fns and discovered
+/// extensions. Duplicates would produce colliding enum variants, match
+/// arms, and IDL discriminators, or silently shadow one another.
+/// `instructions` yields `(fn name, source_label)`; first seen wins,
+/// the second sighting reports both sources.
+pub fn check_duplicate_instruction_names<I>(instructions: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    for (name, source) in instructions {
+        if let Some(first) = seen.get(&name) {
+            return Err(format!(
+                "duplicate instruction name '{name}': defined in {first} and in {source}"
+            ));
+        }
+        seen.insert(name, source);
+    }
+    Ok(())
+}
+
 /// Path dependencies declared directly in this crate's own Cargo.toml.
 /// One level, deliberately not transitive: a dependency of a dependency
 /// can never contribute instructions the consumer did not opt into.
 fn direct_path_dep_dirs<F: FnMut(String)>(manifest_dir: &Path, on_warning: &mut F) -> Vec<PathBuf> {
-    let manifest = manifest_dir.join("Cargo.toml");
+    let Some(manifest) = crate::idl_gen::_find_crate_manifest(manifest_dir, &mut |w| on_warning(w))
+    else {
+        on_warning(format!(
+            "could not locate a crate manifest from '{}'",
+            manifest_dir.display()
+        ));
+        return vec![];
+    };
+    let manifest_dir = match manifest.parent() {
+        Some(d) => d.to_path_buf(),
+        None => return vec![],
+    };
     let content = match std::fs::read_to_string(&manifest) {
         Ok(c) => c,
         Err(e) => {
@@ -727,5 +763,106 @@ lib-no-meta = { path = "../lib-no-meta" }
             discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
                 .unwrap();
         assert!(found.is_empty(), "non-extension deps must not be scanned");
+    }
+
+    #[test]
+    fn duplicate_names_error_names_both_sources() {
+        let pairs = vec![
+            ("update_value".to_string(), "this module".to_string()),
+            (
+                "admin_initialize".to_string(),
+                "extension admin_authority".to_string(),
+            ),
+            (
+                "update_value".to_string(),
+                "extension admin_authority".to_string(),
+            ),
+        ];
+        let err =
+            check_duplicate_instruction_names(pairs).expect_err("colliding names must be rejected");
+        assert!(
+            err.contains("update_value"),
+            "must name the instruction: {err}"
+        );
+        assert!(
+            err.contains("this module"),
+            "must name the first source: {err}"
+        );
+        assert!(
+            err.contains("admin_authority"),
+            "must name the second source: {err}"
+        );
+    }
+
+    #[test]
+    fn unique_names_pass_duplicate_check() {
+        let pairs = vec![
+            ("update_value".to_string(), "this module".to_string()),
+            (
+                "admin_initialize".to_string(),
+                "extension admin_authority".to_string(),
+            ),
+        ];
+        assert!(check_duplicate_instruction_names(pairs).is_ok());
+    }
+
+    #[test]
+    fn user_fn_colliding_with_extension_fails_idl_generation() {
+        let tmp = TempDir::new("dup-user-vs-ext");
+        tmp.write(
+            "my-ext/Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        tmp.write(
+            "my-ext/src/lib.rs",
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+"#,
+        );
+        // Consumer defines an instruction with the SAME name the
+        // extension provides.
+        tmp.write(
+            "user/src/main.rs",
+            r#"
+#[lez_program]
+#[my_ext]
+mod user_program {
+    #[instruction]
+    pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let err = crate::idl_gen::generate_idl_from_file_with_deps(
+            &tmp.path().join("user/src/main.rs"),
+            &[],
+        )
+        .expect_err("colliding user and extension instruction must fail IDL generation");
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("ext_action"),
+            "must name the instruction: {msg}"
+        );
     }
 }

@@ -17,7 +17,7 @@ use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelId
 
 use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
-use crate::extension::discover_extension_instructions;
+use crate::extension::{check_duplicate_instruction_names, discover_extension_instructions};
 
 /// Error type returned by [`generate_idl_from_file`].
 #[derive(Debug)]
@@ -27,6 +27,7 @@ pub enum IdlGenError {
     NoProgram(String),
     NoInstructions(String),
     MalformedExtensionMetadata(String),
+    DuplicateInstruction(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -41,7 +42,10 @@ impl fmt::Display for IdlGenError {
                 write!(f, "No #[instruction] functions found in '{path}'")
             },
             IdlGenError::MalformedExtensionMetadata(e) => {
-                write!(f, "MalformedExtensionMetadata: '{e}'")
+                write!(f, "Malformed extension metadata: '{e}'")
+            },
+            IdlGenError::DuplicateInstruction(e) => {
+                write!(f, "Duplicate instruction: '{e}'")
             },
         }
     }
@@ -158,6 +162,19 @@ fn generate_idl_inner(
             info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
             instructions.push(info);
         }
+        check_duplicate_instruction_names(instructions.iter().map(|i| {
+            (
+                i.fn_name.to_string(),
+                match &i.external_call_path {
+                    Some(p) => match p.segments.first() {
+                        Some(seg) => format!("extension {}", seg.ident),
+                        None => "an extension".to_string(),
+                    },
+                    None => "this module".to_string(),
+                },
+            )
+        }))
+        .map_err(IdlGenError::DuplicateInstruction)?;
     }
 
     // Detect external instruction type from #[lez_program(instruction = "...")]
@@ -1073,7 +1090,10 @@ fn _find_member_manifest<F: FnMut(String)>(
 }
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
-fn _find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> Option<PathBuf> {
+pub(crate) fn _find_crate_manifest<F: FnMut(String)>(
+    start: &Path,
+    on_warning: &mut F,
+) -> Option<PathBuf> {
     let mut dir: &Path = if start.is_file() {
         start.parent()?
     } else {
