@@ -1,5 +1,4 @@
 #[cfg(test)]
-
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -19,9 +18,13 @@ impl TempDir {
         std::fs::write(&p, content).unwrap();
         p
     }
-    pub fn path(&self) -> &Path { &self.0 }
+    pub fn path(&self) -> &Path {
+        &self.0
+    }
 }
 
 impl Drop for TempDir {
-    fn drop(&mut self) { std::fs::remove_dir_all(&self.0).ok(); }
+    fn drop(&mut self) {
+        std::fs::remove_dir_all(&self.0).ok();
+    }
 }

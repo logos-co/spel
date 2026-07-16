@@ -1,7 +1,7 @@
 //! Path-dep extension discovery for SPEL programs.
 //!
-//! Scans the consuming program's local path-dependencies for crates that
-//! declare `[package.metadata.spel]` in their `Cargo.toml`. Each
+//! Scans the consuming program's **direct** path-dependencies for crates
+//! that declare `[package.metadata.spel]` in their `Cargo.toml`. Each
 //! qualifying crate exposes its `#[instruction]` fns (and optional gate
 //! attributes) through this module's discovery API:
 //!
@@ -12,6 +12,26 @@
 //!   gate attribute names that the framework strips from emitted
 //!   handler fns to prevent re-expansion.
 //!
+//! # Trust model
+//!
+//! Activating an extension takes two explicit consumer actions: the
+//! dependency listed in the consumer's own `Cargo.toml` and the marker
+//! attr on the `#[lez_program]` module. Discovery is deliberately not
+//! transitive, so a dependency of a dependency can never contribute
+//! instructions by claiming a matching `extension_attr`. Generated
+//! cross-crate call paths use the dependency's `[package].name`, never
+//! its directory name.
+//!
+//! # Failure tiers
+//!
+//! Malformed `[package.metadata.spel]` (a key with the wrong shape) is a
+//! hard `Err`: callers surface it as a compile error, a broken extension
+//! declaration must never degrade to a program silently missing its
+//! extension surface. Environmental issues (unreadable manifest, path
+//! dep pointing at a missing directory, a matched extension contributing
+//! nothing) are reported through the `on_warning` channel, following the
+//! `find_path_dep_dirs` precedent.
+//!
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
@@ -19,12 +39,11 @@
 //! module-private; consumers go through the two `discover_*` entry
 //! points.
 
-use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use syn::Attribute;
 
-use crate::idl_gen::{collect_items_from_crate_dirs, find_path_dep_dirs, has_instruction_attr};
+use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
 ///
@@ -49,57 +68,94 @@ fn collect_instruction_fns(items: &[syn::Item]) -> Vec<syn::ItemFn> {
 /// attr on its `#[lez_program]` mod, the framework includes the lib's
 /// `#[instruction]` fns in the dispatcher + IDL.
 ///
-/// Returns `None` if the manifest is missing the metadata key.
-fn read_spel_extension_attr(crate_dir: &Path) -> Option<String> {
+/// Ok(None): no spel metadata or no extension_attr_key (a normal crate).
+/// Ok(Some(name)): declared extension.
+/// Err(msg): metadata present but malformed. Callers must surface this as
+/// a hard error, a broken declaration must never degrade to "no extension".
+fn read_spel_extension_attr(crate_dir: &Path) -> Result<Option<String>, String> {
     let manifest = crate_dir.join("Cargo.toml");
-    let content = std::fs::read_to_string(&manifest).ok()?;
-    let value: toml::Value = toml::from_str(&content).ok()?;
-    value
-        .get("package")?
-        .get("metadata")?
-        .get("spel")?
-        .get("extension_attr")?
-        .as_str()
-        .map(String::from)
+    let Ok(content) = std::fs::read_to_string(&manifest) else {
+        return Ok(None); // unreadable dep manifest: cargo fails the build anyway
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
+        return Ok(None); // same
+    };
+    let Some(spel) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+    else {
+        return Ok(None);
+    };
+    match spel.get("extension_attr") {
+        None => Ok(None),
+        Some(v) => match v.as_str() {
+            Some(s) => Ok(Some(s.to_string())),
+            None => Err(format!(
+                "malformed [package.metadata.spel] in {}: extension_attr must be a string",
+                manifest.display()
+            )),
+        },
+    }
 }
 
 /// Read `[package.metadata.spel.instruction_attrs]` from a crate's Cargo.toml.
 /// Returns the list of instruction-level marker attribute names the library
 /// declares (e.g. `["require_admin"]`). Framework strips these from emitted
 /// handler fns to prevent re-expansion.
-fn read_spel_instruction_attrs(crate_dir: &Path) -> Vec<String> {
-    fn inner(crate_dir: &Path) -> Option<Vec<String>> {
-        let manifest = crate_dir.join("Cargo.toml");
-        let content = std::fs::read_to_string(&manifest).ok()?;
-        let value: toml::Value = toml::from_str(&content).ok()?;
-        let arr = value
-            .get("package")?
-            .get("metadata")?
-            .get("spel")?
-            .get("instruction_attrs")?
-            .as_array()?;
-        Some(arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
-    }
-    inner(crate_dir).unwrap_or_default()
+fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> {
+    let manifest = crate_dir.join("Cargo.toml");
+    let Ok(content) = std::fs::read_to_string(&manifest) else {
+        return Ok(vec![]);
+    };
+    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
+        return Ok(vec![]);
+    };
+    let Some(attrs) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+        .and_then(|s| s.get("instruction_attrs"))
+    else {
+        return Ok(vec![]);
+    };
+    let Some(arr) = attrs.as_array() else {
+        return Err(format!(
+            "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
+            manifest.display()
+        ));
+    };
+    arr.iter()
+        .map(|x| {
+            x.as_str().map(String::from).ok_or_else(|| {
+                format!(
+                    "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
+                    manifest.display()
+                )
+            })
+        })
+        .collect()
 }
 
-/// Scan path-dep crates for SPEL extension libraries whose `extension_attr`
-/// metadata matches an attribute on the consuming program's mod. Returns
-/// one `(ItemFn, crate_path)` per discovered `#[instruction]` fn, where
-/// `crate_path` is the absolute path to call the fn from the consumer
-/// (e.g. `::admin_authority`).
+/// Scan the consumer's direct path-deps for SPEL extension libraries whose
+/// `extension_attr` metadata matches an attribute on the consuming
+/// program's mod. Returns one `(ItemFn, crate_path)` per discovered
+/// `#[instruction]` fn, where `crate_path` is the absolute path to call
+/// the fn from the consumer (e.g. `::admin_authority`), derived from the
+/// dependency's `[package].name`.
 ///
-/// Silent on env/IO errors — returns empty. Callers may emit their own
-/// error if they expected results.
-pub fn discover_extension_instructions(
+/// `Err` on malformed spel metadata (callers surface it as a compile
+/// error). Environmental skips are reported via `on_warning`.
+pub fn discover_extension_instructions<F: FnMut(String)>(
     manifest_dir: &Path,
     mod_attrs: &[Attribute],
-) -> Vec<(syn::ItemFn, syn::Path)> {
-    let dep_dirs = direct_path_dep_dirs(&manifest_dir);
-    
+    on_warning: &mut F,
+) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
+    let dep_dirs = direct_path_dep_dirs(&manifest_dir, on_warning);
+
     let mut out = Vec::new();
     for dep_dir in dep_dirs {
-        let Some(ext_attr) = read_spel_extension_attr(&dep_dir) else {
+        let Some(ext_attr) = read_spel_extension_attr(&dep_dir)? else {
             continue;
         };
         if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
@@ -107,68 +163,116 @@ pub fn discover_extension_instructions(
         }
 
         let (items, _) = collect_items_from_crate_dirs(&[dep_dir.clone()]);
-        let Some(crate_name) = read_package_ident(&dep_dir) else { continue };
-        let crate_name = crate_name.replace('-', "_");
+        let Some(crate_name) = read_package_ident(&dep_dir) else {
+            on_warning(format!(
+                "extension at '{}' matched a module attribute but has no [package].name, skipped",
+                dep_dir.display()
+            ));
+            continue;
+        };
         let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
         let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
 
-        for func in collect_instruction_fns(&items) {
+        let funcs = collect_instruction_fns(&items);
+        if funcs.is_empty() && read_spel_instruction_attrs(&dep_dir)?.is_empty() {
+            on_warning(format!(
+                "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
+                #[instruction] fns and no instruction_attrs"
+            ));
+        }
+        for func in funcs {
             out.push((func, crate_path.clone()));
         }
     }
-    out
+    Ok(out)
 }
 
-/// Collect all instruction-level marker attribute names declared by
-/// path-dep extension libraries whose `extension_attr` matches an attribute
-/// on the consuming program's mod. Framework strips these from emitted
-/// handler fns so the lib's own gate macros don't re-expand on them.
-pub fn discover_extension_instruction_attrs(
+/// Collect all instruction-level marker attribute names declared by the
+/// consumer's direct path-dep extensions whose `extension_attr` matches an
+/// attribute on the consuming program's mod. Framework strips these from
+/// emitted handler fns so the lib's own gate macros don't re-expand on
+/// them.
+///
+/// `Err` on malformed spel metadata, same contract as
+/// [`discover_extension_instructions`].
+pub fn discover_extension_instruction_attrs<F: FnMut(String)>(
     manifest_dir: &Path,
-    mod_attrs: &[syn::Attribute],
-) -> Vec<String> {
-    let dep_dirs = find_path_dep_dirs(manifest_dir, |_| {});
+    mod_attrs: &[Attribute],
+    on_warning: &mut F,
+) -> Result<Vec<String>, String> {
+    let dep_dirs = direct_path_dep_dirs(manifest_dir, on_warning);
     let mut out = Vec::new();
     for dep_dir in dep_dirs {
-        let Some(ext_attr) = read_spel_extension_attr(&dep_dir) else { continue };
-        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) { continue };
-        out.extend(read_spel_instruction_attrs(&dep_dir));
+        let Some(ext_attr) = read_spel_extension_attr(&dep_dir)? else {
+            continue;
+        };
+        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
+            continue;
+        };
+        out.extend(read_spel_instruction_attrs(&dep_dir)?);
     }
-    out
+    Ok(out)
 }
 
 /// Path dependencies declared directly in this crate's own Cargo.toml.
 /// One level, deliberately not transitive: a dependency of a dependency
 /// can never contribute instructions the consumer did not opt into.
-fn direct_path_dep_dirs(manifest_dir: &Path) -> Vec<PathBuf> {
-    fn inner(manifest_dir: &Path) -> Option<Vec<PathBuf>> {
-        let content = std::fs::read_to_string(manifest_dir.join("Cargo.toml")).ok()?;
-        let value: toml::Value = toml::from_str(&content).ok()?;
-        let table = value.get("dependencies")?.as_table()?;
-        let mut dirs = Vec::new();
-        for dep in table.values() {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dir = manifest_dir.join(rel);
-                if dir.is_dir() {
-                    dirs.push(dir);
-                }
+fn direct_path_dep_dirs<F: FnMut(String)>(manifest_dir: &Path, on_warning: &mut F) -> Vec<PathBuf> {
+    let manifest = manifest_dir.join("Cargo.toml");
+    let content = match std::fs::read_to_string(&manifest) {
+        Ok(c) => c,
+        Err(e) => {
+            on_warning(format!(
+                "could not read manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return vec![];
+        },
+    };
+    let value: toml::Value = match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            on_warning(format!(
+                "failed to parse manifest '{}': {}",
+                manifest.display(),
+                e
+            ));
+            return vec![];
+        },
+    };
+
+    let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) else {
+        return vec![];
+    };
+    let mut dirs = Vec::new();
+    for (name, dep) in table {
+        if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+            let dir = manifest_dir.join(rel);
+            if dir.is_dir() {
+                dirs.push(dir);
+            } else {
+                on_warning(format!(
+                    "path dependency '{}' points to non-existent directory: {}",
+                    name,
+                    dir.display()
+                ));
             }
         }
-        Some(dirs)
     }
-    inner(manifest_dir).unwrap_or_default()
+    dirs
 }
 
 /// [package].name from crate dir's manifest, `-` mapped to `_`, for use
 /// as the crate ident in generated cross-crate call paths. The directory
-/// name is not the crate's identity: renamed checkouts, vendoring, and 
+/// name is not the crate's identity: renamed checkouts, vendoring, and
 /// `package = ` aliases all diverge from it.
 fn read_package_ident(crate_dir: &Path) -> Option<String> {
-    let content  = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    let content = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
     let value: toml::Value = toml::from_str(&content).ok()?;
     let name = value.get("package")?.get("name")?.as_str()?;
     Some(name.replace('-', "_"))
-} 
+}
 
 #[cfg(test)]
 mod tests {
@@ -192,7 +296,7 @@ extension_attr = "my_ext"
 "#,
         );
         assert_eq!(
-            read_spel_extension_attr(tmp.path()),
+            read_spel_extension_attr(tmp.path()).unwrap(),
             Some("my_ext".to_string())
         );
     }
@@ -204,13 +308,13 @@ extension_attr = "my_ext"
             "Cargo.toml",
             "[package]\nname = \"my-ext\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         );
-        assert!(read_spel_extension_attr(tmp.path()).is_none());
+        assert!(read_spel_extension_attr(tmp.path()).unwrap().is_none());
     }
 
     #[test]
     fn read_spel_extension_attr_none_when_no_manifest() {
         let tmp = TempDir::new("ext-attr-no-manifest");
-        assert!(read_spel_extension_attr(tmp.path()).is_none());
+        assert!(read_spel_extension_attr(tmp.path()).unwrap().is_none());
     }
 
     #[test]
@@ -259,13 +363,22 @@ my-ext = { path = "../my-ext" }
             #[my_ext]
         );
 
-        let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
         assert_eq!(found.len(), 1);
         let (func, crate_path) = &found[0];
         assert_eq!(func.sig.ident.to_string(), "ext_action");
-        let segs: Vec<String> = crate_path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segs: Vec<String> = crate_path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         assert_eq!(segs, vec!["my_ext".to_string()]);
-        assert!(crate_path.leading_colon.is_some(), "path must start with ::");
+        assert!(
+            crate_path.leading_colon.is_some(),
+            "path must start with ::"
+        );
     }
 
     #[test]
@@ -312,10 +425,16 @@ my-ext = { path = "../renamed-checkout" }
             #[my_ext]
         );
 
-        let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
         assert_eq!(found.len(), 1);
         let (_, crate_path) = &found[0];
-        let segs: Vec<String> = crate_path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segs: Vec<String> = crate_path
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
         // Identity comes from [package].name, never from the directory name:
         // ::my_ext, not ::renamed_checkout.
         assert_eq!(segs, vec!["my_ext".to_string()]);
@@ -381,17 +500,157 @@ helper = { path = "../helper" }
             #[my_ext]
         );
 
-        let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
         assert!(
             found.is_empty(),
             "transitive dep must never contribute instructions, got: {:?}",
-            found.iter().map(|(f, _)| f.sig.ident.to_string()).collect::<Vec<_>>()
+            found
+                .iter()
+                .map(|(f, _)| f.sig.ident.to_string())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    fn ext_fixture(tmp: &TempDir, metadata: &str, lib_rs: &str) -> Vec<Attribute> {
+        tmp.write(
+            "my-ext/Cargo.toml",
+            &format!(
+                r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+{metadata}
+"#
+            ),
+        );
+        tmp.write("my-ext/src/lib.rs", lib_rs);
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+"#,
+        );
+        tmp.write("user/src/lib.rs", "");
+        syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+        )
+    }
+
+    #[test]
+    fn malformed_extension_attr_is_a_hard_error() {
+        let tmp = TempDir::new("malformed-ext-attr");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = 42
+"#,
+            "",
+        );
+        let err =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .expect_err("wrong-shaped extension_attr must fail, not degrade to no-extension");
+        assert!(err.contains("extension_attr"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn malformed_instruction_attrs_is_a_hard_error() {
+        let tmp = TempDir::new("malformed-instr-attrs");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+instruction_attrs = "require_x"
+"#,
+            "",
+        );
+        let err =
+            discover_extension_instruction_attrs(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .expect_err("non-array instruction_attrs must fail");
+        assert!(err.contains("instruction_attrs"), "unhelpful error: {err}");
+    }
+
+    #[test]
+    fn unreadable_consumer_manifest_warns() {
+        let tmp = TempDir::new("no-consumer-manifest");
+        // consumer dir exists but has no Cargo.toml at all
+        tmp.write("user/src/lib.rs", "");
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[my_ext]);
+
+        let mut warnings = Vec::new();
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+                warnings.push(w)
+            })
+            .unwrap();
+        assert!(found.is_empty());
+        assert!(!warnings.is_empty(), "failure must be loud, got silence");
+    }
+
+    #[test]
+    fn gate_only_extension_does_not_warn() {
+        let tmp = TempDir::new("gate-only-ext");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+instruction_attrs = ["require_x"]
+"#,
+            "", // no #[instruction] fns: a pure gate library is a valid extension
+        );
+        let mut warnings = Vec::new();
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+                warnings.push(w)
+            })
+            .unwrap();
+        assert!(found.is_empty());
+        assert!(
+            warnings.is_empty(),
+            "gate-only extension is legitimate, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn extension_contributing_nothing_warns() {
+        let tmp = TempDir::new("nothing-ext");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            "", // no fns AND no gate attrs: almost certainly a broken layout
+        );
+        let mut warnings = Vec::new();
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+                warnings.push(w)
+            })
+            .unwrap();
+        assert!(found.is_empty());
+        assert!(
+            warnings.iter().any(|w| w.contains("my_ext")),
+            "matched-but-empty extension must warn, got: {warnings:?}"
         );
     }
 
     #[test]
     fn discover_extension_instructions_skips_when_attr_absent_on_mod() {
-            let tmp = TempDir::new("discover-skip-attr");
+        let tmp = TempDir::new("discover-skip-attr");
 
         tmp.write(
             "my-ext/Cargo.toml",
@@ -425,7 +684,9 @@ my-ext = { path = "../my-ext" }
 
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
 
-        let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
         assert!(found.is_empty(), "should skip — no matching attr on mod");
     }
 
@@ -441,7 +702,7 @@ name = "lib-no-meta"
 version = "0.1.0"
 edition = "2021"
     "#,
-    );
+        );
         tmp.write(
             "lib-no-meta/src/lib.rs",
             r#"#[instruction] pub fn whatever() -> SpelResult { todo!() }"#,
@@ -462,7 +723,9 @@ lib-no-meta = { path = "../lib-no-meta" }
 
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program] #[whatever]);
 
-        let found = discover_extension_instructions(&tmp.path().join("user"), &mod_attrs);
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
         assert!(found.is_empty(), "non-extension deps must not be scanned");
     }
 }

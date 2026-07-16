@@ -245,7 +245,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    for (func, crate_path) in spel_framework_core::extension::discover_extension_instructions(&manifest_dir, &input.attrs) {
+    let discovered = spel_framework_core::extension::discover_extension_instructions(
+        &manifest_dir,
+        &input.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for (func, crate_path) in discovered {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -276,7 +282,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let strip_attrs = spel_framework_core::extension::discover_extension_instruction_attrs(
         &manifest_dir,
         &input.attrs,
-    );
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let handler_fns = generate_handler_fns(&instructions, &strip_attrs);
 
     // Generate validation functions
@@ -2103,7 +2111,13 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     }
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    for (func, crate_path) in spel_framework_core::extension::discover_extension_instructions(&manifest_dir, &program_mod.attrs) {
+    let discovered = spel_framework_core::extension::discover_extension_instructions(
+        &manifest_dir,
+        &program_mod.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for (func, crate_path) in discovered {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));

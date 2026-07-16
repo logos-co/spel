@@ -26,6 +26,7 @@ pub enum IdlGenError {
     Parse(syn::Error),
     NoProgram(String),
     NoInstructions(String),
+    MalformedExtensionMetadata(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -38,6 +39,9 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::NoInstructions(path) => {
                 write!(f, "No #[instruction] functions found in '{path}'")
+            },
+            IdlGenError::MalformedExtensionMetadata(e) => {
+                write!(f, "MalformedExtensionMetadata: '{e}'")
             },
         }
     }
@@ -143,7 +147,12 @@ fn generate_idl_inner(
     }
 
     if let Some(manifest_dir) = manifest_dir {
-        for (func, crate_path) in discover_extension_instructions(manifest_dir, &program_mod.attrs) {
+        let discovered =
+            discover_extension_instructions(manifest_dir, &program_mod.attrs, &mut |w| {
+                eprintln!("⚠️  {w}")
+            })
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
+        for (func, crate_path) in discovered {
             let mut info = parse_instruction(func)?;
             let name = &info.fn_name;
             info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
