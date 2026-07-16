@@ -3,6 +3,8 @@
 use std::fs;
 use std::path::Path;
 
+const DEFAULT_LEZ_REV: &str = "7a40979c7f5b04a46a8665a3d07cd3a300dcae63";
+
 pub fn init_project(
     name: &str,
     lez_tag: Option<&str>,
@@ -97,7 +99,7 @@ ui/
     let lez_ref_ffi = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => format!("rev = \"{DEFAULT_LEZ_REV}\""),
     };
     let spel_ref_ffi = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -688,7 +690,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => format!("rev = \"{DEFAULT_LEZ_REV}\""),
     };
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),

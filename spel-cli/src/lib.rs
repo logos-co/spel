@@ -208,15 +208,15 @@ pub async fn run() {
                     println!("Create a new SPEL project");
                     println!();
                     println!("Options:");
-                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.1.2)");
-                    println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
+                    println!("  --lez-tag <TAG>     LEZ version tag");
+                    println!("  --spel-rev <REV>    SPEL revision");
                     println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
                     println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
                     println!();
                     println!("Examples:");
                     println!("  spel init my-project");
                     println!(
-                        "  spel init my-project --lez-tag v0.1.2 --spel-rev refs/pull/122/head"
+                        "  spel init my-project --lez-rev 7a40979c7f5b04a46a8665a3d07cd3a300dcae63"
                     );
                     return;
                 }
@@ -545,9 +545,10 @@ fn compute_pda_command(
         .collect();
 
     // Parse --key value pairs from remaining args, using IDL types when available.
-    // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
+    // --npk and --vpk are reserved for private PDA derivation.
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut npk_hex: Option<String> = None;
+    let mut vpk_hex: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
@@ -555,6 +556,11 @@ fn compute_pda_command(
                 let raw = &args[i + 1];
                 if key == "npk" {
                     npk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
+                if key == "vpk" {
+                    vpk_hex = Some(raw.clone());
                     i += 2;
                     continue;
                 }
@@ -621,8 +627,8 @@ fn compute_pda_command(
         std::process::exit(1);
     };
 
-    // For private PDAs, parse and require --npk
-    use nssa_core::NullifierPublicKey;
+    // For private PDAs, parse and require both public keys.
+    use nssa_core::{encryption::ViewingPublicKey, NullifierPublicKey};
     let npk: Option<NullifierPublicKey> = if pda_def.private {
         match npk_hex {
             Some(ref hex) => {
@@ -641,6 +647,34 @@ fn compute_pda_command(
                 eprintln!(
                     "   The NullifierPublicKey is the recipient's npk from their wallet key."
                 );
+                std::process::exit(1);
+            },
+        }
+    } else {
+        None
+    };
+    let vpk: Option<ViewingPublicKey> = if pda_def.private {
+        match vpk_hex {
+            Some(ref raw) => {
+                let hex = raw
+                    .strip_prefix("0x")
+                    .or_else(|| raw.strip_prefix("0X"))
+                    .unwrap_or(raw);
+                let bytes = crate::hex::hex_decode(hex).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --vpk '{}': {}", raw, e);
+                    std::process::exit(1);
+                });
+                Some(ViewingPublicKey::from_bytes(bytes).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --vpk '{}': {}", raw, e);
+                    std::process::exit(1);
+                }))
+            },
+            None => {
+                eprintln!(
+                    "❌ '{}' is a private PDA — pass --vpk <2368-char-hex>",
+                    account_name
+                );
+                eprintln!("   The ViewingPublicKey is the recipient's vpk from their wallet key.");
                 std::process::exit(1);
             },
         }
@@ -682,7 +716,7 @@ fn compute_pda_command(
         &program_id,
         &account_map,
         &seed_args,
-        npk.as_ref(),
+        npk.as_ref().zip(vpk.as_ref()),
     ) {
         Ok(account_id) => {
             println!("{}", account_id);

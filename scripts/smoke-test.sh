@@ -165,7 +165,7 @@ else
     exit 0
 fi
 
-export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
+export LEE_WALLET_HOME_DIR="${LEE_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # Wallet needs password on stdin; first run creates storage

@@ -11,8 +11,8 @@ host = ["dep:nssa", "spel-framework-core/host"]
 [dependencies]
 spel-framework-core = { path = "../spel-framework-core" }
 spel-framework-macros = { path = "../spel-framework-macros" }
-nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", features = ["host"], package = "lee_core" }
-nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", optional = true, package = "lee" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "7a40979c7f5b04a46a8665a3d07cd3a300dcae63", features = ["host"], package = "lee_core" }
+nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "7a40979c7f5b04a46a8665a3d07cd3a300dcae63", optional = true, package = "lee" }
 borsh = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 
