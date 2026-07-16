@@ -64,19 +64,15 @@ WALLET_BIN="${LSSA_DIR}/target/release/wallet"
 SPEL_BIN="/tmp/lssa/target/release/spel"
 [ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
 
-# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
-# new location, fall back to the pre-rc6 path for older LEZ revisions.
-if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
+# Prefer current LEZ layout, fall back to older checkout layout.
+if [ -z "${LEE_WALLET_HOME_DIR:-}" ]; then
     if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
     else
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
     fi
 fi
-export NSSA_WALLET_HOME_DIR
-# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
-# Export both so the wallet finds its config on old and new LEZ revisions.
-export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
+export LEE_WALLET_HOME_DIR
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # ─── Setup ─────────────────────────────────────────────────────────────────
@@ -189,7 +185,7 @@ cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
 for i in $(seq 1 90); do
-    if curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
+    if curl -s -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
         log "  ✓ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
@@ -213,7 +209,7 @@ done
 # to the default port. We need to update it to match our non-default port.
 
 log "Step 5: Updating wallet config for port ${SEQUENCER_PORT}..."
-WALLET_CONFIG="${NSSA_WALLET_HOME_DIR}/wallet_config.json"
+WALLET_CONFIG="${LEE_WALLET_HOME_DIR}/wallet_config.json"
 if [ -f "$WALLET_CONFIG" ]; then
     python3 -c "
 import json

@@ -6,7 +6,7 @@
 # Usage: ./smoke-test-privacy.sh [WORK_DIR]
 #
 # Required Environment Variables:
-#   LEZ_TAG     - LEZ revision/tag to test against (e.g., "v0.2.0-rc1" or a commit hash)
+#   LEZ_TAG     - LEZ revision/tag to test against
 #   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
 #
 # Optional Environment Variables:
@@ -87,19 +87,15 @@ for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
 done
 [ -n "$WALLET_BIN" ] || fail "wallet not found"
 
-# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
-# new location, fall back to the pre-rc6 path for older LEZ revisions.
-if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
+# Prefer current LEZ layout, fall back to older checkout layout.
+if [ -z "${LEE_WALLET_HOME_DIR:-}" ]; then
     if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
     else
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
     fi
 fi
-export NSSA_WALLET_HOME_DIR
-# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
-# Export both so the wallet finds its config on old and new LEZ revisions.
-export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
+export LEE_WALLET_HOME_DIR
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # ─── Verify LSSA version matches LEZ_TAG ──────────────────────────────────
@@ -147,7 +143,7 @@ log "  Using local spel: $SPEL_BIN"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+"$SPEL_BIN" init --lez-rev "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
     > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✓ Project scaffolded"
@@ -273,7 +269,8 @@ json.dump(cfg, open(dst, "w"))
 SEQ_CONFIGS="$SEQ_CONFIG_PATCHED"
 
 cd "$SEQ_HOME"
-RUST_LOG=info $SEQUENCER_BIN "$SEQ_CONFIGS" > "$LOG_DIR/sequencer.log" 2>&1 &
+RUST_LOG=info $SEQUENCER_BIN --port "$SEQUENCER_PORT" "$SEQ_CONFIGS" \
+    > "$LOG_DIR/sequencer.log" 2>&1 &
 SEQ_PID=$!
 sleep 2
 if ! kill -0 $SEQ_PID 2>/dev/null; then
@@ -285,7 +282,7 @@ cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
 for i in $(seq 1 60); do
-    if [ $(curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; echo $?) -eq 0 ]; then
+    if curl -s -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
         log "  ✓ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
@@ -308,6 +305,23 @@ for i in $(seq 1 60); do
     sleep 2
     echo -n "."
 done
+
+# Keep the wallet CLI on the same sequencer endpoint used by this test.
+log "  Updating wallet config for port ${SEQUENCER_PORT}..."
+WALLET_CONFIG="${LEE_WALLET_HOME_DIR}/wallet_config.json"
+if [ -f "$WALLET_CONFIG" ]; then
+    python3 -c '
+import json, sys
+path, sequencer_url = sys.argv[1], sys.argv[2]
+with open(path, "r") as wallet_file:
+    config = json.load(wallet_file)
+config["sequencer_addr"] = sequencer_url
+with open(path, "w") as wallet_file:
+    json.dump(config, wallet_file, indent=4)
+' "$WALLET_CONFIG" "$SEQUENCER_URL" || fail "Failed to update wallet config"
+else
+    fail "Wallet config not found at $WALLET_CONFIG"
+fi
 
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
 

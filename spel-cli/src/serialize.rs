@@ -132,6 +132,16 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         )),
         // `AccountId` serializes via `SerializeDisplay`, i.e. as its base58 string.
         ("account_id", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
+        ("nullifier_public_key", ParsedValue::ByteArray(bytes)) if bytes.len() == 32 => Ok(
+            DynamicValue::Tuple(bytes.iter().map(|byte| DynamicValue::U8(*byte)).collect()),
+        ),
+        ("viewing_public_key", ParsedValue::ByteArray(bytes))
+            if bytes.len() == nssa_core::encryption::ViewingPublicKey::LEN =>
+        {
+            Ok(DynamicValue::Seq(
+                bytes.iter().map(|byte| DynamicValue::U8(*byte)).collect(),
+            ))
+        },
         _ => Err(SerializeError::TypeMismatch {
             expected: prim.to_string(),
             got: format!("{:?}", val),

@@ -103,6 +103,25 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             let bytes = crate::hex::decode_bytes_32(raw)?;
             Ok(ParsedValue::Str(nssa::AccountId::new(bytes).to_string()))
         },
+        "nullifier_public_key" => Ok(ParsedValue::ByteArray(
+            crate::hex::decode_bytes_32(raw)?.to_vec(),
+        )),
+        "viewing_public_key" => {
+            let hex = raw
+                .strip_prefix("0x")
+                .or_else(|| raw.strip_prefix("0X"))
+                .unwrap_or(raw);
+            let bytes = hex_decode(hex)?;
+            if bytes.len() != nssa_core::encryption::ViewingPublicKey::LEN {
+                return Err(format!(
+                    "Invalid ViewingPublicKey '{}': expected {} bytes, got {}",
+                    raw,
+                    nssa_core::encryption::ViewingPublicKey::LEN,
+                    bytes.len()
+                ));
+            }
+            Ok(ParsedValue::ByteArray(bytes))
+        },
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),
             "false" | "0" | "no" => Ok(ParsedValue::Bool(false)),

@@ -2,8 +2,9 @@
 
 use base58::FromBase58;
 use nssa_core::account::AccountId;
+use nssa_core::encryption::ViewingPublicKey;
 use nssa_core::program::{PdaSeed, ProgramId};
-use nssa_core::NullifierPublicKey;
+use nssa_core::{Identifier, NullifierPublicKey};
 use sha2::{Digest, Sha256};
 
 /// Trait for converting a value into a 32-byte PDA seed.
@@ -73,28 +74,18 @@ pub fn seed_from_str(s: &str) -> [u8; 32] {
 ///
 /// Panics if `seeds` is empty.
 pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
-    assert!(!seeds.is_empty(), "PDA requires at least one seed");
-
-    let combined = if seeds.len() == 1 {
-        *seeds[0]
-    } else {
-        let mut hasher = Sha256::new();
-        for seed in seeds {
-            hasher.update(seed);
-        }
-        hasher.finalize().into()
-    };
-
-    let pda_seed = PdaSeed::new(combined);
+    let pda_seed = PdaSeed::new(combine_pda_seeds(seeds));
     AccountId::for_public_pda(program_id, &pda_seed)
 }
 
 /// Derive a **private** PDA `AccountId` from a program ID, one or more 32-byte seeds,
-/// and a `NullifierPublicKey`.
+/// a `NullifierPublicKey`, and a `ViewingPublicKey`.
 ///
 /// The seed combining logic mirrors [`compute_pda`]; the difference is the final
-/// derivation calls `AccountId::for_private_pda`, which includes the `npk` in the
-/// hash so each controller group gets a unique address for the same seed.
+/// derivation calls `AccountId::for_private_pda`, which includes both public keys
+/// in the hash so each controller group gets a unique address for the same seed.
+/// This compatibility helper uses identifier `0`; use
+/// [`compute_private_pda_with_identifier`] for a different identifier.
 ///
 /// # Panics
 ///
@@ -103,10 +94,33 @@ pub fn compute_private_pda(
     program_id: &ProgramId,
     seeds: &[&[u8; 32]],
     npk: &NullifierPublicKey,
+    vpk: &ViewingPublicKey,
 ) -> AccountId {
+    compute_private_pda_with_identifier(program_id, seeds, npk, vpk, 0)
+}
+
+/// Derive a **private** PDA `AccountId` with an explicit private-account identifier.
+///
+/// This uses the same seed composition as [`compute_pda`] and [`compute_private_pda`].
+///
+/// # Panics
+///
+/// Panics if `seeds` is empty.
+pub fn compute_private_pda_with_identifier(
+    program_id: &ProgramId,
+    seeds: &[&[u8; 32]],
+    npk: &NullifierPublicKey,
+    vpk: &ViewingPublicKey,
+    identifier: Identifier,
+) -> AccountId {
+    let pda_seed = PdaSeed::new(combine_pda_seeds(seeds));
+    AccountId::for_private_pda(program_id, &pda_seed, npk, vpk, identifier)
+}
+
+fn combine_pda_seeds(seeds: &[&[u8; 32]]) -> [u8; 32] {
     assert!(!seeds.is_empty(), "PDA requires at least one seed");
 
-    let combined = if seeds.len() == 1 {
+    if seeds.len() == 1 {
         *seeds[0]
     } else {
         let mut hasher = Sha256::new();
@@ -114,12 +128,7 @@ pub fn compute_private_pda(
             hasher.update(seed);
         }
         hasher.finalize().into()
-    };
-
-    let pda_seed = PdaSeed::new(combined);
-    // lez-core-v0.2.0 added a u128 `identifier` to private-PDA derivation; default
-    // to 0 (the common case) until callers need to pass a specific identifier.
-    AccountId::for_private_pda(program_id, &pda_seed, npk, 0)
+    }
 }
 
 /// Compute a PDA from a program ID and multiple [`ToSeed`] values.
@@ -304,6 +313,26 @@ mod tests {
         let single = compute_pda(&program_id, &[&seed]);
         let multi = compute_pda(&program_id, &[&seed, &[0u8; 32]]);
         assert_ne!(single, multi);
+    }
+
+    #[test]
+    fn test_compute_private_pda_with_identifier() {
+        let program_id: ProgramId = [1u32; 8];
+        let seed = seed_from_str("private");
+        let npk = NullifierPublicKey([2u8; 32]);
+        let vpk = ViewingPublicKey::from_seed(&[3u8; 32], &[4u8; 32]);
+        let identifier = 7;
+
+        let actual =
+            compute_private_pda_with_identifier(&program_id, &[&seed], &npk, &vpk, identifier);
+        let expected =
+            AccountId::for_private_pda(&program_id, &PdaSeed::new(seed), &npk, &vpk, identifier);
+
+        assert_eq!(actual, expected);
+        assert_ne!(
+            actual,
+            compute_private_pda(&program_id, &[&seed], &npk, &vpk)
+        );
     }
 
     #[test]

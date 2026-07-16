@@ -63,6 +63,8 @@ pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
                 },
                 "ProgramId" => IdlType::Primitive("program_id".to_string()),
                 "AccountId" => IdlType::Primitive("account_id".to_string()),
+                "NullifierPublicKey" => IdlType::Primitive("nullifier_public_key".to_string()),
+                "ViewingPublicKey" => IdlType::Primitive("viewing_public_key".to_string()),
                 other => IdlType::Defined {
                     defined: other.to_string(),
                 },

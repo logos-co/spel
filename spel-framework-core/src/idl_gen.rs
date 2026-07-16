@@ -177,7 +177,7 @@ fn generate_idl_inner(
                             .collect();
                         Some(IdlPda {
                             seeds,
-                            private: false,
+                            private: acc.constraints.private_pda,
                         })
                     };
 
@@ -189,7 +189,11 @@ fn generate_idl_inner(
                         owner: None,
                         pda,
                         rest: acc.is_rest,
-                        visibility: vec![],
+                        visibility: if acc.constraints.private_pda {
+                            vec!["private".to_string()]
+                        } else {
+                            vec![]
+                        },
                     }
                 })
                 .collect();
@@ -560,6 +564,7 @@ struct AccountConstraints {
     init: bool,
     signer: bool,
     pda_seeds: Vec<PdaSeedDef>,
+    private_pda: bool,
 }
 
 #[derive(Clone)]
@@ -695,6 +700,13 @@ fn parse_account_constraints(attrs: &[Attribute]) -> Result<AccountConstraints, 
                     let value = meta.value()?;
                     let expr: syn::Expr = value.parse()?;
                     constraints.pda_seeds = parse_pda_expr(&expr)?;
+                    Ok(())
+                } else if meta.path.is_ident("private_pda") {
+                    constraints.private_pda = true;
+                    Ok(())
+                } else if meta.path.is_ident("npk") || meta.path.is_ident("vpk") {
+                    let value = meta.value()?;
+                    let _expr: syn::Expr = value.parse()?;
                     Ok(())
                 } else {
                     Err(meta.error("unknown account constraint"))
@@ -1272,6 +1284,38 @@ mod tests {
         assert!(matches!(&pda.seeds[0], IdlSeed::Const { value } if value == "amm"));
         assert!(matches!(&pda.seeds[1], IdlSeed::Account { path } if path == "base.id"));
         assert!(matches!(&pda.seeds[2], IdlSeed::Arg { path } if path == "quote_id"));
+    }
+
+    #[test]
+    fn account_private_pda_marks_visibility_and_key_types() {
+        let src = r#"
+            #[lez_program]
+            pub mod prog {
+                #[instruction]
+                pub fn ix(
+                    #[account(
+                        private_pda,
+                        pda = seed_const("vault"),
+                        npk = arg("npk"),
+                        vpk = arg("vpk")
+                    )]
+                    acc: AccountWithMetadata,
+                    npk: NullifierPublicKey,
+                    vpk: ViewingPublicKey,
+                ) {}
+            }
+        "#;
+        let instruction = &ok(src).instructions[0];
+        let account = &instruction.accounts[0];
+        let pda = account.pda.as_ref().expect("private PDA should be present");
+        assert!(pda.private);
+        assert_eq!(account.visibility, vec!["private"]);
+        assert!(
+            matches!(&instruction.args[0].type_, IdlType::Primitive(name) if name == "nullifier_public_key")
+        );
+        assert!(
+            matches!(&instruction.args[1].type_, IdlType::Primitive(name) if name == "viewing_public_key")
+        );
     }
 
     // ── Rest accounts (Vec<AccountWithMetadata>) ──────────────────────────────

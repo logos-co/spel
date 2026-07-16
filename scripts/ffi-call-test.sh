@@ -73,19 +73,15 @@ for candidate in wallet "$HOME/bin/wallet" "$LSSA_DIR/target/release/wallet"; do
 done
 [ -n "$WALLET_BIN" ] || fail "wallet not found"
 
-# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
-# new location, fall back to the pre-rc6 path for older LEZ revisions.
-if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
+# Prefer current LEZ layout, fall back to older checkout layout.
+if [ -z "${LEE_WALLET_HOME_DIR:-}" ]; then
     if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
     else
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
+        LEE_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
     fi
 fi
-export NSSA_WALLET_HOME_DIR
-# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
-# Export both so the wallet finds its config on old and new LEZ revisions.
-export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
+export LEE_WALLET_HOME_DIR
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
 # Determine SPEL ref for testing (PR head or commit SHA)
@@ -111,7 +107,7 @@ CLIENT_GEN_BIN="$SPEL_DIR/target/release/spel-client-gen"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
+"$SPEL_BIN" init --lez-rev "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
 cd "$PROJECT_NAME"
 
 # Regenerate lockfiles so the patch takes effect
@@ -198,7 +194,7 @@ cd "$WORK_DIR/$PROJECT_NAME"
 
 log "  Waiting for sequencer..."
 for i in $(seq 1 60); do
-    if curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
+    if curl -s -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
         log "  ✓ Sequencer up"; break
     fi
     kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
@@ -221,7 +217,7 @@ done
 # ─── Step 5: Update wallet config for correct port ────────────────────────
 
 log "Step 5: Updating wallet config for port ${SEQUENCER_PORT}..."
-WALLET_CONFIG="${NSSA_WALLET_HOME_DIR}/wallet_config.json"
+WALLET_CONFIG="${LEE_WALLET_HOME_DIR}/wallet_config.json"
 if [ -f "$WALLET_CONFIG" ]; then
     python3 -c "
 import json
