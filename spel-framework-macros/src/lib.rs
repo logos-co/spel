@@ -1214,6 +1214,10 @@ fn generate_handler_fns(
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
+            // Strip library-declared gate attrs. Inner attrs expand only
+            // after this outer rewrite, so this removes their first and
+            // only expansion: a gate attr on a consumer-authored
+            // instruction contributes no code and no diagnostics here.
             for name in strip_attrs {
                 func.attrs.retain(|a| !a.path().is_ident(name))
             }

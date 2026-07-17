@@ -10,7 +10,12 @@
 //!   and IDL.
 //! - [`discover_extension_instruction_attrs`] returns the library-owned
 //!   gate attribute names that the framework strips from emitted
-//!   handler fns to prevent re-expansion.
+//!   handler fns. Attribute macros on items inside a module only expand
+//!   after the outer `#[lez_program]` rewrite, so this strip removes the
+//!   first (and only possible) expansion: a gate attr on a
+//!   consumer-authored instruction contributes no code, no validation,
+//!   and no diagnostics. Library gates apply exclusively by re-expanding
+//!   on the handlers the library itself emits.
 //! - [`check_duplicate_instruction_names`] rejects name collisions
 //!   between user fns and discovered extensions (or two extensions)
 //!   before they become colliding enum variants, match arms, or IDL
@@ -194,8 +199,13 @@ pub fn discover_extension_instructions<F: FnMut(String)>(
 /// Collect all instruction-level marker attribute names declared by the
 /// consumer's direct path-dep extensions whose `extension_attr` matches an
 /// attribute on the consuming program's mod. Framework strips these from
-/// emitted handler fns so the lib's own gate macros don't re-expand on
-/// them.
+/// emitted handler fns.
+///
+/// Note the stripping semantics: attrs on items inside a module expand
+/// only after the outer `#[lez_program]` rewrite, so the strip prevents
+/// the first and only possible expansion. A gate attr a consumer writes
+/// on their own instruction never runs; library gates take effect by
+/// re-expansion on library-emitted handlers only.
 ///
 /// `Err` on malformed spel metadata, same contract as
 /// [`discover_extension_instructions`].
