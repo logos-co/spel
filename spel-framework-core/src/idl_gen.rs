@@ -18,10 +18,8 @@ use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelId
 use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
 use crate::extension::{
-    check_duplicate_instruction_names, discover_extension_instructions, instruction_source_label,
+    check_duplicate_instruction_names, discover_extensions, instruction_source_label,
 };
-
-pub use crate::dep_walk::find_path_dep_dirs;
 
 /// Error type returned by [`generate_idl_from_file`].
 #[derive(Debug)]
@@ -155,12 +153,11 @@ fn generate_idl_inner(
     }
 
     if let Some(manifest_dir) = manifest_dir {
-        let discovered =
-            discover_extension_instructions(manifest_dir, &program_mod.attrs, &mut |w| {
-                eprintln!("⚠️  {w}")
-            })
+        let mut warn = |w: String| eprintln!("⚠️  {w}");
+        let graph = crate::dep_walk::resolve_dep_graph(manifest_dir, &mut warn);
+        let ext = discover_extensions(&graph.direct_dirs, &program_mod.attrs, &mut warn)
             .map_err(IdlGenError::MalformedExtensionMetadata)?;
-        for (func, crate_path) in discovered {
+        for (func, crate_path) in ext.instructions {
             let mut info = parse_instruction(func)?;
             let name = &info.fn_name;
             info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));

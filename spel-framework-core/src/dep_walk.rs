@@ -1,61 +1,33 @@
-//! Dependency-graph walks shared by IDL generation and extension discovery.
+//! Dependency-graph resolution shared by IDL generation and extension
+//! discovery.
 //!
-//! Two entry points with deliberately different reach:
+//! [`resolve_dep_graph`] resolves a crate's dependencies in one pass and
+//! returns a [`DepGraph`] with two lists of deliberately different reach:
 //!
-//! - [`find_path_dep_dirs`] walks **transitively**: types referenced by a
-//!   program's instructions may come through any runtime dependency, so
-//!   IDL type collection follows the whole graph.
-//! - [`direct_path_dep_dirs`] walks **depth-1 only**: extension discovery
-//!   must never pick up a dependency of a dependency (trust model's
-//!   two-action rule), so it stops at the consumer's own `Cargo.toml`.
+//! - `transitive_dirs`: types referenced by a program's instructions may
+//!   come through any runtime dependency, so IDL type collection follows
+//!   the whole graph.
+//! - `direct_dirs`: extension discovery must never pick up a dependency
+//!   of a dependency (trust model's two-action rule), so it stops at the
+//!   consumer's own `Cargo.toml`.
 //!
-//! Both merge two sources: a manifest walk for path dependencies (fast,
-//! no subprocess) and a `cargo metadata` call for git and registry
-//! dependencies, filtered to normal-kind resolve edges so dev- and
-//! build-deps stay out. All failures here are environmental and go
-//! through the `on_warning` channel; `cargo metadata` being unavailable
-//! degrades to path-only results so expansion stays deterministic.
+//! Both lists merge two sources: a manifest walk for path dependencies
+//! (fast, no subprocess) and a single shared `cargo metadata` call for
+//! git and registry dependencies, filtered to normal-kind resolve edges
+//! so dev- and build-deps stay out. All failures here are environmental
+//! and go through the `on_warning` channel; `cargo metadata` being
+//! unavailable degrades to path-only results so expansion stays
+//! deterministic.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-/// Return the crate-root directories of every runtime dependency of the
-/// `Cargo.toml` nearest to `source_path`.
-///
-/// Path dependencies are resolved transitively via a direct manifest walk
-/// (fast, no subprocess). Git and registry dependencies are additionally
-/// enumerated via a single `cargo metadata --format-version 1` call so that
-/// extensions shipped through git URLs or crates.io remain discoverable by
-/// name-based lookups (extension attrs, wrap specs, inject specs). Results
-/// from both sources are merged and deduplicated by canonical path.
-///
-/// **Transitive path-dependencies** are resolved: if a discovered path
-/// dependency itself declares further path-based dependencies, those are
-/// included as well (with cycle detection).
-///
-/// `[dev-dependencies]` and `[build-dependencies]` are deliberately
-/// excluded: types defined in those crates are not part of the program's
-/// on-chain interface and must not appear in the generated IDL. The
-/// `cargo metadata` merge only reads the runtime resolve tree, so dev and
-/// build deps are naturally filtered out.
-///
-/// In workspace projects the function detects when the nearest `Cargo.toml`
-/// is a workspace root manifest and searches for the actual crate manifest
-/// containing `[dependencies]`; `cargo metadata` is invoked against that
-/// member manifest so its dep graph is what gets enumerated.
-///
-/// `on_warning` is called for non-fatal issues (missing dep directories,
-/// unparseable manifests, `cargo metadata` failures, etc.). Pass `|_| {}`
-/// to ignore warnings. If `cargo metadata` fails or is unavailable the
-/// function silently returns only the path-dep results so downstream
-/// expansion stays deterministic.
-pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: F) -> Vec<PathBuf> {
-    let manifest = match find_crate_manifest(source_path, &mut on_warning) {
-        Some(m) => m,
-        None => return vec![],
-    };
-
-    let content = match std::fs::read_to_string(&manifest) {
+/// Parsed and validated `Cargo.toml`, or `None` after warning.
+fn read_manifest_toml<F: FnMut(String)>(
+    manifest: &Path,
+    on_warning: &mut F,
+) -> Option<toml::Value> {
+    let content = match std::fs::read_to_string(manifest) {
         Ok(c) => c,
         Err(e) => {
             on_warning(format!(
@@ -63,141 +35,130 @@ pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: 
                 manifest.display(),
                 e
             ));
-            return vec![];
+            return None;
         },
     };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
+    match toml::from_str(&content) {
+        Ok(v) => Some(v),
         Err(e) => {
             on_warning(format!(
                 "⚠️  failed to parse manifest '{}': {}",
                 manifest.display(),
                 e
             ));
-            return vec![];
+            None
         },
-    };
-
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return vec![],
-    };
-
-    // Check if this is a workspace root — if so, it has no [dependencies] of its
-    // own.  We need to find the actual crate manifest for the program binary.
-    let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
-
-    let mut dirs = Vec::new();
-    let mut visited = HashSet::new();
-    let metadata_manifest: Option<PathBuf> = if is_workspace {
-        let member = find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning);
-        if let Some(m) = &member {
-            resolve_path_deps_recursive(m, &mut dirs, &mut visited, &mut on_warning);
-        }
-        member
-    } else {
-        resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, &mut on_warning);
-        Some(manifest.clone())
-    };
-
-    // Merge in git and registry dep dirs via `cargo metadata`. Best-effort:
-    // any failure falls back to path-only results.
-
-    if let Some(m) = &metadata_manifest {
-        for dir in find_dep_dirs_via_cargo_metadata(m, &mut on_warning) {
-            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-            if visited.insert(canonical) {
-                dirs.push(dir);
-            }
-        }
     }
-
-    dirs
 }
 
-/// Path dependencies declared directly in this crate's own Cargo.toml.
-/// One level, deliberately not transitive: a dependency of a dependency
-/// can never contribute instructions the consumer did not opt into.
-pub(crate) fn direct_path_dep_dirs<F: FnMut(String)>(
-    manifest_dir: &Path,
-    on_warning: &mut F,
-) -> Vec<PathBuf> {
-    let Some(manifest) = find_crate_manifest(manifest_dir, &mut |w| on_warning(w)) else {
-        on_warning(format!(
-            "could not locate a crate manifest from '{}'",
-            manifest_dir.display()
-        ));
-        return vec![];
-    };
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return vec![],
-    };
-    let content = match std::fs::read_to_string(&manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
-        },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
-        },
+/// Everything the framework needs to know about a crate's dependency
+/// graph, resolved in one pass with one `cargo metadata` invocation.
+pub struct DepGraph {
+    /// Transitive runtime dependency dirs. Feeds IDL type collection:
+    /// instruction-arg types may come through any runtime dependency.
+    pub transitive_dirs: Vec<PathBuf>,
+    /// Depth-1 dependency dirs only. Feeds extension discovery: the trust
+    /// model's two-action rule forbids transitive discovery.
+    pub direct_dirs: Vec<PathBuf>,
+}
+
+/// Resolve the dependency graph of the crate owning `start` (a source
+/// file or a crate directory).
+///
+/// Resolution: nearest `Cargo.toml`, with workspace roots resolved to the
+/// member manifest containing `start`. Path dependencies come from a
+/// manifest walk (no subprocess); git and registry dependencies from a
+/// single `cargo metadata --offline` call shared by both result lists.
+/// If `cargo metadata` fails, both lists degrade to path-only results.
+pub fn resolve_dep_graph<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> DepGraph {
+    let empty = DepGraph {
+        transitive_dirs: Vec::new(),
+        direct_dirs: Vec::new(),
     };
 
-    let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) else {
-        return vec![];
+    let Some(manifest) = find_crate_manifest(start, on_warning) else {
+        return empty;
     };
-    let mut dirs = Vec::new();
-    for (name, dep) in table {
-        if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-            let dir = manifest_dir.join(rel);
-            if dir.is_dir() {
-                dirs.push(dir);
-            } else {
-                on_warning(format!(
-                    "path dependency '{}' points to non-existent directory: {}",
-                    name,
-                    dir.display()
-                ));
+    let Some(value) = read_manifest_toml(&manifest, on_warning) else {
+        return empty;
+    };
+    let Some(manifest_dir) = manifest.parent().map(Path::to_path_buf) else {
+        return empty;
+    };
+
+    // Workspace roots have no [dependencies] of their own: resolve to the
+    // member manifest that contains `start`.
+    let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
+    let (manifest, value) = if is_workspace {
+        let Some(member) = find_member_manifest(&manifest_dir, &value, start, on_warning) else {
+            return empty;
+        };
+        let Some(member_value) = read_manifest_toml(&member, on_warning) else {
+            return empty;
+        };
+        (member, member_value)
+    } else {
+        (manifest, value)
+    };
+    let Some(manifest_dir) = manifest.parent().map(Path::to_path_buf) else {
+        return empty;
+    };
+
+    // Transitive path walk. `visited` also excludes the crate itself from
+    // the metadata merge below.
+    let mut transitive_dirs = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_path_deps_recursive(&manifest, &mut transitive_dirs, &mut visited, on_warning);
+
+    // Direct path deps straight from the [dependencies] table.
+    let mut direct_dirs = Vec::new();
+    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
+        for (name, dep) in table {
+            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
+                let dir = manifest_dir.join(rel);
+                if dir.is_dir() {
+                    direct_dirs.push(dir);
+                } else {
+                    on_warning(format!(
+                        "path dependency '{}' points to non-existent directory: {}",
+                        name,
+                        dir.display()
+                    ));
+                }
             }
         }
     }
-    // Merge depth-1 git/registry deps from `cargo metadata` so extensions
-    // delivered as git or crates.io libraries are discoverable. Still
-    // direct-only: the trust model's two-action rule is unchanged.
-    let mut seen: HashSet<PathBuf> = dirs
-        .iter()
-        .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
-        .collect();
-    for dir in direct_normal_dep_dirs(&manifest, on_warning) {
-        let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-        if seen.insert(canonical) {
-            dirs.push(dir);
+
+    // One subprocess feeds both merges.
+    if let Some(meta) = cargo_metadata_json(&manifest, on_warning) {
+        for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if visited.insert(canonical) {
+                transitive_dirs.push(dir);
+            }
+        }
+        let mut seen: HashSet<PathBuf> = direct_dirs
+            .iter()
+            .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+            .collect();
+        for dir in direct_normal_dep_dirs(&meta, &manifest) {
+            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+            if seen.insert(canonical) {
+                direct_dirs.push(dir);
+            }
         }
     }
 
-    dirs
+    DepGraph {
+        transitive_dirs,
+        direct_dirs,
+    }
 }
 
 // ── Manifest location ────────────────────────────────────────────────────
 
 /// Walk up from `start` to find the nearest `Cargo.toml`.
-fn find_crate_manifest<F: FnMut(String)>(
-    start: &Path,
-    on_warning: &mut F,
-) -> Option<PathBuf> {
+fn find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> Option<PathBuf> {
     let mut dir: &Path = if start.is_file() {
         start.parent()?
     } else {
@@ -456,17 +417,9 @@ fn cargo_metadata_json<F: FnMut(String)>(
     }
 }
 
-/// Transitive runtime (normal-kind) dependency dirs of `manifest` via
-/// `cargo metadata`, excluding workspace members and the crate itself.
-/// Feeds the IDL type-collection walk in [`find_path_dep_dirs`].
-fn find_dep_dirs_via_cargo_metadata<F: FnMut(String)>(
-    manifest: &Path,
-    on_warning: &mut F,
-) -> Vec<PathBuf> {
-    let Some(meta) = cargo_metadata_json(manifest, on_warning) else {
-        return Vec::new();
-    };
-
+/// Transitive runtime (normal-kind) dependency dirs from parsed metadata,
+/// excluding workspace members and the crate itself.
+fn find_dep_dirs_via_cargo_metadata(meta: &serde_json::Value, manifest: &Path) -> Vec<PathBuf> {
     let workspace_members: HashSet<String> = meta
         .get("workspace_members")
         .and_then(|v| v.as_array())
@@ -480,7 +433,7 @@ fn find_dep_dirs_via_cargo_metadata<F: FnMut(String)>(
     // Walk resolve.nodes from the root, keeping only edges whose dep_kinds
     // include the normal kind (represented as `null` in cargo metadata's
     // JSON) so dev- and build-dependencies stay out of the returned set.
-    let normal_reachable = collect_normal_reachable(&meta, manifest);
+    let normal_reachable = collect_normal_reachable(meta, manifest);
 
     let source_canonical = manifest.canonicalize().ok();
     let mut dirs = Vec::new();
@@ -519,19 +472,10 @@ fn find_dep_dirs_via_cargo_metadata<F: FnMut(String)>(
     dirs
 }
 
-/// Depth-1 normal-kind dependency dirs of `manifest` via `cargo metadata`.
-/// Lets extension discovery see git- and registry-delivered libraries
-/// without widening discovery to transitive deps. Path deps appear here
-/// too. Callers dedup against the manifest walk. Environmental failures
-/// warn and return empty so discovery degrades to path-only.
-fn direct_normal_dep_dirs<F: FnMut(String)>(
-    manifest: &Path,
-    on_warning: &mut F,
-) -> Vec<PathBuf> {
-    let Some(meta) = cargo_metadata_json(manifest, on_warning) else {
-        return Vec::new();
-    };
-    let Some(root_id) = root_package_id(&meta, manifest) else {
+/// Depth-1 normal-kind dependency dirs from parsed metadata. Path deps
+/// appear here too; the caller dedups against the manifest walk.
+fn direct_normal_dep_dirs(meta: &serde_json::Value, manifest: &Path) -> Vec<PathBuf> {
+    let Some(root_id) = root_package_id(meta, manifest) else {
         return Vec::new();
     };
 
@@ -609,10 +553,7 @@ fn root_package_id(meta: &serde_json::Value, manifest: &Path) -> Option<String> 
 /// the set of reachable package IDs (excluding the root itself), or `None`
 /// if the resolve tree is missing so callers fall back to unfiltered
 /// behaviour.
-fn collect_normal_reachable(
-    meta: &serde_json::Value,
-    manifest: &Path,
-) -> Option<HashSet<String>> {
+fn collect_normal_reachable(meta: &serde_json::Value, manifest: &Path) -> Option<HashSet<String>> {
     let resolve = meta.get("resolve")?;
     let nodes = resolve.get("nodes")?.as_array()?;
 
@@ -669,7 +610,7 @@ mod tests {
     use crate::test_utils::TempDir;
 
     #[test]
-    fn find_path_dep_dirs_returns_local_path_deps() {
+    fn resolve_dep_graph_returns_local_path_deps() {
         let tmp = TempDir::new("find-path-deps");
 
         tmp.write(
@@ -697,7 +638,7 @@ token_core = { path = "../../core" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program, |_| {});
+        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1);
         assert!(
             dirs[0].ends_with("core"),
@@ -707,11 +648,11 @@ token_core = { path = "../../core" }
     }
 
     #[test]
-    fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
+    fn resolve_dep_graph_falls_back_to_path_only_when_metadata_fails() {
         // The fake `https://example.com/repo.git` URL makes `cargo metadata`
         // fail (cannot resolve the git dep). The registry version dep on
         // `serde` also fails because the temporary workspace has no
-        // Cargo.lock. `find_path_dep_dirs` should degrade gracefully and
+        // Cargo.lock. `resolve_dep_graph` should degrade gracefully and
         // still return the path-dep, proving the fallback path works.
         let tmp = TempDir::new("find-path-deps-filter");
 
@@ -742,13 +683,13 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program, |_| {});
+        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with("core"));
     }
 
     #[test]
-    fn find_path_dep_dirs_ignores_dev_and_build_deps() {
+    fn resolve_dep_graph_ignores_dev_and_build_deps() {
         let tmp = TempDir::new("find-path-deps-dev-build");
 
         tmp.write(
@@ -789,13 +730,13 @@ test_helpers = { path = "../../test_helpers" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program, |_| {});
+        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
         assert!(dirs[0].ends_with("core"));
     }
 
     #[test]
-    fn find_path_dep_dirs_resolves_transitive_deps() {
+    fn resolve_dep_graph_resolves_transitive_deps() {
         let tmp = TempDir::new("transitive-deps");
 
         // shared_types -> core -> guest
@@ -838,7 +779,7 @@ token_core = { path = "../../core" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = find_path_dep_dirs(&program, |_| {});
+        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
         let names: Vec<&str> = dirs
             .iter()
@@ -849,7 +790,7 @@ token_core = { path = "../../core" }
     }
 
     #[test]
-    fn find_path_dep_dirs_dedups_diamond_graph() {
+    fn resolve_dep_graph_dedups_diamond_graph() {
         // Diamond dep graph: sample → ext_a (direct), sample → ext_b → ext_a (transitive).
         // The buggy version of `resolve_path_deps_recursive` pushes ext_a to the
         // returned Vec twice — once via the direct edge, once via ext_b's transitive
@@ -904,7 +845,7 @@ ext-b = { path = "../ext-b" }
         );
         tmp.write("sample/src/lib.rs", "");
 
-        let dirs = find_path_dep_dirs(&tmp.path().join("sample"), |_| {});
+        let dirs = resolve_dep_graph(&tmp.path().join("sample"), &mut |_| {}).transitive_dirs;
 
         // Canonicalise every returned dir, count unique canonical paths.
         // The dirs Vec MUST have no duplicate canonical paths — including ext-a,
@@ -917,7 +858,7 @@ ext-b = { path = "../ext-b" }
         assert_eq!(
             unique.len(),
             dirs.len(),
-            "find_path_dep_dirs returned duplicate canonical paths: {:?}",
+            "resolve_dep_graph returned duplicate canonical paths: {:?}",
             dirs
         );
 

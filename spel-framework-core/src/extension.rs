@@ -1,21 +1,20 @@
-//! Path-dep extension discovery for SPEL programs.
+//! Extension discovery for SPEL programs.
 //!
-//! Scans the consuming program's **direct** path-dependencies for crates
-//! that declare `[package.metadata.spel]` in their `Cargo.toml`. Each
-//! qualifying crate exposes its `#[instruction]` fns (and optional gate
-//! attributes) through this module's discovery API:
+//! Scans the consuming program's **direct** dependencies (path, git, or
+//! registry, resolved by [`crate::dep_walk`]) for crates that declare
+//! `[package.metadata.spel]` in their `Cargo.toml`. Each qualifying
+//! crate contributes through one entry point:
 //!
-//! - [`discover_extension_instructions`] returns the cross-crate
-//!   `#[instruction]` fns to be merged into the consumer's dispatcher
-//!   and IDL.
-//! - [`discover_extension_instruction_attrs`] returns the library-owned
-//!   gate attribute names that the framework strips from emitted
-//!   handler fns. Attribute macros on items inside a module only expand
-//!   after the outer `#[lez_program]` rewrite, so this strip removes the
-//!   first (and only possible) expansion: a gate attr on a
-//!   consumer-authored instruction contributes no code, no validation,
-//!   and no diagnostics. Library gates apply exclusively by re-expanding
-//!   on the handlers the library itself emits.
+//! - [`discover_extensions`] returns an [`ExtensionDiscoveries`]: the
+//!   cross-crate `#[instruction]` fns to be merged into the consumer's
+//!   dispatcher and IDL, and the library-owned gate attribute names the
+//!   framework strips from emitted handler fns. Attribute macros on
+//!   items inside a module only expand after the outer `#[lez_program]`
+//!   rewrite, so this strip removes the first (and only possible)
+//!   expansion: a gate attr on a consumer-authored instruction
+//!   contributes no code, no validation, and no diagnostics. Library
+//!   gates apply exclusively by re-expanding on the handlers the
+//!   library itself emits.
 //! - [`check_duplicate_instruction_names`] rejects name collisions
 //!   between user fns and discovered extensions (or two extensions)
 //!   before they become colliding enum variants, match arms, or IDL
@@ -45,16 +44,82 @@
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
 //! `read_spel_instruction_attrs`, `collect_instruction_fns`) are
-//! module-private; consumers go through the two `discover_*` entry
-//! points.
+//! module-private; consumers go through [`discover_extensions`].
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use syn::Attribute;
 
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
-use crate::dep_walk::direct_path_dep_dirs;
+/// What the consumer's direct dependencies contribute to its program:
+/// cross-crate instruction fns and library-owned gate attribute names,
+/// collected in one pass per dependency.
+pub struct ExtensionDiscoveries {
+    /// One entry per discovered `#[instruction]` fn, with the absolute
+    /// crate path to call it from the consumer (e.g. `::admin_authority`),
+    /// derived from the dependency's `[package].name`.
+    pub instructions: Vec<(syn::ItemFn, syn::Path)>,
+    /// Instruction-level marker attr names the libraries declare. The
+    /// framework strips these from emitted handler fns.
+    pub instruction_attrs: Vec<String>,
+}
+
+/// Scan `dep_dirs` (the consumer's direct dependencies) for SPEL
+/// extension libraries whose `extension_attr` metadata matches an
+/// attribute on the consuming program's mod.
+///
+/// # Errors
+///
+/// `Err` on malformed spel metadata (callers surface it as a compile
+/// error). Environmental skips are reported via `on_warning`.
+pub fn discover_extensions<F: FnMut(String)>(
+    dep_dirs: &[PathBuf],
+    mod_attrs: &[Attribute],
+    on_warning: &mut F,
+) -> Result<ExtensionDiscoveries, String> {
+    let mut instructions = Vec::new();
+    let mut instruction_attrs = Vec::new();
+
+    for dep_dir in dep_dirs {
+        let Some(ext_attr) = read_spel_extension_attr(dep_dir)? else {
+            continue;
+        };
+        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
+            continue;
+        }
+
+        let attrs = read_spel_instruction_attrs(dep_dir)?;
+
+        let Some(crate_name) = read_package_ident(dep_dir) else {
+            on_warning(format!(
+                "extension at '{}' matched module attribute but has no [package].name, skipped",
+                dep_dir.display()
+            ));
+            continue;
+        };
+        let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
+        let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
+
+        let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
+        let funcs = collect_instruction_fns(&items);
+        if funcs.is_empty() && attrs.is_empty() {
+            on_warning(format!(
+                "extension '{crate_name}' matched #[#{ext_attr}] but contributes no \
+                #[instruction] fns and no instruction_attrs"
+            ));
+        }
+        for func in funcs {
+            instructions.push((func, crate_path.clone()));
+        }
+        instruction_attrs.extend(attrs);
+    }
+
+    Ok(ExtensionDiscoveries {
+        instructions,
+        instruction_attrs,
+    })
+}
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
 ///
@@ -148,92 +213,6 @@ fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> 
         .collect()
 }
 
-/// Scan the consumer's direct path-deps for SPEL extension libraries whose
-/// `extension_attr` metadata matches an attribute on the consuming
-/// program's mod. Returns one `(ItemFn, crate_path)` per discovered
-/// `#[instruction]` fn, where `crate_path` is the absolute path to call
-/// the fn from the consumer (e.g. `::admin_authority`), derived from the
-/// dependency's `[package].name`.
-///
-/// # Errors
-///
-/// `Err` on malformed spel metadata (callers surface it as a compile
-/// error). Environmental skips are reported via `on_warning`.
-pub fn discover_extension_instructions<F: FnMut(String)>(
-    manifest_dir: &Path,
-    mod_attrs: &[Attribute],
-    on_warning: &mut F,
-) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
-    let dep_dirs = direct_path_dep_dirs(manifest_dir, on_warning);
-
-    let mut out = Vec::new();
-    for dep_dir in dep_dirs {
-        let Some(ext_attr) = read_spel_extension_attr(&dep_dir)? else {
-            continue;
-        };
-        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
-            continue;
-        }
-
-        let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(&dep_dir));
-        let Some(crate_name) = read_package_ident(&dep_dir) else {
-            on_warning(format!(
-                "extension at '{}' matched a module attribute but has no [package].name, skipped",
-                dep_dir.display()
-            ));
-            continue;
-        };
-        let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
-        let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
-
-        let funcs = collect_instruction_fns(&items);
-        if funcs.is_empty() && read_spel_instruction_attrs(&dep_dir)?.is_empty() {
-            on_warning(format!(
-                "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
-                #[instruction] fns and no instruction_attrs"
-            ));
-        }
-        for func in funcs {
-            out.push((func, crate_path.clone()));
-        }
-    }
-    Ok(out)
-}
-
-/// Collect all instruction-level marker attribute names declared by the
-/// consumer's direct path-dep extensions whose `extension_attr` matches an
-/// attribute on the consuming program's mod. Framework strips these from
-/// emitted handler fns.
-///
-/// Note the stripping semantics: attrs on items inside a module expand
-/// only after the outer `#[lez_program]` rewrite, so the strip prevents
-/// the first and only possible expansion. A gate attr a consumer writes
-/// on their own instruction never runs; library gates take effect by
-/// re-expansion on library-emitted handlers only.
-///
-/// # Errors
-///
-/// `Err` on malformed spel metadata, same contract as
-/// [`discover_extension_instructions`].
-pub fn discover_extension_instruction_attrs<F: FnMut(String)>(
-    manifest_dir: &Path,
-    mod_attrs: &[Attribute],
-    on_warning: &mut F,
-) -> Result<Vec<String>, String> {
-    let dep_dirs = direct_path_dep_dirs(manifest_dir, on_warning);
-    let mut out = Vec::new();
-    for dep_dir in dep_dirs {
-        let Some(ext_attr) = read_spel_extension_attr(&dep_dir)? else {
-            continue;
-        };
-        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
-            continue;
-        };
-        out.extend(read_spel_instruction_attrs(&dep_dir)?);
-    }
-    Ok(out)
-}
-
 /// Reject duplicate instruction names across user fns and discovered
 /// extensions. Duplicates would produce colliding enum variants, match
 /// arms, and IDL discriminators, or silently shadow one another.
@@ -285,6 +264,26 @@ mod tests {
     use super::*;
     use crate::idl::{IdlSeed, IdlType, SpelIdl};
     use crate::test_utils::TempDir;
+
+    /// Old two-call discovery shape, kept for the tests: resolve the
+    /// graph, then split the discoveries.
+    fn discover_instructions<F: FnMut(String)>(
+        dir: &Path,
+        mod_attrs: &[Attribute],
+        on_warning: &mut F,
+    ) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
+        let graph = crate::dep_walk::resolve_dep_graph(dir, on_warning);
+        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
+    }
+
+    fn discover_attrs<F: FnMut(String)>(
+        dir: &Path,
+        mod_attrs: &[Attribute],
+        on_warning: &mut F,
+    ) -> Result<Vec<String>, String> {
+        let graph = crate::dep_walk::resolve_dep_graph(dir, on_warning);
+        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instruction_attrs)
+    }
 
     #[test]
     fn read_spel_extension_attr_returns_declared_name() {
@@ -370,8 +369,7 @@ my-ext = { path = "../my-ext" }
         );
 
         let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .unwrap();
+            discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {}).unwrap();
         assert_eq!(found.len(), 1);
         let (func, crate_path) = &found[0];
         assert_eq!(func.sig.ident.to_string(), "ext_action");
@@ -432,8 +430,7 @@ my-ext = { path = "../renamed-checkout" }
         );
 
         let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .unwrap();
+            discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {}).unwrap();
         assert_eq!(found.len(), 1);
         let (_, crate_path) = &found[0];
         let segs: Vec<String> = crate_path
@@ -507,8 +504,7 @@ helper = { path = "../helper" }
         );
 
         let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .unwrap();
+            discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {}).unwrap();
         assert!(
             found.is_empty(),
             "transitive dep must never contribute instructions, got: {:?}",
@@ -564,9 +560,8 @@ extension_attr = 42
 "#,
             "",
         );
-        let err =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .expect_err("wrong-shaped extension_attr must fail, not degrade to no-extension");
+        let err = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect_err("wrong-shaped extension_attr must fail, not degrade to no-extension");
         assert!(err.contains("extension_attr"), "unhelpful error: {err}");
     }
 
@@ -582,9 +577,8 @@ instruction_attrs = "require_x"
 "#,
             "",
         );
-        let err =
-            discover_extension_instruction_attrs(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .expect_err("non-array instruction_attrs must fail");
+        let err = discover_attrs(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect_err("non-array instruction_attrs must fail");
         assert!(err.contains("instruction_attrs"), "unhelpful error: {err}");
     }
 
@@ -596,11 +590,10 @@ instruction_attrs = "require_x"
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[my_ext]);
 
         let mut warnings = Vec::new();
-        let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
-                warnings.push(w)
-            })
-            .unwrap();
+        let found = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .unwrap();
         assert!(found.is_empty());
         assert!(!warnings.is_empty(), "failure must be loud, got silence");
     }
@@ -618,11 +611,10 @@ instruction_attrs = ["require_x"]
             "", // no #[instruction] fns: a pure gate library is a valid extension
         );
         let mut warnings = Vec::new();
-        let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
-                warnings.push(w)
-            })
-            .unwrap();
+        let found = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .unwrap();
         assert!(found.is_empty());
         assert!(
             warnings.is_empty(),
@@ -642,11 +634,10 @@ extension_attr = "my_ext"
             "", // no fns AND no gate attrs: almost certainly a broken layout
         );
         let mut warnings = Vec::new();
-        let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
-                warnings.push(w)
-            })
-            .unwrap();
+        let found = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .unwrap();
         assert!(found.is_empty());
         assert!(
             warnings.iter().any(|w| w.contains("my_ext")),
@@ -691,8 +682,7 @@ my-ext = { path = "../my-ext" }
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
 
         let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .unwrap();
+            discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {}).unwrap();
         assert!(found.is_empty(), "should skip — no matching attr on mod");
     }
 
@@ -730,8 +720,7 @@ lib-no-meta = { path = "../lib-no-meta" }
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program] #[whatever]);
 
         let found =
-            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-                .unwrap();
+            discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {}).unwrap();
         assert!(found.is_empty(), "non-extension deps must not be scanned");
     }
 

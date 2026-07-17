@@ -102,9 +102,10 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// containing `[dependencies]`.
 pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
     let mut warnings = Vec::new();
-    let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(source_path, |w| {
+    let dirs = spel_framework_core::dep_walk::resolve_dep_graph(source_path, &mut |w| {
         warnings.push(w);
-    });
+    })
+    .transitive_dirs;
     PathDepResult { dirs, warnings }
 }
 
