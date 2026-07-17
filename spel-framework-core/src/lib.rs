@@ -19,6 +19,9 @@ pub mod extension;
 #[cfg(feature = "idl-gen")]
 pub mod idl_gen;
 
+#[cfg(feature = "idl-gen")]
+pub mod dep_walk;
+
 #[cfg(test)]
 mod test_utils;
 

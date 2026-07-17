@@ -261,13 +261,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         |i| {
             (
                 i.fn_name.to_string(),
-                match &i.external_call_path {
-                    Some(p) => match p.segments.first() {
-                        Some(seg) => format!("extension {}", seg.ident),
-                        None => "an extension".to_string(),
-                    },
-                    None => "this module".to_string(),
-                },
+                spel_framework_core::extension::instruction_source_label(
+                    i.external_call_path.as_ref(),
+                ),
             )
         },
     ))
@@ -470,8 +466,12 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                             }
                             // Also include items from path-dependency crates, so types defined in
                             // extension libraries (account types, instruction-arg types) reach the IDL.
-                            let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&manifest, |_| {});
-                            let (extra_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
+                            let dep_dirs =
+                                spel_framework_core::idl_gen::find_path_dep_dirs(&manifest, |_| {});
+                            let (extra_items, _) =
+                                spel_framework_core::idl_gen::collect_items_from_crate_dirs(
+                                    &dep_dirs,
+                                );
                             all_items.extend(extra_items);
                             result = account_types::collect_account_types(&all_items);
                             break;
@@ -2151,13 +2151,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         |i| {
             (
                 i.fn_name.to_string(),
-                match &i.external_call_path {
-                    Some(p) => match p.segments.first() {
-                        Some(seg) => format!("extension {}", seg.ident),
-                        None => "an extension".to_string(),
-                    },
-                    None => "this module".to_string(),
-                },
+                spel_framework_core::extension::instruction_source_label(
+                    i.external_call_path.as_ref(),
+                ),
             )
         },
     ))
@@ -2322,129 +2318,6 @@ mod tests {
         } else {
             panic!("expected struct");
         }
-    }
-
-    // ── find_path_dep_dirs (via spel-framework-core) ───────────────────────
-
-    #[test]
-    fn find_path_dep_dirs_returns_local_path_deps() {
-        let tmp = TempDir::new("find-path-deps-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1);
-        assert!(
-            dirs[0].ends_with("core"),
-            "expected core dir, got {:?}",
-            dirs[0]
-        );
-    }
-
-    #[test]
-    fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
-        // The fake `https://example.com/repo.git` URL makes `cargo metadata`
-        // fail (cannot resolve the git dep). The registry version dep on
-        // `serde` also fails because the temporary workspace has no
-        // Cargo.lock. `find_path_dep_dirs` should degrade gracefully and
-        // still return the path-dep, proving the fallback path works.
-        let tmp = TempDir::new("find-path-deps-filter-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\n\
-             token_core = { path = \"../../core\" }\n\
-             serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("core"));
-    }
-
-    #[test]
-    fn find_path_dep_dirs_ignores_dev_and_build_deps() {
-        let tmp = TempDir::new("find-path-deps-dev-build-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-        tmp.write(
-            "test_helpers/Cargo.toml",
-            "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("test_helpers/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\n\
-             token_core = { path = \"../../core\" }\n\n\
-             [dev-dependencies]\n\
-             test_helpers = { path = \"../../test_helpers\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
-        assert!(dirs[0].ends_with("core"));
-    }
-
-    #[test]
-    fn find_path_dep_dirs_resolves_transitive_deps() {
-        let tmp = TempDir::new("transitive-deps-macro");
-
-        // shared_types -> core -> guest
-        tmp.write(
-            "shared/Cargo.toml",
-            "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("shared/src/lib.rs", "");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\nshared_types = { path = \"../shared\" }\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
-        let names: Vec<&str> = dirs
-            .iter()
-            .map(|d| d.file_name().unwrap().to_str().unwrap())
-            .collect();
-        assert!(names.contains(&"core"));
-        assert!(names.contains(&"shared"));
     }
 
     // ── expand_generate_idl with path deps ─────────────────────────────────

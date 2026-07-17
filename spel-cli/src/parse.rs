@@ -23,7 +23,7 @@ pub enum ParsedValue {
         index: u32,
         fields: Vec<(String, IdlType, ParsedValue)>,
     },
-    Raw(String),                // fallback
+    Raw(String), // fallback
 }
 
 impl std::fmt::Display for ParsedValue {
@@ -61,7 +61,7 @@ impl std::fmt::Display for ParsedValue {
             },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
-            ParsedValue::EnumVariant {name, fields, .. }=> {
+            ParsedValue::EnumVariant { name, fields, .. } => {
                 if fields.is_empty() {
                     write!(f, "{}", name)
                 } else {
@@ -71,7 +71,7 @@ impl std::fmt::Display for ParsedValue {
                         .collect();
                     write!(f, "{} {{ {} }}", name, parts.join(", "))
                 }
-            } 
+            },
             ParsedValue::Raw(s) => write!(f, "{}", s),
         }
     }
@@ -87,7 +87,9 @@ pub fn parse_value(raw: &str, ty: &IdlType, types: &[IdlTypeDef]) -> Result<Pars
             if raw == "none" || raw == "null" || raw.is_empty() {
                 Ok(ParsedValue::None)
             } else {
-                Ok(ParsedValue::Some(Box::new(parse_value(raw, option, types)?)))
+                Ok(ParsedValue::Some(Box::new(parse_value(
+                    raw, option, types,
+                )?)))
             }
         },
         IdlType::Defined { defined } => parse_defined(raw, defined, types),
@@ -95,7 +97,7 @@ pub fn parse_value(raw: &str, ty: &IdlType, types: &[IdlTypeDef]) -> Result<Pars
 }
 
 /// Parse a user-defined type by looking its definition up in the IDL.
-/// 
+///
 /// Accepted syntax:
 /// - a bare variant name for unit variants
 /// - a one-key JSON object for payload variants
@@ -116,12 +118,12 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
         if !variant.fields.is_empty() {
             return Err(format!(
                 "variant '{raw}' of '{name}' has fields; pass JSON: {{\"{raw}\": {{ ... }} }}"
-            ));          
+            ));
         }
         return Ok(ParsedValue::EnumVariant {
             name: variant.name.clone(),
             index: index as u32,
-            fields: vec![]
+            fields: vec![],
         });
     }
 
@@ -133,10 +135,9 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
             names.join(", ")
         )
     })?;
-    let obj = json
-        .as_object()
-        .filter(|o| o.len() == 1)
-        .ok_or_else(|| "expected a JSON object with exactly one key (the variant name)".to_string())?;
+    let obj = json.as_object().filter(|o| o.len() == 1).ok_or_else(|| {
+        "expected a JSON object with exactly one key (the variant name)".to_string()
+    })?;
     let (variant_name, payload) = obj.iter().next().expect("len checked above");
 
     let (index, variant) = def
@@ -150,7 +151,10 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
     let mut fields = Vec::new();
     for field in &variant.fields {
         let field_json = payload.get(&field.name).ok_or_else(|| {
-            format!("missing field '{}' for variant '{variant_name}'", field.name)
+            format!(
+                "missing field '{}' for variant '{variant_name}'",
+                field.name
+            )
         })?;
         // parse_value expects the CLI's raw-string form: strings drop their
         // JSON quotes (hex stays hex), everything else keeps its JSON text.
@@ -161,12 +165,12 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
         let value = parse_value(&field_raw, &field.type_, types)
             .map_err(|e| format!("field '{}': {e}", field.name))?;
         fields.push((field.name.clone(), field.type_.clone(), value));
-    } 
+    }
 
-    Ok(ParsedValue::EnumVariant { 
+    Ok(ParsedValue::EnumVariant {
         name: variant.name.clone(),
-        index: index as u32, 
-        fields
+        index: index as u32,
+        fields,
     })
 }
 
@@ -418,7 +422,8 @@ mod tests {
         };
 
         let hex_input = "4343434343434343434343434343434343434343434343434343434343434343";
-        let parsed = parse_value(hex_input, &idl_type, &[]).expect("should parse [u8; 32] from hex");
+        let parsed =
+            parse_value(hex_input, &idl_type, &[]).expect("should parse [u8; 32] from hex");
 
         // Must be ByteArray, not Raw — Raw causes PDA computation to fail
         match &parsed {

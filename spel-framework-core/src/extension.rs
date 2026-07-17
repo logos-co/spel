@@ -48,11 +48,13 @@
 //! module-private; consumers go through the two `discover_*` entry
 //! points.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use syn::Attribute;
 
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
+
+use crate::dep_walk::direct_path_dep_dirs;
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
 ///
@@ -153,6 +155,8 @@ fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> 
 /// the fn from the consumer (e.g. `::admin_authority`), derived from the
 /// dependency's `[package].name`.
 ///
+/// # Errors
+///
 /// `Err` on malformed spel metadata (callers surface it as a compile
 /// error). Environmental skips are reported via `on_warning`.
 pub fn discover_extension_instructions<F: FnMut(String)>(
@@ -160,7 +164,7 @@ pub fn discover_extension_instructions<F: FnMut(String)>(
     mod_attrs: &[Attribute],
     on_warning: &mut F,
 ) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
-    let dep_dirs = direct_path_dep_dirs(&manifest_dir, on_warning);
+    let dep_dirs = direct_path_dep_dirs(manifest_dir, on_warning);
 
     let mut out = Vec::new();
     for dep_dir in dep_dirs {
@@ -171,7 +175,7 @@ pub fn discover_extension_instructions<F: FnMut(String)>(
             continue;
         }
 
-        let (items, _) = collect_items_from_crate_dirs(&[dep_dir.clone()]);
+        let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(&dep_dir));
         let Some(crate_name) = read_package_ident(&dep_dir) else {
             on_warning(format!(
                 "extension at '{}' matched a module attribute but has no [package].name, skipped",
@@ -207,6 +211,8 @@ pub fn discover_extension_instructions<F: FnMut(String)>(
 /// on their own instruction never runs; library gates take effect by
 /// re-expansion on library-emitted handlers only.
 ///
+/// # Errors
+///
 /// `Err` on malformed spel metadata, same contract as
 /// [`discover_extension_instructions`].
 pub fn discover_extension_instruction_attrs<F: FnMut(String)>(
@@ -231,8 +237,11 @@ pub fn discover_extension_instruction_attrs<F: FnMut(String)>(
 /// Reject duplicate instruction names across user fns and discovered
 /// extensions. Duplicates would produce colliding enum variants, match
 /// arms, and IDL discriminators, or silently shadow one another.
-/// `instructions` yields `(fn name, source_label)`; first seen wins,
-/// the second sighting reports both sources.
+/// `instructions` yields `(fn name, source_label)`; first seen wins.
+///
+/// # Errors
+///
+/// `Err` on the second sighting of a name, naming both sources.
 pub fn check_duplicate_instruction_names<I>(instructions: I) -> Result<(), String>
 where
     I: IntoIterator<Item = (String, String)>,
@@ -249,64 +258,15 @@ where
     Ok(())
 }
 
-/// Path dependencies declared directly in this crate's own Cargo.toml.
-/// One level, deliberately not transitive: a dependency of a dependency
-/// can never contribute instructions the consumer did not opt into.
-fn direct_path_dep_dirs<F: FnMut(String)>(manifest_dir: &Path, on_warning: &mut F) -> Vec<PathBuf> {
-    let Some(manifest) = crate::idl_gen::_find_crate_manifest(manifest_dir, &mut |w| on_warning(w))
-    else {
-        on_warning(format!(
-            "could not locate a crate manifest from '{}'",
-            manifest_dir.display()
-        ));
-        return vec![];
-    };
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return vec![],
-    };
-    let content = match std::fs::read_to_string(&manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
+/// Human label for a duplicate-name report: which side owns the fn.
+pub fn instruction_source_label(external_call_path: Option<&syn::Path>) -> String {
+    match external_call_path {
+        Some(p) => match p.segments.first() {
+            Some(seg) => format!("extension {}", seg.ident),
+            None => "an extension".to_string(),
         },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
-        },
-    };
-
-    let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) else {
-        return vec![];
-    };
-    let mut dirs = Vec::new();
-    for (name, dep) in table {
-        if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-            let dir = manifest_dir.join(rel);
-            if dir.is_dir() {
-                dirs.push(dir);
-            } else {
-                on_warning(format!(
-                    "path dependency '{}' points to non-existent directory: {}",
-                    name,
-                    dir.display()
-                ));
-            }
-        }
+        None => "this module".to_string(),
     }
-    dirs
 }
 
 /// [package].name from crate dir's manifest, `-` mapped to `_`, for use

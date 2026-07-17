@@ -133,7 +133,7 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
                     .collect();
                 Ok(DynamicValue::StructVariant(*index, converted?))
             }
-        }
+        },
         _ => Err(SerializeError::TypeMismatch {
             expected: format!("{:?}", ty),
             got: format!("{:?}", val),
@@ -394,7 +394,10 @@ mod tests {
         #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
         enum TestCandidate {
             Signer,
-            Pda { program_id: [u32; 8], seed: [u8; 32] },
+            Pda {
+                program_id: [u32; 8],
+                seed: [u8; 32],
+            },
         }
 
         // The IDL-side description, in the exact JSON shape generate-idl emits.
@@ -413,7 +416,9 @@ mod tests {
         )
         .unwrap();
         let types = std::slice::from_ref(&def);
-        let arg_ty = IdlType::Defined { defined: "TestCandidate".into() };
+        let arg_ty = IdlType::Defined {
+            defined: "TestCandidate".into(),
+        };
 
         // Unit variant: CLI words must equal derived-serde words.
         let parsed = parse_value("Signer", &arg_ty, types).unwrap();
@@ -422,7 +427,10 @@ mod tests {
             new_admin: TestCandidate::Signer,
         })
         .unwrap();
-        assert_eq!(words, reference, "Signer wire format diverges from derived serde");
+        assert_eq!(
+            words, reference,
+            "Signer wire format diverges from derived serde"
+        );
 
         // Payload variant, patterned bytes so an endianness slip would show.
         let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
@@ -445,9 +453,11 @@ mod tests {
             },
         })
         .unwrap();
-        assert_eq!(words, reference, "Pda wire format diverges from derived serde");
+        assert_eq!(
+            words, reference,
+            "Pda wire format diverges from derived serde"
+        );
     }
-
 
     #[test]
     fn dynamic_value_u32_smoke() {

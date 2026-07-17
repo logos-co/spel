@@ -285,15 +285,23 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
     // also end up in the IDL's `types` section.
     for item in items {
         let Item::Fn(f) = item else { continue };
-        if !f.attrs.iter().any(|a| a.path().is_ident("instruction")) { continue; }
+        if !f.attrs.iter().any(|a| a.path().is_ident("instruction")) {
+            continue;
+        }
         for input in &f.sig.inputs {
-            let syn::FnArg::Typed(pt) = input else { continue };
-            if is_account_shaped(&pt.ty) { continue; }
+            let syn::FnArg::Typed(pt) = input else {
+                continue;
+            };
+            if is_account_shaped(&pt.ty) {
+                continue;
+            }
             let idl_ty = syn_type_to_idl_type(&pt.ty);
             let mut refs = Vec::new();
             collect_defined_refs_from_type(&idl_ty, &mut refs);
             for name in refs {
-                if !visited.contains(&name) { queue.push(name); }
+                if !visited.contains(&name) {
+                    queue.push(name);
+                }
             }
         }
     }
