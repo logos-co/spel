@@ -245,14 +245,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    let graph = spel_framework_core::dep_walk::resolve_dep_graph(&manifest_dir, &mut |_| {});
-    let ext = spel_framework_core::extension::discover_extensions(
-        &graph.direct_dirs,
+    let deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
         &input.attrs,
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    for (func, crate_path) in ext.instructions {
+    for (func, crate_path) in deps.extensions.instructions {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -291,7 +290,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let match_arms = generate_match_arms(mod_name, &instructions);
 
     // Generate the handler functions (with #[instruction] stripped, account attrs stripped)
-    let handler_fns = generate_handler_fns(&instructions, &ext.instruction_attrs);
+    let handler_fns = generate_handler_fns(&instructions, &deps.extensions.instruction_attrs);
 
     // Generate validation functions
     let validation_fns = generate_validation(&instructions);
@@ -463,7 +462,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                             // extension libraries (account types, instruction-arg types) reach the IDL.
                             let (extra_items, _) =
                                 spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-                                    &graph.transitive_dirs,
+                                    &deps.graph.transitive_dirs,
                                 );
                             all_items.extend(extra_items);
                             result = account_types::collect_account_types(&all_items);
@@ -2128,14 +2127,13 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     }
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    let graph = spel_framework_core::dep_walk::resolve_dep_graph(&manifest_dir, &mut |_| {});
-    let ext = spel_framework_core::extension::discover_extensions(
-        &graph.direct_dirs,
+    let deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
         &program_mod.attrs,
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    for (func, crate_path) in ext.instructions {
+    for (func, crate_path) in deps.extensions.instructions {
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -2185,7 +2183,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // in a shared core crate (e.g. my_program_core) and the program binary
     // depends on it via `path = "..."`.
     let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&graph.transitive_dirs);
+        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&deps.graph.transitive_dirs);
     all_items.extend(extra_items);
 
     let (accounts, types) = account_types::collect_account_types(&all_items);

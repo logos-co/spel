@@ -25,15 +25,6 @@ pub struct PathDepResult {
     pub warnings: Vec<String>,
 }
 
-impl PathDepResult {
-    pub fn new() -> Self {
-        Self {
-            dirs: Vec::new(),
-            warnings: Vec::new(),
-        }
-    }
-}
-
 /// Resolve the list of SPEL program source files for IDL generation.
 ///
 /// `arg` is the optional positional argument passed to `generate-idl`:
@@ -102,7 +93,7 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// containing `[dependencies]`.
 pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
     let mut warnings = Vec::new();
-    let dirs = spel_framework_core::dep_walk::resolve_dep_graph(source_path, &mut |w| {
+    let dirs = spel_framework_core::dep_walk::resolve_dep_graph(source_path, true, &mut |w| {
         warnings.push(w);
     })
     .transitive_dirs;

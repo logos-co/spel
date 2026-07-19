@@ -17,9 +17,7 @@ use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelId
 
 use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
-use crate::extension::{
-    check_duplicate_instruction_names, discover_extensions, instruction_source_label,
-};
+use crate::extension::{check_duplicate_instruction_names, instruction_source_label};
 
 /// Error type returned by [`generate_idl_from_file`].
 #[derive(Debug)]
@@ -154,10 +152,10 @@ fn generate_idl_inner(
 
     if let Some(manifest_dir) = manifest_dir {
         let mut warn = |w: String| eprintln!("⚠️  {w}");
-        let graph = crate::dep_walk::resolve_dep_graph(manifest_dir, &mut warn);
-        let ext = discover_extensions(&graph.direct_dirs, &program_mod.attrs, &mut warn)
-            .map_err(IdlGenError::MalformedExtensionMetadata)?;
-        for (func, crate_path) in ext.instructions {
+        let deps =
+            crate::extension::resolve_program_deps(&manifest_dir, &program_mod.attrs, &mut warn)
+                .map_err(IdlGenError::MalformedExtensionMetadata)?;
+        for (func, crate_path) in deps.extensions.instructions {
             let mut info = parse_instruction(func)?;
             let name = &info.fn_name;
             info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -819,7 +817,6 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
 mod tests {
     use super::*;
     use crate::idl::{IdlSeed, IdlType, SpelIdl};
-    use crate::test_utils::TempDir;
 
     fn ok(src: &str) -> SpelIdl {
         generate_idl_from_str(src, "<test>").expect("IDL generation failed")

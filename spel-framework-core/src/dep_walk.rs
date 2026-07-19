@@ -22,6 +22,18 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
+/// Everything the framework needs to know about a crate's dependency
+/// graph, resolved in one pass with one `cargo metadata` invocation.
+#[derive(Debug, Default)]
+pub struct DepGraph {
+    /// Transitive runtime dependency dirs. Feeds IDL type collection:
+    /// instruction-arg types may come through any runtime dependency.
+    pub transitive_dirs: Vec<PathBuf>,
+    /// Depth-1 dependency dirs only. Feeds extension discovery: the trust
+    /// model's two-action rule forbids transitive discovery.
+    pub direct_dirs: Vec<PathBuf>,
+}
+
 /// Parsed and validated `Cargo.toml`, or `None` after warning.
 fn read_manifest_toml<F: FnMut(String)>(
     manifest: &Path,
@@ -51,17 +63,6 @@ fn read_manifest_toml<F: FnMut(String)>(
     }
 }
 
-/// Everything the framework needs to know about a crate's dependency
-/// graph, resolved in one pass with one `cargo metadata` invocation.
-pub struct DepGraph {
-    /// Transitive runtime dependency dirs. Feeds IDL type collection:
-    /// instruction-arg types may come through any runtime dependency.
-    pub transitive_dirs: Vec<PathBuf>,
-    /// Depth-1 dependency dirs only. Feeds extension discovery: the trust
-    /// model's two-action rule forbids transitive discovery.
-    pub direct_dirs: Vec<PathBuf>,
-}
-
 /// Resolve the dependency graph of the crate owning `start` (a source
 /// file or a crate directory).
 ///
@@ -70,7 +71,11 @@ pub struct DepGraph {
 /// manifest walk (no subprocess); git and registry dependencies from a
 /// single `cargo metadata --offline` call shared by both result lists.
 /// If `cargo metadata` fails, both lists degrade to path-only results.
-pub fn resolve_dep_graph<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> DepGraph {
+pub fn resolve_dep_graph<F: FnMut(String)>(
+    start: &Path,
+    with_cargo_metadata: bool,
+    on_warning: &mut F,
+) -> DepGraph {
     let empty = DepGraph {
         transitive_dirs: Vec::new(),
         direct_dirs: Vec::new(),
@@ -130,21 +135,23 @@ pub fn resolve_dep_graph<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> 
     }
 
     // One subprocess feeds both merges.
-    if let Some(meta) = cargo_metadata_json(&manifest, on_warning) {
-        for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
-            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-            if visited.insert(canonical) {
-                transitive_dirs.push(dir);
+    if with_cargo_metadata {
+        if let Some(meta) = cargo_metadata_json(&manifest, on_warning) {
+            for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
+                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                if visited.insert(canonical) {
+                    transitive_dirs.push(dir);
+                }
             }
-        }
-        let mut seen: HashSet<PathBuf> = direct_dirs
-            .iter()
-            .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
-            .collect();
-        for dir in direct_normal_dep_dirs(&meta, &manifest) {
-            let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-            if seen.insert(canonical) {
-                direct_dirs.push(dir);
+            let mut seen: HashSet<PathBuf> = direct_dirs
+                .iter()
+                .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+                .collect();
+            for dir in direct_normal_dep_dirs(&meta, &manifest) {
+                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                if seen.insert(canonical) {
+                    direct_dirs.push(dir);
+                }
             }
         }
     }
@@ -638,7 +645,7 @@ token_core = { path = "../../core" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
+        let dirs = resolve_dep_graph(&program, true, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1);
         assert!(
             dirs[0].ends_with("core"),
@@ -683,7 +690,7 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
+        let dirs = resolve_dep_graph(&program, true, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with("core"));
     }
@@ -730,7 +737,7 @@ test_helpers = { path = "../../test_helpers" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
+        let dirs = resolve_dep_graph(&program, true, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
         assert!(dirs[0].ends_with("core"));
     }
@@ -779,7 +786,7 @@ token_core = { path = "../../core" }
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
-        let dirs = resolve_dep_graph(&program, &mut |_| {}).transitive_dirs;
+        let dirs = resolve_dep_graph(&program, true, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
         let names: Vec<&str> = dirs
             .iter()
@@ -845,7 +852,7 @@ ext-b = { path = "../ext-b" }
         );
         tmp.write("sample/src/lib.rs", "");
 
-        let dirs = resolve_dep_graph(&tmp.path().join("sample"), &mut |_| {}).transitive_dirs;
+        let dirs = resolve_dep_graph(&tmp.path().join("sample"), true, &mut |_| {}).transitive_dirs;
 
         // Canonicalise every returned dir, count unique canonical paths.
         // The dirs Vec MUST have no duplicate canonical paths — including ext-a,
@@ -870,5 +877,46 @@ ext-b = { path = "../ext-b" }
             "ext-a not in result; diamond walk failed: {:?}",
             dirs
         );
+    }
+
+    #[test]
+    fn resolve_dep_graph_skips_cargo_metadata_when_disabled() {
+        // Same fixture as the falls-back test: if `cargo metadata` ran, the
+        // unfetchable git dep would make it fail and warn. With the flag off
+        // there must be no warning at all, proving the subprocess never ran.
+        let tmp = TempDir::new("skip-metadata");
+
+        tmp.write(
+            "core/Cargo.toml",
+            r#"
+[package]
+name = "token_core"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            r#"
+[package]
+name = "token-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+token_core = { path = "../../core" }
+serde = { version = "1.0" }
+nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
+"#,
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let mut warnings = Vec::new();
+        let graph = resolve_dep_graph(&program, false, &mut |w| warnings.push(w));
+        assert!(warnings.is_empty(), "metadata must not run: {warnings:?}");
+        assert_eq!(graph.transitive_dirs.len(), 1);
+        assert!(graph.transitive_dirs[0].ends_with("core"));
     }
 }

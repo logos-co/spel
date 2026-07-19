@@ -44,7 +44,9 @@
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
 //! `read_spel_instruction_attrs`, `collect_instruction_fns`) are
-//! module-private; consumers go through [`discover_extensions`].
+//! module-private; producers go through [`resolve_program_deps`],
+//! and [`discover_extensions`] stays public for callers that already
+//! hold a resolved graph.
 
 use std::path::{Path, PathBuf};
 
@@ -55,6 +57,7 @@ use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 /// What the consumer's direct dependencies contribute to its program:
 /// cross-crate instruction fns and library-owned gate attribute names,
 /// collected in one pass per dependency.
+#[derive(Debug, Default)]
 pub struct ExtensionDiscoveries {
     /// One entry per discovered `#[instruction]` fn, with the absolute
     /// crate path to call it from the consumer (e.g. `::admin_authority`),
@@ -63,6 +66,46 @@ pub struct ExtensionDiscoveries {
     /// Instruction-level marker attr names the libraries declare. The
     /// framework strips these from emitted handler fns.
     pub instruction_attrs: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+/// Everything a producer needs from the dependency side, resolved in
+/// one call by [`resolve_program_deps`].
+pub struct ProgramDeps {
+    /// The dependency graph, one `cargo metadata` invocation at most.
+    pub graph: crate::dep_walk::DepGraph,
+    /// What matched extensions contribute to the program.
+    pub extensions: ExtensionDiscoveries,
+}
+
+/// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
+/// unpareable. Silent: cargo itself fails the build for those cases.
+fn read_manifest_value(crate_dir: &Path) -> Option<toml::Value> {
+    let content = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
+    toml::from_str(&content).ok()
+}
+
+/// Producer entry point: marker pre-check, graph resolution, and
+/// extension discovery in one call. Modules without candidate markers
+/// skip the cargo metadata walk and discovery entirely.
+///
+/// # Errors
+///
+/// `Err` on malformed spel metadata or a marker placed above
+/// `#[lez_program]`; callers surface it as a compile error.
+pub fn resolve_program_deps<F: FnMut(String)>(
+    start: &Path,
+    mod_attrs: &[Attribute],
+    on_warning: &mut F,
+) -> Result<ProgramDeps, String> {
+    let with_metadata = has_extension_marker_candidates(mod_attrs);
+    let graph = crate::dep_walk::resolve_dep_graph(start, with_metadata, on_warning);
+    let extensions = if with_metadata {
+        discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?
+    } else {
+        ExtensionDiscoveries::default()
+    };
+    Ok(ProgramDeps { graph, extensions })
 }
 
 /// Scan `dep_dirs` (the consumer's direct dependencies) for SPEL
@@ -81,17 +124,35 @@ pub fn discover_extensions<F: FnMut(String)>(
     let mut instructions = Vec::new();
     let mut instruction_attrs = Vec::new();
 
+    let lez_pos = mod_attrs
+        .iter()
+        .position(|a| a.path().is_ident("lez_program"));
     for dep_dir in dep_dirs {
-        let Some(ext_attr) = read_spel_extension_attr(dep_dir)? else {
+        let Some(manifest_value) = read_manifest_value(dep_dir) else {
+            continue;
+        };
+        let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
             continue;
         };
         if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
             continue;
         }
+        if let (Some(lez), Some(marker)) = (
+            lez_pos,
+            mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)),
+        ) {
+            if marker < lez {
+                return Err(format!(
+                    "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
+                    above expand first and are invisible to the compiled program, so the \
+                    extension would appear in the IDL but not in the dispatcher. Move \
+                    #[{ext_attr}] below #[lez_program]."
+                ));
+            }
+        }
+        let attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
 
-        let attrs = read_spel_instruction_attrs(dep_dir)?;
-
-        let Some(crate_name) = read_package_ident(dep_dir) else {
+        let Some(crate_name) = read_package_ident(&manifest_value) else {
             on_warning(format!(
                 "extension at '{}' matched module attribute but has no [package].name, skipped",
                 dep_dir.display()
@@ -148,14 +209,10 @@ fn collect_instruction_fns(items: &[syn::Item]) -> Vec<syn::ItemFn> {
 /// Ok(Some(name)): declared extension.
 /// Err(msg): metadata present but malformed. Callers must surface this as
 /// a hard error, a broken declaration must never degrade to "no extension".
-fn read_spel_extension_attr(crate_dir: &Path) -> Result<Option<String>, String> {
-    let manifest = crate_dir.join("Cargo.toml");
-    let Ok(content) = std::fs::read_to_string(&manifest) else {
-        return Ok(None); // unreadable dep manifest: cargo fails the build anyway
-    };
-    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
-        return Ok(None); // same
-    };
+fn read_spel_extension_attr(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Option<String>, String> {
     let Some(spel) = value
         .get("package")
         .and_then(|p| p.get("metadata"))
@@ -169,7 +226,7 @@ fn read_spel_extension_attr(crate_dir: &Path) -> Result<Option<String>, String> 
             Some(s) => Ok(Some(s.to_string())),
             None => Err(format!(
                 "malformed [package.metadata.spel] in {}: extension_attr must be a string",
-                manifest.display()
+                crate_dir.join("Cargo.toml").display()
             )),
         },
     }
@@ -179,14 +236,10 @@ fn read_spel_extension_attr(crate_dir: &Path) -> Result<Option<String>, String> 
 /// Returns the list of instruction-level marker attribute names the library
 /// declares (e.g. `["require_admin"]`). Framework strips these from emitted
 /// handler fns to prevent re-expansion.
-fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> {
-    let manifest = crate_dir.join("Cargo.toml");
-    let Ok(content) = std::fs::read_to_string(&manifest) else {
-        return Ok(vec![]);
-    };
-    let Ok(value) = toml::from_str::<toml::Value>(&content) else {
-        return Ok(vec![]);
-    };
+fn read_spel_instruction_attrs(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Vec<String>, String> {
     let Some(attrs) = value
         .get("package")
         .and_then(|p| p.get("metadata"))
@@ -198,7 +251,7 @@ fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> 
     let Some(arr) = attrs.as_array() else {
         return Err(format!(
             "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
-            manifest.display()
+            crate_dir.join("Cargo.toml").display()
         ));
     };
     arr.iter()
@@ -206,7 +259,7 @@ fn read_spel_instruction_attrs(crate_dir: &Path) -> Result<Vec<String>, String> 
             x.as_str().map(String::from).ok_or_else(|| {
                 format!(
                     "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
-                    manifest.display()
+                    crate_dir.join("Cargo.toml").display()
                 )
             })
         })
@@ -252,17 +305,39 @@ pub fn instruction_source_label(external_call_path: Option<&syn::Path>) -> Strin
 /// as the crate ident in generated cross-crate call paths. The directory
 /// name is not the crate's identity: renamed checkouts, vendoring, and
 /// `package = ` aliases all diverge from it.
-fn read_package_ident(crate_dir: &Path) -> Option<String> {
-    let content = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
-    let value: toml::Value = toml::from_str(&content).ok()?;
+fn read_package_ident(value: &toml::Value) -> Option<String> {
     let name = value.get("package")?.get("name")?.as_str()?;
     Some(name.replace('-', "_"))
+}
+
+/// True when the module carries at least one attribute that could be an
+/// extension marker. Built-in and framework attrs are excluded. Unknown
+/// or path-qualified attrs count as candidates: the guard may only skip
+/// work when skipping is provably free.
+pub fn has_extension_marker_candidates(mod_attrs: &[Attribute]) -> bool {
+    mod_attrs.iter().any(|a| {
+        let Some(ident) = a.path().get_ident() else {
+            return true;
+        };
+        !matches!(
+            ident.to_string().as_str(),
+            "lez_program"
+                | "doc"
+                | "cfg"
+                | "cfg_attr"
+                | "allow"
+                | "deny"
+                | "warn"
+                | "expect"
+                | "forbid"
+                | "deprecated"
+        )
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::idl::{IdlSeed, IdlType, SpelIdl};
     use crate::test_utils::TempDir;
 
     /// Old two-call discovery shape, kept for the tests: resolve the
@@ -272,7 +347,7 @@ mod tests {
         mod_attrs: &[Attribute],
         on_warning: &mut F,
     ) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
-        let graph = crate::dep_walk::resolve_dep_graph(dir, on_warning);
+        let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
         Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
     }
 
@@ -281,7 +356,7 @@ mod tests {
         mod_attrs: &[Attribute],
         on_warning: &mut F,
     ) -> Result<Vec<String>, String> {
-        let graph = crate::dep_walk::resolve_dep_graph(dir, on_warning);
+        let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
         Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instruction_attrs)
     }
 
@@ -300,8 +375,9 @@ edition = "2021"
 extension_attr = "my_ext"
 "#,
         );
+        let value = read_manifest_value(tmp.path()).unwrap();
         assert_eq!(
-            read_spel_extension_attr(tmp.path()).unwrap(),
+            read_spel_extension_attr(&value, tmp.path()).unwrap(),
             Some("my_ext".to_string())
         );
     }
@@ -313,13 +389,16 @@ extension_attr = "my_ext"
             "Cargo.toml",
             "[package]\nname = \"my-ext\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
         );
-        assert!(read_spel_extension_attr(tmp.path()).unwrap().is_none());
+        let value = read_manifest_value(tmp.path()).unwrap();
+        assert!(read_spel_extension_attr(&value, tmp.path())
+            .unwrap()
+            .is_none());
     }
 
     #[test]
-    fn read_spel_extension_attr_none_when_no_manifest() {
+    fn read_manifest_value_none_when_no_manifest() {
         let tmp = TempDir::new("ext-attr-no-manifest");
-        assert!(read_spel_extension_attr(tmp.path()).unwrap().is_none());
+        assert!(read_manifest_value(tmp.path()).is_none());
     }
 
     #[test]
@@ -547,6 +626,154 @@ my-ext = { path = "../my-ext" }
             #[lez_program]
             #[my_ext]
         )
+    }
+
+    #[test]
+    fn resolve_program_deps_discovers_through_one_call() {
+        let tmp = TempDir::new("program-deps-match");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect("discovery through the producer entry point");
+        assert_eq!(deps.extensions.instructions.len(), 1);
+        assert!(
+            deps.graph.direct_dirs.iter().any(|d| d.ends_with("my-ext")),
+            "graph must contain the extension dir: {:?}",
+            deps.graph.direct_dirs
+        );
+    }
+
+    #[test]
+    fn resolve_program_deps_without_markers_skips_discovery_and_metadata() {
+        let tmp = TempDir::new("program-deps-no-marker");
+        // Extension exists as a dependency, and the consumer manifest also
+        // carries an unfetchable git dep: if `cargo metadata` ran it would
+        // warn, and if discovery ran it would read the extension manifest.
+        ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
+"#,
+        );
+
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[doc = "no markers here"]
+        );
+        let mut warnings = Vec::new();
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .expect("no markers is not an error");
+        assert!(warnings.is_empty(), "metadata must not run: {warnings:?}");
+        assert!(deps.extensions.instructions.is_empty());
+        assert!(deps.extensions.instruction_attrs.is_empty());
+    }
+
+    #[test]
+    fn resolve_program_deps_propagates_marker_order_error() {
+        let tmp = TempDir::new("program-deps-marker-above");
+        ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[my_ext]
+            #[lez_program]
+        );
+
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect_err("misplaced marker must propagate");
+        assert!(
+            err.contains("above #[lez_program]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn marker_above_lez_program_is_a_hard_error() {
+        let tmp = TempDir::new("marker-above-lez");
+        ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        // Same fixture, but the marker sits above #[lez_program], the order
+        // the compiled program cannot see.
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[my_ext]
+            #[lez_program]
+        );
+
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect_err("marker above lez_program must fail discovery");
+        assert!(
+            err.contains("above #[lez_program]"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn marker_below_lez_program_is_accepted() {
+        let tmp = TempDir::new("marker-below-lez");
+        // ext_fixture returns #[lez_program] #[my_ext], the correct order.
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect("marker below lez_program must be accepted");
+        assert_eq!(ext.instructions.len(), 1);
     }
 
     #[test]
@@ -823,5 +1050,32 @@ mod user_program {
             msg.contains("ext_action"),
             "must name the instruction: {msg}"
         );
+    }
+
+    #[test]
+    fn marker_candidates_false_for_builtin_attrs_only() {
+        let m: syn::ItemMod = syn::parse_quote! {
+            #[doc = "hi"]
+            #[cfg(test)]
+            #[allow(dead_code)]
+            mod program {}
+        };
+        assert!(!has_extension_marker_candidates(&m.attrs));
+        assert!(!has_extension_marker_candidates(&[]));
+    }
+
+    #[test]
+    fn marker_candidates_true_for_unknown_and_qualified_attrs() {
+        let m: syn::ItemMod = syn::parse_quote! {
+            #[admin_authority]
+            mod program {}
+        };
+        assert!(has_extension_marker_candidates(&m.attrs));
+
+        let q: syn::ItemMod = syn::parse_quote! {
+            #[some::qualified]
+            mod program {}
+        };
+        assert!(has_extension_marker_candidates(&q.attrs));
     }
 }
