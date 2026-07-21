@@ -169,6 +169,7 @@ struct InstructionInfo {
     external_call_path: Option<syn::Path>,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
+    injected: Vec<String>,
 }
 
 struct AccountParam {
@@ -216,6 +217,16 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(&input, "lez_program module must have a body"))?;
 
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
+    let manifest_dir = std::path::PathBuf::from(manifest_dir);
+    let deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
+        &input.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     let mut other_items: Vec<TokenStream2> = Vec::new();
@@ -224,7 +235,14 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         match item {
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
-                    instructions.push(parse_instruction(func.clone())?);
+                    let mut func = func.clone();
+                    let injected = spel_framework_core::extension::inject_gate_params(
+                        &mut func,
+                        &deps.extensions.inject_specs,
+                    );
+                    let mut info = parse_instruction(func)?;
+                    info.injected = injected;
+                    instructions.push(info);
                 } else {
                     other_items.push(quote! { #func });
                 }
@@ -242,16 +260,12 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         ));
     }
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
-    let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    let deps = spel_framework_core::extension::resolve_program_deps(
-        &manifest_dir,
-        &input.attrs,
-        &mut |_| {},
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     for (func, crate_path) in deps.extensions.instructions {
+        let mut func = func;
+        spel_framework_core::extension::inject_gate_params(
+            &mut func,
+            &deps.extensions.inject_specs,
+        );
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -591,6 +605,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         has_context,
         external_call_path: None,
         func,
+        injected: vec![],
     })
 }
 
@@ -1014,6 +1029,9 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
 struct ExecuteTransformer<'a> {
     accounts: &'a [AccountParam],
     fn_name: &'a Ident,
+    /// Injected param names: their post-states are prepended to the
+    /// execute output since the handler body does not know them.
+    injected: &'a [String],
 }
 
 impl<'a> ExecuteTransformer<'a> {
@@ -1119,6 +1137,17 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
         if let Some(account_idents) = extract_vec_macro_idents(&accounts_arg) {
             // Verify all account names are known before transforming
             let mut account_clones: Vec<TokenStream2> = Vec::new();
+            // Injected params the body does not know about: pass their
+            // post-state through unchanged, in declaration order (they sit
+            // at the front of self.accounts, keeping claims alignment).
+            for acc in self.accounts {
+                if self.injected.iter().any(|n| acc.name == *n)
+                    && !account_idents.iter().any(|i| *i == acc.name)
+                {
+                    let ident = &acc.name;
+                    account_clones.push(quote! { #ident.account.clone() });
+                }
+            }
             for ident in &account_idents {
                 if !self.accounts.iter().any(|a| a.name == *ident) {
                     return; // unknown account — don't transform
@@ -1143,7 +1172,19 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
         // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
         // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
         if self.has_rest() {
-            let num_fixed = self.num_fixed();
+            let injected_clones: Vec<TokenStream2> = self
+                .accounts
+                .iter()
+                .filter(|a| self.injected.iter().any(|n| a.name == *n))
+                .map(|a| {
+                    let ident = &a.name;
+                    quote! { #ident.account.clone() }
+                })
+                .collect();
+            // ix.accounts counts injected params as fixed, but the
+            // consumer's vec does not contain them: subtract so the claims
+            // fn sees only the declared fixed params.
+            let num_fixed = self.num_fixed() - injected_clones.len();
             let accs = quote! { __accs };
             let account_seed_args = self.account_seed_args_for_rest(&accs);
             let all_seed_args: Vec<TokenStream2> =
@@ -1151,10 +1192,10 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             *expr = syn::parse_quote! {
                 {
                     let __accs: ::std::vec::Vec<_> = #accounts_arg;
-                    let __extracted: ::std::vec::Vec<_> =
-                        __accs.iter().map(|__a| __a.account.clone()).collect();
+                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
+                    __all.extend(__accs.iter().map(|__a| __a.account.clone()));
                     SpelOutput::execute_with_claims(
-                        &__extracted,
+                        &__all,
                         &#claims_fn(__accs.len() - #num_fixed #(, #all_seed_args)*),
                         #chained_arg
                     )
@@ -1227,6 +1268,7 @@ fn generate_handler_fns(
             let mut transformer = ExecuteTransformer {
                 accounts: &ix.accounts,
                 fn_name: &ix.fn_name,
+                injected: &ix.injected,
             };
             transformer.visit_item_fn_mut(&mut func);
             quote! { #func }
@@ -2109,12 +2151,27 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
+    let manifest_dir = std::path::PathBuf::from(&resolved_path);
+    let deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
+        &program_mod.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     for item in items {
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
-                instructions.push(parse_instruction(func.clone())?);
+                let mut func = func.clone();
+                let injected = spel_framework_core::extension::inject_gate_params(
+                    &mut func,
+                    &deps.extensions.inject_specs,
+                );
+                let mut info = parse_instruction(func)?;
+                info.injected = injected;
+                instructions.push(info);
             }
         }
     }
@@ -2126,14 +2183,12 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         ));
     }
 
-    let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    let deps = spel_framework_core::extension::resolve_program_deps(
-        &manifest_dir,
-        &program_mod.attrs,
-        &mut |_| {},
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     for (func, crate_path) in deps.extensions.instructions {
+        let mut func = func.clone();
+        spel_framework_core::extension::inject_gate_params(
+            &mut func,
+            &deps.extensions.inject_specs,
+        );
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));

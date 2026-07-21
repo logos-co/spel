@@ -136,12 +136,30 @@ fn generate_idl_inner(
         .as_ref()
         .ok_or_else(|| IdlGenError::NoProgram(path_str.clone()))?;
 
+    // Resolve the dependency side first: inject specs apply to the
+    // consumer's own instructions below.
+    let mut warn = |w: String| eprintln!("⚠️  {w}");
+    let (ext_instructions, inject_specs) = match manifest_dir {
+        Some(manifest_dir) => {
+            let deps = crate::extension::resolve_program_deps(
+                &manifest_dir,
+                &program_mod.attrs,
+                &mut warn,
+            )
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            (deps.extensions.instructions, deps.extensions.inject_specs)
+        },
+        None => (vec![], vec![]),
+    };
+
     // Collect instruction functions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     for item in items {
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
-                instructions.push(parse_instruction(func.clone())?);
+                let mut func = func.clone();
+                crate::extension::inject_gate_params(&mut func, &inject_specs);
+                instructions.push(parse_instruction(func)?);
             }
         }
     }
@@ -150,25 +168,21 @@ fn generate_idl_inner(
         return Err(IdlGenError::NoInstructions(path_str));
     }
 
-    if let Some(manifest_dir) = manifest_dir {
-        let mut warn = |w: String| eprintln!("⚠️  {w}");
-        let deps =
-            crate::extension::resolve_program_deps(&manifest_dir, &program_mod.attrs, &mut warn)
-                .map_err(IdlGenError::MalformedExtensionMetadata)?;
-        for (func, crate_path) in deps.extensions.instructions {
-            let mut info = parse_instruction(func)?;
-            let name = &info.fn_name;
-            info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
-            instructions.push(info);
-        }
-        check_duplicate_instruction_names(instructions.iter().map(|i| {
-            (
-                i.fn_name.to_string(),
-                instruction_source_label(i.external_call_path.as_ref()),
-            )
-        }))
-        .map_err(IdlGenError::DuplicateInstruction)?;
+    for (func, crate_path) in ext_instructions {
+        let mut func = func;
+        crate::extension::inject_gate_params(&mut func, &inject_specs);
+        let mut info = parse_instruction(func)?;
+        let name = &info.fn_name;
+        info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
+        instructions.push(info);
     }
+    check_duplicate_instruction_names(instructions.iter().map(|i| {
+        (
+            i.fn_name.to_string(),
+            instruction_source_label(i.external_call_path.as_ref()),
+        )
+    }))
+    .map_err(IdlGenError::DuplicateInstruction)?;
 
     // Detect external instruction type from #[lez_program(instruction = "...")]
     let external_instruction = program_mod

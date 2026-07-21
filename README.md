@@ -235,7 +235,44 @@ Contracts an extension author must hold:
 2. **Signature types resolve at the consumer's expansion site.** Extension instruction signatures are copied verbatim into consumer-side codegen, so reference your own types by absolute path (`::your_crate::YourType`) rather than relying on imports.
 3. **Gate attrs on consumer instructions never expand.** Attrs on items inside a module expand only after the outer `#[lez_program]` rewrite, and the framework strips `instruction_attrs` from emitted handlers at that point, removing their first and only possible expansion. A library gate takes effect exclusively by re-expanding on handlers the library itself emits. Do not design an extension that relies on consumer-side gate expansion.
 
+An extension whose gate needs specific accounts can additionally declare an inject block:
+
+```toml
+[[package.metadata.spel.inject]]
+wrapper = "require_admin"
+
+  [[package.metadata.spel.inject.account]]
+  name = "admin_config"
+  seed = { const = "admin_config" }
+
+  [[package.metadata.spel.inject.account]]
+  name = "caller"
+  signer = true
+```
+
+Any consumer instruction carrying the named wrapper attribute gets the listed account params synthesized at expansion time unless it already declares them (skip-if-declared). Injection runs identically in the compile-time expansion and in `spel generate-idl`, so the IDL producers cannot diverge. Injected params are prepended after a leading `ProgramContext`, in the block's declaration order, and are part of the instruction's ABI as shown in the IDL.
+
 The framework holds no library-specific knowledge. Multiple extensions stack on one program without coordination. First consumer of this mechanism is [`admin-authority`](https://github.com/mmlado/spel-admin-authority).
+
+#### Auto-Wrap (Optional)
+
+Extensions can additionally request that the framework automatically prepend a per-instruction attribute (e.g. a freeze gate) to every dispatched instruction the consumer ships. Activated by a second metadata table:
+
+```toml
+[package.metadata.spel.wrap_instructions]
+wrapper = "freeze_authority::require_not_frozen"
+skip = "manual"
+self_exempt_marker = "freeze_exempt"
+exempt = [
+  "admin_authority::admin_initialize",
+  "admin_authority::admin_transfer",
+  "admin_authority::admin_renounce",
+]
+```
+
+When the consumer's marker carries the listed `skip` arg (e.g. `#[freeze_authority(manual)]`), wrap is disabled and the consumer falls back to per-instruction opt-in. Otherwise the framework walks every dispatched instruction and prepends `wrapper`, except those carrying the `self_exempt_marker` attribute or named in `exempt` (cross-crate carve-outs from other extensions).
+
+First consumer of this mechanism is [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority).
 
 ## CLI Usage
 

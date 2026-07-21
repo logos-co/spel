@@ -7,8 +7,9 @@
 //!
 //! - [`discover_extensions`] returns an [`ExtensionDiscoveries`]: the
 //!   cross-crate `#[instruction]` fns to be merged into the consumer's
-//!   dispatcher and IDL, and the library-owned gate attribute names the
-//!   framework strips from emitted handler fns. Attribute macros on
+//!   dispatcher and IDL, the gate param inject specs applied by
+//!   [`inject_gate_params`], and the library-owned gate attribute names
+//!   the framework strips from emitted handler fns. Attribute macros on
 //!   items inside a module only expand after the outer `#[lez_program]`
 //!   rewrite, so this strip removes the first (and only possible)
 //!   expansion: a gate attr on a consumer-authored instruction
@@ -43,29 +44,34 @@
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
-//! `read_spel_instruction_attrs`, `collect_instruction_fns`) are
-//! module-private; producers go through [`resolve_program_deps`],
+//! `read_spel_instruction_attrs`, `read_spel_inject_specs`,
+//! `collect_instruction_fns`) are module-private; producers go through [`resolve_program_deps`],
 //! and [`discover_extensions`] stays public for callers that already
 //! hold a resolved graph.
 
 use std::path::{Path, PathBuf};
 
-use syn::Attribute;
+use syn::{parse_quote, Attribute, FnArg, ItemFn};
 
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
 /// What the consumer's direct dependencies contribute to its program:
-/// cross-crate instruction fns and library-owned gate attribute names,
-/// collected in one pass per dependency.
+/// cross-crate instruction fns, gate param inject specs, and
+/// library-owned gate attribute names, collected in one pass per
+/// dependency.
 #[derive(Debug, Default)]
 pub struct ExtensionDiscoveries {
     /// One entry per discovered `#[instruction]` fn, with the absolute
     /// crate path to call it from the consumer (e.g. `::admin_authority`),
     /// derived from the dependency's `[package].name`.
-    pub instructions: Vec<(syn::ItemFn, syn::Path)>,
+    pub instructions: Vec<(ItemFn, syn::Path)>,
     /// Instruction-level marker attr names the libraries declare. The
     /// framework strips these from emitted handler fns.
     pub instruction_attrs: Vec<String>,
+    /// Gate param injection specs the libraries declare. Instructions
+    /// carrying a spec's bare wrapper attr get missing params
+    /// synthesized by [`inject_gate_params`].
+    pub inject_specs: Vec<InjectSpec>,
 }
 
 #[derive(Debug, Default)]
@@ -78,8 +84,29 @@ pub struct ProgramDeps {
     pub extensions: ExtensionDiscoveries,
 }
 
+/// One account a gate wrapper needs injected.
+#[derive(Debug, Default)]
+pub struct InjectAccount {
+    /// Param name the gate matches by.
+    pub name: String,
+    /// Const PDA seed; `None` means a plain account param.
+    pub seed: Option<String>,
+    /// Whether the param carries `#[account(signer)]`.
+    pub signer: bool,
+}
+
+/// One `[[package.metadata.spel.inject]]` block: which wrapper attr it
+/// serves and the accounts to inject when a gated fn omits them.
+#[derive(Debug, Default)]
+pub struct InjectSpec {
+    /// Wrapper attr name (e.g. `require_admin`) that activates this spec.
+    pub wrapper: String,
+    /// Accounts to synthesize, in declaration order.
+    pub accounts: Vec<InjectAccount>,
+}
+
 /// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
-/// unpareable. Silent: cargo itself fails the build for those cases.
+/// unparseable. Silent: cargo itself fails the build for those cases.
 fn read_manifest_value(crate_dir: &Path) -> Option<toml::Value> {
     let content = std::fs::read_to_string(crate_dir.join("Cargo.toml")).ok()?;
     toml::from_str(&content).ok()
@@ -123,6 +150,7 @@ pub fn discover_extensions<F: FnMut(String)>(
 ) -> Result<ExtensionDiscoveries, String> {
     let mut instructions = Vec::new();
     let mut instruction_attrs = Vec::new();
+    let mut inject_specs = Vec::new();
 
     let lez_pos = mod_attrs
         .iter()
@@ -151,6 +179,7 @@ pub fn discover_extensions<F: FnMut(String)>(
             }
         }
         let attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
+        let injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
 
         let Some(crate_name) = read_package_ident(&manifest_value) else {
             on_warning(format!(
@@ -164,7 +193,7 @@ pub fn discover_extensions<F: FnMut(String)>(
 
         let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
         let funcs = collect_instruction_fns(&items);
-        if funcs.is_empty() && attrs.is_empty() {
+        if funcs.is_empty() && attrs.is_empty() && injects.is_empty() {
             on_warning(format!(
                 "extension '{crate_name}' matched #[#{ext_attr}] but contributes no \
                 #[instruction] fns and no instruction_attrs"
@@ -174,12 +203,53 @@ pub fn discover_extensions<F: FnMut(String)>(
             instructions.push((func, crate_path.clone()));
         }
         instruction_attrs.extend(attrs);
+        inject_specs.extend(injects);
     }
 
     Ok(ExtensionDiscoveries {
         instructions,
         instruction_attrs,
+        inject_specs,
     })
+}
+
+/// Inject a wrapper's missing gate params into an instruction fn.
+///
+/// Skip-if-declared: a param that exists is never touched. A wrapper
+/// attr carrying arguments (custom target names) disables injection for
+/// that fn: renaming is manual mode, the consumer declares its own
+/// params. Returns the names actually injected.
+pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Vec<String> {
+    let mut injected = Vec::new();
+    for spec in specs {
+        let activities = func
+            .attrs
+            .iter()
+            .any(|a| a.path().is_ident(&spec.wrapper) && matches!(a.meta, syn::Meta::Path(_)));
+        if !activities {
+            continue;
+        }
+
+        let mut pos = insert_position(func);
+        for acc in &spec.accounts {
+            if has_param_named(func, &acc.name) {
+                continue;
+            }
+            let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
+            let param: FnArg = match (&acc.seed, acc.signer) {
+                (Some(seed), _) => {
+                    let lit = syn::LitStr::new(seed, proc_macro2::Span::call_site());
+                    parse_quote! { #[account(pda = literal(#lit))] #ident: AccountWithMetadata }
+                },
+                (None, true) => parse_quote! { #[account(signer)] #ident: AccountWithMetadata },
+                (None, false) => parse_quote! { #ident: AccountWithMetadata },
+            };
+            func.sig.inputs.insert(pos, param);
+            pos += 1;
+            injected.push(acc.name.clone());
+        }
+    }
+    injected
 }
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
@@ -187,7 +257,7 @@ pub fn discover_extensions<F: FnMut(String)>(
 /// Used by framework codegen to pull instruction definitions out of
 /// extension libraries (e.g. admin-authority) that ship pre-defined
 /// instructions to be merged into a consuming program's IDL + dispatcher.
-fn collect_instruction_fns(items: &[syn::Item]) -> Vec<syn::ItemFn> {
+fn collect_instruction_fns(items: &[syn::Item]) -> Vec<ItemFn> {
     items
         .iter()
         .filter_map(|it| match it {
@@ -266,6 +336,80 @@ fn read_spel_instruction_attrs(
         .collect()
 }
 
+/// Read `[[package.metadata.spel.inject]]` blocks from a parsed manifest.
+///
+/// Absent inject key is `Ok(empty)`, a normal extension without param
+/// injection. Malformed blocks are a hard `Err`: a broken inject
+/// declaration must never degrade to a gate silently missing its
+/// account constraints.
+fn read_spel_inject_specs(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Vec<InjectSpec>, String> {
+    let manifest = crate_dir.join("Cargo.toml");
+    let malformed = |what: &str| {
+        format!(
+            "malformed [package.metadata.spel] in {}: {what}",
+            manifest.display()
+        )
+    };
+
+    let Some(injects) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+        .and_then(|s| s.get("inject"))
+    else {
+        return Ok(vec![]);
+    };
+    let Some(injects) = injects.as_array() else {
+        return Err(malformed("inject must be an array of tables"));
+    };
+
+    let mut specs = Vec::new();
+    for inject in injects {
+        let Some(wrapper) = inject.get("wrapper").and_then(|w| w.as_str()) else {
+            return Err(malformed("inject.wrapper must be a string"));
+        };
+        let Some(accs) = inject.get("account").and_then(|a| a.as_array()) else {
+            return Err(malformed("inject.account must be an array of tables"));
+        };
+        let mut accounts = Vec::new();
+        for acc in accs {
+            let Some(name) = acc.get("name").and_then(|n| n.as_str()) else {
+                return Err(malformed("inject.account.name must be a string"));
+            };
+            let seed = match acc.get("seed") {
+                None => None,
+                Some(seed) => match seed.get("const").and_then(|c| c.as_str()) {
+                    Some(c) => Some(c.to_string()),
+                    None => {
+                        return Err(malformed(
+                            "inject.account.seed mut be a { const = \"...\" } table",
+                        ));
+                    },
+                },
+            };
+            let signer = match acc.get("signer") {
+                None => false,
+                Some(b) => b
+                    .as_bool()
+                    .ok_or_else(|| malformed("inject.account.signer must be a boolean"))?,
+            };
+            accounts.push(InjectAccount {
+                name: name.to_string(),
+                seed,
+                signer,
+            });
+        }
+        specs.push(InjectSpec {
+            wrapper: wrapper.to_string(),
+            accounts,
+        });
+    }
+    Ok(specs)
+}
+
 /// Reject duplicate instruction names across user fns and discovered
 /// extensions. Duplicates would produce colliding enum variants, match
 /// arms, and IDL discriminators, or silently shadow one another.
@@ -333,6 +477,30 @@ pub fn has_extension_marker_candidates(mod_attrs: &[Attribute]) -> bool {
                 | "deprecated"
         )
     })
+}
+
+/// True if the fn already declares a param with this name.
+fn has_param_named(func: &ItemFn, name: &str) -> bool {
+    func.sig.inputs.iter().any(|input| {
+        matches!(input, FnArg::Typed(pt)
+            if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == name))
+    })
+}
+
+/// Injected params go after a leading ProgramContext, else at the front.
+fn insert_position(func: &ItemFn) -> usize {
+    if let Some(FnArg::Typed(pt)) = func.sig.inputs.first() {
+        if let syn::Type::Path(p) = &*pt.ty {
+            if p.path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "ProgramContext")
+            {
+                return 1;
+            }
+        }
+    }
+    0
 }
 
 #[cfg(test)]
@@ -722,6 +890,178 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             err.contains("above #[lez_program]"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn read_inject_specs_parses_admin_block() {
+        let tmp = TempDir::new("inject-specs");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "admin_authority"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_admin"
+
+  [[package.metadata.spel.inject.account]]
+  name = "admin_config"
+  seed = { const = "admin_config" }
+
+  [[package.metadata.spel.inject.account]]
+  name = "caller"
+  signer = true
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let specs = read_spel_inject_specs(&value, tmp.path()).unwrap();
+        assert_eq!(specs.len(), 1);
+        assert_eq!(specs[0].wrapper, "require_admin");
+        assert_eq!(specs[0].accounts.len(), 2);
+        assert_eq!(specs[0].accounts[0].seed.as_deref(), Some("admin_config"));
+        assert!(specs[0].accounts[1].signer);
+        assert!(specs[0].accounts[1].seed.is_none());
+    }
+
+    #[test]
+    fn malformed_inject_seed_is_a_hard_error() {
+        // A bare-string seed used to be swallowed, injecting the account
+        // unconstrained where a PDA-verified one was intended.
+        let tmp = TempDir::new("inject-bad-seed");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2021"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_admin"
+
+  [[package.metadata.spel.inject.account]]
+  name = "admin_config"
+  seed = "admin_config"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_inject_specs(&value, tmp.path())
+            .expect_err("bare-string seed must be rejected");
+        assert!(err.contains("seed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn malformed_inject_wrapper_is_a_hard_error() {
+        let tmp = TempDir::new("inject-bad-wrapper");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2021"
+
+[[package.metadata.spel.inject]]
+wrapper = 42
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_inject_specs(&value, tmp.path())
+            .expect_err("non-string wrapper must be rejected");
+        assert!(err.contains("wrapper"), "unexpected error: {err}");
+    }
+
+    fn admin_specs() -> Vec<InjectSpec> {
+        vec![InjectSpec {
+            wrapper: "require_admin".to_string(),
+            accounts: vec![
+                InjectAccount {
+                    name: "admin_config".into(),
+                    seed: Some("admin_config".into()),
+                    signer: false,
+                },
+                InjectAccount {
+                    name: "caller".into(),
+                    seed: None,
+                    signer: true,
+                },
+            ],
+        }]
+    }
+
+    #[test]
+    fn inject_gate_params_injects_missing_and_skips_declared() {
+        let specs = admin_specs();
+
+        // Gated fn missing both params: inject both, in order, at the front.
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[require_admin]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        let injected = inject_gate_params(&mut func, &specs);
+        assert_eq!(
+            injected,
+            vec!["admin_config".to_string(), "caller".to_string()]
+        );
+        assert_eq!(func.sig.inputs.len(), 3);
+
+        // Second run: everything declared now, nothing injected, fn untouched.
+        let before = func.sig.inputs.len();
+        assert!(inject_gate_params(&mut func, &specs).is_empty());
+        assert_eq!(func.sig.inputs.len(), before);
+
+        // Ungated fn: untouched.
+        let mut plain: ItemFn = parse_quote! {
+            #[instruction]
+            pub fn other(x: u64) -> SpelResult { todo!() }
+        };
+        assert!(inject_gate_params(&mut plain, &specs).is_empty());
+    }
+
+    #[test]
+    fn wrapper_with_args_disables_injection() {
+        // Custom target names are manual mode: whoever renames declares.
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[require_admin(config = my_cfg, signer = owner)]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        assert!(inject_gate_params(&mut func, &admin_specs()).is_empty());
+        assert_eq!(func.sig.inputs.len(), 1);
+    }
+
+    #[test]
+    fn discovery_collects_inject_specs() {
+        let tmp = TempDir::new("discover-inject");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.inject]]
+wrapper = "my_gate"
+
+  [[package.metadata.spel.inject.account]]
+  name = "gate_config"
+  seed = { const = "gate_config" }
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect("inject block must be collected");
+        assert_eq!(ext.inject_specs.len(), 1);
+        assert_eq!(ext.inject_specs[0].wrapper, "my_gate");
     }
 
     #[test]
