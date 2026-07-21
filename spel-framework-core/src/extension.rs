@@ -87,13 +87,25 @@ pub struct ProgramDeps {
     pub extensions: ExtensionDiscoveries,
 }
 
+/// One component of an injected account's PDA seed.
+#[derive(Debug)]
+pub enum InjectSeed {
+    /// Literal string seed, emitted as `pda = literal("...")`.
+    Const(String),
+    /// Seed derived from another account's `AccountId`, emitted as
+    /// `pda = account("...")`. The string names a param of the same
+    /// gated instructions,
+    Account(String),
+}
+
 /// One account a gate wrapper needs injected.
 #[derive(Debug, Default)]
 pub struct InjectAccount {
     /// Param name the gate matches by.
     pub name: String,
-    /// Const PDA seed; `None` means a plain account param.
-    pub seed: Option<String>,
+    /// Ordered PDA seed components. Empty = plain account (no PDA),
+    /// one = single-seed PDA, multiple = compound PDA.
+    pub seeds: Vec<InjectSeed>,
     /// Whether the param carries `#[account(signer)]`.
     pub signer: bool,
 }
@@ -252,15 +264,20 @@ pub fn discover_extensions<F: FnMut(String)>(
 /// Skip-if-declared: a param that exists is never touched. A wrapper
 /// attr carrying arguments (custom target names) disables injection for
 /// that fn: renaming is manual mode, the consumer declares its own
-/// params. Returns the names actually injected.
+/// params. The wrapper is matched by the attr path's last segment, so
+/// the fully qualified attrs prepended by auto-wrap activate specs too.
+/// Returns the names actually injected.
 pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Vec<String> {
     let mut injected = Vec::new();
     for spec in specs {
-        let activities = func
-            .attrs
-            .iter()
-            .any(|a| a.path().is_ident(&spec.wrapper) && matches!(a.meta, syn::Meta::Path(_)));
-        if !activities {
+        let activates = func.attrs.iter().any(|a| {
+            a.path()
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == spec.wrapper)
+                && matches!(a.meta, syn::Meta::Path(_))
+        });
+        if !activates {
             continue;
         }
 
@@ -270,13 +287,31 @@ pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Vec<String
                 continue;
             }
             let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
-            let param: FnArg = match (&acc.seed, acc.signer) {
-                (Some(seed), _) => {
-                    let lit = syn::LitStr::new(seed, proc_macro2::Span::call_site());
-                    parse_quote! { #[account(pda = literal(#lit))] #ident: AccountWithMetadata }
-                },
-                (None, true) => parse_quote! { #[account(signer)] #ident: AccountWithMetadata },
-                (None, false) => parse_quote! { #ident: AccountWithMetadata },
+            let seed_exprs: Vec<syn::Expr> = acc
+                .seeds
+                .iter()
+                .map(|s| match s {
+                    InjectSeed::Const(v) => {
+                        let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                        parse_quote! { literal(#lit) }
+                    },
+                    InjectSeed::Account(v) => {
+                        let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                        parse_quote! { account(#lit) }
+                    },
+                })
+                .collect();
+            let param: FnArg = if !seed_exprs.is_empty() {
+                if seed_exprs.len() == 1 {
+                    let single = &seed_exprs[0];
+                    parse_quote! { #[account(pda = #single)] #ident: AccountWithMetadata }
+                } else {
+                    parse_quote! { #[account(pda = [#(#seed_exprs),*])] #ident: AccountWithMetadata }
+                }
+            } else if acc.signer {
+                parse_quote! { #[account(signer)] #ident: AccountWithMetadata }
+            } else {
+                parse_quote! { #ident: AccountWithMetadata }
             };
             func.sig.inputs.insert(pos, param);
             pos += 1;
@@ -413,16 +448,23 @@ fn read_spel_inject_specs(
             let Some(name) = acc.get("name").and_then(|n| n.as_str()) else {
                 return Err(malformed("inject.account.name must be a string"));
             };
-            let seed = match acc.get("seed") {
-                None => None,
-                Some(seed) => match seed.get("const").and_then(|c| c.as_str()) {
-                    Some(c) => Some(c.to_string()),
-                    None => {
-                        return Err(malformed(
-                            "inject.account.seed mut be a { const = \"...\" } table",
-                        ));
-                    },
-                },
+            let seeds = match acc.get("seed") {
+                None => vec![],
+                Some(toml::Value::Array(entries)) => entries
+                    .iter()
+                    .map(|e| {
+                        parse_seed_entry(e).ok_or_else(|| {
+                            malformed(
+                                "inject.account.seed entries must be { const = \"...\" } or { account = \"...\" }",
+                            )
+                        })
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+                Some(single) => vec![parse_seed_entry(single).ok_or_else(|| {
+                    malformed(
+                        "inject.account.seed must be { const = \"...\" }, { account = \"...\" }, or an array of those",
+                    )
+                })?],
             };
             let signer = match acc.get("signer") {
                 None => false,
@@ -432,7 +474,7 @@ fn read_spel_inject_specs(
             };
             accounts.push(InjectAccount {
                 name: name.to_string(),
-                seed,
+                seeds,
                 signer,
             });
         }
@@ -620,6 +662,19 @@ fn extract_attr_arg(attr: &Attribute, ext_attr: &str) -> Option<String> {
     attr.parse_args::<syn::Ident>().ok().map(|i| i.to_string())
 }
 
+/// Decode one TOML seed entry (`{ const = "..." }` or
+/// `{ account "..." }`) into an [`InjectSeed`].
+fn parse_seed_entry(value: &toml::Value) -> Option<InjectSeed> {
+    let t = value.as_table()?;
+    if let Some(s) = t.get("const").and_then(|c| c.as_str()) {
+        return Some(InjectSeed::Const(s.to_string()));
+    }
+    if let Some(s) = t.get("account").and_then(|a| a.as_str()) {
+        return Some(InjectSeed::Account(s.to_string()));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -631,7 +686,7 @@ mod tests {
         dir: &Path,
         mod_attrs: &[Attribute],
         on_warning: &mut F,
-    ) -> Result<Vec<(syn::ItemFn, syn::Path)>, String> {
+    ) -> Result<Vec<(ItemFn, syn::Path)>, String> {
         let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
         Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
     }
@@ -1058,9 +1113,12 @@ wrapper = "require_admin"
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].wrapper, "require_admin");
         assert_eq!(specs[0].accounts.len(), 2);
-        assert_eq!(specs[0].accounts[0].seed.as_deref(), Some("admin_config"));
+        assert!(matches!(
+            &specs[0].accounts[0].seeds[..],
+            [InjectSeed::Const(s)] if s == "admin_config"
+        ));
         assert!(specs[0].accounts[1].signer);
-        assert!(specs[0].accounts[1].seed.is_none());
+        assert!(specs[0].accounts[1].seeds.is_empty());
     }
 
     #[test]
@@ -1117,12 +1175,12 @@ wrapper = 42
             accounts: vec![
                 InjectAccount {
                     name: "admin_config".into(),
-                    seed: Some("admin_config".into()),
+                    seeds: vec![InjectSeed::Const("admin_config".into())],
                     signer: false,
                 },
                 InjectAccount {
                     name: "caller".into(),
-                    seed: None,
+                    seeds: vec![],
                     signer: true,
                 },
             ],
@@ -1157,6 +1215,110 @@ wrapper = 42
             pub fn other(x: u64) -> SpelResult { todo!() }
         };
         assert!(inject_gate_params(&mut plain, &specs).is_empty());
+    }
+
+    #[test]
+    fn read_inject_specs_parses_compound_seed() {
+        let tmp = TempDir::new("inject-compound");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2021"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_not_frozen"
+
+  [[package.metadata.spel.inject.account]]
+  name = "freeze_marker"
+  seed = [{ const = "frozen" }, { account = "caller" }]
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let specs = read_spel_inject_specs(&value, tmp.path()).unwrap();
+        let seeds = &specs[0].accounts[0].seeds;
+        assert_eq!(seeds.len(), 2);
+        assert!(matches!(&seeds[0], InjectSeed::Const(s) if s == "frozen"));
+        assert!(matches!(&seeds[1], InjectSeed::Account(s) if s == "caller"));
+    }
+
+    #[test]
+    fn malformed_compound_seed_entry_is_a_hard_error() {
+        // An entry that is neither const nor account used to be silently
+        // skipped, shortening the seed list and deriving a wrong PDA.
+        let tmp = TempDir::new("inject-bad-compound");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "x"
+version = "0.1.0"
+edition = "2021"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_not_frozen"
+
+  [[package.metadata.spel.inject.account]]
+  name = "freeze_marker"
+  seed = [{ neither = "x" }]
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_inject_specs(&value, tmp.path())
+            .expect_err("unknown seed entry must be rejected");
+        assert!(err.contains("seed"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn inject_matches_qualified_wrapper_by_last_segment() {
+        // Auto-wrap prepends fully qualified attrs; the spec names only
+        // the final segment.
+        let specs = admin_specs();
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[admin_authority_macros::require_admin]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        let injected = inject_gate_params(&mut func, &specs);
+        assert_eq!(
+            injected,
+            vec!["admin_config".to_string(), "caller".to_string()]
+        );
+    }
+
+    #[test]
+    fn inject_emits_compound_pda_attr() {
+        let specs = vec![InjectSpec {
+            wrapper: "require_not_frozen".to_string(),
+            accounts: vec![InjectAccount {
+                name: "freeze_marker".into(),
+                seeds: vec![
+                    InjectSeed::Const("frozen".into()),
+                    InjectSeed::Account("caller".into()),
+                ],
+                signer: false,
+            }],
+        }];
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[require_not_frozen]
+            pub fn transfer(caller: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        assert_eq!(inject_gate_params(&mut func, &specs), vec!["freeze_marker"]);
+
+        let FnArg::Typed(pt) = &func.sig.inputs[0] else {
+            panic!("injected param must be typed");
+        };
+        let syn::Meta::List(list) = &pt.attrs[0].meta else {
+            panic!("injected param must carry #[account(...)]");
+        };
+        let tokens = list.tokens.to_string();
+        assert!(
+            tokens.contains(r#"literal ("frozen")"#) && tokens.contains(r#"account ("caller")"#),
+            "compound pda attr not emitted: {tokens}"
+        );
     }
 
     #[test]
