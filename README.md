@@ -270,7 +270,7 @@ exempt = [
 ]
 ```
 
-When the consumer's marker carries the listed `skip` arg (e.g. `#[freeze_authority(manual)]`), wrap is disabled and the consumer falls back to per-instruction opt-in. Otherwise the framework walks every dispatched instruction and prepends `wrapper`, except those carrying the `self_exempt_marker` attribute or named in `exempt` (cross-crate carve-outs from other extensions).
+When the extension declares a `skip` word and the consumer's marker carries it as an arg (e.g. `#[freeze_authority(manual)]`), wrap is disabled and the consumer falls back to per-instruction opt-in. Omitting `skip` means the extension offers no opt-out word, and wrap is active for every consumer carrying the marker. Otherwise the framework walks every dispatched instruction and prepends `wrapper`, except those carrying the `self_exempt_marker` attribute or named in `exempt` (cross-crate carve-outs from other extensions).
 
 First consumer of this mechanism is [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority).
 

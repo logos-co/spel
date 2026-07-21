@@ -133,8 +133,10 @@ pub struct InjectSpec {
 pub struct WrapInstructions {
     /// Proc-macro attribute the framework prepends to each non-exempt fn.
     pub wrapper: String,
-    /// Marker attr arg that disables wrap (e.g. `"manual"`),
-    pub skip: String,
+    /// Marker attr arg that disables wrap (e.g. `"manual"`). `None` when
+    /// the extension offers no opt-out word: wrap is then always active
+    /// for consumers that carry the marker.
+    pub skip: Option<String>,
     /// Per-fn opt-out attribute name (e.g. `"freeze_exempt`).
     pub self_exempt_marker: String,
     /// Fully-qualified instructions from other crates to skip
@@ -543,11 +545,19 @@ fn read_spel_wrap_instructions(
         ));
     };
     let skip = match wrap.get("skip") {
-        None => String::new(),
-        Some(v) => v
-            .as_str()
-            .map(String::from)
-            .ok_or_else(|| malformed("wrap_instructions.skip must be a string"))?,
+        None => None,
+        Some(v) => {
+            let Some(s) = v.as_str() else {
+                return Err(malformed("wrap_instructions.skip must be a string"));
+            };
+            if s.is_empty() {
+                return Err(malformed(
+                    "wrap_instructions.skip must not be empty: an empty skip word \
+                    matches the bare marker and turns wrap off for every consumer",
+                ));
+            }
+            Some(s.to_string())
+        },
     };
     let exempt = match wrap.get("exempt") {
         None => vec![],
@@ -1963,7 +1973,7 @@ exempt = ["ext_a::action_one", "ext_a::action_two"]
             .unwrap()
             .expect("wrap config declared");
         assert_eq!(wrap.wrapper, "ext_b_macros::__inject_gate");
-        assert_eq!(wrap.skip, "manual");
+        assert_eq!(wrap.skip.as_deref(), Some("manual"));
         assert_eq!(wrap.self_exempt_marker, "freeze_exempt");
         assert_eq!(wrap.exempt, vec!["ext_a::action_one", "ext_a::action_two"]);
     }
@@ -2007,7 +2017,7 @@ self_exempt_marker = "minimal_exempt"
         let wrap = read_spel_wrap_instructions(&value, tmp.path())
             .unwrap()
             .expect("minimal config");
-        assert_eq!(wrap.skip, "");
+        assert!(wrap.skip.is_none());
         assert!(wrap.exempt.is_empty());
     }
 
@@ -2032,6 +2042,52 @@ wrapper = "incomplete::wrapper"
             err.contains("self_exempt_marker"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn omitted_skip_keeps_wrap_active() {
+        // No skip word declared means no opt-out: a bare marker must not
+        // accidentally match an empty-string default and turn wrap off.
+        let tmp = TempDir::new("wrap-no-skip");
+        wrap_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel.wrap_instructions]
+wrapper = "my_ext_macros::gate"
+self_exempt_marker = "my_exempt"
+"#,
+        );
+        let bare: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        assert_eq!(ext.wraps.len(), 1);
+        assert_eq!(ext.wraps[0].0, "");
+        assert!(ext.wraps[0].1.skip.is_none());
+    }
+
+    #[test]
+    fn empty_skip_is_a_hard_error() {
+        let tmp = TempDir::new("wrap-empty-skip");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "empty-skip"
+version = "0.1.0"
+
+[package.metadata.spel.wrap_instructions]
+wrapper = "x::gate"
+skip = ""
+self_exempt_marker = "x_exempt"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_wrap_instructions(&value, tmp.path())
+            .expect_err("empty skip word must be rejected");
+        assert!(err.contains("skip"), "unexpected error: {err}");
     }
 
     #[test]

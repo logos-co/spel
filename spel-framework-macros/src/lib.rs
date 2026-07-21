@@ -231,7 +231,10 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         .extensions
         .wraps
         .iter()
-        .filter(|(arg, wrap)| arg != &wrap.skip)
+        .filter(|(arg, wrap)| match &wrap.skip {
+            Some(s) => arg != s,
+            None => true,
+        })
         .map(|(_, wrap)| wrap.clone())
         .collect();
 
