@@ -76,7 +76,6 @@ pub struct ExtensionDiscoveries {
     /// (`""` for a bare marker) so callers can honor `skip`.
     pub wraps: Vec<(String, WrapInstructions)>,
 }
-
 #[derive(Debug, Default)]
 /// Everything a producer needs from the dependency side, resolved in
 /// one call by [`resolve_program_deps`].
@@ -88,7 +87,7 @@ pub struct ProgramDeps {
 }
 
 /// One component of an injected account's PDA seed.
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum InjectSeed {
     /// Literal string seed, emitted as `pda = literal("...")`.
     Const(String),
@@ -99,7 +98,7 @@ pub enum InjectSeed {
 }
 
 /// One account a gate wrapper needs injected.
-#[derive(Debug, Default)]
+#[derive(Debug, PartialEq)]
 pub struct InjectAccount {
     /// Param name the gate matches by.
     pub name: String,
@@ -112,12 +111,15 @@ pub struct InjectAccount {
 
 /// One `[[package.metadata.spel.inject]]` block: which wrapper attr it
 /// serves and the accounts to inject when a gated fn omits them.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct InjectSpec {
     /// Wrapper attr name (e.g. `require_admin`) that activates this spec.
     pub wrapper: String,
     /// Accounts to synthesize, in declaration order.
     pub accounts: Vec<InjectAccount>,
+    // Crate name of the extension that declared this spec. Names the
+    // offender when two extensions inject conflicting params.
+    pub source: String,
 }
 
 /// Parsed `[package.metadata.spel.wrap_instructions]` for an extension
@@ -138,6 +140,14 @@ pub struct WrapInstructions {
     /// Fully-qualified instructions from other crates to skip
     /// unconditionally.
     pub exempt: Vec<String>,
+}
+
+struct MatchedExtension {
+    marker_pos: usize,
+    instructions: Vec<(ItemFn, syn::Path)>,
+    instruction_attrs: Vec<String>,
+    inject_specs: Vec<InjectSpec>,
+    wraps: Vec<(String, WrapInstructions)>,
 }
 
 /// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
@@ -174,6 +184,11 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 /// extension libraries whose `extension_attr` metadata matches an
 /// attribute on the consuming program's mod.
 ///
+/// Contributions are ordered by the marker attrs' positions on the
+/// module, first marker first. That order is the cross-extension ABI:
+/// it decides instruction order in the dispatcher and IDL, and the
+/// account order of injected params.
+///
 /// # Errors
 ///
 /// `Err` on malformed spel metadata (callers surface it as a compile
@@ -183,10 +198,7 @@ pub fn discover_extensions<F: FnMut(String)>(
     mod_attrs: &[Attribute],
     on_warning: &mut F,
 ) -> Result<ExtensionDiscoveries, String> {
-    let mut instructions = Vec::new();
-    let mut instruction_attrs = Vec::new();
-    let mut inject_specs = Vec::new();
-    let mut wraps = Vec::new();
+    let mut matched: Vec<MatchedExtension> = Vec::new();
 
     let lez_pos = mod_attrs
         .iter()
@@ -214,10 +226,26 @@ pub fn discover_extensions<F: FnMut(String)>(
                 ));
             }
         }
-        let attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
-        let injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
+        let Some(crate_name) = read_package_ident(&manifest_value) else {
+            on_warning(format!(
+                "extension at '{}' matched module attribute but has no [package].name, skipped",
+                dep_dir.display()
+            ));
+            continue;
+        };
+
+        let marker_pos = mod_attrs
+            .iter()
+            .position(|a| a.path().is_ident(&ext_attr))
+            .unwrap_or(usize::MAX);
+        let instruction_attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
+        let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
+        for spec in &mut injects {
+            spec.source = crate_name.clone();
+        }
         let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
         let has_wrap = wrap.is_some();
+        let mut wraps = Vec::new();
         if let Some(w) = wrap {
             let arg = mod_attrs
                 .iter()
@@ -226,37 +254,31 @@ pub fn discover_extensions<F: FnMut(String)>(
             wraps.push((arg, w));
         }
 
-        let Some(crate_name) = read_package_ident(&manifest_value) else {
-            on_warning(format!(
-                "extension at '{}' matched module attribute but has no [package].name, skipped",
-                dep_dir.display()
-            ));
-            continue;
-        };
         let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
         let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
 
         let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
         let funcs = collect_instruction_fns(&items);
-        if funcs.is_empty() && attrs.is_empty() && injects.is_empty() && !has_wrap {
+        if funcs.is_empty() && instruction_attrs.is_empty() && injects.is_empty() && !has_wrap {
             on_warning(format!(
                 "extension '{crate_name}' matched #[#{ext_attr}] but contributes no \
                 #[instruction] fns and no instruction_attrs and no wrap config"
             ));
         }
+        let mut instructions = Vec::new();
         for func in funcs {
             instructions.push((func, crate_path.clone()));
         }
-        instruction_attrs.extend(attrs);
-        inject_specs.extend(injects);
+        matched.push(MatchedExtension {
+            marker_pos,
+            instructions,
+            instruction_attrs,
+            inject_specs: injects,
+            wraps,
+        });
     }
 
-    Ok(ExtensionDiscoveries {
-        instructions,
-        instruction_attrs,
-        inject_specs,
-        wraps,
-    })
+    Ok(flatten_in_marker_order(matched))
 }
 
 /// Inject a wrapper's missing gate params into an instruction fn.
@@ -267,8 +289,22 @@ pub fn discover_extensions<F: FnMut(String)>(
 /// params. The wrapper is matched by the attr path's last segment, so
 /// the fully qualified attrs prepended by auto-wrap activate specs too.
 /// Returns the names actually injected.
-pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Vec<String> {
+///
+/// When two specs want the same param name: identical constraints share
+/// one account at the first injector's position, the cheap shared-signer
+/// ABI. Conflicting constraints are a hard error naming both extensions.
+///
+/// # Errors
+///
+/// `Err` when two extensions inject the same param name with different
+/// constraints; callers surface it as a compile error.
+pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
     let mut injected = Vec::new();
+    // name -> (account def, source extension) for params this call added
+    let mut injected_by: std::collections::HashMap<String, (&InjectAccount, &str)> =
+        std::collections::HashMap::new();
+    let mut pos = insert_position(func);
+
     for spec in specs {
         let activates = func.attrs.iter().any(|a| {
             a.path()
@@ -281,44 +317,27 @@ pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Vec<String
             continue;
         }
 
-        let mut pos = insert_position(func);
         for acc in &spec.accounts {
-            if has_param_named(func, &acc.name) {
-                continue;
-            }
-            let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
-            let seed_exprs: Vec<syn::Expr> = acc
-                .seeds
-                .iter()
-                .map(|s| match s {
-                    InjectSeed::Const(v) => {
-                        let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
-                        parse_quote! { literal(#lit) }
-                    },
-                    InjectSeed::Account(v) => {
-                        let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
-                        parse_quote! { account(#lit) }
-                    },
-                })
-                .collect();
-            let param: FnArg = if !seed_exprs.is_empty() {
-                if seed_exprs.len() == 1 {
-                    let single = &seed_exprs[0];
-                    parse_quote! { #[account(pda = #single)] #ident: AccountWithMetadata }
-                } else {
-                    parse_quote! { #[account(pda = [#(#seed_exprs),*])] #ident: AccountWithMetadata }
+            if let Some((existing, source)) = injected_by.get(acc.name.as_str()) {
+                if *existing == acc {
+                    continue; // identical constraints: one shared account
                 }
-            } else if acc.signer {
-                parse_quote! { #[account(signer)] #ident: AccountWithMetadata }
-            } else {
-                parse_quote! { #ident: AccountWithMetadata }
-            };
-            func.sig.inputs.insert(pos, param);
+                return Err(format!(
+                    "extension '{source}' and '{}' both inject param '{}' with \
+                    conflicting constraints",
+                    spec.source, acc.name
+                ));
+            }
+            if has_param_named(func, &acc.name) {
+                continue; // consumer declared it: declared win
+            }
+            func.sig.inputs.insert(pos, build_inject_param(acc));
             pos += 1;
             injected.push(acc.name.clone());
+            injected_by.insert(acc.name.clone(), (acc, spec.source.as_str()));
         }
     }
-    injected
+    Ok(injected)
 }
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
@@ -481,6 +500,7 @@ fn read_spel_inject_specs(
         specs.push(InjectSpec {
             wrapper: wrapper.to_string(),
             accounts,
+            source: String::new(),
         });
     }
     Ok(specs)
@@ -675,10 +695,52 @@ fn parse_seed_entry(value: &toml::Value) -> Option<InjectSeed> {
     None
 }
 
+// Render one injected account as a typed fn param carrying its
+// `#[account(...)]` constraint.
+fn build_inject_param(acc: &InjectAccount) -> FnArg {
+    let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
+    let seed_exprs: Vec<syn::Expr> = acc
+        .seeds
+        .iter()
+        .map(|s| match s {
+            InjectSeed::Const(v) => {
+                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                parse_quote! { literal(#lit) }
+            },
+            InjectSeed::Account(v) => {
+                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                parse_quote! { account(#lit) }
+            },
+        })
+        .collect();
+    match (&seed_exprs[..], acc.signer) {
+        ([], true) => parse_quote! { #[account(signer)] #ident: AccountWithMetadata },
+        ([], false) => parse_quote! { #ident: AccountWithMetadata },
+        ([single], _) => parse_quote! { #[account(pda = #single)] #ident: AccountWithMetadata },
+        (multi, _) => parse_quote! { #[account(pda = [#(#multi),*])] #ident: AccountWithMetadata },
+    }
+}
+
+/// Flatten matched extensions in marker order. The first marker on the
+/// module contributes first, everywhere downstream: dispatcher, IDL,
+/// and injected params. Marker order is the cross-extension ABI order.
+fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDiscoveries {
+    matched.sort_by_key(|m| m.marker_pos);
+    let mut out = ExtensionDiscoveries::default();
+    for m in matched {
+        out.instructions.extend(m.instructions);
+        out.instruction_attrs.extend(m.instruction_attrs);
+        out.inject_specs.extend(m.inject_specs);
+        out.wraps.extend(m.wraps);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_utils::TempDir;
+    use syn::Pat;
 
     /// Old two-call discovery shape, kept for the tests: resolve the
     /// graph, then split the discoveries.
@@ -1094,14 +1156,14 @@ version = "0.1.0"
 edition = "2021"
 
 [package.metadata.spel]
-extension_attr = "admin_authority"
+extension_attr = "my_ext"
 
 [[package.metadata.spel.inject]]
-wrapper = "require_admin"
+wrapper = "my_gate"
 
   [[package.metadata.spel.inject.account]]
-  name = "admin_config"
-  seed = { const = "admin_config" }
+  name = "gate_config"
+  seed = { const = "gate_config" }
 
   [[package.metadata.spel.inject.account]]
   name = "caller"
@@ -1111,11 +1173,11 @@ wrapper = "require_admin"
         let value = read_manifest_value(tmp.path()).unwrap();
         let specs = read_spel_inject_specs(&value, tmp.path()).unwrap();
         assert_eq!(specs.len(), 1);
-        assert_eq!(specs[0].wrapper, "require_admin");
+        assert_eq!(specs[0].wrapper, "my_gate");
         assert_eq!(specs[0].accounts.len(), 2);
         assert!(matches!(
             &specs[0].accounts[0].seeds[..],
-            [InjectSeed::Const(s)] if s == "admin_config"
+            [InjectSeed::Const(s)] if s == "gate_config"
         ));
         assert!(specs[0].accounts[1].signer);
         assert!(specs[0].accounts[1].seeds.is_empty());
@@ -1135,11 +1197,11 @@ version = "0.1.0"
 edition = "2021"
 
 [[package.metadata.spel.inject]]
-wrapper = "require_admin"
+wrapper = "my_gate"
 
   [[package.metadata.spel.inject.account]]
-  name = "admin_config"
-  seed = "admin_config"
+  name = "gate_config"
+  seed = "gate_config"
 "#,
         );
         let value = read_manifest_value(tmp.path()).unwrap();
@@ -1169,13 +1231,14 @@ wrapper = 42
         assert!(err.contains("wrapper"), "unexpected error: {err}");
     }
 
-    fn admin_specs() -> Vec<InjectSpec> {
+    fn gate_specs() -> Vec<InjectSpec> {
         vec![InjectSpec {
-            wrapper: "require_admin".to_string(),
+            wrapper: "my_gate".to_string(),
+            source: "ext-a".into(),
             accounts: vec![
                 InjectAccount {
-                    name: "admin_config".into(),
-                    seeds: vec![InjectSeed::Const("admin_config".into())],
+                    name: "gate_config".into(),
+                    seeds: vec![InjectSeed::Const("gate_config".into())],
                     signer: false,
                 },
                 InjectAccount {
@@ -1189,24 +1252,24 @@ wrapper = 42
 
     #[test]
     fn inject_gate_params_injects_missing_and_skips_declared() {
-        let specs = admin_specs();
+        let specs = gate_specs();
 
         // Gated fn missing both params: inject both, in order, at the front.
         let mut func: ItemFn = parse_quote! {
             #[instruction]
-            #[require_admin]
+            #[my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs);
+        let injected = inject_gate_params(&mut func, &specs).unwrap();
         assert_eq!(
             injected,
-            vec!["admin_config".to_string(), "caller".to_string()]
+            vec!["gate_config".to_string(), "caller".to_string()]
         );
         assert_eq!(func.sig.inputs.len(), 3);
 
         // Second run: everything declared now, nothing injected, fn untouched.
         let before = func.sig.inputs.len();
-        assert!(inject_gate_params(&mut func, &specs).is_empty());
+        assert!(inject_gate_params(&mut func, &specs).unwrap().is_empty());
         assert_eq!(func.sig.inputs.len(), before);
 
         // Ungated fn: untouched.
@@ -1214,7 +1277,7 @@ wrapper = 42
             #[instruction]
             pub fn other(x: u64) -> SpelResult { todo!() }
         };
-        assert!(inject_gate_params(&mut plain, &specs).is_empty());
+        assert!(inject_gate_params(&mut plain, &specs).unwrap().is_empty());
     }
 
     #[test]
@@ -1229,18 +1292,18 @@ version = "0.1.0"
 edition = "2021"
 
 [[package.metadata.spel.inject]]
-wrapper = "require_not_frozen"
+wrapper = "other_gate"
 
   [[package.metadata.spel.inject.account]]
-  name = "freeze_marker"
-  seed = [{ const = "frozen" }, { account = "caller" }]
+  name = "marker_account"
+  seed = [{ const = "marker" }, { account = "caller" }]
 "#,
         );
         let value = read_manifest_value(tmp.path()).unwrap();
         let specs = read_spel_inject_specs(&value, tmp.path()).unwrap();
         let seeds = &specs[0].accounts[0].seeds;
         assert_eq!(seeds.len(), 2);
-        assert!(matches!(&seeds[0], InjectSeed::Const(s) if s == "frozen"));
+        assert!(matches!(&seeds[0], InjectSeed::Const(s) if s == "marker"));
         assert!(matches!(&seeds[1], InjectSeed::Account(s) if s == "caller"));
     }
 
@@ -1258,10 +1321,10 @@ version = "0.1.0"
 edition = "2021"
 
 [[package.metadata.spel.inject]]
-wrapper = "require_not_frozen"
+wrapper = "other_gate"
 
   [[package.metadata.spel.inject.account]]
-  name = "freeze_marker"
+  name = "marker_account"
   seed = [{ neither = "x" }]
 "#,
         );
@@ -1275,27 +1338,28 @@ wrapper = "require_not_frozen"
     fn inject_matches_qualified_wrapper_by_last_segment() {
         // Auto-wrap prepends fully qualified attrs; the spec names only
         // the final segment.
-        let specs = admin_specs();
+        let specs = gate_specs();
         let mut func: ItemFn = parse_quote! {
             #[instruction]
-            #[admin_authority_macros::require_admin]
+            #[my_ext_macros::my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs);
+        let injected = inject_gate_params(&mut func, &specs).unwrap();
         assert_eq!(
             injected,
-            vec!["admin_config".to_string(), "caller".to_string()]
+            vec!["gate_config".to_string(), "caller".to_string()]
         );
     }
 
     #[test]
     fn inject_emits_compound_pda_attr() {
         let specs = vec![InjectSpec {
-            wrapper: "require_not_frozen".to_string(),
+            wrapper: "other_gate".to_string(),
+            source: "ext-b".into(),
             accounts: vec![InjectAccount {
-                name: "freeze_marker".into(),
+                name: "marker_account".into(),
                 seeds: vec![
-                    InjectSeed::Const("frozen".into()),
+                    InjectSeed::Const("marker".into()),
                     InjectSeed::Account("caller".into()),
                 ],
                 signer: false,
@@ -1303,10 +1367,13 @@ wrapper = "require_not_frozen"
         }];
         let mut func: ItemFn = parse_quote! {
             #[instruction]
-            #[require_not_frozen]
+            #[other_gate]
             pub fn transfer(caller: AccountWithMetadata) -> SpelResult { todo!() }
         };
-        assert_eq!(inject_gate_params(&mut func, &specs), vec!["freeze_marker"]);
+        assert_eq!(
+            inject_gate_params(&mut func, &specs).unwrap(),
+            vec!["marker_account"]
+        );
 
         let FnArg::Typed(pt) = &func.sig.inputs[0] else {
             panic!("injected param must be typed");
@@ -1316,7 +1383,7 @@ wrapper = "require_not_frozen"
         };
         let tokens = list.tokens.to_string();
         assert!(
-            tokens.contains(r#"literal ("frozen")"#) && tokens.contains(r#"account ("caller")"#),
+            tokens.contains(r#"literal ("marker")"#) && tokens.contains(r#"account ("caller")"#),
             "compound pda attr not emitted: {tokens}"
         );
     }
@@ -1326,10 +1393,12 @@ wrapper = "require_not_frozen"
         // Custom target names are manual mode: whoever renames declares.
         let mut func: ItemFn = parse_quote! {
             #[instruction]
-            #[require_admin(config = my_cfg, signer = owner)]
+            #[my_gate(config = my_cfg, signer = owner)]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        assert!(inject_gate_params(&mut func, &admin_specs()).is_empty());
+        assert!(inject_gate_params(&mut func, &gate_specs())
+            .unwrap()
+            .is_empty());
         assert_eq!(func.sig.inputs.len(), 1);
     }
 
@@ -1359,6 +1428,168 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             .expect("inject block must be collected");
         assert_eq!(ext.inject_specs.len(), 1);
         assert_eq!(ext.inject_specs[0].wrapper, "my_gate");
+    }
+
+    #[test]
+    fn contributions_follow_marker_order_not_dep_order() {
+        // Two extensions, both matched. The module lists ext_b's marker
+        // first, so ext_b contributes first, regardless of dep-walk order.
+        let tmp = TempDir::new("marker-order");
+        for name in ["ext-a", "ext-b"] {
+            let ident = name.replace('-', "_");
+            tmp.write(
+                &format!("{name}/Cargo.toml"),
+                &format!(
+                    r#"
+[package]
+name = "{name}"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "{ident}"
+
+[[package.metadata.spel.inject]]
+wrapper = "{ident}_gate"
+
+  [[package.metadata.spel.inject.account]]
+  name = "{ident}_config"
+  seed = {{ const = "{ident}_config" }}
+"#
+                ),
+            );
+            tmp.write(
+                &format!("{name}/src/lib.rs"),
+                &format!(
+                    r#"
+#[instruction]
+pub fn {ident}_action(account: AccountWithMetadata) -> SpelResult {{ todo!() }}
+"#
+                ),
+            );
+        }
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ext-a = { path = "../ext-a" }
+ext-b = { path = "../ext-b" }
+"#,
+        );
+        tmp.write("user/src/lib.rs", "");
+
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+
+        let b_first: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[ext_b]
+            #[ext_a]
+        );
+        let ext = discover_extensions(&graph.direct_dirs, &b_first, &mut |_| {}).unwrap();
+        assert_eq!(ext.inject_specs[0].wrapper, "ext_b_gate");
+        assert_eq!(ext.inject_specs[1].wrapper, "ext_a_gate");
+        assert_eq!(ext.instructions[0].0.sig.ident, "ext_b_action");
+        assert_eq!(ext.instructions[1].0.sig.ident, "ext_a_action");
+
+        // Flip the markers: order flips with them.
+        let a_first: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[ext_a]
+            #[ext_b]
+        );
+        let ext = discover_extensions(&graph.direct_dirs, &a_first, &mut |_| {}).unwrap();
+        assert_eq!(ext.inject_specs[0].wrapper, "ext_a_gate");
+        assert_eq!(ext.inject_specs[1].wrapper, "ext_b_gate");
+    }
+
+    #[test]
+    fn two_specs_append_in_order_with_running_cursor() {
+        let mut specs = gate_specs();
+        specs.push(InjectSpec {
+            wrapper: "my_gate".to_string(),
+            source: "ext-b".into(),
+            accounts: vec![InjectAccount {
+                name: "other_config".into(),
+                seeds: vec![InjectSeed::Const("other_config".into())],
+                signer: false,
+            }],
+        });
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[my_gate]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        assert_eq!(injected, vec!["gate_config", "caller", "other_config"]);
+        let names: Vec<String> = func
+            .sig
+            .inputs
+            .iter()
+            .filter_map(|i| match i {
+                FnArg::Typed(pt) => match &*pt.pat {
+                    Pat::Ident(pi) => Some(pi.ident.to_string()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            names,
+            vec!["gate_config", "caller", "other_config", "new_value"]
+        );
+    }
+
+    #[test]
+    fn identical_shared_param_dedups_to_first_position() {
+        let mut specs = gate_specs();
+        specs.push(InjectSpec {
+            wrapper: "my_gate".to_string(),
+            source: "ext-b".into(),
+            accounts: vec![InjectAccount {
+                name: "caller".into(),
+                seeds: vec![],
+                signer: true,
+            }],
+        });
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[my_gate]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        assert_eq!(injected, vec!["gate_config", "caller"]);
+        assert_eq!(func.sig.inputs.len(), 3);
+    }
+
+    #[test]
+    fn conflicting_shared_param_is_a_hard_error() {
+        let mut specs = gate_specs();
+        specs.push(InjectSpec {
+            wrapper: "my_gate".to_string(),
+            source: "ext-b".into(),
+            accounts: vec![InjectAccount {
+                name: "caller".into(),
+                seeds: vec![InjectSeed::Const("caller_pda".into())],
+                signer: false,
+            }],
+        });
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[my_gate]
+            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+        };
+        let err = inject_gate_params(&mut func, &specs)
+            .expect_err("conflicting constraints must be rejected");
+        assert!(
+            err.contains("ext-a") && err.contains("ext-b"),
+            "must name both extensions: {err}"
+        );
+        assert!(err.contains("caller"), "must name the param: {err}");
     }
 
     #[test]
@@ -1594,12 +1825,9 @@ lib-no-meta = { path = "../lib-no-meta" }
             ("update_value".to_string(), "this module".to_string()),
             (
                 "admin_initialize".to_string(),
-                "extension admin_authority".to_string(),
+                "extension my_ext".to_string(),
             ),
-            (
-                "update_value".to_string(),
-                "extension admin_authority".to_string(),
-            ),
+            ("update_value".to_string(), "extension my_ext".to_string()),
         ];
         let err =
             check_duplicate_instruction_names(pairs).expect_err("colliding names must be rejected");
@@ -1611,10 +1839,7 @@ lib-no-meta = { path = "../lib-no-meta" }
             err.contains("this module"),
             "must name the first source: {err}"
         );
-        assert!(
-            err.contains("admin_authority"),
-            "must name the second source: {err}"
-        );
+        assert!(err.contains("my_ext"), "must name the second source: {err}");
     }
 
     #[test]
@@ -1623,7 +1848,7 @@ lib-no-meta = { path = "../lib-no-meta" }
             ("update_value".to_string(), "this module".to_string()),
             (
                 "admin_initialize".to_string(),
-                "extension admin_authority".to_string(),
+                "extension my_ext".to_string(),
             ),
         ];
         assert!(check_duplicate_instruction_names(pairs).is_ok());
@@ -1704,7 +1929,7 @@ mod user_program {
     #[test]
     fn marker_candidates_true_for_unknown_and_qualified_attrs() {
         let m: syn::ItemMod = syn::parse_quote! {
-            #[admin_authority]
+            #[my_ext]
             mod program {}
         };
         assert!(has_extension_marker_candidates(&m.attrs));
@@ -1723,33 +1948,24 @@ mod user_program {
             "Cargo.toml",
             r#"
 [package]
-name = "freeze-authority"
+name = "ext-b"
 version = "0.1.0"
 
 [package.metadata.spel.wrap_instructions]
-wrapper = "freeze_authority_macros::__inject_freeze_gate"
+wrapper = "ext_b_macros::__inject_gate"
 skip = "manual"
 self_exempt_marker = "freeze_exempt"
-exempt = ["admin_authority::admin_transfer", "admin_authority::admin_renounce"]
+exempt = ["ext_a::action_one", "ext_a::action_two"]
 "#,
         );
         let value = read_manifest_value(tmp.path()).unwrap();
         let wrap = read_spel_wrap_instructions(&value, tmp.path())
             .unwrap()
             .expect("wrap config declared");
-        assert_eq!(
-            wrap.wrapper,
-            "freeze_authority_macros::__inject_freeze_gate"
-        );
+        assert_eq!(wrap.wrapper, "ext_b_macros::__inject_gate");
         assert_eq!(wrap.skip, "manual");
         assert_eq!(wrap.self_exempt_marker, "freeze_exempt");
-        assert_eq!(
-            wrap.exempt,
-            vec![
-                "admin_authority::admin_transfer",
-                "admin_authority::admin_renounce"
-            ]
-        );
+        assert_eq!(wrap.exempt, vec!["ext_a::action_one", "ext_a::action_two"]);
     }
 
     #[test]

@@ -158,7 +158,8 @@ fn generate_idl_inner(
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                crate::extension::inject_gate_params(&mut func, &inject_specs);
+                crate::extension::inject_gate_params(&mut func, &inject_specs)
+                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
                 instructions.push(parse_instruction(func)?);
             }
         }
@@ -170,7 +171,8 @@ fn generate_idl_inner(
 
     for (func, crate_path) in ext_instructions {
         let mut func = func;
-        crate::extension::inject_gate_params(&mut func, &inject_specs);
+        crate::extension::inject_gate_params(&mut func, &inject_specs)
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));

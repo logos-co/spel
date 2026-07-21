@@ -250,7 +250,7 @@ wrapper = "require_admin"
   signer = true
 ```
 
-Any consumer instruction carrying the named wrapper attribute (bare, without arguments) gets the listed account params synthesized at expansion time unless it already declares them (skip-if-declared). A seed can also be a compound list, `seed = [{ const = "frozen" }, { account = "caller" }]`, emitted as a compound PDA constraint. Injection runs identically in the compile-time expansion and in `spel generate-idl`, so the IDL producers cannot diverge. Injected params are prepended after a leading `ProgramContext`, in the block's declaration order, and are part of the instruction's ABI as shown in the IDL.
+Any consumer instruction carrying the named wrapper attribute (bare, without arguments) gets the listed account params synthesized at expansion time unless it already declares them (skip-if-declared). A seed can also be a compound list, `seed = [{ const = "frozen" }, { account = "caller" }]`, emitted as a compound PDA constraint. Injection runs identically in the compile-time expansion and in `spel generate-idl`, so the IDL producers cannot diverge. Injected params are prepended after a leading `ProgramContext`, in the block's declaration order, and are part of the instruction's ABI as shown in the IDL. When multiple extensions inject on one instruction, the order of their marker attrs on the module decides which extension's params come first.
 
 The framework holds no library-specific knowledge. Multiple extensions stack on one program without coordination. First consumer of this mechanism is [`admin-authority`](https://github.com/mmlado/spel-admin-authority).
 

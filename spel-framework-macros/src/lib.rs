@@ -265,7 +265,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                     let injected = spel_framework_core::extension::inject_gate_params(
                         &mut func,
                         &deps.extensions.inject_specs,
-                    );
+                    )
+                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                     let mut info = parse_instruction(func)?;
                     info.injected = injected;
                     instructions.push(info);
@@ -316,7 +317,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         spel_framework_core::extension::inject_gate_params(
             &mut func,
             &deps.extensions.inject_specs,
-        );
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -2222,7 +2224,8 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
                 let injected = spel_framework_core::extension::inject_gate_params(
                     &mut func,
                     &deps.extensions.inject_specs,
-                );
+                )
+                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                 let mut info = parse_instruction(func)?;
                 info.injected = injected;
                 instructions.push(info);
@@ -2242,7 +2245,8 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         spel_framework_core::extension::inject_gate_params(
             &mut func,
             &deps.extensions.inject_specs,
-        );
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
