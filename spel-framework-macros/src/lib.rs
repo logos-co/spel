@@ -227,6 +227,14 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
+    let active_wraps: Vec<_> = deps
+        .extensions
+        .wraps
+        .iter()
+        .filter(|(arg, wrap)| arg != &wrap.skip)
+        .map(|(_, wrap)| wrap.clone())
+        .collect();
+
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     let mut other_items: Vec<TokenStream2> = Vec::new();
@@ -236,6 +244,24 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
                     let mut func = func.clone();
+                    // Prepend each active wrap's gate unless this fn
+                    // carries the wrap's self_exempt_marker.
+                    for wrap in &active_wraps {
+                        let exempt = func
+                            .attrs
+                            .iter()
+                            .any(|a| a.path().is_ident(&wrap.self_exempt_marker));
+                        if !exempt {
+                            let wrapper_path: syn::Path =
+                                syn::parse_str(&wrap.wrapper).map_err(|e| {
+                                    syn::Error::new_spanned(
+                                        &func.sig.ident,
+                                        format!("invalid wrapper path {:?}: {e}", wrap.wrapper),
+                                    )
+                                })?;
+                            func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
+                        }
+                    }
                     let injected = spel_framework_core::extension::inject_gate_params(
                         &mut func,
                         &deps.extensions.inject_specs,
@@ -262,6 +288,31 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
     for (func, crate_path) in deps.extensions.instructions {
         let mut func = func;
+        let qualified = format!(
+            "{}: {}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        for wrap in &active_wraps {
+            let exempt = wrap.exempt.iter().any(|e| e == &qualified)
+                || func
+                    .attrs
+                    .iter()
+                    .any(|a| a.path().is_ident(&wrap.self_exempt_marker));
+            if !exempt {
+                let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper).map_err(|e| {
+                    syn::Error::new_spanned(
+                        &func.sig.ident,
+                        format!("invalid wrapper path: {:?}: {e}", wrap.wrapper),
+                    )
+                })?;
+                func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
+            }
+        }
         spel_framework_core::extension::inject_gate_params(
             &mut func,
             &deps.extensions.inject_specs,

@@ -72,6 +72,9 @@ pub struct ExtensionDiscoveries {
     /// carrying a spec's bare wrapper attr get missing params
     /// synthesized by [`inject_gate_params`].
     pub inject_specs: Vec<InjectSpec>,
+    /// Active wrap configs, paired with the consumer marker attr's arg
+    /// (`""` for a bare marker) so callers can honor `skip`.
+    pub wraps: Vec<(String, WrapInstructions)>,
 }
 
 #[derive(Debug, Default)]
@@ -103,6 +106,26 @@ pub struct InjectSpec {
     pub wrapper: String,
     /// Accounts to synthesize, in declaration order.
     pub accounts: Vec<InjectAccount>,
+}
+
+/// Parsed `[package.metadata.spel.wrap_instructions]` for an extension
+/// lib. Declares the per-instruction wrap the extension wants applied
+/// to every instruction the consumer's dispatcher ships, the
+/// consumer's own and discovered ones alike. Consumer fns opt out per
+/// fn via `self_exempt_marker`; discovered fns have no source site to
+/// annotate, so cross-crate carve-outs go in `exempt` by qualified
+/// name.
+#[derive(Debug, Clone)]
+pub struct WrapInstructions {
+    /// Proc-macro attribute the framework prepends to each non-exempt fn.
+    pub wrapper: String,
+    /// Marker attr arg that disables wrap (e.g. `"manual"`),
+    pub skip: String,
+    /// Per-fn opt-out attribute name (e.g. `"freeze_exempt`).
+    pub self_exempt_marker: String,
+    /// Fully-qualified instructions from other crates to skip
+    /// unconditionally.
+    pub exempt: Vec<String>,
 }
 
 /// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
@@ -151,6 +174,7 @@ pub fn discover_extensions<F: FnMut(String)>(
     let mut instructions = Vec::new();
     let mut instruction_attrs = Vec::new();
     let mut inject_specs = Vec::new();
+    let mut wraps = Vec::new();
 
     let lez_pos = mod_attrs
         .iter()
@@ -180,6 +204,15 @@ pub fn discover_extensions<F: FnMut(String)>(
         }
         let attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
         let injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
+        let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
+        let has_wrap = wrap.is_some();
+        if let Some(w) = wrap {
+            let arg = mod_attrs
+                .iter()
+                .find_map(|a| extract_attr_arg(a, &ext_attr))
+                .unwrap_or_default();
+            wraps.push((arg, w));
+        }
 
         let Some(crate_name) = read_package_ident(&manifest_value) else {
             on_warning(format!(
@@ -193,10 +226,10 @@ pub fn discover_extensions<F: FnMut(String)>(
 
         let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
         let funcs = collect_instruction_fns(&items);
-        if funcs.is_empty() && attrs.is_empty() && injects.is_empty() {
+        if funcs.is_empty() && attrs.is_empty() && injects.is_empty() && !has_wrap {
             on_warning(format!(
                 "extension '{crate_name}' matched #[#{ext_attr}] but contributes no \
-                #[instruction] fns and no instruction_attrs"
+                #[instruction] fns and no instruction_attrs and no wrap config"
             ));
         }
         for func in funcs {
@@ -210,6 +243,7 @@ pub fn discover_extensions<F: FnMut(String)>(
         instructions,
         instruction_attrs,
         inject_specs,
+        wraps,
     })
 }
 
@@ -410,6 +444,75 @@ fn read_spel_inject_specs(
     Ok(specs)
 }
 
+/// Read `[package.metadata.spel.wrap_instructions` from parsed
+/// manifest.
+///
+/// Absent section in `Ok(None)`, the extension does not wrap. A present
+/// but malformed section is a hard `Err`: a broken wrap declaration
+/// must never degrade to a program silently shipping unwrapped
+/// instructions.
+fn read_spel_wrap_instructions(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Option<WrapInstructions>, String> {
+    let manifest = crate_dir.join("Cargo.toml");
+    let malformed = |what: &str| {
+        format!(
+            "malformed [package.metadata.spel] in {}: {what}",
+            manifest.display()
+        )
+    };
+
+    let Some(wrap) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+        .and_then(|s| s.get("wrap_instructions"))
+    else {
+        return Ok(None);
+    };
+
+    let Some(wrapper) = wrap.get("wrapper").and_then(|w| w.as_str()) else {
+        return Err(malformed("wrap_instructions.wrapper must be a string"));
+    };
+    let Some(self_exempt_marker) = wrap.get("self_exempt_marker").and_then(|w| w.as_str()) else {
+        return Err(malformed(
+            "wrap_instructions.self_exempt_marker must be a string",
+        ));
+    };
+    let skip = match wrap.get("skip") {
+        None => String::new(),
+        Some(v) => v
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| malformed("wrap_instructions.skip must be a string"))?,
+    };
+    let exempt = match wrap.get("exempt") {
+        None => vec![],
+        Some(v) => {
+            let Some(arr) = v.as_array() else {
+                return Err(malformed(
+                    "wrap_instructions.exempt must be an array of string",
+                ));
+            };
+            arr.iter()
+                .map(|x| {
+                    x.as_str().map(String::from).ok_or_else(|| {
+                        malformed("wrap_instructions.exempt must be and array of strings")
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        },
+    };
+
+    Ok(Some(WrapInstructions {
+        wrapper: wrapper.to_string(),
+        skip,
+        self_exempt_marker: self_exempt_marker.to_string(),
+        exempt,
+    }))
+}
+
 /// Reject duplicate instruction names across user fns and discovered
 /// extensions. Duplicates would produce colliding enum variants, match
 /// arms, and IDL discriminators, or silently shadow one another.
@@ -503,6 +606,20 @@ fn insert_position(func: &ItemFn) -> usize {
     0
 }
 
+/// Extract the single-ident arg from an attribute whose path matches
+/// `ext_attr`. Returns `Some("")` for bare attribute, `Some(ident)`
+/// for `#[name(ident)]`, and `None` if the path doesn't match or the
+/// args aren't a single ident.
+fn extract_attr_arg(attr: &Attribute, ext_attr: &str) -> Option<String> {
+    if !attr.path().is_ident(ext_attr) {
+        return None;
+    }
+    if matches!(attr.meta, syn::Meta::Path(_)) {
+        return Some(String::new());
+    }
+    attr.parse_args::<syn::Ident>().ok().map(|i| i.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -526,6 +643,24 @@ mod tests {
     ) -> Result<Vec<String>, String> {
         let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
         Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instruction_attrs)
+    }
+
+    fn wrap_fixture(tmp: &TempDir, wrap_toml: &str) {
+        ext_fixture(
+            tmp,
+            &format!(
+                r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+{wrap_toml}
+"#
+            ),
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
     }
 
     #[test]
@@ -1417,5 +1552,157 @@ mod user_program {
             mod program {}
         };
         assert!(has_extension_marker_candidates(&q.attrs));
+    }
+
+    #[test]
+    fn read_wrap_instructions_returns_declared_config() {
+        let tmp = TempDir::new("wrap-declared");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "freeze-authority"
+version = "0.1.0"
+
+[package.metadata.spel.wrap_instructions]
+wrapper = "freeze_authority_macros::__inject_freeze_gate"
+skip = "manual"
+self_exempt_marker = "freeze_exempt"
+exempt = ["admin_authority::admin_transfer", "admin_authority::admin_renounce"]
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let wrap = read_spel_wrap_instructions(&value, tmp.path())
+            .unwrap()
+            .expect("wrap config declared");
+        assert_eq!(
+            wrap.wrapper,
+            "freeze_authority_macros::__inject_freeze_gate"
+        );
+        assert_eq!(wrap.skip, "manual");
+        assert_eq!(wrap.self_exempt_marker, "freeze_exempt");
+        assert_eq!(
+            wrap.exempt,
+            vec![
+                "admin_authority::admin_transfer",
+                "admin_authority::admin_renounce"
+            ]
+        );
+    }
+
+    #[test]
+    fn read_wrap_instructions_none_when_section_missing() {
+        let tmp = TempDir::new("wrap-absent");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "no-wrap"
+version = "0.1.0"
+
+[package.metadata.spel]
+extension_attr = "some_other"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        assert!(read_spel_wrap_instructions(&value, tmp.path())
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn read_wrap_instructions_handles_omitted_optional_fields() {
+        let tmp = TempDir::new("wrap-minimal");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "minimal-wrap"
+version = "0.1.0"
+
+[package.metadata.spel.wrap_instructions]
+wrapper = "minimal::wrapper"
+self_exempt_marker = "minimal_exempt"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let wrap = read_spel_wrap_instructions(&value, tmp.path())
+            .unwrap()
+            .expect("minimal config");
+        assert_eq!(wrap.skip, "");
+        assert!(wrap.exempt.is_empty());
+    }
+
+    #[test]
+    fn malformed_wrap_missing_required_field_is_a_hard_error() {
+        let tmp = TempDir::new("wrap-incomplete");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "incomplete"
+version = "0.1.0"
+
+[package.metadata.spel.wrap_instructions]
+wrapper = "incomplete::wrapper"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_wrap_instructions(&value, tmp.path())
+            .expect_err("missing self_exempt_marker must be rejected");
+        assert!(
+            err.contains("self_exempt_marker"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn discovery_pairs_wrap_with_marker_arg() {
+        let tmp = TempDir::new("wrap-discover-arg");
+        wrap_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel.wrap_instructions]
+wrapper = "my_ext_macros::gate"
+skip = "manual"
+self_exempt_marker = "my_exempt"
+"#,
+        );
+
+        // Bare marker: arg is "".
+        let bare: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        assert_eq!(ext.wraps.len(), 1);
+        assert_eq!(ext.wraps[0].0, "");
+
+        // Marker with ident arg: arg is the ident (skip matching happens
+        // at the producer).
+        let manual: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext(manual)]
+        );
+        let ext = discover_extensions(&graph.direct_dirs, &manual, &mut |_| {}).unwrap();
+        assert_eq!(ext.wraps[0].0, "manual");
+    }
+
+    #[test]
+    fn discovery_skips_wrap_when_attr_absent_on_mod() {
+        let tmp = TempDir::new("wrap-discover-absent");
+        wrap_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel.wrap_instructions]
+wrapper = "my_ext_macros::gate"
+self_exempt_marker = "my_exempt"
+"#,
+        );
+        let attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &attrs, &mut |_| {}).unwrap();
+        assert!(ext.wraps.is_empty());
     }
 }
