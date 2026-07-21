@@ -1129,6 +1129,9 @@ impl<'a> ExecuteTransformer<'a> {
                         seen.push(name.clone());
                         if let Some(ident) = account_idents.iter().find(|i| i.to_string() == name) {
                             result.push(quote! { &*#ident.account_id.value() });
+                        } else if self.injected.iter().any(|n| n == &name) {
+                            let ident = format_ident!("{}", name);
+                            result.push(quote! { &*#ident.account_id.value() });
                         }
                     }
                 }
@@ -2532,6 +2535,44 @@ pub mod token {
         assert!(
             output.contains("VaultConfig"),
             "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
+        );
+    }
+
+    /// A compound-seed account whose seed source is an auto-injected param
+    /// (not present in the user's `vec![...]`) must still produce the
+    /// `&*<name>.account_id.value()` seed arg — the injected param is in
+    /// scope in the fn body just like a user-listed account.
+    #[test]
+    fn account_seed_args_from_idents_falls_back_to_injected_accounts() {
+        let accounts = vec![AccountParam {
+            name: format_ident!("freeze_account"),
+            constraints: AccountConstraints {
+                pda_seeds: vec![
+                    PdaSeedDef::Const("frozen".into()),
+                    PdaSeedDef::Account("caller".into()),
+                ],
+                ..Default::default()
+            },
+            is_rest: false,
+        }];
+        let fn_name = format_ident!("update_value");
+        let injected = vec![
+            "freeze_config".to_string(),
+            "freeze_account".to_string(),
+            "caller".to_string(),
+        ];
+        let transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+
+        let result = transformer.account_seed_args_from_idents(&[]);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].to_string(),
+            quote! { &*caller.account_id.value() }.to_string()
         );
     }
 }
