@@ -293,7 +293,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     for (func, crate_path) in deps.extensions.instructions {
         let mut func = func;
         let qualified = format!(
-            "{}: {}",
+            "{}::{}",
             crate_path
                 .segments
                 .first()
