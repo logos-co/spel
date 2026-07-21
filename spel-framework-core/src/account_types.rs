@@ -194,6 +194,18 @@ fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
                 def.name = name.to_string();
                 return Some(def);
             },
+            Item::Type(t) if t.ident == name => {
+                // Type alias: resolve the target and emit its def under the
+                // alias name, so instruction args referencing the alias find
+                // a matching entry in the IDL's `types` array.
+                if let Some(target) = last_ident(&t.ty) {
+                    if let Some(mut def) = find_and_parse_type(items, &target) {
+                        def.name = name.to_string();
+                        return Some(def)
+                    }
+                }
+                return None;
+            }
             _ => {},
         }
     }
@@ -386,5 +398,20 @@ mod tests {
         assert_eq!(types.len(), 1);
         assert_eq!(types[0].name, "MyChoice");
         assert_eq!(types[0].kind, "enum");
+    }
+
+    #[test]
+    fn alias_to_enum_resolves_under_alias_name() {
+        let src = r#"
+            pub enum Real { A, B { x: u64 } }
+            pub type Alias = Real;
+
+            #[instruction]
+            pub fn do_it(choice: Alias) -> SpelResult { todo!() }
+        "#;
+        let items = syn::parse_file(src).unwrap().items;
+        let (_, types) = collect_account_types(&items);
+        assert_eq!(types.len(), 1);
+        assert_eq!(types[0].name, "Alias");
     }
 }
