@@ -8,14 +8,10 @@
 //! - [`discover_extensions`] returns an [`ExtensionDiscoveries`]: the
 //!   cross-crate `#[instruction]` fns to be merged into the consumer's
 //!   dispatcher and IDL, the gate param inject specs applied by
-//!   [`inject_gate_params`], and the library-owned gate attribute names
-//!   the framework strips from emitted handler fns. Attribute macros on
-//!   items inside a module only expand after the outer `#[lez_program]`
-//!   rewrite, so this strip removes the first (and only possible)
-//!   expansion: a gate attr on a consumer-authored instruction
-//!   contributes no code, no validation, and no diagnostics. Library
-//!   gates apply exclusively by re-expanding on the handlers the
-//!   library itself emits.
+//!   [`inject_gate_params`], and the wrap configs. Gate and marker
+//!   attrs stay on emitted handler fns and expand there as ordinary
+//!   proc-macros: a gate rewrites the handler body, a marker expands
+//!   to nothing. Nothing is stripped.
 //! - [`check_duplicate_instruction_names`] rejects name collisions
 //!   between user fns and discovered extensions (or two extensions)
 //!   before they become colliding enum variants, match arms, or IDL
@@ -44,8 +40,8 @@
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
-//! `read_spel_instruction_attrs`, `read_spel_inject_specs`,
-//! `collect_instruction_fns`) are module-private; producers go through [`resolve_program_deps`],
+//! `read_spel_inject_specs`, `collect_instruction_fns`) are
+//! module-private; producers go through [`resolve_program_deps`],
 //! and [`discover_extensions`] stays public for callers that already
 //! hold a resolved graph.
 
@@ -65,9 +61,6 @@ pub struct ExtensionDiscoveries {
     /// crate path to call it from the consumer (e.g. `::admin_authority`),
     /// derived from the dependency's `[package].name`.
     pub instructions: Vec<(ItemFn, syn::Path)>,
-    /// Instruction-level marker attr names the libraries declare. The
-    /// framework strips these from emitted handler fns.
-    pub instruction_attrs: Vec<String>,
     /// Gate param injection specs the libraries declare. Instructions
     /// carrying a spec's bare wrapper attr get missing params
     /// synthesized by [`inject_gate_params`].
@@ -147,7 +140,6 @@ pub struct WrapInstructions {
 struct MatchedExtension {
     marker_pos: usize,
     instructions: Vec<(ItemFn, syn::Path)>,
-    instruction_attrs: Vec<String>,
     inject_specs: Vec<InjectSpec>,
     wraps: Vec<(String, WrapInstructions)>,
 }
@@ -240,7 +232,6 @@ pub fn discover_extensions<F: FnMut(String)>(
             .iter()
             .position(|a| a.path().is_ident(&ext_attr))
             .unwrap_or(usize::MAX);
-        let instruction_attrs = read_spel_instruction_attrs(&manifest_value, dep_dir)?;
         let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
         for spec in &mut injects {
             spec.source = crate_name.clone();
@@ -261,10 +252,10 @@ pub fn discover_extensions<F: FnMut(String)>(
 
         let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
         let funcs = collect_instruction_fns(&items);
-        if funcs.is_empty() && instruction_attrs.is_empty() && injects.is_empty() && !has_wrap {
+        if funcs.is_empty() && injects.is_empty() && !has_wrap {
             on_warning(format!(
-                "extension '{crate_name}' matched #[#{ext_attr}] but contributes no \
-                #[instruction] fns and no instruction_attrs and no wrap config"
+                "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
+                #[instruction] fns, no inject specs, and no wrap config"
             ));
         }
         let mut instructions = Vec::new();
@@ -274,7 +265,6 @@ pub fn discover_extensions<F: FnMut(String)>(
         matched.push(MatchedExtension {
             marker_pos,
             instructions,
-            instruction_attrs,
             inject_specs: injects,
             wraps,
         });
@@ -390,40 +380,6 @@ fn read_spel_extension_attr(
             )),
         },
     }
-}
-
-/// Read `[package.metadata.spel.instruction_attrs]` from a crate's Cargo.toml.
-/// Returns the list of instruction-level marker attribute names the library
-/// declares (e.g. `["require_admin"]`). Framework strips these from emitted
-/// handler fns to prevent re-expansion.
-fn read_spel_instruction_attrs(
-    value: &toml::Value,
-    crate_dir: &Path,
-) -> Result<Vec<String>, String> {
-    let Some(attrs) = value
-        .get("package")
-        .and_then(|p| p.get("metadata"))
-        .and_then(|m| m.get("spel"))
-        .and_then(|s| s.get("instruction_attrs"))
-    else {
-        return Ok(vec![]);
-    };
-    let Some(arr) = attrs.as_array() else {
-        return Err(format!(
-            "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
-            crate_dir.join("Cargo.toml").display()
-        ));
-    };
-    arr.iter()
-        .map(|x| {
-            x.as_str().map(String::from).ok_or_else(|| {
-                format!(
-                    "malformed [package.metadata.spel] in {}: instruction_attrs must be an array of strings",
-                    crate_dir.join("Cargo.toml").display()
-                )
-            })
-        })
-        .collect()
 }
 
 /// Read `[[package.metadata.spel.inject]]` blocks from a parsed manifest.
@@ -739,7 +695,6 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
     let mut out = ExtensionDiscoveries::default();
     for m in matched {
         out.instructions.extend(m.instructions);
-        out.instruction_attrs.extend(m.instruction_attrs);
         out.inject_specs.extend(m.inject_specs);
         out.wraps.extend(m.wraps);
     }
@@ -761,15 +716,6 @@ mod tests {
     ) -> Result<Vec<(ItemFn, syn::Path)>, String> {
         let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
         Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
-    }
-
-    fn discover_attrs<F: FnMut(String)>(
-        dir: &Path,
-        mod_attrs: &[Attribute],
-        on_warning: &mut F,
-    ) -> Result<Vec<String>, String> {
-        let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
-        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instruction_attrs)
     }
 
     fn wrap_fixture(tmp: &TempDir, wrap_toml: &str) {
@@ -1124,7 +1070,6 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
         .expect("no markers is not an error");
         assert!(warnings.is_empty(), "metadata must not run: {warnings:?}");
         assert!(deps.extensions.instructions.is_empty());
-        assert!(deps.extensions.instruction_attrs.is_empty());
     }
 
     #[test]
@@ -1671,23 +1616,6 @@ extension_attr = 42
     }
 
     #[test]
-    fn malformed_instruction_attrs_is_a_hard_error() {
-        let tmp = TempDir::new("malformed-instr-attrs");
-        let mod_attrs = ext_fixture(
-            &tmp,
-            r#"
-[package.metadata.spel]
-extension_attr = "my_ext"
-instruction_attrs = "require_x"
-"#,
-            "",
-        );
-        let err = discover_attrs(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
-            .expect_err("non-array instruction_attrs must fail");
-        assert!(err.contains("instruction_attrs"), "unhelpful error: {err}");
-    }
-
-    #[test]
     fn unreadable_consumer_manifest_warns() {
         let tmp = TempDir::new("no-consumer-manifest");
         // consumer dir exists but has no Cargo.toml at all
@@ -1704,16 +1632,21 @@ instruction_attrs = "require_x"
     }
 
     #[test]
-    fn gate_only_extension_does_not_warn() {
-        let tmp = TempDir::new("gate-only-ext");
+    fn wrap_only_extension_does_not_warn() {
+        // No #[instruction] fns and no inject specs: a library whose whole
+        // contribution is the auto-wrap config is a valid extension.
+        let tmp = TempDir::new("wrap-only-ext");
         let mod_attrs = ext_fixture(
             &tmp,
             r#"
 [package.metadata.spel]
 extension_attr = "my_ext"
-instruction_attrs = ["require_x"]
+
+[package.metadata.spel.wrap_instructions]
+wrapper = "my_ext_macros::gate"
+self_exempt_marker = "my_exempt"
 "#,
-            "", // no #[instruction] fns: a pure gate library is a valid extension
+            "",
         );
         let mut warnings = Vec::new();
         let found = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
@@ -1723,7 +1656,38 @@ instruction_attrs = ["require_x"]
         assert!(found.is_empty());
         assert!(
             warnings.is_empty(),
-            "gate-only extension is legitimate, got: {warnings:?}"
+            "wrap-only extension is legitimate, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn inject_only_extension_does_not_warn() {
+        // A library contributing only gate param inject specs is valid too.
+        let tmp = TempDir::new("inject-only-ext");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.inject]]
+wrapper = "my_gate"
+
+  [[package.metadata.spel.inject.account]]
+  name = "gate_config"
+  seed = { const = "gate_config" }
+"#,
+            "",
+        );
+        let mut warnings = Vec::new();
+        let found = discover_instructions(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .unwrap();
+        assert!(found.is_empty());
+        assert!(
+            warnings.is_empty(),
+            "inject-only extension is legitimate, got: {warnings:?}"
         );
     }
 

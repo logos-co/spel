@@ -360,7 +360,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let match_arms = generate_match_arms(mod_name, &instructions);
 
     // Generate the handler functions (with #[instruction] stripped, account attrs stripped)
-    let handler_fns = generate_handler_fns(&instructions, &deps.extensions.instruction_attrs);
+    let handler_fns = generate_handler_fns(&instructions);
 
     // Generate validation functions
     let validation_fns = generate_validation(&instructions);
@@ -1301,23 +1301,13 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     None
 }
 
-fn generate_handler_fns(
-    instructions: &[InstructionInfo],
-    strip_attrs: &[String],
-) -> Vec<TokenStream2> {
+fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .filter(|ix| ix.external_call_path.is_none())
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
-            // Strip library-declared gate attrs. Inner attrs expand only
-            // after this outer rewrite, so this removes their first and
-            // only expansion: a gate attr on a consumer-authored
-            // instruction contributes no code and no diagnostics here.
-            for name in strip_attrs {
-                func.attrs.retain(|a| !a.path().is_ident(name))
-            }
             for input in &mut func.sig.inputs {
                 if let FnArg::Typed(pat_type) = input {
                     pat_type.attrs.retain(|a| !a.path().is_ident("account"));

@@ -222,10 +222,9 @@ Third-party libraries can ship `#[instruction]` fns that are auto-discovered by 
 ```toml
 [package.metadata.spel]
 extension_attr = "admin_authority"
-instruction_attrs = ["require_admin"]
 ```
 
-When a consumer's `#[lez_program]` module carries the declared `extension_attr` (e.g. `#[admin_authority]`), the framework scans the library's `src/lib.rs` for `#[instruction]` fns and merges them with cross-crate dispatcher calls. The `instruction_attrs` list names per-instruction marker attributes the library owns (e.g. `#[require_admin]`); the framework strips these from emitted handler fns.
+When a consumer's `#[lez_program]` module carries the declared `extension_attr` (e.g. `#[admin_authority]`), the framework scans the library's `src/lib.rs` for `#[instruction]` fns and merges them with cross-crate dispatcher calls. Per-instruction attrs the library owns (e.g. `#[require_admin]`) stay on the emitted handlers and expand there as the library's own proc-macros.
 
 Trust model: activating an extension takes two explicit consumer actions, the dependency in the consumer's own `Cargo.toml` and the marker attr on the module. Discovery covers direct dependencies only, so a transitive crate can never contribute instructions by claiming a matching `extension_attr`. Generated call paths derive from the dependency's `[package].name`, never its directory name. Malformed `[package.metadata.spel]` fails the build rather than silently deactivating the extension. Duplicate instruction names across user fns and extensions are a compile error naming both sources.
 
@@ -233,7 +232,7 @@ Contracts an extension author must hold:
 
 1. **Instruction fns are re-exported at the crate root.** The generated dispatcher calls `::your_crate::your_instruction(...)`; a fn nested in a private module does not resolve.
 2. **Signature types resolve at the consumer's expansion site.** Extension instruction signatures are copied verbatim into consumer-side codegen, so reference your own types by absolute path (`::your_crate::YourType`) rather than relying on imports.
-3. **Gate attrs on consumer instructions never expand.** Attrs on items inside a module expand only after the outer `#[lez_program]` rewrite, and the framework strips `instruction_attrs` from emitted handlers at that point, removing their first and only possible expansion. A library gate takes effect exclusively by re-expanding on handlers the library itself emits. Do not design an extension that relies on consumer-side gate expansion.
+3. **Gate and marker attrs are self-consuming proc-macros.** Attrs on items inside a module expand once, after the outer `#[lez_program]` rewrite, on the emitted handlers. Ship every instruction-level attr as a real proc-macro that handles that expansion: a gate rewrites the handler body, a marker expands to nothing. The framework strips nothing.
 
 An extension whose gate needs specific accounts can additionally declare an inject block:
 
