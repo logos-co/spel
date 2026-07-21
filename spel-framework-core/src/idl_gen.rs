@@ -139,7 +139,7 @@ fn generate_idl_inner(
     // Resolve the dependency side first: inject specs apply to the
     // consumer's own instructions below.
     let mut warn = |w: String| eprintln!("⚠️  {w}");
-    let (ext_instructions, inject_specs) = match manifest_dir {
+    let (ext_instructions, inject_specs, active_wraps) = match manifest_dir {
         Some(manifest_dir) => {
             let deps = crate::extension::resolve_program_deps(
                 &manifest_dir,
@@ -147,9 +147,14 @@ fn generate_idl_inner(
                 &mut warn,
             )
             .map_err(IdlGenError::MalformedExtensionMetadata)?;
-            (deps.extensions.instructions, deps.extensions.inject_specs)
+            let active_wraps = crate::extension::active_wraps(&deps.extensions.wraps);
+            (
+                deps.extensions.instructions,
+                deps.extensions.inject_specs,
+                active_wraps,
+            )
         },
-        None => (vec![], vec![]),
+        None => (vec![], vec![], vec![]),
     };
 
     // Collect instruction functions
@@ -158,8 +163,13 @@ fn generate_idl_inner(
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                crate::extension::inject_gate_params(&mut func, &inject_specs)
-                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
+                crate::extension::apply_wrap_and_inject(
+                    &mut func,
+                    &active_wraps,
+                    &inject_specs,
+                    None,
+                )
+                .map_err(IdlGenError::MalformedExtensionMetadata)?;
                 instructions.push(parse_instruction(func)?);
             }
         }
@@ -171,8 +181,22 @@ fn generate_idl_inner(
 
     for (func, crate_path) in ext_instructions {
         let mut func = func;
-        crate::extension::inject_gate_params(&mut func, &inject_specs)
-            .map_err(IdlGenError::MalformedExtensionMetadata)?;
+        let qualified = format!(
+            "{}::{}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        crate::extension::apply_wrap_and_inject(
+            &mut func,
+            &active_wraps,
+            &inject_specs,
+            Some(&qualified),
+        )
+        .map_err(IdlGenError::MalformedExtensionMetadata)?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));

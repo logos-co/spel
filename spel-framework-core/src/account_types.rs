@@ -201,11 +201,11 @@ fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
                 if let Some(target) = last_ident(&t.ty) {
                     if let Some(mut def) = find_and_parse_type(items, &target) {
                         def.name = name.to_string();
-                        return Some(def)
+                        return Some(def);
                     }
                 }
                 return None;
-            }
+            },
             _ => {},
         }
     }

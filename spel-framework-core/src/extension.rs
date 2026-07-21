@@ -332,6 +332,62 @@ pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec
     Ok(injected)
 }
 
+/// Filter `deps.extensions.wraps` down to the wraps whose extension
+/// marker carries no skip-word arg matching `WrapInstructions::skip`.
+///
+/// A wrap with `skip = Some("manual")` is dropped for a marker written
+/// `#[freeze_authority(manual)]`, kept for `#[freeze_authority]`. A wrap
+/// with `skip = None` is always kept.
+pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstructions> {
+    wraps
+        .iter()
+        .filter(|(arg, wrap)| match &wrap.skip {
+            Some(s) => arg != s,
+            None => true,
+        })
+        .map(|(_, wrap)| wrap.clone())
+        .collect()
+}
+
+/// Prepend each active wrap's attribute to `func`, then inject any
+/// gate params those wrappers need. Shared between the program-macro
+/// dispatcher and both IDL paths so all three see the same accounts.
+///
+/// `qualified = None` for consumer-authored fns: only the per-fn
+/// `self_exempt_marker` opts out. `Some("crate::fn_name")` for
+/// extension-provided fns: the `exempt` qualified-name list is also
+/// consulted so a wrap can carve out an extension it depends on.
+///
+/// Returns the names of the params `inject_gate_params` synthesized.
+///
+/// # Errors
+///
+/// Propagates `inject_gate_params` errors and fails when a declared
+/// wrapper path is not a valid Rust attribute path.
+pub fn apply_wrap_and_inject(
+    func: &mut ItemFn,
+    active_wraps: &[WrapInstructions],
+    inject_specs: &[InjectSpec],
+    qualified: Option<&str>,
+) -> Result<Vec<String>, String> {
+    for wrap in active_wraps {
+        let exempt = func
+            .attrs
+            .iter()
+            .any(|a| a.path().is_ident(&wrap.self_exempt_marker))
+            || qualified
+                .map(|q| wrap.exempt.iter().any(|e| e == q))
+                .unwrap_or(false);
+        if exempt {
+            continue;
+        }
+        let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper)
+            .map_err(|e| format!("invalid wrapper path {:?}: {e}", wrap.wrapper))?;
+        func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
+    }
+    inject_gate_params(func, inject_specs)
+}
+
 /// Filter `#[instruction]`-annotated fns from a flat item list.
 ///
 /// Used by framework codegen to pull instruction definitions out of

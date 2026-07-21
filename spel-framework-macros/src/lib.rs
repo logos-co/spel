@@ -227,16 +227,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
-    let active_wraps: Vec<_> = deps
-        .extensions
-        .wraps
-        .iter()
-        .filter(|(arg, wrap)| match &wrap.skip {
-            Some(s) => arg != s,
-            None => true,
-        })
-        .map(|(_, wrap)| wrap.clone())
-        .collect();
+    let active_wraps: Vec<_> = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
 
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -247,27 +238,11 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
                     let mut func = func.clone();
-                    // Prepend each active wrap's gate unless this fn
-                    // carries the wrap's self_exempt_marker.
-                    for wrap in &active_wraps {
-                        let exempt = func
-                            .attrs
-                            .iter()
-                            .any(|a| a.path().is_ident(&wrap.self_exempt_marker));
-                        if !exempt {
-                            let wrapper_path: syn::Path =
-                                syn::parse_str(&wrap.wrapper).map_err(|e| {
-                                    syn::Error::new_spanned(
-                                        &func.sig.ident,
-                                        format!("invalid wrapper path {:?}: {e}", wrap.wrapper),
-                                    )
-                                })?;
-                            func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
-                        }
-                    }
-                    let injected = spel_framework_core::extension::inject_gate_params(
+                    let injected = spel_framework_core::extension::apply_wrap_and_inject(
                         &mut func,
+                        &active_wraps,
                         &deps.extensions.inject_specs,
+                        None,
                     )
                     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                     let mut info = parse_instruction(func)?;
@@ -301,25 +276,11 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 .unwrap_or_default(),
             func.sig.ident
         );
-        for wrap in &active_wraps {
-            let exempt = wrap.exempt.iter().any(|e| e == &qualified)
-                || func
-                    .attrs
-                    .iter()
-                    .any(|a| a.path().is_ident(&wrap.self_exempt_marker));
-            if !exempt {
-                let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper).map_err(|e| {
-                    syn::Error::new_spanned(
-                        &func.sig.ident,
-                        format!("invalid wrapper path: {:?}: {e}", wrap.wrapper),
-                    )
-                })?;
-                func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
-            }
-        }
-        spel_framework_core::extension::inject_gate_params(
+        spel_framework_core::extension::apply_wrap_and_inject(
             &mut func,
+            &active_wraps,
             &deps.extensions.inject_specs,
+            Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
@@ -2207,6 +2168,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let active_wraps = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
 
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -2214,9 +2176,11 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                let injected = spel_framework_core::extension::inject_gate_params(
+                let injected = spel_framework_core::extension::apply_wrap_and_inject(
                     &mut func,
+                    &active_wraps,
                     &deps.extensions.inject_specs,
+                    None,
                 )
                 .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                 let mut info = parse_instruction(func)?;
@@ -2235,9 +2199,20 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
 
     for (func, crate_path) in deps.extensions.instructions {
         let mut func = func.clone();
-        spel_framework_core::extension::inject_gate_params(
+        let qualified = format!(
+            "{}::{}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        spel_framework_core::extension::apply_wrap_and_inject(
             &mut func,
+            &active_wraps,
             &deps.extensions.inject_specs,
+            Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
