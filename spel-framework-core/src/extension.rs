@@ -45,9 +45,12 @@
 //! and [`discover_extensions`] stays public for callers that already
 //! hold a resolved graph.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
-use syn::{parse_quote, Attribute, FnArg, ItemFn};
+use syn::{parse_quote, token::Fn, Attribute, FnArg, ItemFn};
 
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
@@ -273,6 +276,43 @@ pub fn discover_extensions<F: FnMut(String)>(
     Ok(flatten_in_marker_order(matched))
 }
 
+fn build_remap(specs: &[InjectSpec], func: &ItemFn) -> HashMap<String, String> {
+    let existing_signer = find_signer_param(func);
+    let mut remap: HashMap<String, String> = HashMap::new();
+
+    for spec in specs {
+        for acc in &spec.accounts {
+            if acc.signer {
+                if let Some(existing) = &existing_signer {
+                    if existing != &acc.name {
+                        remap.insert(acc.name.clone(), existing.clone());
+                    }
+                }
+            } else if let [InjectSeed::Const(literal)] = acc.seeds.as_slice() {
+                if let Some(existing) = find_pda_literal_param(func, literal) {
+                    if existing != acc.name {
+                        remap.insert(acc.name.clone(), existing.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    for spec in specs {
+        for acc in &spec.accounts {
+            if acc.seeds.len() >= 2 {
+                if let Some(existing) = find_pda_compound_param(func, &acc.seeds, &remap) {
+                    if existing != acc.name {
+                        remap.insert(acc.name.clone(), existing);
+                    }
+                }
+            }
+        }
+    }
+
+    remap
+}
+
 /// Inject a wrapper's missing gate params into an instruction fn.
 ///
 /// Skip-if-declared: a param that exists is never touched. A wrapper
@@ -290,43 +330,39 @@ pub fn discover_extensions<F: FnMut(String)>(
 ///
 /// `Err` when two extensions inject the same param name with different
 /// constraints; callers surface it as a compile error.
-pub fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
+fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
+    let remap = build_remap(specs, func);
     let mut injected = Vec::new();
-    // name -> (account def, source extension) for params this call added
-    let mut injected_by: std::collections::HashMap<String, (&InjectAccount, &str)> =
-        std::collections::HashMap::new();
+    let mut injected_by: HashMap<String, (&InjectAccount, &str)> = HashMap::new();
     let mut pos = insert_position(func);
 
     for spec in specs {
-        let activates = func.attrs.iter().any(|a| {
-            a.path()
-                .segments
-                .last()
-                .is_some_and(|s| s.ident == spec.wrapper)
-                && matches!(a.meta, syn::Meta::Path(_))
-        });
-        if !activates {
+        if !spec_activates(spec, func) {
             continue;
         }
 
         for acc in &spec.accounts {
-            if let Some((existing, source)) = injected_by.get(acc.name.as_str()) {
+            let effective = remap
+                .get(&acc.name)
+                .cloned()
+                .unwrap_or_else(|| acc.name.clone());
+            if let Some((existing, source)) = injected_by.get(effective.as_str()) {
                 if *existing == acc {
                     continue; // identical constraints: one shared account
                 }
                 return Err(format!(
                     "extension '{source}' and '{}' both inject param '{}' with \
                     conflicting constraints",
-                    spec.source, acc.name
+                    spec.source, effective
                 ));
             }
-            if has_param_named(func, &acc.name) {
+            if has_param_named(func, &effective) {
                 continue; // consumer declared it: declared win
             }
-            func.sig.inputs.insert(pos, build_inject_param(acc));
+            func.sig.inputs.insert(pos, build_inject_param(acc, &remap));
             pos += 1;
             injected.push(acc.name.clone());
-            injected_by.insert(acc.name.clone(), (acc, spec.source.as_str()));
+            injected_by.insert(effective.clone(), (acc, spec.source.as_str()));
         }
     }
     Ok(injected)
@@ -370,6 +406,7 @@ pub fn apply_wrap_and_inject(
     inject_specs: &[InjectSpec],
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    let remap = build_remap(inject_specs, func);
     for wrap in active_wraps {
         let exempt = func
             .attrs
@@ -383,7 +420,33 @@ pub fn apply_wrap_and_inject(
         }
         let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper)
             .map_err(|e| format!("invalid wrapper path {:?}: {e}", wrap.wrapper))?;
-        func.attrs.insert(0, syn::parse_quote! { #[#wrapper_path] });
+        let wrapper_last = wrapper_path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+
+        let mut args: Vec<syn::MetaNameValue> = Vec::new();
+        for spec in inject_specs {
+            if spec.wrapper != wrapper_last {
+                continue;
+            }
+            for acc in &spec.accounts {
+                let resolved = remap
+                    .get(&acc.name)
+                    .cloned()
+                    .unwrap_or_else(|| acc.name.clone());
+                let key = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
+                let val = syn::Ident::new(&resolved, proc_macro2::Span::call_site());
+                args.push(parse_quote! { #key = # val});
+            }
+        }
+        let attr: Attribute = if args.is_empty() {
+            parse_quote! { #[#wrapper_path] }
+        } else {
+            parse_quote! { #[#wrapper_path(#(#args), *)] }
+        };
+        func.attrs.insert(0, attr);
     }
     inject_gate_params(func, inject_specs)
 }
@@ -674,6 +737,157 @@ fn has_param_named(func: &ItemFn, name: &str) -> bool {
     })
 }
 
+fn find_signer_param(func: &ItemFn) -> Option<String> {
+    let mut found: Option<String> = None;
+    for input in &func.sig.inputs {
+        let FnArg::Typed(pt) = input else { continue };
+        let is_signer = pt.attrs.iter().any(|a| {
+            if !a.path().is_ident("account") {
+                return false;
+            }
+            let mut hit = false;
+            let _ = a.parse_nested_meta(|meta| {
+                if meta.path.is_ident("signer") {
+                    hit = true;
+                }
+                Ok(())
+            });
+            hit
+        });
+        if !is_signer {
+            continue;
+        }
+        let syn::Pat::Ident(pi) = &*pt.pat else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        found = Some(pi.ident.to_string());
+    }
+    found
+}
+
+fn find_pda_literal_param(func: &ItemFn, literal: &str) -> Option<String> {
+    for input in &func.sig.inputs {
+        let FnArg::Typed(pt) = input else { continue };
+        let syn::Pat::Ident(pi) = &*pt.pat else {
+            continue;
+        };
+        for attr in &pt.attrs {
+            if !attr.path().is_ident("account") {
+                continue;
+            }
+            let mut matched = false;
+            let _ = attr.parse_nested_meta(|meta| {
+                if !meta.path.is_ident("pda") {
+                    return Ok(());
+                }
+                let expr: syn::Expr = meta.value()?.parse()?;
+                if expr_is_literal_call(&expr, literal) {
+                    matched = true;
+                }
+                Ok(())
+            });
+            if matched {
+                return Some(pi.ident.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn expr_is_literal_call(expr: &syn::Expr, target: &str) -> bool {
+    let syn::Expr::Call(call) = expr else {
+        return false;
+    };
+    let syn::Expr::Path(p) = &*call.func else {
+        return false;
+    };
+    if !p.path.is_ident("literal") {
+        return false;
+    }
+    let Some(syn::Expr::Lit(lit_expr)) = call.args.first() else {
+        return false;
+    };
+    let syn::Lit::Str(s) = &lit_expr.lit else {
+        return false;
+    };
+    s.value() == target
+}
+
+fn find_pda_compound_param(
+    func: &ItemFn,
+    seeds: &[InjectSeed],
+    remap: &HashMap<String, String>,
+) -> Option<String> {
+    let target: Vec<String> = seeds
+        .iter()
+        .map(|s| match s {
+            InjectSeed::Const(v) => format!("literal:{v}"),
+            InjectSeed::Account(v) => {
+                let resolved = remap.get(v).map(String::as_str).unwrap_or(v);
+                format!("account:{resolved}")
+            },
+        })
+        .collect();
+
+    for input in &func.sig.inputs {
+        let FnArg::Typed(pt) = input else { continue };
+        let syn::Pat::Ident(pi) = &*pt.pat else {
+            continue;
+        };
+        for attr in &pt.attrs {
+            if !attr.path().is_ident("account") {
+                continue;
+            }
+            let mut candidate: Vec<String> = Vec::new();
+            let _ = attr.parse_nested_meta(|meta| {
+                if !meta.path.is_ident("pda") {
+                    return Ok(());
+                }
+                let expr: syn::Expr = meta.value()?.parse()?;
+                let syn::Expr::Array(arr) = expr else {
+                    return Ok(());
+                };
+                for elem in &arr.elems {
+                    if let Some(tag) = seed_expr_to_tag(elem) {
+                        candidate.push(tag);
+                    }
+                }
+                Ok(())
+            });
+            if candidate == target {
+                return Some(pi.ident.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn seed_expr_to_tag(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Call(call) = expr else {
+        return None;
+    };
+    let syn::Expr::Path(p) = &*call.func else {
+        return None;
+    };
+    let arg = call.args.first()?;
+    let syn::Expr::Lit(lit_expr) = arg else {
+        return None;
+    };
+    let syn::Lit::Str(s) = &lit_expr.lit else {
+        return None;
+    };
+    if p.path.is_ident("literal") {
+        Some(format!("literal:{}", s.value()))
+    } else if p.path.is_ident("account") {
+        Some(format!("account:{}", s.value()))
+    } else {
+        None
+    }
+}
+
 /// Injected params go after a leading ProgramContext, else at the front.
 fn insert_position(func: &ItemFn) -> usize {
     if let Some(FnArg::Typed(pt)) = func.sig.inputs.first() {
@@ -719,7 +933,7 @@ fn parse_seed_entry(value: &toml::Value) -> Option<InjectSeed> {
 
 // Render one injected account as a typed fn param carrying its
 // `#[account(...)]` constraint.
-fn build_inject_param(acc: &InjectAccount) -> FnArg {
+fn build_inject_param(acc: &InjectAccount, remap: &HashMap<String, String>) -> FnArg {
     let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
     let seed_exprs: Vec<syn::Expr> = acc
         .seeds
@@ -730,7 +944,8 @@ fn build_inject_param(acc: &InjectAccount) -> FnArg {
                 parse_quote! { literal(#lit) }
             },
             InjectSeed::Account(v) => {
-                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                let name = remap.get(v).unwrap_or(v);
+                let lit = syn::LitStr::new(name, proc_macro2::Span::call_site());
                 parse_quote! { account(#lit) }
             },
         })
@@ -755,6 +970,16 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.wraps.extend(m.wraps);
     }
     out
+}
+
+fn spec_activates(spec: &InjectSpec, func: &ItemFn) -> bool {
+    func.attrs.iter().any(|a| {
+        a.path()
+            .segments
+            .last()
+            .is_some_and(|s| s.ident == spec.wrapper)
+            && matches!(a.meta, syn::Meta::Path(_) | syn::Meta::List(_))
+    })
 }
 
 #[cfg(test)]
@@ -1400,17 +1625,68 @@ wrapper = "other_gate"
     }
 
     #[test]
-    fn wrapper_with_args_disables_injection() {
-        // Custom target names are manual mode: whoever renames declares.
+    fn role_matched_params_skip_injection() {
+        // Consumer declares both roles the spec would inject: a PDA
+        // literal("gate_config") param and a signer. Injection detects
+        // both via the role remap and skips them regardless of the
+        // consumer's chosen names. ADR-0010 supersedes ADR-0009's
+        // "args-form disables injection" — activation now runs for both
+        // Path and List forms.
         let mut func: ItemFn = parse_quote! {
             #[instruction]
-            #[my_gate(config = my_cfg, signer = owner)]
-            pub fn update_value(new_value: u64) -> SpelResult { todo!() }
+            #[my_gate(gate_config = my_cfg, caller = owner)]
+            pub fn update_value(
+                #[account(pda = literal("gate_config"))] my_cfg: AccountWithMetadata,
+                #[account(signer)] owner: AccountWithMetadata,
+                new_value: u64,
+            ) -> SpelResult { todo!() }
         };
         assert!(inject_gate_params(&mut func, &gate_specs())
             .unwrap()
             .is_empty());
-        assert_eq!(func.sig.inputs.len(), 1);
+        assert_eq!(func.sig.inputs.len(), 3);
+    }
+
+    #[test]
+    fn role_matched_compound_pda_skips_injection() {
+        // Compound-seed reuse: consumer names their signer `sender` and
+        // declares a per-account PDA with the same shape as the spec's
+        // compound seed, resolved through the signer remap. Phase-1
+        // remap resolves `caller` -> `sender`; phase-2 sees the
+        // consumer's `[literal("frozen"), account("sender")]` matches
+        // the spec's `[literal("frozen"), account("caller")]` after
+        // resolution, so `marker_account` remaps to `my_frozen` and no
+        // injection happens.
+        let specs = vec![InjectSpec {
+            wrapper: "my_gate".to_string(),
+            source: "ext-c".into(),
+            accounts: vec![
+                InjectAccount {
+                    name: "marker_account".into(),
+                    seeds: vec![
+                        InjectSeed::Const("frozen".into()),
+                        InjectSeed::Account("caller".into()),
+                    ],
+                    signer: false,
+                },
+                InjectAccount {
+                    name: "caller".into(),
+                    seeds: vec![],
+                    signer: true,
+                },
+            ],
+        }];
+        let mut func: ItemFn = parse_quote! {
+            #[instruction]
+            #[my_gate]
+            pub fn withdraw(
+                #[account(pda = [literal("frozen"), account("sender")])] my_frozen: AccountWithMetadata,
+                #[account(signer)] sender: AccountWithMetadata,
+                amount: u64,
+            ) -> SpelResult { todo!() }
+        };
+        assert!(inject_gate_params(&mut func, &specs).unwrap().is_empty());
+        assert_eq!(func.sig.inputs.len(), 3);
     }
 
     #[test]
