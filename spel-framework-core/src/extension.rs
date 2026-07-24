@@ -56,7 +56,7 @@ mod marker;
 mod metadata;
 
 pub use inject::{active_wraps, apply_wrap_and_inject};
-pub use marker::has_extension_marker_candidates;
+pub use marker::{has_extension_marker_candidates, parse_marker_args, EmbedDecl, MarkerArgs};
 
 use marker::extract_attr_arg;
 use metadata::{
