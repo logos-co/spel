@@ -210,12 +210,13 @@ fn find_signer_param(func: &ItemFn) -> Option<String> {
                 return false;
             }
             let mut hit = false;
-            let _ = a.parse_nested_meta(|meta| {
+            a.parse_nested_meta(|meta| {
                 if meta.path.is_ident("signer") {
                     hit = true;
                 }
                 Ok(())
-            });
+            })
+            .ok();
             hit
         });
         if !is_signer {
@@ -243,7 +244,7 @@ fn find_pda_literal_param(func: &ItemFn, literal: &str) -> Option<String> {
                 continue;
             }
             let mut matched = false;
-            let _ = attr.parse_nested_meta(|meta| {
+            attr.parse_nested_meta(|meta| {
                 if !meta.path.is_ident("pda") {
                     return Ok(());
                 }
@@ -252,7 +253,8 @@ fn find_pda_literal_param(func: &ItemFn, literal: &str) -> Option<String> {
                     matched = true;
                 }
                 Ok(())
-            });
+            })
+            .ok();
             if matched {
                 return Some(pi.ident.to_string());
             }
@@ -306,7 +308,7 @@ fn find_pda_compound_param(
                 continue;
             }
             let mut candidate: Vec<String> = Vec::new();
-            let _ = attr.parse_nested_meta(|meta| {
+            attr.parse_nested_meta(|meta| {
                 if !meta.path.is_ident("pda") {
                     return Ok(());
                 }
@@ -320,7 +322,8 @@ fn find_pda_compound_param(
                     }
                 }
                 Ok(())
-            });
+            })
+            .ok();
             if candidate == target {
                 return Some(pi.ident.to_string());
             }

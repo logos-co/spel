@@ -89,7 +89,7 @@ pub fn generate_idl_from_file_with_deps(
         &content,
         &source_path.display().to_string(),
         &extra_items,
-        Some(&source_path),
+        Some(source_path),
     )
 }
 
@@ -142,7 +142,7 @@ fn generate_idl_inner(
     let (ext_instructions, inject_specs, active_wraps) = match manifest_dir {
         Some(manifest_dir) => {
             let deps = crate::extension::resolve_program_deps(
-                &manifest_dir,
+                manifest_dir,
                 &program_mod.attrs,
                 &mut warn,
             )
