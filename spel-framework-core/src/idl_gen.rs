@@ -139,12 +139,22 @@ fn generate_idl_inner(
     // Resolve the dependency side first: inject specs apply to the
     // consumer's own instructions below.
     let mut warn = |w: String| eprintln!("⚠️  {w}");
-    let (ext_instructions, inject_specs, active_wraps) = match manifest_dir {
+    let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
         Some(manifest_dir) => {
-            let deps = crate::extension::resolve_program_deps(
-                manifest_dir,
-                &program_mod.attrs,
-                &mut warn,
+            let mut deps =
+                crate::extension::resolve_program_deps(manifest_dir, &program_mod.attrs, &mut warn)
+                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            let consumer_fns: Vec<ItemFn> = items
+                .iter()
+                .filter_map(|i| match i {
+                    syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+                    _ => None,
+                })
+                .collect();
+            crate::extension::rewrite_embedded_roles(
+                &mut deps.extensions.inject_specs,
+                &deps.extensions.embeds,
+                &consumer_fns,
             )
             .map_err(IdlGenError::MalformedExtensionMetadata)?;
             let active_wraps = crate::extension::active_wraps(&deps.extensions.wraps);
@@ -152,9 +162,10 @@ fn generate_idl_inner(
                 deps.extensions.instructions,
                 deps.extensions.inject_specs,
                 active_wraps,
+                deps.extensions.embeds,
             )
         },
-        None => (vec![], vec![], vec![]),
+        None => (vec![], vec![], vec![], vec![]),
     };
 
     // Collect instruction functions
@@ -167,6 +178,7 @@ fn generate_idl_inner(
                     &mut func,
                     &active_wraps,
                     &inject_specs,
+                    &embeds,
                     None,
                 )
                 .map_err(IdlGenError::MalformedExtensionMetadata)?;
@@ -194,6 +206,7 @@ fn generate_idl_inner(
             &mut func,
             &active_wraps,
             &inject_specs,
+            &embeds,
             Some(&qualified),
         )
         .map_err(IdlGenError::MalformedExtensionMetadata)?;

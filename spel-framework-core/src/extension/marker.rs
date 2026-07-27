@@ -173,20 +173,6 @@ pub fn has_extension_marker_candidates(mod_attrs: &[Attribute]) -> bool {
     })
 }
 
-/// Extract the single-ident arg from an attribute whose path matches
-/// `ext_attr`. Returns `Some("")` for bare attribute, `Some(ident)`
-/// for `#[name(ident)]`, and `None` if the path doesn't match or the
-/// args aren't a single ident.
-pub(super) fn extract_attr_arg(attr: &Attribute, ext_attr: &str) -> Option<String> {
-    if !attr.path().is_ident(ext_attr) {
-        return None;
-    }
-    if matches!(attr.meta, syn::Meta::Path(_)) {
-        return Some(String::new());
-    }
-    attr.parse_args::<syn::Ident>().ok().map(|i| i.to_string())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

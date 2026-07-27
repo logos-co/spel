@@ -220,10 +220,24 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    let deps = spel_framework_core::extension::resolve_program_deps(
+    let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &input.attrs,
         &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let bound_calls = deps.extensions.bound_calls.clone();
+    let consumer_fns: Vec<ItemFn> = items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+            _ => None,
+        })
+        .collect();
+    spel_framework_core::extension::rewrite_embedded_roles(
+        &mut deps.extensions.inject_specs,
+        &deps.extensions.embeds,
+        &consumer_fns,
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
@@ -242,6 +256,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                         &mut func,
                         &active_wraps,
                         &deps.extensions.inject_specs,
+                        &deps.extensions.embeds,
                         None,
                     )
                     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -280,6 +295,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             &mut func,
             &active_wraps,
             &deps.extensions.inject_specs,
+            &deps.extensions.embeds,
             Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -318,7 +334,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     };
 
     // Generate match arms for dispatch
-    let match_arms = generate_match_arms(mod_name, &instructions);
+    let match_arms = generate_match_arms(mod_name, &instructions, &bound_calls);
 
     // Generate the handler functions (with #[instruction] stripped, account attrs stripped)
     let handler_fns = generate_handler_fns(&instructions);
@@ -860,7 +876,11 @@ fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2>
         .collect()
 }
 
-fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
+fn generate_match_arms(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    bound_calls: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
@@ -936,6 +956,12 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     let name = &a.name;
                     quote! { #name }
                 }));
+                if let Some(values) = bound_calls.get(&ix.fn_name.to_string()) {
+                    args.extend(values.iter().map(|v| {
+                        let lit = proc_macro2::Literal::usize_unsuffixed(*v);
+                        quote! { #lit }
+                    }));
+                }
                 args
             };
 
@@ -2162,10 +2188,23 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    let deps = spel_framework_core::extension::resolve_program_deps(
+    let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &program_mod.attrs,
         &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let consumer_fns: Vec<ItemFn> = items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+            _ => None,
+        })
+        .collect();
+    spel_framework_core::extension::rewrite_embedded_roles(
+        &mut deps.extensions.inject_specs,
+        &deps.extensions.embeds,
+        &consumer_fns,
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let active_wraps = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
@@ -2180,6 +2219,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
                     &mut func,
                     &active_wraps,
                     &deps.extensions.inject_specs,
+                    &deps.extensions.embeds,
                     None,
                 )
                 .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -2212,6 +2252,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             &mut func,
             &active_wraps,
             &deps.extensions.inject_specs,
+            &deps.extensions.embeds,
             Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;

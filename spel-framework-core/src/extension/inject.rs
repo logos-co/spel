@@ -25,14 +25,20 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
         .collect()
 }
 
-/// Prepend each active wrap's attribute to `func`, then inject any
-/// gate params those wrappers need. Shared between the program-macro
-/// dispatcher and both IDL paths so all three see the same accounts.
+/// The shared gate pass, four phases in order: substitute embedded
+/// role params on discovered fns, prepend each active wrap's
+/// attribute, inject missing gate params, then stamp authored bare
+/// gates with the framework's location kwargs. Shared between the
+/// program-macro dispatcher and both IDL paths so all three see the
+/// same accounts. Injection reads the authored attr before stamping,
+/// so consumer-authored args disable injection and framework-stamped
+/// args never do.
 ///
 /// `qualified = None` for consumer-authored fns: only the per-fn
 /// `self_exempt_marker` opts out. `Some("crate::fn_name")` for
 /// extension-provided fns: the `exempt` qualified-name list is also
-/// consulted so a wrap can carve out an extension it depends on.
+/// consulted so a wrap can carve out an extension it depends on, and
+/// embedded role substitution applies only on this path.
 ///
 /// Returns the names of the params `inject_gate_params` synthesized.
 ///
@@ -44,9 +50,19 @@ pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
     active_wraps: &[WrapInstructions],
     inject_specs: &[InjectSpec],
+    embeds: &[(String, super::EmbedDecl)],
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    if qualified.is_some() {
+        substitute_embedded_params(func, inject_specs);
+    }
+
     let remap = build_remap(inject_specs, func);
+    let offset_by_source: HashMap<&str, usize> = embeds
+        .iter()
+        .map(|(source, e)| (source.as_str(), e.offset))
+        .collect();
+
     for wrap in active_wraps {
         let exempt = func
             .attrs
@@ -71,15 +87,11 @@ pub fn apply_wrap_and_inject(
             if spec.wrapper != wrapper_last {
                 continue;
             }
-            for acc in &spec.accounts {
-                let resolved = remap
-                    .get(&acc.name)
-                    .cloned()
-                    .unwrap_or_else(|| acc.name.clone());
-                let key = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
-                let val = syn::Ident::new(&resolved, proc_macro2::Span::call_site());
-                args.push(parse_quote! { #key = # val});
-            }
+            args.extend(spec_gate_args(
+                spec,
+                &remap,
+                offset_by_source.get(spec.source.as_str()).copied(),
+            ));
         }
         let attr: Attribute = if args.is_empty() {
             parse_quote! { #[#wrapper_path] }
@@ -88,7 +100,130 @@ pub fn apply_wrap_and_inject(
         };
         func.attrs.insert(0, attr);
     }
-    inject_gate_params(func, inject_specs)
+
+    let injected = inject_gate_params(func, inject_specs)?;
+
+    stamp_authored_gates(func, inject_specs, &remap, &offset_by_source);
+
+    Ok(injected)
+}
+
+/// Resolve the canonical PDA constraint for an embedded-mode account.
+///
+/// The canonical declaration is the consumer's account-creating one,
+/// `#[account(init, pda = ...)]` on a param named account. Every
+/// other declaration of that name carrying a `pda` constraint must
+/// agree with it structurally.
+///
+/// # Errors
+///
+/// `Err` when no declaration carries `init` plus a `pda` constraint,
+/// or when two declarations disagree, naming both fns. Callers
+/// surface it as a compile error.
+pub fn resolve_canonical_constraint(fns: &[ItemFn], account: &str) -> Result<syn::Expr, String> {
+    struct Decl {
+        fn_name: String,
+        has_init: bool,
+        pda: syn::Expr,
+    }
+    let mut decls: Vec<Decl> = Vec::new();
+
+    for func in fns {
+        for (pi, pt) in typed_params(func) {
+            if pi.ident != account {
+                continue;
+            }
+            for attr in &pt.attrs {
+                if !attr.path().is_ident("account") {
+                    continue;
+                }
+                let mut has_init = false;
+                let mut pda: Option<syn::Expr> = None;
+                attr.parse_nested_meta(|meta| {
+                    if meta.path.is_ident("init") {
+                        has_init = true;
+                    } else if meta.path.is_ident("pda") {
+                        pda = Some(meta.value()?.parse()?);
+                    }
+                    Ok(())
+                })
+                .ok();
+                if let Some(pda) = pda {
+                    decls.push(Decl {
+                        fn_name: func.sig.ident.to_string(),
+                        has_init,
+                        pda,
+                    });
+                }
+            }
+        }
+    }
+
+    let Some(canonical) = decls.iter().find(|d| d.has_init) else {
+        return Err(format!(
+            "embedded account `{account}` has no canonical declaration: the \
+            account-creating instruction must declare it with \
+            `#[account(init, pda = ...)]`"
+        ));
+    };
+    for d in &decls {
+        if d.pda != canonical.pda {
+            return Err(format!(
+                "embedded account `{account}` is declared with conflicting pda \
+                constraints: in `{}` and in `{}`",
+                canonical.fn_name, d.fn_name
+            ));
+        }
+    }
+
+    Ok(canonical.pda.clone())
+}
+
+/// Rewrite each embedded role's inject entry: the role's account is
+/// replaced by the consumer's embedding account, name and canonical
+/// constraint. Runs before any wrap or inject pass so all three
+/// producers see the rewritten specs.
+///
+/// # Errors
+///
+/// `Err` when a declared role matches no inject account of the
+/// declaring extension, when the canonical constraint is missing or
+/// conflicting ([`resolve_canonical_constraint`]), or when the
+/// constraint is not `literal()`/`account()` seed shaped. Callers
+/// surface it as a compile error.
+pub fn rewrite_embedded_roles(
+    specs: &mut [InjectSpec],
+    embeds: &[(String, super::EmbedDecl)],
+    consumer_fns: &[ItemFn],
+) -> Result<(), String> {
+    for (source, embed) in embeds {
+        let canonical = resolve_canonical_constraint(consumer_fns, &embed.account)?;
+        let seeds = expr_to_seeds(&canonical).ok_or_else(|| {
+            format!(
+                "embedded account `{}`: canonical constraint is not a \
+                literal()/account() seed expression",
+                embed.account
+            )
+        })?;
+
+        let mut hit = false;
+        for spec in specs.iter_mut().filter(|s| &s.source == source) {
+            for acc in spec.accounts.iter_mut().filter(|a| a.role == embed.role) {
+                acc.name = embed.account.clone();
+                acc.seeds = seeds.clone();
+                hit = true;
+            }
+        }
+        if !hit {
+            return Err(format!(
+                "extension `{source}` declares no inject account named \
+                `{}`; the marker kwarg must name one of the extension's \
+                inject roles",
+                embed.role
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Inject a wrapper's missing gate params into an instruction fn.
@@ -203,8 +338,7 @@ fn has_param_named(func: &ItemFn, name: &str) -> bool {
 
 fn find_signer_param(func: &ItemFn) -> Option<String> {
     let mut found: Option<String> = None;
-    for input in &func.sig.inputs {
-        let FnArg::Typed(pt) = input else { continue };
+    for (_, pt) in typed_params(func) {
         let is_signer = pt.attrs.iter().any(|a| {
             if !a.path().is_ident("account") {
                 return false;
@@ -234,52 +368,10 @@ fn find_signer_param(func: &ItemFn) -> Option<String> {
 }
 
 fn find_pda_literal_param(func: &ItemFn, literal: &str) -> Option<String> {
-    for input in &func.sig.inputs {
-        let FnArg::Typed(pt) = input else { continue };
-        let syn::Pat::Ident(pi) = &*pt.pat else {
-            continue;
-        };
-        for attr in &pt.attrs {
-            if !attr.path().is_ident("account") {
-                continue;
-            }
-            let mut matched = false;
-            attr.parse_nested_meta(|meta| {
-                if !meta.path.is_ident("pda") {
-                    return Ok(());
-                }
-                let expr: syn::Expr = meta.value()?.parse()?;
-                if expr_is_literal_call(&expr, literal) {
-                    matched = true;
-                }
-                Ok(())
-            })
-            .ok();
-            if matched {
-                return Some(pi.ident.to_string());
-            }
-        }
-    }
-    None
-}
-
-fn expr_is_literal_call(expr: &syn::Expr, target: &str) -> bool {
-    let syn::Expr::Call(call) = expr else {
-        return false;
-    };
-    let syn::Expr::Path(p) = &*call.func else {
-        return false;
-    };
-    if !p.path.is_ident("literal") {
-        return false;
-    }
-    let Some(syn::Expr::Lit(lit_expr)) = call.args.first() else {
-        return false;
-    };
-    let syn::Lit::Str(s) = &lit_expr.lit else {
-        return false;
-    };
-    s.value() == target
+    let target = vec![InjectSeed::Const(literal.to_string())];
+    typed_params(func)
+        .find(|(_, pt)| param_pda_seeds(pt).is_some_and(|s| s == target))
+        .map(|(pi, _)| pi.ident.to_string())
 }
 
 fn find_pda_compound_param(
@@ -287,52 +379,22 @@ fn find_pda_compound_param(
     seeds: &[InjectSeed],
     remap: &HashMap<String, String>,
 ) -> Option<String> {
-    let target: Vec<String> = seeds
+    let target: Vec<InjectSeed> = seeds
         .iter()
         .map(|s| match s {
-            InjectSeed::Const(v) => format!("literal:{v}"),
+            InjectSeed::Const(v) => InjectSeed::Const(v.clone()),
             InjectSeed::Account(v) => {
-                let resolved = remap.get(v).map(String::as_str).unwrap_or(v);
-                format!("account:{resolved}")
+                InjectSeed::Account(remap.get(v).cloned().unwrap_or_else(|| v.clone()))
             },
         })
         .collect();
-
-    for input in &func.sig.inputs {
-        let FnArg::Typed(pt) = input else { continue };
-        let syn::Pat::Ident(pi) = &*pt.pat else {
-            continue;
-        };
-        for attr in &pt.attrs {
-            if !attr.path().is_ident("account") {
-                continue;
-            }
-            let mut candidate: Vec<String> = Vec::new();
-            attr.parse_nested_meta(|meta| {
-                if !meta.path.is_ident("pda") {
-                    return Ok(());
-                }
-                let expr: syn::Expr = meta.value()?.parse()?;
-                let syn::Expr::Array(arr) = expr else {
-                    return Ok(());
-                };
-                for elem in &arr.elems {
-                    if let Some(tag) = seed_expr_to_tag(elem) {
-                        candidate.push(tag);
-                    }
-                }
-                Ok(())
-            })
-            .ok();
-            if candidate == target {
-                return Some(pi.ident.to_string());
-            }
-        }
-    }
-    None
+    typed_params(func)
+        .find(|(_, pt)| param_pda_seeds(pt).is_some_and(|s| s == target))
+        .map(|(pi, _)| pi.ident.to_string())
 }
 
-fn seed_expr_to_tag(expr: &syn::Expr) -> Option<String> {
+// One `literal("x")` / `account("y")` call as a structured seed.
+fn seed_call_to_seed(expr: &syn::Expr) -> Option<InjectSeed> {
     let syn::Expr::Call(call) = expr else {
         return None;
     };
@@ -347,9 +409,9 @@ fn seed_expr_to_tag(expr: &syn::Expr) -> Option<String> {
         return None;
     };
     if p.path.is_ident("literal") {
-        Some(format!("literal:{}", s.value()))
+        Some(InjectSeed::Const(s.value()))
     } else if p.path.is_ident("account") {
-        Some(format!("account:{}", s.value()))
+        Some(InjectSeed::Account(s.value()))
     } else {
         None
     }
@@ -398,9 +460,399 @@ fn build_inject_param(acc: &InjectAccount, remap: &HashMap<String, String>) -> F
     }
 }
 
+/// Parse a consumer-declared `pda` expression back into structured
+/// seeds. `literal("x")` and `account("y")` calls, alone or in an
+/// array. `None` for any other shape.
+fn expr_to_seeds(expr: &syn::Expr) -> Option<Vec<InjectSeed>> {
+    let elems: Vec<&syn::Expr> = match expr {
+        syn::Expr::Array(arr) => arr.elems.iter().collect(),
+        single => vec![single],
+    };
+    elems.into_iter().map(seed_call_to_seed).collect()
+}
+
+/// Kwargs a gate attr carries for  `spec`: `role = resolved_name` per
+/// account, plus the extension's embedded offset when one is declared
+fn spec_gate_args(
+    spec: &InjectSpec,
+    remap: &HashMap<String, String>,
+    offset: Option<usize>,
+) -> Vec<syn::MetaNameValue> {
+    let mut args = Vec::new();
+    for acc in &spec.accounts {
+        let resolved = remap
+            .get(&acc.name)
+            .cloned()
+            .unwrap_or_else(|| acc.name.clone());
+        let key = syn::Ident::new(&acc.role, proc_macro2::Span::call_site());
+        let val = syn::Ident::new(&resolved, proc_macro2::Span::call_site());
+        args.push(parse_quote! { #key = #val});
+    }
+    if let Some(off) = offset {
+        let lit = syn::LitInt::new(&off.to_string(), proc_macro2::Span::call_site());
+        args.push(parse_quote! { offset = #lit });
+    }
+    args
+}
+
+// Rewrite consumer-authored bare gate attrs to carry the framework's
+// location kwargs. Embedded mode is the only writer of those kwargs
+// and stamps every gate. Runs after the injection pass so the
+// bare-attr-activates-injection rule saw the authored form.
+fn stamp_authored_gates(
+    func: &mut ItemFn,
+    inject_specs: &[InjectSpec],
+    remap: &HashMap<String, String>,
+    offset_by_source: &HashMap<&str, usize>,
+) {
+    for attr in func.attrs.iter_mut() {
+        if !matches!(attr.meta, syn::Meta::Path(_)) {
+            continue;
+        }
+        let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
+            continue;
+        };
+        for spec in inject_specs {
+            if spec.wrapper != last {
+                continue;
+            }
+            let Some(off) = offset_by_source.get(spec.source.as_str()) else {
+                continue;
+            };
+            let args = spec_gate_args(spec, remap, Some(*off));
+            let path = attr.path().clone();
+            *attr = parse_quote! { #[#path(#(#args),*)] };
+        }
+    }
+}
+
+// Named, typed params of a fn: the only shape gate machinery reads.
+fn typed_params(func: &ItemFn) -> impl Iterator<Item = (&syn::PatIdent, &syn::PatType)> {
+    func.sig.inputs.iter().filter_map(|input| match input {
+        FnArg::Typed(pt) => match &*pt.pat {
+            syn::Pat::Ident(pi) => Some((pi, pt)),
+            _ => None,
+        },
+        _ => None,
+    })
+}
+
+// The declared pda seeds of a param, when its `#[account]` attr
+// carries a pda constraint in the literal()/account() grammar.
+fn param_pda_seeds(pt: &syn::PatType) -> Option<Vec<InjectSeed>> {
+    for attr in &pt.attrs {
+        if !attr.path().is_ident("account") {
+            continue;
+        }
+        let mut pda: Option<syn::Expr> = None;
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("pda") {
+                pda = Some(meta.value()?.parse()?);
+            }
+            Ok(())
+        })
+        .ok();
+        if let Some(expr) = pda {
+            return expr_to_seeds(&expr);
+        }
+    }
+    None
+}
+
+// Render structured seeds back into a `pda = ...` expression:
+// a bare call for one seed, an array for a compound.
+fn seeds_to_pda_expr(seeds: &[InjectSeed]) -> Option<syn::Expr> {
+    let exprs: Vec<syn::Expr> = seeds
+        .iter()
+        .map(|s| match s {
+            InjectSeed::Const(v) => {
+                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                parse_quote! { literal(#lit) }
+            },
+            InjectSeed::Account(v) => {
+                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
+                parse_quote! { account(#lit) }
+            },
+        })
+        .collect();
+    match &exprs[..] {
+        [] => None,
+        [single] => Some(single.clone()),
+        multi => Some(parse_quote! { [#(#multi),*] }),
+    }
+}
+
+/// Retarget a discovered fn's embedded role params: a param named
+/// after a rewritten role (role differs from name only after an
+/// embedded rewrite) takes the consumer account's name and canonical
+/// constraint. `mut` on the account attr is preserved; other flags
+/// are not carried yet, the embedded role grammar is `mut` + `pda`.
+fn substitute_embedded_params(func: &mut ItemFn, inject_specs: &[InjectSpec]) {
+    for spec in inject_specs {
+        for acc in &spec.accounts {
+            if acc.role == acc.name {
+                continue;
+            }
+            let Some(pda_expr) = seeds_to_pda_expr(&acc.seeds) else {
+                continue;
+            };
+            for input in func.sig.inputs.iter_mut() {
+                let syn::FnArg::Typed(pt) = input else {
+                    continue;
+                };
+                let syn::Pat::Ident(pi) = &mut *pt.pat else {
+                    continue;
+                };
+                if pi.ident != acc.role {
+                    continue;
+                }
+                pi.ident = syn::Ident::new(&acc.name, pi.ident.span());
+                for attr in pt.attrs.iter_mut() {
+                    if !attr.path().is_ident("account") {
+                        continue;
+                    }
+                    let mut is_mut = false;
+                    attr.parse_nested_meta(|meta| {
+                        if meta.path.is_ident("mut") {
+                            is_mut = true;
+                        } else if meta.path.is_ident("pda") {
+                            let _: syn::Expr = meta.value()?.parse()?;
+                        }
+                        Ok(())
+                    })
+                    .ok();
+                    *attr = if is_mut {
+                        parse_quote! { #[account(mut, pda = #pda_expr)] }
+                    } else {
+                        parse_quote! { #[account(pda = #pda_expr)] }
+                    };
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Parse the fn items out of a source string.
+    fn fns(src: &str) -> Vec<ItemFn> {
+        syn::parse_file(src)
+            .unwrap()
+            .items
+            .into_iter()
+            .filter_map(|i| match i {
+                syn::Item::Fn(f) => Some(f),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn expr(src: &str) -> syn::Expr {
+        syn::parse_str(src).unwrap()
+    }
+
+    #[test]
+    fn wrap_stamped_attr_carries_embedded_offset() {
+        let specs = vec![InjectSpec {
+            wrapper: "my_gate".to_string(),
+            accounts: vec![InjectAccount {
+                name: "prog_config".to_string(),
+                role: "gate_config".to_string(),
+                seeds: vec![InjectSeed::Const("prog_config".to_string())],
+                signer: false,
+            }],
+            source: "my_ext".to_string(),
+        }];
+        let embeds = vec![(
+            "my_ext".to_string(),
+            crate::extension::EmbedDecl {
+                role: "gate_config".to_string(),
+                account: "prog_config".to_string(),
+                offset: 32,
+            },
+        )];
+        let wraps = vec![WrapInstructions {
+            wrapper: "my_gate".to_string(),
+            skip: None,
+            self_exempt_marker: "my_exempt".to_string(),
+            exempt: vec![],
+        }];
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn update(value: u64) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        let expected: Attribute =
+            syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);
+        assert_eq!(
+            func.attrs.first(),
+            Some(&expected),
+            "wrap-stamped gate must carry the extension's offset"
+        );
+    }
+
+    #[test]
+    fn substituted_role_param_takes_consumer_name_and_constraint() {
+        let specs = vec![InjectSpec {
+            wrapper: "my_gate".to_string(),
+            accounts: vec![InjectAccount {
+                name: "prog_config".to_string(),
+                role: "gate_config".to_string(),
+                seeds: vec![InjectSeed::Const("prog_config".to_string())],
+                signer: false,
+            }],
+            source: "my_ext".to_string(),
+        }];
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn ext_transfer(
+                #[account(mut, pda = literal("gate_config"))] mut gate_config: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(&mut func, &[], &specs, &[], Some("my_ext::ext_transfer")).unwrap();
+
+        let syn::FnArg::Typed(pt) = &func.sig.inputs[0] else {
+            panic!("expected typed param");
+        };
+        let syn::Pat::Ident(pi) = &*pt.pat else {
+            panic!("expected ident pattern");
+        };
+        assert_eq!(
+            pi.ident, "prog_config",
+            "param renamed to the consumer account"
+        );
+        let expected: Attribute = syn::parse_quote!(#[account(mut, pda = literal("prog_config"))]);
+        assert_eq!(
+            pt.attrs.first(),
+            Some(&expected),
+            "mut preserved, constraint swapped"
+        );
+    }
+
+    #[test]
+    fn unrewritten_role_leaves_discovered_fn_untouched() {
+        let specs = gate_specs();
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn ext_transfer(
+                #[account(mut, pda = literal("gate_config"))] mut gate_config: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let before = func.clone();
+        apply_wrap_and_inject(&mut func, &[], &specs, &[], Some("my_ext::ext_transfer")).unwrap();
+        assert_eq!(
+            func, before,
+            "dedicated mode must not rewrite discovered fns"
+        );
+    }
+
+    #[test]
+    fn expr_to_seeds_handles_compound_arrays() {
+        let seeds = expr_to_seeds(&expr(r#"[literal("cfg"), account("owner")]"#)).unwrap();
+        assert_eq!(
+            seeds,
+            vec![
+                InjectSeed::Const("cfg".to_string()),
+                InjectSeed::Account("owner".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn canonical_constraint_resolves_from_init_declaration() {
+        let fns = fns(r#"
+            pub fn initialize(
+                #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+            pub fn update(
+                #[account(mut, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        assert_eq!(
+            resolve_canonical_constraint(&fns, "prog_config").unwrap(),
+            expr(r#"literal("prog_config")"#)
+        );
+    }
+
+    #[test]
+    fn canonical_constraint_resolves_compound_pda() {
+        let fns = fns(r#"
+            pub fn initialize(
+                #[account(init, pda = [literal("cfg"), account("owner")])] mut cfg: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        assert_eq!(
+            resolve_canonical_constraint(&fns, "cfg").unwrap(),
+            expr(r#"[literal("cfg"), account("owner")]"#)
+        );
+    }
+
+    #[test]
+    fn canonical_constraint_missing_init_is_error() {
+        let fns = fns(r#"
+            pub fn update(
+                #[account(mut, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        let err = resolve_canonical_constraint(&fns, "prog_config").unwrap_err();
+        assert!(err.contains("no canonical declaration"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_constraint_never_declared_is_error() {
+        let fns = fns("pub fn other(x: u64) -> u64 { x }");
+        let err = resolve_canonical_constraint(&fns, "prog_config").unwrap_err();
+        assert!(err.contains("no canonical declaration"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_constraint_init_without_pda_is_not_canonical() {
+        let fns = fns(r#"
+            pub fn initialize(
+                #[account(init)] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        let err = resolve_canonical_constraint(&fns, "prog_config").unwrap_err();
+        assert!(err.contains("no canonical declaration"), "got: {err}");
+    }
+
+    #[test]
+    fn canonical_constraint_conflict_names_both_fns() {
+        let fns = fns(r#"
+            pub fn initialize(
+                #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+            pub fn update(
+                #[account(mut, pda = literal("other_seed"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        let err = resolve_canonical_constraint(&fns, "prog_config").unwrap_err();
+        assert!(
+            err.contains("initialize") && err.contains("update"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn canonical_constraint_ignores_other_params_and_fns() {
+        let fns = fns(r#"
+            pub fn initialize(
+                #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+                #[account(init, pda = literal("unrelated"))] mut other: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        "#);
+        assert_eq!(
+            resolve_canonical_constraint(&fns, "prog_config").unwrap(),
+            expr(r#"literal("prog_config")"#)
+        );
+    }
     use syn::Pat;
     fn gate_specs() -> Vec<InjectSpec> {
         vec![InjectSpec {
@@ -409,11 +861,13 @@ mod tests {
             accounts: vec![
                 InjectAccount {
                     name: "gate_config".into(),
+                    role: "gate_config".into(),
                     seeds: vec![InjectSeed::Const("gate_config".into())],
                     signer: false,
                 },
                 InjectAccount {
                     name: "caller".into(),
+                    role: "caller".into(),
                     seeds: vec![],
                     signer: true,
                 },
@@ -475,6 +929,7 @@ mod tests {
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
                 name: "marker_account".into(),
+                role: "marker_account".into(),
                 seeds: vec![
                     InjectSeed::Const("marker".into()),
                     InjectSeed::Account("caller".into()),
@@ -544,6 +999,7 @@ mod tests {
             accounts: vec![
                 InjectAccount {
                     name: "marker_account".into(),
+                    role: "marker_account".into(),
                     seeds: vec![
                         InjectSeed::Const("frozen".into()),
                         InjectSeed::Account("caller".into()),
@@ -552,6 +1008,7 @@ mod tests {
                 },
                 InjectAccount {
                     name: "caller".into(),
+                    role: "caller".into(),
                     seeds: vec![],
                     signer: true,
                 },
@@ -578,6 +1035,7 @@ mod tests {
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
                 name: "other_config".into(),
+                role: "other_config".into(),
                 seeds: vec![InjectSeed::Const("other_config".into())],
                 signer: false,
             }],
@@ -615,6 +1073,7 @@ mod tests {
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
                 name: "caller".into(),
+                role: "caller".into(),
                 seeds: vec![],
                 signer: true,
             }],
@@ -637,6 +1096,7 @@ mod tests {
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
                 name: "caller".into(),
+                role: "caller".into(),
                 seeds: vec![InjectSeed::Const("caller_pda".into())],
                 signer: false,
             }],

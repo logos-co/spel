@@ -9,6 +9,64 @@ use std::path::Path;
 
 use super::{InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 
+/// One `[[package.metadata.spel.bound_args]]` entry: a trailing fn
+/// param the framework fills at the dispatch call site from a module
+/// marker kwarg, never from the transaction. Excluded from the IDL by
+/// construction: discovery strips the param from the collected fn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoundArg {
+    /// Trailing fn param name to strip and fill.
+    pub arg: String,
+    /// Module marker kwarg the value comes from. `"offset"` is the
+    /// only value-carrying kwarg today; a `from` naming anything else
+    /// resolves to `default` until the marker grammar grows.
+    pub from: String,
+    /// Value when the marker does not carry the kwarg (dedicated mode).
+    pub default: usize,
+}
+
+pub(super) fn read_spel_bound_args(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Vec<BoundArg>, String> {
+    let malformed = |what: &str| malformed_metadata(crate_dir, what);
+
+    let Some(bounds) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+        .and_then(|s| s.get("bound_args"))
+    else {
+        return Ok(vec![]);
+    };
+    let Some(arr) = bounds.as_array() else {
+        return Err(malformed("bound_args must be an array of tables"));
+    };
+    arr.iter()
+        .map(|b| {
+            let Some(arg) = b.get("arg").and_then(|v| v.as_str()) else {
+                return Err(malformed("bound_args.arg must be a string"));
+            };
+            let Some(from) = b.get("from").and_then(|v| v.as_str()) else {
+                return Err(malformed("bound_args.from must be a string"));
+            };
+            let default = match b.get("default") {
+                None => 0,
+                Some(v) => usize::try_from(
+                    v.as_integer()
+                        .ok_or_else(|| malformed("bound_args.default muts be an integer"))?,
+                )
+                .map_err(|_| malformed("bound_args.default must not be negative"))?,
+            };
+            Ok(BoundArg {
+                arg: arg.to_string(),
+                from: from.to_string(),
+                default,
+            })
+        })
+        .collect()
+}
+
 /// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
 /// unparseable. Silent: cargo itself fails the build for those cases.
 pub(super) fn read_manifest_value(crate_dir: &Path) -> Option<toml::Value> {
@@ -43,9 +101,9 @@ pub(super) fn read_spel_extension_attr(
         None => Ok(None),
         Some(v) => match v.as_str() {
             Some(s) => Ok(Some(s.to_string())),
-            None => Err(format!(
-                "malformed [package.metadata.spel] in {}: extension_attr must be a string",
-                crate_dir.join("Cargo.toml").display()
+            None => Err(malformed_metadata(
+                crate_dir,
+                "extension_attr must be a string",
             )),
         },
     }
@@ -61,13 +119,7 @@ pub(super) fn read_spel_inject_specs(
     value: &toml::Value,
     crate_dir: &Path,
 ) -> Result<Vec<InjectSpec>, String> {
-    let manifest = crate_dir.join("Cargo.toml");
-    let malformed = |what: &str| {
-        format!(
-            "malformed [package.metadata.spel] in {}: {what}",
-            manifest.display()
-        )
-    };
+    let malformed = |what: &str| malformed_metadata(crate_dir, what);
 
     let Some(injects) = value
         .get("package")
@@ -120,6 +172,7 @@ pub(super) fn read_spel_inject_specs(
             };
             accounts.push(InjectAccount {
                 name: name.to_string(),
+                role: name.to_string(),
                 seeds,
                 signer,
             });
@@ -144,13 +197,7 @@ pub(super) fn read_spel_wrap_instructions(
     value: &toml::Value,
     crate_dir: &Path,
 ) -> Result<Option<WrapInstructions>, String> {
-    let manifest = crate_dir.join("Cargo.toml");
-    let malformed = |what: &str| {
-        format!(
-            "malformed [package.metadata.spel] in {}: {what}",
-            manifest.display()
-        )
-    };
+    let malformed = |what: &str| malformed_metadata(crate_dir, what);
 
     let Some(wrap) = value
         .get("package")
@@ -219,6 +266,47 @@ pub(super) fn read_package_ident(value: &toml::Value) -> Option<String> {
     Some(name.replace('-', "_"))
 }
 
+/// Read `[package.metadata.spel.embedded]` from a parsed manifest.
+///
+/// `skip` names discovered instructions the framework mus not emit
+/// when the extension is in embedded mode. The slot is born
+/// initialized by the consumer's own account-creating instruction,
+/// so the extension's initializer has no role to play there. Absent
+/// section or absent `skip` is an empty list.
+///
+/// # Errors
+///
+/// `Err` when `skip` is present but not an array of strings. Callers
+/// surface it as a compile error.
+pub(super) fn read_spel_embedded_skip(
+    value: &toml::Value,
+    crate_dir: &Path,
+) -> Result<Vec<String>, String> {
+    let malformed = |what: &str| malformed_metadata(crate_dir, what);
+
+    let Some(embedded) = value
+        .get("package")
+        .and_then(|p| p.get("metadata"))
+        .and_then(|m| m.get("spel"))
+        .and_then(|s| s.get("embedded"))
+    else {
+        return Ok(vec![]);
+    };
+    let Some(skip) = embedded.get("skip") else {
+        return Ok(vec![]);
+    };
+    let Some(arr) = skip.as_array() else {
+        return Err(malformed("embedded.skip must be an array of strings"));
+    };
+    arr.iter()
+        .map(|x| {
+            x.as_str()
+                .map(String::from)
+                .ok_or_else(|| malformed("embedded.skip must be an array of strings"))
+        })
+        .collect()
+}
+
 /// Decode one TOML seed entry (`{ const = "..." }` or
 /// `{ account "..." }`) into an [`InjectSeed`].
 fn parse_seed_entry(value: &toml::Value) -> Option<InjectSeed> {
@@ -230,6 +318,15 @@ fn parse_seed_entry(value: &toml::Value) -> Option<InjectSeed> {
         return Some(InjectSeed::Account(s.to_string()));
     }
     None
+}
+
+/// The uniform malformed-metadata message: every reader's errors share
+/// one prefix so callers and tests can rely on its shape.
+fn malformed_metadata(crate_dir: &Path, what: &str) -> String {
+    format!(
+        "malformed [package.metadata.spel] in {}: {what}",
+        crate_dir.join("Cargo.toml").display()
+    )
 }
 
 #[cfg(test)]
@@ -486,6 +583,103 @@ self_exempt_marker = "minimal_exempt"
             .expect("minimal config");
         assert!(wrap.skip.is_none());
         assert!(wrap.exempt.is_empty());
+    }
+
+    #[test]
+    fn bound_args_reader_parses_entries() {
+        let tmp = TempDir::new("bound-args-ok");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[[package.metadata.spel.bound_args]]
+arg = "offset"
+from = "offset"
+default = 0
+
+[[package.metadata.spel.bound_args]]
+arg = "window"
+from = "offset"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let bounds = read_spel_bound_args(&value, tmp.path()).unwrap();
+        assert_eq!(
+            bounds,
+            vec![
+                BoundArg {
+                    arg: "offset".to_string(),
+                    from: "offset".to_string(),
+                    default: 0,
+                },
+                BoundArg {
+                    arg: "window".to_string(),
+                    from: "offset".to_string(),
+                    default: 0,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn malformed_bound_args_missing_arg_is_a_hard_error() {
+        let tmp = TempDir::new("bound-args-missing-arg");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[[package.metadata.spel.bound_args]]
+from = "offset"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_bound_args(&value, tmp.path())
+            .expect_err("a bound arg without `arg` must be rejected");
+        assert!(err.contains("bound_args.arg"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn malformed_embedded_skip_is_a_hard_error() {
+        let tmp = TempDir::new("embedded-skip-malformed");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel.embedded]
+skip = "ext_init"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_embedded_skip(&value, tmp.path())
+            .expect_err("a non-array skip must be rejected");
+        assert!(err.contains("embedded.skip"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn absent_embedded_section_is_empty_skip() {
+        let tmp = TempDir::new("embedded-skip-absent");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        assert_eq!(read_spel_embedded_skip(&value, tmp.path()), Ok(vec![]));
     }
 
     #[test]
