@@ -175,6 +175,7 @@ pub(super) fn read_spel_inject_specs(
                 role: name.to_string(),
                 seeds,
                 signer,
+                embedded: false,
             });
         }
         specs.push(InjectSpec {

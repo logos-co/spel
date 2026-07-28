@@ -273,6 +273,36 @@ When the extension declares a `skip` word and the consumer's marker carries it a
 
 First consumer of this mechanism is [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority).
 
+#### Embedded Mode (Optional)
+
+An extension's config state can live inside one of the consumer's own accounts instead of a dedicated PDA. The consumer declares it program-wide on the module marker, role kwarg plus byte offset:
+
+```rust
+#[lez_program]
+#[admin_authority(admin_config = config, offset = 32)]
+mod my_program { ... }
+```
+
+The framework then rewrites the named role end to end. The role's inject entry retargets to the consumer account with the constraint copied from the consumer's account-creating declaration, the `#[account(init, pda = ...)]` one, minus `init` and `mut`. Gated instructions that declare the account use it, ones that do not get it injected PDA-verified. Every gate is stamped with the location kwargs and the offset by the framework itself, after the injection decision, so authored args keep disabling injection and a consumer-written location kwarg is a compile error, the marker is the only writer. Discovered instructions get the role param substituted to the consumer account, and instructions the extension names in its embedded metadata are not emitted at all, typically the initializer, because the slot is born initialized by the consumer's own account-creating instruction.
+
+Two more metadata tables drive the extension side:
+
+```toml
+[package.metadata.spel.embedded]
+skip = ["admin_initialize"]
+
+[[package.metadata.spel.bound_args]]
+arg = "offset"
+from = "offset"
+default = 0
+```
+
+`embedded.skip` names discovered instructions dropped in embedded mode. `bound_args` declares a trailing fn param the framework strips at discovery and fills at the dispatch call site as a compile-time literal, resolved from the marker kwarg or the default. The value never appears in the IDL or the transaction, a caller-supplied offset would be a caller-controlled write location. Dedicated mode is the degenerate case offset zero over the extension's own PDA, one code path.
+
+One amendment to the wrapper-kwarg contract above: `offset` is the single non-role kwarg a stamped gate attr may carry, and framework-stamped args do not count as consumer-authored, only the authored form disables injection.
+
+First consumer of embedded mode is [`admin-authority`](https://github.com/mmlado/spel-admin-authority); freeze-authority adopts the same mechanisms next.
+
 ## CLI Usage
 
 ```bash

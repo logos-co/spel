@@ -133,6 +133,11 @@ pub struct InjectAccount {
     pub seeds: Vec<InjectSeed>,
     /// Whether the param carries `#[account(signer)]`.
     pub signer: bool,
+    /// Set by the embedded rewrite: this entry was retargeted to the
+    /// consumer's embedding account. Substitution keys on this, never
+    /// on a name/role comparison, so an embedding account may share
+    /// the role's name.
+    pub embedded: bool,
 }
 
 /// One `[[package.metadata.spel.inject]]` block: which wrapper attr it
@@ -1040,6 +1045,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 role: "gate_config".to_string(),
                 seeds: vec![InjectSeed::Const("gate_config".to_string())],
                 signer: false,
+                embedded: false,
             }],
             source: "my_ext".to_string(),
         }];
@@ -1074,6 +1080,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 role: "gate_config".to_string(),
                 seeds: vec![InjectSeed::Const("gate_config".to_string())],
                 signer: false,
+                embedded: false,
             }],
             source: "my_ext".to_string(),
         }];
