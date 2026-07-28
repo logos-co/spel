@@ -711,6 +711,18 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         }
     }
 
+    let mut deduped: Vec<AccountParam> = Vec::new();
+    for a in accounts {
+        match deduped.iter_mut().find(|d| d.name == a.name) {
+            Some(kept) => {
+                kept.constraints.mutable |= a.constraints.mutable;
+                kept.constraints.signer |= a.constraints.signer;
+            },
+            None => deduped.push(a),
+        }
+    }
+    let accounts = deduped;
+
     Ok(InstructionInfo {
         fn_name,
         accounts,

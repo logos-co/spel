@@ -170,6 +170,10 @@ struct InstructionInfo {
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
     injected: Vec<String>,
+    /// Account param ident in original signature order, duplicates kept.
+    /// The dispatch call site needs every position; `accounts` below is
+    /// the transaction view, deduped by ident.
+    pub call_accounts: Vec<Ident>,
 }
 
 struct AccountParam {
@@ -631,6 +635,19 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         }
     }
 
+    let call_accounts: Vec<Ident> = accounts.iter().map(|a| a.name.clone()).collect();
+    let mut deduped: Vec<AccountParam> = Vec::new();
+    for a in accounts {
+        match deduped.iter_mut().find(|d| d.name == a.name) {
+            Some(kept) => {
+                kept.constraints.mutable |= a.constraints.mutable;
+                kept.constraints.signer |= a.constraints.signer;
+            },
+            None => deduped.push(a),
+        }
+    }
+    let accounts = deduped;
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
@@ -639,6 +656,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         external_call_path: None,
         func,
         injected: vec![],
+        call_accounts,
     })
 }
 
@@ -948,9 +966,13 @@ fn generate_match_arms(
                         )
                     });
                 }
-                args.extend(ix.accounts.iter().map(|a| {
-                    let name = &a.name;
-                    quote! { #name }
+                args.extend(ix.call_accounts.iter().enumerate().map(|(i, name)| {
+                    let repeats_later = ix.call_accounts[i + 1..].iter().any(|n| n == name);
+                    if repeats_later {
+                        quote! { #name.clone() }
+                    } else {
+                        quote! { #name }
+                    }
                 }));
                 args.extend(ix.args.iter().map(|a| {
                     let name = &a.name;

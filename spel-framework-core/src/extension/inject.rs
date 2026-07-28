@@ -227,6 +227,27 @@ pub fn rewrite_embedded_roles(
             ));
         }
     }
+
+    check_embed_window_collisions(embeds)?;
+    Ok(())
+}
+
+/// Reject two embeds sharing an account at the same offset: identical
+/// windows cannot both hold state. Distinct offsets on one account are
+/// the intended shared-account layout.
+fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Result<(), String> {
+    for (i, (source_a, a)) in embeds.iter().enumerate() {
+        for (source_b, b) in &embeds[i + 1..] {
+            if a.account == b.account && a.offset == b.offset {
+                return Err(format!(
+                    "extensions `{source_a}` and `{source_b}` both embed into \
+                    account `{}` at offset {}; overlapping windows cannot both \
+                    hold state, declare distinct offsets",
+                    a.account, a.offset
+                ));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -1301,5 +1322,110 @@ mod tests {
             "must name both extensions: {err}"
         );
         assert!(err.contains("caller"), "must name the param: {err}");
+    }
+
+    #[test]
+    fn embedded_role_substitutes_on_peer_extension_fns() {
+        // One extension's embedded entry must retarget a PEER extension's
+        // authored role param: substitution is global across extensions.
+        // This is the admin-embedded cell of freeze's renounce.
+        let specs = vec![InjectSpec {
+            wrapper: "require_admin".to_string(),
+            accounts: vec![InjectAccount {
+                name: "prog_config".to_string(),
+                role: "admin_config".to_string(),
+                seeds: vec![InjectSeed::Const("prog_config".to_string())],
+                signer: false,
+                embedded: true,
+            }],
+            source: "admin_authority".to_string(),
+        }];
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn freeze_authority_renounce(
+                #[account(pda = literal("admin_config"))] admin_config: AccountWithMetadata,
+                #[account(mut, pda = literal("freeze_config"))] mut freeze_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(
+            &mut func,
+            &[],
+            &specs,
+            &[],
+            Some("freeze_authority::freeze_authority_renounce"),
+        )
+        .unwrap();
+        let FnArg::Typed(pt) = &func.sig.inputs[0] else {
+            panic!("expected typed param");
+        };
+        let Pat::Ident(pi) = &*pt.pat else {
+            panic!("expected ident pattern");
+        };
+        assert_eq!(pi.ident, "prog_config", "peer fn's role param renamed");
+        let expected: Attribute = syn::parse_quote!(#[account(pda = literal("prog_config"))]);
+        assert_eq!(pt.attrs.first(), Some(&expected));
+    }
+
+    #[test]
+    fn same_account_same_offset_embeds_are_rejected() {
+        let mut specs = vec![
+            InjectSpec {
+                wrapper: "gate_a".to_string(),
+                accounts: vec![InjectAccount {
+                    name: "cfg_a".to_string(),
+                    role: "cfg_a".to_string(),
+                    seeds: vec![InjectSeed::Const("cfg_a".to_string())],
+                    signer: false,
+                    embedded: false,
+                }],
+                source: "ext_a".to_string(),
+            },
+            InjectSpec {
+                wrapper: "gate_b".to_string(),
+                accounts: vec![InjectAccount {
+                    name: "cfg_b".to_string(),
+                    role: "cfg_b".to_string(),
+                    seeds: vec![InjectSeed::Const("cfg_b".to_string())],
+                    signer: false,
+                    embedded: false,
+                }],
+                source: "ext_b".to_string(),
+            },
+        ];
+        let consumer: ItemFn = syn::parse_quote!(
+            pub fn initialize(
+                #[account(init, pda = literal("shared"))] mut shared: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let embeds = |off_b: usize| {
+            vec![
+                (
+                    "ext_a".to_string(),
+                    crate::extension::EmbedDecl {
+                        role: "cfg_a".to_string(),
+                        account: "shared".to_string(),
+                        offset: 32,
+                    },
+                ),
+                (
+                    "ext_b".to_string(),
+                    crate::extension::EmbedDecl {
+                        role: "cfg_b".to_string(),
+                        account: "shared".to_string(),
+                        offset: off_b,
+                    },
+                ),
+            ]
+        };
+        let err = rewrite_embedded_roles(&mut specs, &embeds(32), std::slice::from_ref(&consumer))
+            .expect_err("equal offsets on one account must be rejected");
+        assert!(err.contains("both embed into"), "unexpected error: {err}");
+
+        // Distinct offsets on the same account are the goal layout.
+        rewrite_embedded_roles(&mut specs, &embeds(64), std::slice::from_ref(&consumer))
+            .expect("distinct offsets must pass");
     }
 }

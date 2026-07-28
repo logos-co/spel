@@ -68,7 +68,7 @@ pub use marker::{has_extension_marker_candidates, parse_marker_args, EmbedDecl, 
 
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded_skip,
-    read_spel_extension_attr, read_spel_inject_specs, read_spel_wrap_instructions,
+    read_spel_extension_attr, read_spel_inject_specs, read_spel_wrap_instructions, BoundArg,
 };
 
 /// What the consumer's direct dependencies contribute to its program:
@@ -304,42 +304,51 @@ pub fn discover_extensions<F: FnMut(String)>(
         };
         let bound_args = read_spel_bound_args(&manifest_value, dep_dir)?;
         for bound in &bound_args {
-            if bound.from != "offset" {
+            let kwarg = bound
+                .from
+                .split_once("::")
+                .map_or(bound.from.as_str(), |(_, k)| k);
+            if kwarg != "offset" {
                 return Err(format!(
-                    "extension '{crate_name}': bound_args.from = \"{}\" is not a \
-                    marker kwarg the framework knows; only \"offset\" is supported",
+                    "extension '{crate_name}': bound_args.from = \"{}\" names kwarg \
+                    \"{kwarg}\", which is not a marker kwarg the framework knows; \
+                    only \"offset\" carries a value",
                     bound.from
                 ));
             }
         }
         let mut bound_calls = std::collections::HashMap::new();
-        let funcs: Vec<ItemFn> = funcs
-            .into_iter()
-            .map(|mut f| {
-                let mut values = Vec::new();
-                for bound in &bound_args {
-                    let Some(pos) = f.sig.inputs.iter().position(|input| {
-                        matches!(input, syn::FnArg::Typed(pt)
-                            if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
-                    }) else {
-                        continue;
-                    };
-                    f.sig.inputs = f
-                        .sig
-                        .inputs
-                        .iter()
-                        .enumerate()
-                        .filter(|(i, _)| *i != pos)
-                        .map(|(_, input)| input.clone())
-                        .collect();
-                    values.push(embed_offset.unwrap_or(bound.default));
-                }
-                if !values.is_empty() {
-                    bound_calls.insert(f.sig.ident.to_string(), values);
-                }
-                f
-            })
-            .collect();
+        let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
+        for mut f in funcs {
+            let mut values = Vec::new();
+            for bound in &bound_args {
+                let Some(pos) = f.sig.inputs.iter().position(|input| {
+                    matches!(input, syn::FnArg::Typed(pt)
+                        if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
+                }) else {
+                    continue;
+                };
+                f.sig.inputs = f
+                    .sig
+                    .inputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| *i != pos)
+                    .map(|(_, input)| input.clone())
+                    .collect();
+                values.push(resolve_bound_value(
+                    bound,
+                    embed_offset,
+                    mod_attrs,
+                    &crate_name,
+                )?);
+            }
+            if !values.is_empty() {
+                bound_calls.insert(f.sig.ident.to_string(), values);
+            }
+            stripped.push(f);
+        }
+        let funcs = stripped;
         if funcs.is_empty() && injects.is_empty() && !has_wrap {
             on_warning(format!(
                 "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
@@ -361,6 +370,50 @@ pub fn discover_extensions<F: FnMut(String)>(
     }
 
     Ok(flatten_in_marker_order(matched))
+}
+
+/// Resolve one bound arg to its compile-time value.
+///
+/// Self shape (`from = "offset"`) reads the extension's own marker's
+/// offset kwarg. Cross shape (`from = "<marker>::offset"`) reads the
+/// named peer marker's offset from the same module, so an extension
+/// can depend on where a peer embedded its state (freeze ADR-0012:
+/// freeze binding `admin_offset` from `admin_authority::offset`).
+/// A missing marker or missing kwarg falls back to `default`; a bound
+/// without a default makes both hard errors at the consumer's build.
+fn resolve_bound_value(
+    bound: &BoundArg,
+    self_offset: Option<usize>,
+    mod_attrs: &[Attribute],
+    crate_name: &str,
+) -> Result<usize, String> {
+    let marker_offset = match bound.from.split_once("::") {
+        None => self_offset,
+        Some((marker, _)) => {
+            let Some(args) = mod_attrs
+                .iter()
+                .find_map(|a| parse_marker_args(a, marker).transpose())
+                .transpose()?
+            else {
+                return bound.default.ok_or_else(|| {
+                    format!(
+                        "extension '{crate_name}': bound_arg '{}' requires marker \
+                        '#[{marker}]', which is not declared on this module, and \
+                        declares no default",
+                        bound.arg
+                    )
+                });
+            };
+            args.embed.map(|e| e.offset)
+        }
+    };
+    marker_offset.or(bound.default).ok_or_else(|| {
+        format!(
+            "extension '{crate_name}': bound_arg '{}' reads '{}' but the marker \
+            carries no offset kwarg and the bound_arg declares no default",
+            bound.arg, bound.from
+        )
+    })
 }
 
 /// Filter `#[instruction]`-annotated fns from a flat item list.
@@ -807,7 +860,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
         let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
             .expect_err("an unknown bound_args.from must be rejected");
         assert!(
-            err.contains("only \"offset\" is supported"),
+            err.contains("only \"offset\" carries a value"),
             "unexpected error: {err}"
         );
     }
@@ -828,6 +881,7 @@ wrapper = "my_gate"
 [[package.metadata.spel.bound_args]]
 arg = "offset"
 from = "offset"
+default = 0
 "#;
         let lib_rs = r#"
 #[instruction]
@@ -871,6 +925,71 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
         let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
             .expect("dedicated discovery must succeed");
         assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+    }
+
+    #[test]
+    fn cross_marker_bound_resolves_peer_offset() {
+        let metadata = r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.bound_args]]
+arg = "admin_offset"
+from = "peer_ext::offset"
+default = 0
+"#;
+        let lib_rs = r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResult { todo!() }
+"#;
+
+        // Peer marker embedded: the value is the peer's offset kwarg.
+        let tmp = TempDir::new("bound-cross-embedded");
+        ext_fixture(&tmp, metadata, lib_rs);
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+            #[peer_ext(peer_config = prog_config, offset = 16)]
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect("cross-marker discovery must succeed");
+        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![16]));
+
+        // Peer marker absent: the declared default applies.
+        let tmp = TempDir::new("bound-cross-dedicated");
+        let mod_attrs = ext_fixture(&tmp, metadata, lib_rs);
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect("absent peer with default must succeed");
+        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+    }
+
+    #[test]
+    fn cross_marker_bound_without_default_requires_the_peer_marker() {
+        let tmp = TempDir::new("bound-cross-no-default");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.bound_args]]
+arg = "admin_offset"
+from = "peer_ext::offset"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResult { todo!() }
+"#,
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect_err("absent peer without default must be rejected");
+        assert!(
+            err.contains("requires marker '#[peer_ext]'"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

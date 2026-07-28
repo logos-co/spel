@@ -299,9 +299,13 @@ default = 0
 
 `embedded.skip` names discovered instructions dropped in embedded mode. `bound_args` declares a trailing fn param the framework strips at discovery and fills at the dispatch call site as a compile-time literal, resolved from the marker kwarg or the default. The value never appears in the IDL or the transaction, a caller-supplied offset would be a caller-controlled write location. Dedicated mode is the degenerate case offset zero over the extension's own PDA, one code path.
 
+`from` accepts two shapes. `"offset"` reads the extension's own marker. `"<marker>::offset"` reads a peer marker on the same module, so an extension can depend on where a peer embedded its state without depending on the peer's crate. `default` is optional. When the referenced marker or kwarg is absent the default applies, and a bound arg without a default makes both hard errors at the consumer's build, never a silent zero.
+
+When two embedded roles resolve to the same consumer account, the framework merges them into one transaction account: listed once in the IDL, enum, and validation with the union of their `mut` and `signer` constraints, and cloned into every duplicated position of the precompiled call. Two embeds naming the same account at the same offset are a compile error.
+
 One amendment to the wrapper-kwarg contract above: `offset` is the single non-role kwarg a stamped gate attr may carry, and framework-stamped args do not count as consumer-authored, only the authored form disables injection.
 
-First consumer of embedded mode is [`admin-authority`](https://github.com/mmlado/spel-admin-authority); freeze-authority adopts the same mechanisms next.
+Embedded mode ships in [`admin-authority`](https://github.com/mmlado/spel-admin-authority) and [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority), including both extensions sharing one consumer account.
 
 ## CLI Usage
 

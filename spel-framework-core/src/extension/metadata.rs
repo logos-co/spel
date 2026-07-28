@@ -17,12 +17,21 @@ use super::{InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 pub struct BoundArg {
     /// Trailing fn param name to strip and fill.
     pub arg: String,
-    /// Module marker kwarg the value comes from. `"offset"` is the
-    /// only value-carrying kwarg today; a `from` naming anything else
-    /// resolves to `default` until the marker grammar grows.
+    /// Module marker kwarg the value comes from. Two shapes:
+    /// - `"offset"` reads the self-marker's own `offset` kwarg
+    ///   (dedicated-mode fallback via `default`).
+    /// - `"<marker>::<kwarg>"` reads another marker's kwarg from the
+    ///   same module. Used when an extension depends on a peer
+    ///   extension's compile-time value, such as freeze-authority
+    ///   binding `admin_offset` from `admin_authority::offset`.
+    ///
+    /// See freeze-authority ADR-0012 for the cross-marker contract.
     pub from: String,
-    /// Value when the marker does not carry the kwarg (dedicated mode).
-    pub default: usize,
+    /// Value when the referenced marker or kwarg is absent. `None`
+    /// means unresolvable references are a hard error at the consumer's
+    /// build. `Some(v)` supplies a fallback (typically `0` for the
+    /// dedicated-mode offset).
+    pub default: Option<usize>,
 }
 
 pub(super) fn read_spel_bound_args(
@@ -50,13 +59,16 @@ pub(super) fn read_spel_bound_args(
             let Some(from) = b.get("from").and_then(|v| v.as_str()) else {
                 return Err(malformed("bound_args.from must be a string"));
             };
+            validate_bound_from_shape(from).map_err(|reason| malformed(&reason))?;
             let default = match b.get("default") {
-                None => 0,
-                Some(v) => usize::try_from(
-                    v.as_integer()
-                        .ok_or_else(|| malformed("bound_args.default muts be an integer"))?,
-                )
-                .map_err(|_| malformed("bound_args.default must not be negative"))?,
+                None => None,
+                Some(v) => Some(
+                    usize::try_from(
+                        v.as_integer()
+                            .ok_or_else(|| malformed("bound_args.default must be an integer"))?,
+                    )
+                    .map_err(|_| malformed("bound_args.default must not be negative"))?,
+                ),
             };
             Ok(BoundArg {
                 arg: arg.to_string(),
@@ -65,6 +77,36 @@ pub(super) fn read_spel_bound_args(
             })
         })
         .collect()
+}
+
+/// Validate the `from` string is either a bare kwarg name (`"offset"`)
+/// or a two-segment cross-marker reference (`"admin_authority::offset"`).
+/// Rejects empty segments, more than one `::`, and non-identifier
+/// characters that could not be a Rust ident.
+fn validate_bound_from_shape(from: &str) -> Result<(), String> {
+    let segments: Vec<&str> = from.split("::").collect();
+    if segments.len() > 2 {
+        return Err(format!(
+            "bound_args.from `{from}` has more than one `::`; expected `<kwarg>` or `<marker>::<kwarg>`"
+        ));
+    }
+    for seg in &segments {
+        if seg.is_empty() {
+            return Err(format!(
+                "bound_args.from `{from}` has an empty segment; expected `<kwarg>` or `<marker>::<kwarg>`"
+            ));
+        }
+        let is_ident = seg
+            .chars()
+            .enumerate()
+            .all(|(i, c)| c == '_' || (i == 0 && c.is_ascii_alphabetic()) || c.is_ascii_alphanumeric());
+        if !is_ident {
+            return Err(format!(
+                "bound_args.from `{from}` segment `{seg}` is not a valid identifier"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Parsed Cargo.toml of a dependency dir, or `None` when unreadable or
@@ -614,12 +656,12 @@ from = "offset"
                 BoundArg {
                     arg: "offset".to_string(),
                     from: "offset".to_string(),
-                    default: 0,
+                    default: Some(0),
                 },
                 BoundArg {
                     arg: "window".to_string(),
                     from: "offset".to_string(),
-                    default: 0,
+                    default: None,
                 },
             ]
         );
