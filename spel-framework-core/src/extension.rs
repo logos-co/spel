@@ -292,11 +292,18 @@ fn direct_path_dep_dirs<F: FnMut(String)>(manifest_dir: &Path, on_warning: &mut 
         return vec![];
     };
     let mut dirs = Vec::new();
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for (name, dep) in table {
         if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
             let dir = manifest_dir.join(rel);
             if dir.is_dir() {
-                dirs.push(dir);
+                // Deduplicate by canonical path: `package =` aliases can list
+                // the same directory under two dependency names, and scanning
+                // it twice would trip the duplicate-instruction-name check.
+                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                if seen.insert(canonical) {
+                    dirs.push(dir);
+                }
             } else {
                 on_warning(format!(
                     "path dependency '{}' points to non-existent directory: {}",
@@ -425,6 +432,60 @@ my-ext = { path = "../my-ext" }
             crate_path.leading_colon.is_some(),
             "path must start with ::"
         );
+    }
+
+    #[test]
+    fn aliased_path_dep_scanned_once() {
+        let tmp = TempDir::new("discover-aliased-dep");
+
+        tmp.write(
+            "my-ext/Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        tmp.write(
+            "my-ext/src/lib.rs",
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+
+        // Same directory listed under two dependency names via a
+        // `package = ` alias. A double scan would surface ext_action twice
+        // and fail the duplicate-instruction-name check downstream.
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+my-ext-alias = { package = "my-ext", path = "../my-ext" }
+"#,
+        );
+        tmp.write("user/src/lib.rs", "");
+
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+        );
+
+        let found =
+            discover_extension_instructions(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+                .unwrap();
+        assert_eq!(found.len(), 1, "aliased dep must be scanned once");
+        assert_eq!(found[0].0.sig.ident.to_string(), "ext_action");
     }
 
     #[test]
