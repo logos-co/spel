@@ -253,11 +253,14 @@ fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Resul
 
 /// Inject a wrapper's missing gate params into an instruction fn.
 ///
-/// Skip-if-declared: a param that exists is never touched. A wrapper
-/// attr carrying arguments (custom target names) disables injection for
-/// that fn: renaming is manual mode, the consumer declares its own
-/// params. The wrapper is matched by the attr path's last segment, so
-/// the fully qualified attrs prepended by auto-wrap activate specs too.
+/// Skip-if-declared: a param that exists is never touched, and the
+/// role remap reuses consumer params (signer, literal PDA, compound
+/// PDA) under their declared names. Bare and args forms of the gate
+/// attr both activate injection: kwargs rename the gate's targets but
+/// never disable synthesis of params the fn lacks, per the ADR-0010
+/// kwarg contract that superseded the old args-form-is-manual rule.
+/// The wrapper is matched by the attr path's last segment, so the
+/// fully qualified attrs prepended by auto-wrap activate specs too.
 /// Returns the names actually injected.
 ///
 /// When two specs want the same param name: identical constraints share
