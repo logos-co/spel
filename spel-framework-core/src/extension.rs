@@ -452,6 +452,23 @@ fn resolve_bound_value(
     })
 }
 
+/// Read a crate's `[[package.metadata.spe.inject]]` blocks from its
+/// manifest on disk. Public for the extension author's alignment
+/// self-test (freeze ADR-0010): a unit test inside the extension crate
+/// reads its own declared inject-account names and asserts they match
+/// the kwarg set its wrapper macro accepts, so metadata and macro
+/// cannot drift apart silently.
+/// 
+/// # Errors
+/// 
+/// `Err` on an unreadable manifest or malformed inject metadata.
+pub fn read_inject_specs(crate_dir: &Path) -> Result<Vec<InjectSpec>, String> {
+    let Some(manifest_value) = read_manifest_value(crate_dir) else {
+        return Err(format!("unreadable Cargo.toml under {}", crate_dir.display()));
+    };
+    read_spel_inject_specs(&manifest_value, crate_dir)
+}
+
 /// Filter `#[instruction]`-annotated fns from a flat item list.
 ///
 /// Used by framework codegen to pull instruction definitions out of
