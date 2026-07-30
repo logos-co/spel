@@ -157,20 +157,34 @@ pub fn has_extension_marker_candidates(mod_attrs: &[Attribute]) -> bool {
         let Some(ident) = a.path().get_ident() else {
             return true;
         };
-        !matches!(
-            ident.to_string().as_str(),
-            "lez_program"
-                | "doc"
-                | "cfg"
-                | "cfg_attr"
-                | "allow"
-                | "deny"
-                | "warn"
-                | "expect"
-                | "forbid"
-                | "deprecated"
-        )
+        is_marker_candidate(ident.to_string().as_str())
     })
+}
+
+/// Idents on the module that could be extension markers, by the same
+/// filter the pre-check uses.
+pub fn candidate_marker_names(mod_attrs: &[Attribute]) -> Vec<String> {
+    mod_attrs
+        .iter()
+        .filter_map(|a| a.path().get_ident().map(ToString::to_string))
+        .filter(|i| is_marker_candidate(i))
+        .collect()
+}
+
+fn is_marker_candidate(ident: &str) -> bool {
+    !matches!(
+        ident,
+        "lez_program"
+            | "doc"
+            | "cfg"
+            | "cfg_attr"
+            | "allow"
+            | "deny"
+            | "warn"
+            | "expect"
+            | "forbid"
+            | "deprecated"
+    )
 }
 
 #[cfg(test)]
@@ -325,5 +339,21 @@ mod tests {
             mod program {}
         };
         assert!(has_extension_marker_candidates(&q.attrs));
+    }
+
+    #[test]
+    fn candidate_names_keep_markers_and_drop_standard_attrs() {
+        let m: syn::ItemMod = syn::parse_quote! {
+            #[lez_program]
+            #[doc = "x"]
+            #[allow(dead_code)]
+            #[my_ext]
+            #[freeze_authority(manual)]
+            mod program {}
+        };
+        assert_eq!(
+            candidate_marker_names(&m.attrs),
+            vec!["my_ext".to_string(), "freeze_authority".to_string()]
+        );
     }
 }

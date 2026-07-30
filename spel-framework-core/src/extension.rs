@@ -41,7 +41,14 @@
 //! extension surface. Environmental issues (unreadable manifest, path
 //! dep pointing at a missing directory, a matched extension contributing
 //! nothing) are reported through the `on_warning` channel, following the
-//! `find_path_dep_dirs` precedent.
+//! `find_path_dep_dirs` precedent — with one exception. When dependency
+//! resolution loses the cargo metadata layer while a candidate marker
+//! matched no discovered extension, [`resolve_program_deps`] hard-errors
+//! instead: a git or registry extension cannot be located in that state,
+//! and compiling a program that may be silently missing its extension
+//! surface is the one failure this mechanism cannot afford. When every
+//! candidate marker matched a path dependency, the degradation stays a
+//! warning and the build proceeds.
 //!
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
@@ -64,7 +71,10 @@ mod metadata;
 pub use inject::{
     active_wraps, apply_wrap_and_inject, resolve_canonical_constraint, rewrite_embedded_roles,
 };
-pub use marker::{has_extension_marker_candidates, parse_marker_args, EmbedDecl, MarkerArgs};
+pub use marker::{
+    candidate_marker_names, has_extension_marker_candidates, parse_marker_args, EmbedDecl,
+    MarkerArgs,
+};
 
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded_skip,
@@ -97,6 +107,10 @@ pub struct ExtensionDiscoveries {
     /// appends these literals at the call site; the params were
     /// stripped at discovery so no IDL or validation path sees them.
     pub bound_calls: std::collections::HashMap<String, Vec<usize>>,
+    /// Marker names that matched a discovered extension, in marker
+    /// order. Lets producers tell an unmatched candidate attr from a
+    /// matched one when dependency resolution degrades.
+    pub matched_markers: Vec<String>,
 }
 
 #[derive(Debug, Default)]
@@ -182,6 +196,7 @@ struct MatchedExtension {
     wraps: Vec<(String, WrapInstructions)>,
     embeds: Vec<(String, EmbedDecl)>,
     bound_calls: std::collections::HashMap<String, Vec<usize>>,
+    marker: String,
 }
 
 /// Producer entry point: marker pre-check, graph resolution, and
@@ -204,6 +219,26 @@ pub fn resolve_program_deps<F: FnMut(String)>(
     } else {
         ExtensionDiscoveries::default()
     };
+    if with_metadata {
+        if let Some(reason) = &graph.metadata_failure {
+            let unmatched: Vec<String> = candidate_marker_names(mod_attrs)
+                .into_iter()
+                .filter(|c| !extensions.matched_markers.contains(c))
+                .collect();
+            if !unmatched.is_empty() {
+                return Err(format!(
+                    "marker(s) {unmatched:?} matched no discoverable extension and \
+                    dependency resolution failed: {reason}. A git or registry \
+                    extension cannot be located in this state, refusing to compile \
+                    a program that could be silently missing its extension surface."
+                ));
+            }
+            on_warning(format!(
+                "dependency resolution degraded ({reason}); every marker matched a \
+                path dependency, continuing"
+            ));
+        }
+    }
     Ok(ProgramDeps { graph, extensions })
 }
 
@@ -366,6 +401,7 @@ pub fn discover_extensions<F: FnMut(String)>(
             wraps,
             embeds,
             bound_calls,
+            marker: ext_attr.clone(),
         });
     }
 
@@ -405,7 +441,7 @@ fn resolve_bound_value(
                 });
             };
             args.embed.map(|e| e.offset)
-        }
+        },
     };
     marker_offset.or(bound.default).ok_or_else(|| {
         format!(
@@ -478,6 +514,7 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.wraps.extend(m.wraps);
         out.embeds.extend(m.embeds);
         out.bound_calls.extend(m.bound_calls);
+        out.matched_markers.push(m.marker);
     }
     out
 }
@@ -989,6 +1026,90 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
         assert!(
             err.contains("requires marker '#[peer_ext]'"),
             "unexpected error: {err}"
+        );
+    }
+
+    // The fail-open closure: a metadata failure with a marker that
+    // matched nothing must refuse to compile, never silently drop a
+    // git or registry extension. The invalid version string makes
+    // cargo metadata fail deterministically and offline.
+    #[test]
+    fn metadata_failure_with_unmatched_marker_is_a_hard_error() {
+        let tmp = TempDir::new("fail-open-unmatched");
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "not-a-version"
+edition = "2021"
+"#,
+        );
+        tmp.write("user/src/lib.rs", "");
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[ghost_ext]
+        );
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect_err("unmatched marker with failed metadata must refuse to compile");
+        assert!(
+            err.contains("refusing to compile"),
+            "unexpected error: {err}"
+        );
+        assert!(err.contains("ghost_ext"), "must name the marker: {err}");
+    }
+
+    // The counterpart: when every marker matched a path dependency,
+    // the same metadata failure stays a warning and the build proceeds.
+    #[test]
+    fn metadata_failure_with_matched_path_marker_degrades_to_warning() {
+        let tmp = TempDir::new("fail-open-matched");
+        tmp.write(
+            "my-ext/Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        tmp.write(
+            "my-ext/src/lib.rs",
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "not-a-version"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+"#,
+        );
+        tmp.write("user/src/lib.rs", "");
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+        );
+        let mut warnings = Vec::new();
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+            warnings.push(w)
+        })
+        .expect("matched path marker must compile through a degraded resolution");
+        assert_eq!(deps.extensions.matched_markers, vec!["my_ext".to_string()]);
+        assert_eq!(deps.extensions.instructions.len(), 1);
+        assert!(
+            warnings.iter().any(|w| w.contains("degraded")),
+            "must warn about the degradation: {warnings:?}"
         );
     }
 

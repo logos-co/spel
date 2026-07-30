@@ -1346,7 +1346,8 @@ mod tests {
         let mut func: ItemFn = syn::parse_quote!(
             pub fn freeze_authority_renounce(
                 #[account(pda = literal("admin_config"))] admin_config: AccountWithMetadata,
-                #[account(mut, pda = literal("freeze_config"))] mut freeze_config: AccountWithMetadata,
+                #[account(mut, pda = literal("freeze_config"))]
+                mut freeze_config: AccountWithMetadata,
             ) -> SpelResult {
                 todo!()
             }

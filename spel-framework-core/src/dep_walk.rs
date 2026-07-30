@@ -17,7 +17,10 @@
 //! so dev- and build-deps stay out. All failures here are environmental
 //! and go through the `on_warning` channel; `cargo metadata` being
 //! unavailable degrades to path-only results so expansion stays
-//! deterministic.
+//! deterministic. Every degradation that loses coverage is additionally
+//! recorded in [`DepGraph::metadata_failure`] so callers with extension
+//! markers can refuse to compile instead of silently dropping a git or
+//! registry extension.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -32,6 +35,11 @@ pub struct DepGraph {
     /// Depth-1 dependency dirs only. Feeds extension discovery: the trust
     /// model's two-action rule forbids transitive discovery.
     pub direct_dirs: Vec<PathBuf>,
+    /// Why the cargo metadata layer could not contribute when it was
+    /// requested. `None` means full coverage or metadata not requested.
+    /// Callers with extension marker treat `Some` as a hard error: a
+    /// git or registry extension may be silently missing.
+    pub metadata_failure: Option<String>,
 }
 
 /// Parsed and validated `Cargo.toml`, or `None` after warning.
@@ -76,19 +84,23 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
     with_cargo_metadata: bool,
     on_warning: &mut F,
 ) -> DepGraph {
-    let empty = DepGraph {
+    let fail = |reason: String| DepGraph {
         transitive_dirs: Vec::new(),
         direct_dirs: Vec::new(),
+        metadata_failure: with_cargo_metadata.then_some(reason),
     };
 
     let Some(manifest) = find_crate_manifest(start, on_warning) else {
-        return empty;
+        return fail(format!("no Cargo.toml found above {}", start.display()));
     };
     let Some(value) = read_manifest_toml(&manifest, on_warning) else {
-        return empty;
+        return fail(format!("unreadable manifest at {}", manifest.display()));
     };
     let Some(manifest_dir) = manifest.parent().map(Path::to_path_buf) else {
-        return empty;
+        return fail(format!(
+            "manifest at {} has not parent directory",
+            manifest.display()
+        ));
     };
 
     // Workspace roots have no [dependencies] of their own: resolve to the
@@ -96,17 +108,20 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
     let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
     let (manifest, value) = if is_workspace {
         let Some(member) = find_member_manifest(&manifest_dir, &value, start, on_warning) else {
-            return empty;
+            return fail(format!(
+                "workspace member manifest for {} not found",
+                start.display()
+            ));
         };
         let Some(member_value) = read_manifest_toml(&member, on_warning) else {
-            return empty;
+            return fail(format!(
+                "unreadable member manifest at {}",
+                member.display()
+            ));
         };
         (member, member_value)
     } else {
         (manifest, value)
-    };
-    let Some(manifest_dir) = manifest.parent().map(Path::to_path_buf) else {
-        return empty;
     };
 
     // Transitive path walk. `visited` also excludes the crate itself from
@@ -135,30 +150,37 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
     }
 
     // One subprocess feeds both merges.
+    let mut metadata_failure = None;
     if with_cargo_metadata {
-        if let Some(meta) = cargo_metadata_json(&manifest, on_warning) {
-            for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
-                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-                if visited.insert(canonical) {
-                    transitive_dirs.push(dir);
+        match cargo_metadata_json(&manifest, on_warning) {
+            Some(meta) => {
+                for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
+                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    if visited.insert(canonical) {
+                        transitive_dirs.push(dir);
+                    }
                 }
-            }
-            let mut seen: HashSet<PathBuf> = direct_dirs
-                .iter()
-                .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
-                .collect();
-            for dir in direct_normal_dep_dirs(&meta, &manifest) {
-                let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
-                if seen.insert(canonical) {
-                    direct_dirs.push(dir);
+                let mut seen: HashSet<PathBuf> = direct_dirs
+                    .iter()
+                    .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
+                    .collect();
+                for dir in direct_normal_dep_dirs(&meta, &manifest) {
+                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    if seen.insert(canonical) {
+                        direct_dirs.push(dir);
+                    }
                 }
-            }
+            },
+            None => {
+                metadata_failure = Some(format!("cargo metadata failed for {}", manifest.display()))
+            },
         }
     }
 
     DepGraph {
         transitive_dirs,
         direct_dirs,
+        metadata_failure,
     }
 }
 

@@ -96,10 +96,9 @@ fn validate_bound_from_shape(from: &str) -> Result<(), String> {
                 "bound_args.from `{from}` has an empty segment; expected `<kwarg>` or `<marker>::<kwarg>`"
             ));
         }
-        let is_ident = seg
-            .chars()
-            .enumerate()
-            .all(|(i, c)| c == '_' || (i == 0 && c.is_ascii_alphabetic()) || c.is_ascii_alphanumeric());
+        let is_ident = seg.chars().enumerate().all(|(i, c)| {
+            c == '_' || (i == 0 && c.is_ascii_alphabetic()) || c.is_ascii_alphanumeric()
+        });
         if !is_ident {
             return Err(format!(
                 "bound_args.from `{from}` segment `{seg}` is not a valid identifier"
