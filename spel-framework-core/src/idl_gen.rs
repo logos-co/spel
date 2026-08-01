@@ -369,6 +369,9 @@ fn collect_items_from_source_file(
         Err(_) => return,
     };
     files_read.push(path.to_path_buf());
+    if has_metavar_glued_literal(&content) {
+        return;
+    }
     let file = match syn::parse_file(&content) {
         Ok(f) => f,
         Err(_) => return,
@@ -878,10 +881,69 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
     }
 }
 
+/// True when the text contains a macro metavariable glued to a string
+/// literal (e.g. ark-ff's `$Fp"({})"`). Legal in the defining crate's own
+/// edition, but re-lexed as raw source under a 2021+ edition rustc's lexer
+/// queues a fatal "unknown prefix" error as a side effect even though the
+/// parse error itself is caught. Such files cannot carry usable
+/// `#[account_type]` items, so they are skipped instead of parsed.
+fn has_metavar_glued_literal(content: &str) -> bool {
+    let bytes = content.as_bytes();
+    let mut i = 0;
+
+    while let Some(off) = content[i..].find('$') {
+        let start = i + off + 1;
+        let mut j = start;
+        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+            j += 1;
+        }
+        if j > start && j < bytes.len() && bytes[j] == b'"' && !bytes[start].is_ascii_digit() {
+            return true;
+        }
+        i = start;
+    }
+
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::idl::{IdlSeed, IdlType, SpelIdl};
+
+    #[test]
+    fn metavar_glued_literal_is_detected() {
+        // The exact shape from ark-ff-0.3.0 src/fields/macros.rs:615.
+        assert!(has_metavar_glued_literal(
+            r#"write!(f, stringify!($Fp"({})"), self.into_repr())"#
+        ));
+        // A metavariable not glued to a quote is fine.
+        assert!(!has_metavar_glued_literal(
+            "macro_rules! m { ($x:ident) => { $x } }"
+        ));
+        // A bare dollar, a digit after the dollar, and plain code are fine.
+        assert!(!has_metavar_glued_literal("let price = \"$\";"));
+        assert!(!has_metavar_glued_literal(r#"let s = "$5\"quoted\"";"#));
+        assert!(!has_metavar_glued_literal("fn account_type_free() {}"));
+    }
+
+    #[test]
+    fn landmine_file_contributes_no_items_but_is_tracked() {
+        let dir = std::env::temp_dir().join("spel_idl_gen_landmine_fixture");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            concat!(
+                "#[account_type]\npub struct Hidden { pub x: u8 }\n",
+                "macro_rules! m { () => { stringify!($Fp\"({})\") } }\n",
+            ),
+        )
+        .unwrap();
+        let (items, files) = collect_items_from_crate_dirs(std::slice::from_ref(&dir));
+        assert_eq!(files.len(), 1, "the file must still be change-tracked");
+        assert!(items.is_empty(), "a landmine file must be skipped whole");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     fn ok(src: &str) -> SpelIdl {
         generate_idl_from_str(src, "<test>").expect("IDL generation failed")
