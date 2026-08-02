@@ -209,6 +209,8 @@ pub fn rewrite_embedded_roles(
             )
         })?;
 
+        check_initializer_coverage(specs, source, embed, consumer_fns)?;
+
         let mut hit = false;
         for spec in specs.iter_mut().filter(|s| &s.source == source) {
             for acc in spec.accounts.iter_mut().filter(|a| a.role == embed.role) {
@@ -229,6 +231,56 @@ pub fn rewrite_embedded_roles(
     }
 
     check_embed_window_collisions(embeds)?;
+    Ok(())
+}
+
+/// An extension that declares an initializer wrapper makes it
+/// mandatory: every instruction that creates the embedding account must
+/// carry it, or the program ships born renounced. Extensions without
+/// one (freeze is born vacant by design) are untouched.
+fn check_initializer_coverage(
+    specs: &[InjectSpec],
+    source: &str,
+    embed: &super::EmbedDecl,
+    consumer_fns: &[ItemFn],
+) -> Result<(), String> {
+    let prefix = embed.role.strip_suffix("_config").unwrap_or(&embed.role);
+    let init_attr = format!("{prefix}_initialize");
+    let declares_initializer = specs
+        .iter()
+        .any(|s| s.source == source && s.wrapper == init_attr);
+    if !declares_initializer {
+        return Ok(());
+    }
+    for func in consumer_fns {
+        let creates = typed_params(func)
+            .any(|(pi, pt)| pi.ident == embed.account.as_str() && param_has_init(pt));
+        let annotated = func.attrs.iter().any(|a| {
+            a.path()
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == init_attr.as_str())
+        });
+
+        if !creates && !annotated {
+            continue;
+        }
+        if creates && !annotated {
+            return Err(format!(
+                "`{}` creates the embedding account `{}` and must carry \
+                #[{init_attr}]; without it the program ships born renounced",
+                func.sig.ident, embed.account
+            ));
+        }
+        if annotated && !creates {
+            return Err(format!(
+                "`{}` carries #[{init_attr}] but does not declare `{}` with \
+                 #[account(init, ...)]; the bootstrap must only ever run on \
+                 a freshly created account",
+                func.sig.ident, embed.account
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -587,6 +639,24 @@ fn param_pda_seeds(pt: &syn::PatType) -> Option<Vec<InjectSeed>> {
     None
 }
 
+// True when the param's `#[account]` attr carries `init`.
+fn param_has_init(pt: &syn::PatType) -> bool {
+    pt.attrs.iter().any(|attr| {
+        if !attr.path().is_ident("account") {
+            return false;
+        }
+        let mut has_init = false;
+        attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("init") {
+                has_init = true;
+            }
+            Ok(())
+        })
+        .ok();
+        has_init
+    })
+}
+
 // Render structured seeds back into a `pda = ...` expression:
 // a bare call for one seed, an array for a compound.
 fn seeds_to_pda_expr(seeds: &[InjectSeed]) -> Option<syn::Expr> {
@@ -802,6 +872,93 @@ mod tests {
             before,
             "no duplicate account params"
         );
+    }
+
+    // Specs of embedded_fixture plus an initializer wrapper, which
+    // makes the coverage check mandatory for `my_ext`.
+    fn initializer_specs() -> (Vec<InjectSpec>, Vec<(String, crate::extension::EmbedDecl)>) {
+        let (mut specs, embeds) = embedded_fixture();
+        specs.push(InjectSpec {
+            wrapper: "gate_initialize".to_string(),
+            accounts: vec![InjectAccount {
+                name: "caller".to_string(),
+                role: "caller".to_string(),
+                seeds: vec![],
+                signer: true,
+                embedded: false,
+            }],
+            source: "my_ext".to_string(),
+        });
+        (specs, embeds)
+    }
+
+    #[test]
+    fn embedding_creator_without_initializer_attr_is_refused() {
+        let (mut specs, embeds) = initializer_specs();
+        let create: ItemFn = syn::parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let err = rewrite_embedded_roles(&mut specs, &embeds, &[create]).unwrap_err();
+        assert!(
+            err.contains("born renounced") && err.contains("create"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn annotated_creator_passes_the_coverage_check() {
+        let (mut specs, embeds) = initializer_specs();
+        let create: ItemFn = syn::parse_quote!(
+            #[gate_initialize]
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create]).expect("annotated creator passes");
+    }
+
+    #[test]
+    fn initializer_attr_without_init_param_is_refused() {
+        let (mut specs, embeds) = initializer_specs();
+        let create: ItemFn = syn::parse_quote!(
+            #[gate_initialize]
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let wrong: ItemFn = syn::parse_quote!(
+            #[gate_initialize]
+            pub fn poke(value: u64) -> SpelResult {
+                todo!()
+            }
+        );
+        let err = rewrite_embedded_roles(&mut specs, &embeds, &[create, wrong]).unwrap_err();
+        assert!(
+            err.contains("poke") && err.contains("freshly created"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn extension_without_initializer_spec_skips_the_check() {
+        let (mut specs, embeds) = embedded_fixture();
+        let create: ItemFn = syn::parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create])
+            .expect("born-vacant extensions are untouched");
     }
 
     #[test]
