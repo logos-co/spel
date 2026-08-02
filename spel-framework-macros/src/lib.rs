@@ -41,6 +41,7 @@ use syn::{
 };
 
 mod account_types;
+mod slot_offsets;
 
 /// Main entry point: `#[lez_program]` on a module.
 ///
@@ -128,11 +129,13 @@ pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// This attribute is a no-op at compile time; it is consumed solely by the
-/// IDL generator.
+/// For the IDL the attribute is a pass-through, consumed by the
+/// generator. Structs with a `*_slot` field attribute (e.g.
+/// `#[admin_slot]`) additionally gain a derived `<NAME>_OFFSET` const
+/// and an emitted layout test. See `slot_offsets`.
 #[proc_macro_attribute]
 pub fn account_type(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+    slot_offsets::expand(item)
 }
 
 /// Generate IDL from a program source file.
@@ -230,6 +233,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let mut slot_assert = proc_macro2::TokenStream::new();
     let bound_calls = deps.extensions.bound_calls.clone();
     let consumer_fns: Vec<ItemFn> = items
         .iter()
@@ -492,10 +496,21 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 }
             }
 
+            // Manifest 'declared bin paths: entry files outside src/
+            // (custom [[bin]] path, test harnesses) must not be missed,
+            // a missed entry file silently skips the slot assert.
+            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+                if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
+                    candidate_paths.push(bin_path);
+                }
+            }
+
+            let mut module_source_found = false;
             for guest_path in &candidate_paths {
                 if let Ok(content_str) = std::fs::read_to_string(guest_path) {
                     if let Ok(parsed_file) = syn::parse_file(&content_str) {
                         if file_matches_module(&parsed_file) {
+                            module_source_found = true;
                             // Collect from top-level items AND from inside the
                             // #[lez_program] module body (account types are often
                             // defined inside the module).
@@ -516,11 +531,24 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                                     &deps.graph.transitive_dirs,
                                 );
                             all_items.extend(extra_items);
+                            slot_assert.extend(slot_offsets::emit_agreement_asserts(
+                                guest_path,
+                                &deps.extensions.embeds,
+                            ));
                             result = account_types::collect_account_types(&all_items);
                             break;
                         }
                     }
                 }
+            }
+            if !module_source_found && !deps.extensions.embeds.is_empty() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "embedded markers are declared but the module's source \
+                    file could not be located, so the slot agreement checks \
+                    cannot be emitted; refusing to compile rather than skip \
+                    them silently",
+                ));
             }
         }
         result
@@ -553,6 +581,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         // validation helpers (__validate_*), and claims helpers (__claims_*) directly.
         pub mod #mod_name {
             use super::*;
+
+            #slot_assert
 
             #(#other_items)*
 

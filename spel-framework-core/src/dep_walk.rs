@@ -398,6 +398,17 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
     }
 }
 
+/// Local path-dependency dirs of `manifest`, transitively. The slot
+/// scan uses this: path deps are consumer-owned by layout, while git
+/// and registry dependencies must never satisfy of steal a slot
+/// binding.
+pub fn path_dep_dirs(manifest: &Path) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut visited = HashSet::new();
+    resolve_path_deps_recursive(manifest, &mut dirs, &mut visited, &mut |_| {});
+    dirs
+}
+
 // ── Cargo metadata layer (git/registry deps) ─────────────────────────────
 
 /// Shared `cargo metadata --format-version 1` invocation. Parsed JSON, or
@@ -635,6 +646,43 @@ fn is_normal_dep_edge(dep: &serde_json::Value) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn path_dep_dirs_follows_transitive_path_deps() {
+        let root = std::env::temp_dir().join("spel_path_dep_dirs_fixture");
+        let a = root.join("a");
+        let b = root.join("b");
+        let c = root.join("c");
+        for d in [&a, &b, &c] {
+            std::fs::create_dir_all(d.join("src")).unwrap();
+            std::fs::write(d.join("src/lib.rs"), "").unwrap();
+        }
+        std::fs::write(
+            a.join("Cargo.toml"),
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\n[dependencies]\nb = { path = \"../b\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            b.join("Cargo.toml"),
+            "[package]\nname = \"b\"\nversion = \"0.1.0\"\n[dependencies]\nc = { path = \"../c\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            c.join("Cargo.toml"),
+            "[package]\nname = \"c\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+
+        let dirs = path_dep_dirs(&a.join("Cargo.toml"));
+        let has = |needle: &std::path::Path| {
+            let n = needle.canonicalize().unwrap();
+            dirs.iter()
+                .any(|d| d.canonicalize().map(|x| x == n).unwrap_or(false))
+        };
+        assert!(has(&b), "direct path dep missing: {dirs:?}");
+        assert!(has(&c), "transitive path dep missing: {dirs:?}");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     use super::*;
     use crate::test_utils::TempDir;
 

@@ -766,6 +766,45 @@ mod tests {
     }
 
     #[test]
+    fn embedded_role_reuses_same_spec_under_any_name() {
+        // Recognition is by seed spec, not by name: a gated fn declaring
+        // the embedding account's constraint under its own name must be
+        // reused, never duplicated by injection.
+        let (mut specs, embeds) = embedded_fixture();
+        let create: ItemFn = syn::parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+                #[account(signer)] payer: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create]).expect("rewrite succeeds");
+
+        let mut gated: ItemFn = syn::parse_quote!(
+            #[my_gate]
+            pub fn update(
+                #[account(pda = literal("prog_config"))] renamed: AccountWithMetadata,
+                #[account(signer)] sender: AccountWithMetadata,
+                value: u64,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let before = gated.sig.inputs.len();
+        let injected = inject_gate_params(&mut gated, &specs).expect("inject succeeds");
+        assert!(
+            injected.is_empty(),
+            "same-spec params must be reused under their own names, injected: {injected:?}"
+        );
+        assert_eq!(
+            gated.sig.inputs.len(),
+            before,
+            "no duplicate account params"
+        );
+    }
+
+    #[test]
     fn consumer_location_kwarg_on_embedded_gate_is_error() {
         let (specs, embeds) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(

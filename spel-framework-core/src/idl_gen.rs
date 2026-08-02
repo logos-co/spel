@@ -348,6 +348,37 @@ pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> (Vec<syn::Item>, Vec<P
     (items, files_read)
 }
 
+/// Parse a source file and every module file it declares, returning the
+/// flattened items. The slot-attribute scan uses this so a slot-bearing
+/// struct may live in a `mod` file instead of the entry file.
+pub fn collect_file_items_following_mods(path: &Path) -> Vec<syn::Item> {
+    let mut items = Vec::new();
+    let mut visited = HashSet::new();
+    let mut files_read = Vec::new();
+    collect_items_from_source_file(path, &mut items, &mut visited, &mut files_read);
+    items
+}
+
+/// Bin entry files declared in the manifest (`[[bin]] path = ...`).
+/// Module-source discovery adds these to its candidates: consumers and
+/// test harnesses may put the entry file outside `src/`, and a missed
+/// entry file would silently skip source-derived checks.
+pub fn manifest_bin_paths(manifest_dir: &Path) -> Vec<PathBuf> {
+    let Ok(content) = std::fs::read_to_string(manifest_dir.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(bins) = value.get("bin").and_then(|b| b.as_array()) else {
+        return Vec::new();
+    };
+    bins.iter()
+        .filter_map(|bin| bin.get("path").and_then(|p| p.as_str()))
+        .map(|p| manifest_dir.join(p))
+        .collect()
+}
+
 /// Parse a single Rust source file and append its items to `out`, following
 /// external `mod` declarations to their corresponding files.
 fn collect_items_from_source_file(
@@ -380,7 +411,7 @@ fn collect_items_from_source_file(
     // Sub-module files for `lib.rs` / `mod.rs` live alongside the file;
     // for `foo.rs` they live in a `foo/` directory next to the file.
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let sub_base = if file_name == "lib.rs" || file_name == "mod.rs" {
+    let sub_base = if file_name == "lib.rs" || file_name == "mod.rs" || file_name == "main.rs" {
         path.parent().map(|p| p.to_path_buf())
     } else {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -908,6 +939,66 @@ fn has_metavar_glued_literal(content: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_bin_paths_reads_declared_bins() {
+        let dir = std::env::temp_dir().join("spel_manifest_bin_paths_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            concat!(
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+                "[[bin]]\nname = \"x\"\npath = \"main.rs\"\n",
+                "[[bin]]\nname = \"y\"\npath = \"tools/y.rs\"\n",
+            ),
+        )
+        .unwrap();
+        let paths = manifest_bin_paths(&dir);
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths[0].ends_with("main.rs"));
+        assert!(paths[1].ends_with("tools/y.rs"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn following_mods_reads_module_files_beside_lib() {
+        let dir = std::env::temp_dir().join("spel_follow_mods_lib_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "mod types;\npub struct Top;\n").unwrap();
+        std::fs::write(dir.join("types.rs"), "pub struct Inner;\n").unwrap();
+        let items = collect_file_items_following_mods(&dir.join("lib.rs"));
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Top".to_string()), "{names:?}");
+        assert!(names.contains(&"Inner".to_string()), "{names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn following_mods_reads_module_files_beside_main() {
+        let dir = std::env::temp_dir().join("spel_follow_mods_main_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "mod types;\npub struct Top;\n").unwrap();
+        std::fs::write(dir.join("types.rs"), "pub struct Inner;\n").unwrap();
+        let items = collect_file_items_following_mods(&dir.join("main.rs"));
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"Inner".to_string()),
+            "a bin entry file's `mod` must resolve beside it, found {names:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::idl::{IdlSeed, IdlType, SpelIdl};
 
