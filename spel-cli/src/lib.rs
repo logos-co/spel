@@ -212,6 +212,9 @@ pub async fn run() {
                     println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
                     println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
                     println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
+                    println!(
+                        "  --spel-git <URL>    SPEL git URL (default: https://github.com/logos-co/spel.git)"
+                    );
                     println!();
                     println!("Examples:");
                     println!("  spel init my-project");
@@ -224,6 +227,7 @@ pub async fn run() {
                 let mut spel_tag: Option<String> = None;
                 let mut lez_rev: Option<String> = None;
                 let mut spel_rev: Option<String> = None;
+                let mut spel_git: Option<String> = None;
                 let mut name_arg_idx = 2;
 
                 while name_arg_idx < remaining_args.len() {
@@ -248,6 +252,11 @@ pub async fn run() {
                         if name_arg_idx < remaining_args.len() {
                             spel_rev = Some(remaining_args[name_arg_idx].clone());
                         }
+                    } else if arg == "--spel-git" {
+                        name_arg_idx += 1;
+                        if name_arg_idx < remaining_args.len() {
+                            spel_git = Some(remaining_args[name_arg_idx].clone());
+                        }
                     } else {
                         break;
                     }
@@ -255,7 +264,7 @@ pub async fn run() {
                 }
 
                 let name = remaining_args.get(name_arg_idx).unwrap_or_else(|| {
-                    eprintln!("Usage: {} init <project-name> [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>]", args[0]);
+                    eprintln!("Usage: {} init <project-name> [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>] [--spel-git <url>]", args[0]);
                     process::exit(1);
                 });
                 init_project(
@@ -264,6 +273,7 @@ pub async fn run() {
                     spel_tag.as_deref(),
                     lez_rev.as_deref(),
                     spel_rev.as_deref(),
+                    spel_git.as_deref(),
                 );
                 return;
             },
