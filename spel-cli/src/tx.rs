@@ -122,7 +122,7 @@ pub async fn execute_instruction(
     // Parse instruction args.
     // Vec<String> is the one shape that consumes every repeated --flag
     // value; every other type takes the last occurrence (scalar semantics).
-    let mut parsed_args: Vec<(&str, &spel_framework_core::idl::IdlType, ParsedValue)> = Vec::new();
+    let mut parsed_args: Vec<(&str, &IdlType, ParsedValue)> = Vec::new();
     let mut has_errors = false;
     for arg in &ix.args {
         let key = snake_to_kebab(&arg.name);
@@ -622,7 +622,7 @@ struct DryRunSummary<'a> {
     parsed_account_ids: &'a [(&'a str, &'a [u8])],
     /// Rest (variadic) accounts: `(name, [raw_32_bytes…])`.
     rest_account_ids: &'a [(&'a str, Vec<&'a [u8]>)],
-    parsed_args: &'a [(&'a str, &'a spel_framework_core::idl::IdlType, ParsedValue)],
+    parsed_args: &'a [(&'a str, &'a IdlType, ParsedValue)],
     instruction_data: &'a [u32],
     signer_names: &'a [&'a str],
     signer_nonces: &'a [Option<Nonce>],

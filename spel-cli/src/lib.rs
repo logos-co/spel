@@ -509,7 +509,7 @@ fn compute_pda_command(
                     }
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
@@ -533,7 +533,7 @@ fn compute_pda_command(
                     }
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
@@ -576,7 +576,7 @@ fn compute_pda_command(
                 i += 2;
             } else {
                 eprintln!("❌ Missing value for --{}", key);
-                std::process::exit(1);
+                process::exit(1);
             }
         } else {
             i += 1;
@@ -590,7 +590,7 @@ fn compute_pda_command(
     let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
             eprintln!("❌ Invalid program ID '{}': {}", hex, e);
-            std::process::exit(1);
+            process::exit(1);
         });
         let mut pid = [0u32; 8];
         for (i, chunk) in bytes.chunks(4).enumerate() {
@@ -599,26 +599,26 @@ fn compute_pda_command(
         pid
     } else if let Some(path) = program_path {
         if std::path::Path::new(path).exists() {
-            let program_bytes = std::fs::read(path).unwrap_or_else(|e| {
+            let program_bytes = fs::read(path).unwrap_or_else(|e| {
                 eprintln!("❌ Cannot read program binary '{}': {}", path, e);
-                std::process::exit(1);
+                process::exit(1);
             });
             Program::new(program_bytes.into())
                 .unwrap_or_else(|e| {
                     eprintln!("❌ Invalid program binary: {:?}", e);
-                    std::process::exit(1);
+                    process::exit(1);
                 })
                 .id()
         } else {
             eprintln!("❌ Program binary not found: {}", path);
-            std::process::exit(1);
+            process::exit(1);
         }
     } else {
         eprintln!("❌ Program ID required to compute PDA.");
         eprintln!("   Pass --program <name>           (from spel.toml)");
         eprintln!("   Or   --program <64-char-hex>    (program ID)");
         eprintln!("   Or   --program <path-to-binary>");
-        std::process::exit(1);
+        process::exit(1);
     };
 
     // For private PDAs, parse and require --npk
@@ -629,7 +629,7 @@ fn compute_pda_command(
                 use crate::hex::decode_bytes_32;
                 let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
                     eprintln!("❌ Invalid --npk '{}': {}", hex, e);
-                    std::process::exit(1);
+                    process::exit(1);
                 });
                 Some(NullifierPublicKey(bytes))
             },
@@ -641,7 +641,7 @@ fn compute_pda_command(
                 eprintln!(
                     "   The NullifierPublicKey is the recipient's npk from their wallet key."
                 );
-                std::process::exit(1);
+                process::exit(1);
             },
         }
     } else {
@@ -665,7 +665,7 @@ fn compute_pda_command(
                             },
                             Err(_) => {
                                 eprintln!("❌ '{}' is not a valid base58 account ID", raw);
-                                std::process::exit(1);
+                                process::exit(1);
                             },
                         }
                     }
@@ -701,7 +701,7 @@ fn compute_pda_command(
                     ),
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     }
 }
@@ -728,13 +728,13 @@ fn compute_pda_raw(args: &[String]) {
         Some(w) => &w[1],
         None => {
             eprintln!("Usage: pda --program-id <64-char-hex> <seed1> [seed2] ...");
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
     let pid_bytes = decode_bytes_32(pid_hex).unwrap_or_else(|e| {
         eprintln!("❌ Invalid --program-id '{}': {}", pid_hex, e);
-        std::process::exit(1);
+        process::exit(1);
     });
     let mut program_id: ProgramId = [0u32; 8];
     for (i, chunk) in pid_bytes.chunks(4).enumerate() {
@@ -762,14 +762,14 @@ fn compute_pda_raw(args: &[String]) {
         {
             decode_bytes_32(arg).unwrap_or_else(|e| {
                 eprintln!("❌ Invalid hex seed '{}': {}", arg, e);
-                std::process::exit(1);
+                process::exit(1);
             })
         } else {
             let mut bytes = [0u8; 32];
             let src = arg.as_bytes();
             if src.len() > 32 {
                 eprintln!("❌ Seed '{}' is {} bytes, max 32", arg, src.len());
-                std::process::exit(1);
+                process::exit(1);
             }
             bytes[..src.len()].copy_from_slice(src);
             bytes
@@ -780,7 +780,7 @@ fn compute_pda_raw(args: &[String]) {
     if seeds.is_empty() {
         eprintln!("❌ At least one seed required");
         eprintln!("Usage: pda --program-id <hex> <seed1> [seed2] ...");
-        std::process::exit(1);
+        process::exit(1);
     }
 
     // Combine seeds via SHA-256(seed1 || seed2 || ...)
