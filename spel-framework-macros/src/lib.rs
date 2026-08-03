@@ -1208,6 +1208,20 @@ impl<'a> ExecuteTransformer<'a> {
         }
         result
     }
+
+    /// Post-state clones for the injected params, in accounts order.
+    /// Injected params never appear in a consumer-authored accounts
+    /// expression, the consumer does not know they exist.
+    fn injected_clones(&self) -> Vec<TokenStream2> {
+        self.accounts
+            .iter()
+            .filter(|a| self.injected.iter().any(|n| a.name == *n))
+            .map(|a| {
+                let ident = &a.name;
+                quote! { #ident.account.clone() }
+            })
+            .collect()
+    }
 }
 
 impl<'a> VisitMut for ExecuteTransformer<'a> {
@@ -1267,18 +1281,10 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             return;
         }
 
+        let injected_clones: Vec<TokenStream2> = self.injected_clones();
         // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
         // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
         if self.has_rest() {
-            let injected_clones: Vec<TokenStream2> = self
-                .accounts
-                .iter()
-                .filter(|a| self.injected.iter().any(|n| a.name == *n))
-                .map(|a| {
-                    let ident = &a.name;
-                    quote! { #ident.account.clone() }
-                })
-                .collect();
             // ix.accounts counts injected params as fixed, but the
             // consumer's vec does not contain them: subtract so the claims
             // fn sees only the declared fixed params.
@@ -1306,14 +1312,32 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
         // variable built by the handler). The vec![name, ...] pattern above handles the common
         // case; this catches anything else. Note: account(...) PDA seeds cannot be resolved here
         // because AccountWithMetadata is not available — use vec![...] for those instructions.
+        //
+        // Injected params never appear in a consumer-authored expression, the
+        // consumer does not know they exist. Prepend their post-states here,
+        // same as the rest-accounts branch, so the claims stay aligned.
         let all_seed_args: Vec<TokenStream2> = arg_seed_args;
-        if let syn::Expr::Call(call) = expr {
-            call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
-            call.args.clear();
-            call.args.push(syn::parse_quote! { &#accounts_arg });
-            call.args
-                .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
-            call.args.push(syn::parse_quote! { #chained_arg });
+        if injected_clones.is_empty() {
+            if let syn::Expr::Call(call) = expr {
+                call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
+                call.args.clear();
+                call.args.push(syn::parse_quote! { &#accounts_arg });
+                call.args
+                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+                call.args.push(syn::parse_quote! { #chained_arg });
+            }
+        } else {
+            *expr = syn::parse_quote! {
+                {
+                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
+                    __all.extend(#accounts_arg);
+                    SpelOutput::execute_with_claims(
+                        &__all,
+                        &#claims_fn(#(#all_seed_args),*),
+                        #chained_arg
+                    )
+                }
+            };
         }
     }
 }
@@ -2638,6 +2662,84 @@ pub mod token {
         assert_eq!(
             result[0].to_string(),
             quote! { &*caller.account_id.value() }.to_string()
+        );
+    }
+
+    // The claims fn counts every account param, injected ones included,
+    // so the fallback branch must prepend injected post-states to any
+    // consumer-authored accounts expression (e.g. vec![config.account]).
+    // Without the prepend the guest panics at execution with
+    // execute_with_claims: accounts.len() != claims.len().
+    #[test]
+    fn fallback_prepends_injected_post_states() {
+        let accounts = vec![
+            AccountParam {
+                name: format_ident!("caller"),
+                constraints: AccountConstraints {
+                    signer: true,
+                    ..Default::default()
+                },
+                is_rest: false,
+            },
+            AccountParam {
+                name: format_ident!("config"),
+                constraints: AccountConstraints::default(),
+                is_rest: false,
+            },
+        ];
+        let fn_name = format_ident!("update_value");
+        let injected = vec!["caller".to_string()];
+        let mut transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            pub fn update_value(
+                caller: AccountWithMetadata,
+                mut config: AccountWithMetadata,
+            ) -> SpelResult {
+                Ok(SpelOutput::execute(vec![config.account], vec![]))
+            }
+        };
+
+        transformer.visit_item_fn_mut(&mut func);
+
+        let out = quote! { #func }.to_string();
+        assert!(out.contains("execute_with_claims"), "{out}");
+        assert!(
+            out.contains("caller . account . clone ()"),
+            "the injected caller's post-state must be prepended: {out}"
+        );
+    }
+
+    #[test]
+    fn fallback_without_injection_passes_the_expression_through() {
+        let accounts = vec![AccountParam {
+            name: format_ident!("config"),
+            constraints: AccountConstraints::default(),
+            is_rest: false,
+        }];
+        let fn_name = format_ident!("update_value");
+        let injected: Vec<String> = Vec::new();
+        let mut transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
+                Ok(SpelOutput::execute(vec![config.account], vec![]))
+            }
+        };
+
+        transformer.visit_item_fn_mut(&mut func);
+
+        let out = quote! { #func }.to_string();
+        assert!(out.contains("execute_with_claims"), "{out}");
+        assert!(
+            !out.contains("__all"),
+            "no injected params, the expression must pass through unwrapped: {out}"
         );
     }
 }
