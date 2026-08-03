@@ -91,12 +91,16 @@ cd "$WORK_DIR"
 # On PRs, SPEL_TAG is set so the scaffolded project uses the PR's framework code.
 # On main pushes, SPEL_TAG is unset for true default testing.
 
-log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG})..."
+log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG}${SPEL_GIT:+, SPEL_GIT=$SPEL_GIT})..."
+SPEL_GIT_ARGS=()
+if [ -n "${SPEL_GIT:-}" ]; then
+    SPEL_GIT_ARGS=(--spel-git "$SPEL_GIT")
+fi
 if [ -n "${SPEL_TAG:-}" ]; then
-    "$SPEL_BIN" init --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+    "$SPEL_BIN" init --spel-rev "$SPEL_TAG" "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
         > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
 else
-    "$SPEL_BIN" init "$PROJECT_NAME" \
+    "$SPEL_BIN" init "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
         > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
 fi
 cd "$PROJECT_NAME"

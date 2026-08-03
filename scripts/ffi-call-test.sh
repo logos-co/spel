@@ -111,7 +111,11 @@ CLIENT_GEN_BIN="$SPEL_DIR/target/release/spel-client-gen"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
+SPEL_GIT_ARGS=()
+if [ -n "${SPEL_GIT:-}" ]; then
+    SPEL_GIT_ARGS=(--spel-git "$SPEL_GIT")
+fi
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" 2>&1 | tee "$WORK_DIR/init.log" || { echo ''; echo '=== INIT LOG ==='; cat "$WORK_DIR/init.log"; echo '================='; fail "spel init failed"; }
 cd "$PROJECT_NAME"
 
 # Regenerate lockfiles so the patch takes effect

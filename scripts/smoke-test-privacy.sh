@@ -147,7 +147,11 @@ log "  Using local spel: $SPEL_BIN"
 # ─── Step 1: Scaffold project ──────────────────────────────────────────────
 
 log "Step 1: Creating SPEL project (LEZ=${LEZ_TAG})..."
-"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+SPEL_GIT_ARGS=()
+if [ -n "${SPEL_GIT:-}" ]; then
+    SPEL_GIT_ARGS=(--spel-git "$SPEL_GIT")
+fi
+"$SPEL_BIN" init --lez-tag "$LEZ_TAG" --spel-rev "$SPEL_TAG" "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
     > "$LOG_DIR/init.log" 2>&1 || fail "spel init failed (see $LOG_DIR/init.log)"
 cd "$PROJECT_NAME"
 log "  ✓ Project scaffolded"
