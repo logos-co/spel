@@ -698,7 +698,7 @@ struct ArgParam {
     ty: Type,
 }
 
-pub fn has_instruction_attr(attrs: &[Attribute]) -> bool {
+pub(crate) fn has_instruction_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("instruction"))
 }
 
