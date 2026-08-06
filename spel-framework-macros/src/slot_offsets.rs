@@ -3,18 +3,26 @@
 //! the struct gain a derived `<NAME>_OFFSET` const, computed as a sum
 //! of `FixedBorshSize::SIZE` terms that rustc evaluates, plus a layout
 //! test emitted into the consumer crate that serializes a probe value
-//! in the slot field and asserts it lands at the derived offset. For
-//! every embedded marker, `lez_program` then emits a const assert that
-//! the marker's declared offset equals the derived const, so marker
-//! drift is a compile error. Structs without slot attributes pass
-//! through unchanged.
+//! in the slot field and asserts it lands at the derived offset.
+//!
+//! The const serves two masters. A marker that declares an explicit
+//! offset gets an agreement assert, declared equals derived, so marker
+//! drift is a compile error. A marker that omits the offset derives it:
+//! `extension::slots` resolves the role to the carrier's const path and
+//! this module lowers the resolved values back to tokens for the
+//! dispatcher, the stamped gates, and the window-collision asserts,
+//! with rustc evaluating what discovery-time code cannot. Structs
+//! without slot attributes pass through unchanged.
 
 use proc_macro::TokenStream;
 use quote::quote;
+use spel_framework_core::extension::{
+    find_slot_carrier, BoundValue, EmbedDecl, OffsetSpec, SlotCarrier,
+};
 
 // ── account_type side: derive the offset ─────────────────────────────────
 
-pub(crate) fn expand(item: TokenStream) -> TokenStream {
+pub(crate) fn expand(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let mut st = match syn::parse::<syn::ItemStruct>(item.clone()) {
         Ok(s) => s,
         // Enums and anything non-struct keep the passthrough behavior.
@@ -63,13 +71,14 @@ pub(crate) fn expand(item: TokenStream) -> TokenStream {
 
 /// Const asserts refusing overlapping embedded windows in one account.
 ///
-/// Discovery rejects identical offsets, but only rustc knows window
-/// lengths, so range overlap is checked here: one assert per embed
-/// pair sharing an account, each window's length read from the
-/// extension's declared state type through `FixedBorshSize::SIZE`.
-/// Touching windows are legal.
+/// Discovery rejects identical literal offsets, but only rustc knows
+/// window lengths and derived offsets, so range overlap is checked
+/// here: one assert per embed pair sharing an account, each window's
+/// length read from the extension's declared state type through
+/// `FixedBorshSize::SIZE`, each offset lowered as its literal or its
+/// carrier const path. Touching windows are legal.
 pub(crate) fn embed_window_collision_asserts(
-    embeds: &[(String, spel_framework_core::extension::EmbedDecl)],
+    embeds: &[(String, EmbedDecl)],
     state_types: &std::collections::HashMap<String, String>,
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut out = proc_macro2::TokenStream::new();
@@ -80,8 +89,7 @@ pub(crate) fn embed_window_collision_asserts(
             }
             let ty_a = state_type_path(state_types, source_a)?;
             let ty_b = state_type_path(state_types, source_b)?;
-            let off_a = a.offset;
-            let off_b = b.offset;
+            let (off_a, off_b) = (offset_tokens(a)?, offset_tokens(b)?);
             let message = format!(
                 "embedded windows of `{source_a}` (offset {off_a}) and \
                 `{source_b}` (offset {off_b}) overlap in account `{}`",
@@ -213,17 +221,37 @@ fn layout_test(struct_ident: &syn::Ident, slot: &SlotField) -> proc_macro2::Toke
     }
 }
 
-// ── lez_program side: marker agreement ───────────────────────────────────
+// ── lez_program side: marker agreement and derived offsets ──────────────
 
-/// Emit every embedded marker's agreement assert. The scan set is the
-/// consumer's own code: the entry file with its inline and file-backed
-/// modules, plus local path-dependency crates for the shared-core
-/// layout. Git and registry dependencies never participate, a foreign
-/// crate must not satisfy or steal the consumer's slot binding.
+/// Emit every embedded marker's agreement assert: declared literal
+/// offset equals the carrier's derived const. Derived offsets need no
+/// agreement assert, the carrier const is their single source of
+/// truth. Window collisions are a separate emission,
+/// [`embed_window_collision_asserts`].
 pub(crate) fn emit_agreement_asserts(
     guest_path: &std::path::Path,
-    embeds: &[(String, spel_framework_core::extension::EmbedDecl)],
+    embeds: &[(String, EmbedDecl)],
 ) -> syn::Result<proc_macro2::TokenStream> {
+    let scan_items = consumer_scan_items(guest_path);
+    let mut out = proc_macro2::TokenStream::new();
+    for (_, embed) in embeds {
+        if let OffsetSpec::Literal(off) = embed.offset {
+            if let Some(c) = find_slot_carrier(&scan_items, &embed.role)
+                .map_err(|m| syn::Error::new(proc_macro2::Span::call_site(), m))?
+            {
+                out.extend(agreement_assert(&c, off));
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The consumer's binding scan set: the entry file with its inline and
+/// file-backed modules, plus local path-dependency crates for the
+/// shared-core layout. Git and registry dependencies never participate,
+/// a foreign crate must not satisfy or steal the consumer's slot
+/// binding.
+pub(crate) fn consumer_scan_items(guest_path: &std::path::Path) -> Vec<syn::Item> {
     let mut scan_items =
         spel_framework_core::idl_gen::collect_file_items_following_mods(guest_path);
     if let Ok(md) = std::env::var("CARGO_MANIFEST_DIR") {
@@ -234,91 +262,77 @@ pub(crate) fn emit_agreement_asserts(
         );
         scan_items.extend(path_dep_items);
     }
-    let mut out = proc_macro2::TokenStream::new();
-    for (_, embed) in embeds {
-        if let Some(a) = find_slot_assert(&scan_items, &embed.role, embed.offset)? {
-            out.extend(agreement_assert(&a));
-        }
-    }
-    Ok(out)
+    scan_items
 }
 
-/// One embed's declared offset paired with the derived const that must
-/// equal it. Disagreement means gates would read one location while the
-/// struct's layout puts the slot at another, so the emitted check turns
-/// that into a compile error instead of a wrong-slot read at runtime.
-struct SlotAssert {
-    pub struct_ident: syn::Ident,
-    pub const_ident: syn::Ident,
-    pub offset: usize,
-    pub attr_name: String,
-}
-
-/// Binds an embed to the one consumer struct carrying its slot
-/// attribute (`admin_config` binds `#[admin_slot]`). Dependency items
-/// never participate, a dep crate must not satisfy or steal the
-/// consumer's binding. Two carriers is an error, none means the derive
-/// is not adopted and no check is emitted.
-fn find_slot_assert(
-    items: &[syn::Item],
-    role: &str,
-    offset: usize,
-) -> syn::Result<Option<SlotAssert>> {
-    let prefix = role.strip_suffix("_config").unwrap_or(role);
-    let attr_name = format!("{prefix}_slot");
-    let mut found: Option<syn::Ident> = None;
-    for item in items {
-        let syn::Item::Struct(st) = item else {
-            continue;
-        };
-        let syn::Fields::Named(fields) = &st.fields else {
-            continue;
-        };
-        let has = fields.named.iter().any(|f| {
-            f.attrs.iter().any(|a| {
-                a.path()
-                    .get_ident()
-                    .is_some_and(|id| *id == attr_name.as_str())
-            })
-        });
-        if has {
-            if let Some(first) = &found {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    format!(
-                        "both `{first}` and `{}` carry a #[{attr_name}] \
-                        field; only one struct may embed this slot",
-                        st.ident
-                    ),
-                ));
-            }
-            found = Some(st.ident.clone());
-        }
-    }
-
-    Ok(found.map(|struct_ident| SlotAssert {
-        struct_ident,
-        const_ident: quote::format_ident!("{}_OFFSET", &attr_name.to_uppercase()),
-        offset,
-        attr_name,
-    }))
-}
-
-/// Emit the compile-time agreement check.
-fn agreement_assert(a: &SlotAssert) -> proc_macro2::TokenStream {
-    let SlotAssert {
-        struct_ident,
-        const_ident,
-        offset,
-        attr_name,
-    } = a;
+/// Emit the compile-time agreement check for an explicit offset.
+fn agreement_assert(c: &SlotCarrier, offset: usize) -> proc_macro2::TokenStream {
+    let (path, attr_name) = (carrier_tokens(c), &c.attr_name);
     let msg = format!(
-        "the marker offset {offset} disagrees with \
-        {struct_ident}::{const_ident}; a field before the \
-        #[{attr_name}] field changed without the marker following"
+        "the marker offset {offset} disagrees with {}::{}; a field before \
+        the #[{attr_name}] field changed without the marker following",
+        c.struct_name, c.const_name
     );
     quote::quote! {
-        const _: () = assert!(#struct_ident::#const_ident == #offset, #msg);
+        const _: () = assert!(#path == #offset, #msg);
+    }
+}
+
+// ── token lowering: resolved offsets back into consumer code ─────────────
+
+/// The carrier's offset const as tokens: `Cfg::MY_SLOT_OFFSET`.
+fn carrier_tokens(c: &SlotCarrier) -> proc_macro2::TokenStream {
+    let (struct_ident, const_ident) = (
+        quote::format_ident!("{}", &c.struct_name),
+        quote::format_ident!("{}", c.const_name),
+    );
+    quote::quote! { #struct_ident::#const_ident }
+}
+
+/// One embed's offset as tokens: the declared literal, or the
+/// carrier's const path when the marker derived it. A `Derived` offset
+/// here means the resolution pass never ran, which is a framework bug
+/// rather than a consumer mistake, so it names the missing step.
+fn offset_tokens(embed: &EmbedDecl) -> syn::Result<proc_macro2::TokenStream> {
+    match &embed.offset {
+        OffsetSpec::Literal(n) => Ok(quote::quote! { #n }),
+        OffsetSpec::Path(p) => {
+            let path: syn::Expr = syn::parse_str(p)?;
+            Ok(quote::quote! { #path })
+        },
+        OffsetSpec::Derived => Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "`{}` reached assert emission with an unresolved derived \
+                offset; `resolve_derived_offsets` must run after discovery",
+                embed.role
+            ),
+        )),
+    }
+}
+
+/// One resolved bound value as a dispatch call argument: the literal,
+/// or the carrier's const path. `offset_tokens`' twin for the
+/// dispatcher, which appends these to the generated call. An unresolved
+/// `Derived` here means the resolution pass never ran; a proc-macro
+/// panic is a compile error, so the invariant fails loudly at the
+/// consumer's build.
+pub(crate) fn bound_value_tokens(v: &BoundValue) -> proc_macro2::TokenStream {
+    match v {
+        BoundValue::Literal(n) => {
+            let lit = proc_macro2::Literal::usize_unsuffixed(*n);
+            quote::quote! { #lit }
+        },
+        BoundValue::Path(p) => {
+            let path: syn::Expr =
+                syn::parse_str(p).expect("a resolved carrier path parses as an expression");
+            quote::quote! { #path }
+        },
+        BoundValue::Derived { role } => panic!(
+            "`{role}` reached dispatch emission with an unresolved \
+            derived offset; resolve_derived_offsets must run after \
+            discovery"
+        ),
     }
 }
 
@@ -330,30 +344,38 @@ mod tests {
         syn::parse_file(src).expect("fixture parses").items
     }
 
+    fn embed(role: &str, account: &str, offset: OffsetSpec) -> (String, EmbedDecl) {
+        (
+            role.to_string(),
+            EmbedDecl {
+                role: role.to_string(),
+                account: account.to_string(),
+                offset,
+            },
+        )
+    }
+
     #[test]
     fn binds_the_roles_slot_attr() {
         let its = items("#[account_type]\npub struct Cfg { pub v: u64, #[admin_slot] pub a: u8 }");
-        let a = find_slot_assert(&its, "admin_config", 8)
+        let c = find_slot_carrier(&its, "admin_config")
             .expect("unambiguous")
             .expect("binds");
-        assert_eq!(a.struct_ident, "Cfg");
-        assert_eq!(a.const_ident, "ADMIN_SLOT_OFFSET");
-        assert_eq!(a.offset, 8);
+        assert_eq!(c.struct_name, "Cfg");
+        assert_eq!(c.const_name, "ADMIN_SLOT_OFFSET");
     }
 
     #[test]
     fn role_without_config_suffix_uses_the_full_role() {
         let its = items("pub struct S { #[vault_slot] pub s: u8 }");
-        let a = find_slot_assert(&its, "vault", 0).unwrap().expect("binds");
-        assert_eq!(a.attr_name, "vault_slot");
+        let c = find_slot_carrier(&its, "vault").unwrap().expect("binds");
+        assert_eq!(c.attr_name, "vault_slot");
     }
 
     #[test]
     fn no_carrier_emits_nothing() {
         let its = items("pub struct S { pub v: u64 }");
-        assert!(find_slot_assert(&its, "admin_config", 32)
-            .unwrap()
-            .is_none());
+        assert!(find_slot_carrier(&its, "admin_config").unwrap().is_none());
     }
 
     #[test]
@@ -361,10 +383,9 @@ mod tests {
         let its = items(
             "pub struct Alpha { #[admin_slot] pub a: u8 }\npub struct Beta { #[admin_slot] pub b: u8 }",
         );
-        let Err(e) = find_slot_assert(&its, "admin_config", 32) else {
+        let Err(msg) = find_slot_carrier(&its, "admin_config") else {
             panic!("expected the two-carrier ambiguity error");
         };
-        let msg = e.to_string();
         assert!(
             msg.contains("Alpha") && msg.contains("Beta"),
             "message: {msg}"
@@ -374,27 +395,12 @@ mod tests {
     #[test]
     fn agreement_assert_names_both_sides() {
         let its = items("pub struct Cfg { #[admin_slot] pub a: u8 }");
-        let a = find_slot_assert(&its, "admin_config", 32).unwrap().unwrap();
-        let ts = agreement_assert(&a).to_string();
+        let c = find_slot_carrier(&its, "admin_config").unwrap().unwrap();
+        let ts = agreement_assert(&c, 32).to_string();
         assert!(
             ts.contains("ADMIN_SLOT_OFFSET") && ts.contains("32"),
             "{ts}"
         );
-    }
-
-    fn embed(
-        source: &str,
-        account: &str,
-        offset: usize,
-    ) -> (String, spel_framework_core::extension::EmbedDecl) {
-        (
-            source.to_string(),
-            spel_framework_core::extension::EmbedDecl {
-                role: format!("{source}_config"),
-                account: account.to_string(),
-                offset,
-            },
-        )
     }
 
     fn state_types(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
@@ -408,7 +414,10 @@ mod tests {
     // length through its declared state type, offsets as literals.
     #[test]
     fn shared_account_pair_emits_a_range_assert() {
-        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 40)];
+        let embeds = vec![
+            embed("admin", "cfg", OffsetSpec::Literal(32)),
+            embed("freeze", "cfg", OffsetSpec::Literal(40)),
+        ];
         let types = state_types(&[
             ("admin", "admin_authority::AdminConfig"),
             ("freeze", "freeze_authority::FreezeConfig"),
@@ -427,7 +436,10 @@ mod tests {
     // Separate accounts have nothing to collide.
     #[test]
     fn separate_accounts_emit_no_collision_assert() {
-        let embeds = vec![embed("admin", "cfg_a", 32), embed("freeze", "cfg_b", 32)];
+        let embeds = vec![
+            embed("admin", "cfg_a", OffsetSpec::Literal(32)),
+            embed("freeze", "cfg_b", OffsetSpec::Literal(32)),
+        ];
         let types = state_types(&[("admin", "A"), ("freeze", "B")]);
         let ts = embed_window_collision_asserts(&embeds, &types).expect("ok");
         assert!(ts.is_empty(), "{ts}");
@@ -437,7 +449,10 @@ mod tests {
     // closed before emission. The error still names the source.
     #[test]
     fn missing_state_type_is_an_error_naming_the_source() {
-        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 64)];
+        let embeds = vec![
+            embed("admin", "cfg", OffsetSpec::Literal(32)),
+            embed("freeze", "cfg", OffsetSpec::Literal(64)),
+        ];
         let types = state_types(&[("admin", "A")]);
         let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
         assert!(e.to_string().contains("freeze"), "{e}");
@@ -446,9 +461,79 @@ mod tests {
     // A malformed declared path fails naming the offending string.
     #[test]
     fn invalid_state_type_path_is_an_error() {
-        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 64)];
+        let embeds = vec![
+            embed("admin", "cfg", OffsetSpec::Literal(32)),
+            embed("freeze", "cfg", OffsetSpec::Literal(64)),
+        ];
         let types = state_types(&[("admin", "not a path!!"), ("freeze", "B")]);
         let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
         assert!(e.to_string().contains("not a path!!"), "{e}");
+    }
+
+    // Two resolved derivations in one account land in the same range
+    // assert as const paths: neither side is a number until rustc
+    // evaluates it, so the check discovery could not make lands in the
+    // consumer's crate.
+    #[test]
+    fn derived_pair_collides_through_the_const_paths() {
+        let embeds = [
+            embed(
+                "admin_config",
+                "config",
+                OffsetSpec::Path("Cfg::ADMIN_SLOT_OFFSET".into()),
+            ),
+            embed(
+                "freeze_config",
+                "config",
+                OffsetSpec::Path("Cfg::FREEZE_SLOT_OFFSET".into()),
+            ),
+        ];
+        let types = state_types(&[("admin_config", "A"), ("freeze_config", "B")]);
+        let ts = embed_window_collision_asserts(&embeds, &types)
+            .expect("both sides resolve")
+            .to_string();
+        assert!(
+            ts.contains("ADMIN_SLOT_OFFSET") && ts.contains("FREEZE_SLOT_OFFSET"),
+            "{ts}"
+        );
+        assert!(ts.contains("FixedBorshSize"), "{ts}");
+    }
+
+    // An unresolved derivation reaching emission is a framework bug, so
+    // it fails loudly naming the pass that should have run.
+    #[test]
+    fn unresolved_derived_offset_names_the_missing_pass() {
+        let (_, e) = embed("admin_config", "config", OffsetSpec::Derived);
+        let Err(err) = offset_tokens(&e) else {
+            panic!("expected the unresolved-derived error");
+        };
+        assert!(
+            err.to_string().contains("resolve_derived_offsets"),
+            "message: {err}"
+        );
+    }
+
+    // The dispatcher lowering renders each resolved shape and refuses
+    // the unresolved one.
+    #[test]
+    fn bound_literal_renders_the_number() {
+        assert_eq!(
+            bound_value_tokens(&BoundValue::Literal(32)).to_string(),
+            "32"
+        );
+    }
+
+    #[test]
+    fn bound_path_renders_the_const_path() {
+        let ts = bound_value_tokens(&BoundValue::Path("Cfg::ADMIN_SLOT_OFFSET".into()));
+        assert_eq!(ts.to_string(), "Cfg :: ADMIN_SLOT_OFFSET");
+    }
+
+    #[test]
+    #[should_panic(expected = "resolve_derived_offsets")]
+    fn bound_derived_panics_naming_the_missing_pass() {
+        bound_value_tokens(&BoundValue::Derived {
+            role: "admin_config".into(),
+        });
     }
 }

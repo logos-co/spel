@@ -58,14 +58,23 @@ pub fn apply_wrap_and_inject(
     embeds: &[(String, super::EmbedDecl)],
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
+    if let Some((source, _)) = embeds
+        .iter()
+        .find(|(_, e)| e.offset == super::OffsetSpec::Derived)
+    {
+        return Err(format!(
+            "extension `{source}` reached the gate pass with an unresolved \
+            derived offset; `resolve_derived_offsets` must run after discovery"
+        ));
+    }
     if qualified.is_some() {
         substitute_embedded_params(func, inject_specs);
     }
 
     let remap = build_remap(inject_specs, func);
-    let offset_by_source: HashMap<&str, usize> = embeds
+    let offset_by_source: HashMap<&str, &super::OffsetSpec> = embeds
         .iter()
-        .map(|(source, e)| (source.as_str(), e.offset))
+        .map(|(source, e)| (source.as_str(), &e.offset))
         .collect();
     check_authored_location_kwargs(func, inject_specs, &offset_by_source)?;
 
@@ -313,15 +322,28 @@ fn check_initializer_coverage(
 /// Reject two embeds sharing an account at the same offset: identical
 /// windows cannot both hold state. Distinct offsets on one account are
 /// the intended shared-account layout.
+///
+/// Only literal pairs are decided here. A derived offset is not a
+/// number at this point, so pairs involving one are checked by the
+/// const assert `slot_offsets` emits over the carriers' offset consts,
+/// which rustc evaluates once the layout is known.
 fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Result<(), String> {
     for (i, (source_a, a)) in embeds.iter().enumerate() {
         for (source_b, b) in &embeds[i + 1..] {
-            if a.account == b.account && a.offset == b.offset {
+            if a.account != b.account {
+                continue;
+            }
+            let (super::OffsetSpec::Literal(off_a), super::OffsetSpec::Literal(off_b)) =
+                (&a.offset, &b.offset)
+            else {
+                continue;
+            };
+            if off_a == off_b {
                 return Err(format!(
                     "extensions `{source_a}` and `{source_b}` both embed into \
-                    account `{}` at offset {}; identical offsets cannot both \
+                    account `{}` at offset {off_a}; identical offsets cannot both \
                     hold state, declare distinct offsets",
-                    a.account, a.offset
+                    a.account
                 ));
             }
         }
@@ -582,7 +604,7 @@ fn expr_to_seeds(expr: &syn::Expr) -> Option<Vec<InjectSeed>> {
 fn spec_gate_args(
     spec: &InjectSpec,
     remap: &HashMap<String, String>,
-    offset: Option<usize>,
+    offset: Option<&super::OffsetSpec>,
 ) -> Vec<syn::MetaNameValue> {
     let mut args = Vec::new();
     for acc in &spec.accounts {
@@ -595,8 +617,18 @@ fn spec_gate_args(
         args.push(parse_quote! { #key = #val});
     }
     if let Some(off) = offset {
-        let lit = syn::LitInt::new(&off.to_string(), proc_macro2::Span::call_site());
-        args.push(parse_quote! { offset = #lit });
+        let value: syn::Expr = match off {
+            super::OffsetSpec::Literal(n) => {
+                let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
+                parse_quote!(#lit)
+            },
+            super::OffsetSpec::Path(p) => {
+                syn::parse_str(p).expect("a resolved carrier path parses as an expression")
+            },
+            // The entry guard in `apply_wrap_and_inject` rejects these.
+            super::OffsetSpec::Derived => unreachable!("unresolved derived offset   "),
+        };
+        args.push(parse_quote! { offset = #value });
     }
     args
 }
@@ -609,7 +641,7 @@ fn stamp_authored_gates(
     func: &mut ItemFn,
     inject_specs: &[InjectSpec],
     remap: &HashMap<String, String>,
-    offset_by_source: &HashMap<&str, usize>,
+    offset_by_source: &HashMap<&str, &super::OffsetSpec>,
 ) {
     for attr in func.attrs.iter_mut() {
         if !matches!(attr.meta, syn::Meta::Path(_)) {
@@ -764,7 +796,7 @@ fn substitute_embedded_params(func: &mut ItemFn, inject_specs: &[InjectSpec]) {
 fn check_authored_location_kwargs(
     func: &ItemFn,
     inject_specs: &[InjectSpec],
-    offset_by_source: &HashMap<&str, usize>,
+    offset_by_source: &HashMap<&str, &super::OffsetSpec>,
 ) -> Result<(), String> {
     for attr in &func.attrs {
         if !matches!(attr.meta, syn::Meta::List(_)) {
@@ -809,6 +841,8 @@ fn check_authored_location_kwargs(
 
 #[cfg(test)]
 mod tests {
+    use crate::extension::OffsetSpec;
+
     use super::*;
 
     // Parse the fn items out of a source string.
@@ -855,7 +889,7 @@ mod tests {
             crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
             },
         )];
         (specs, embeds)
@@ -1063,7 +1097,7 @@ mod tests {
             crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
             },
         )];
         let wraps = vec![WrapInstructions {
@@ -1110,7 +1144,7 @@ mod tests {
             crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: crate::extension::OffsetSpec::Literal(32),
             },
         )];
         let wraps = vec![WrapInstructions {
@@ -1779,7 +1813,7 @@ mod tests {
                     crate::extension::EmbedDecl {
                         role: "cfg_a".to_string(),
                         account: "shared".to_string(),
-                        offset: 32,
+                        offset: OffsetSpec::Literal(32),
                     },
                 ),
                 (
@@ -1787,7 +1821,7 @@ mod tests {
                     crate::extension::EmbedDecl {
                         role: "cfg_b".to_string(),
                         account: "shared".to_string(),
-                        offset: off_b,
+                        offset: OffsetSpec::Literal(off_b),
                     },
                 ),
             ]

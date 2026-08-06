@@ -673,7 +673,7 @@ mod tests {
         .unwrap();
 
         let dirs = path_dep_dirs(&a.join("Cargo.toml"));
-        let has = |needle: &std::path::Path| {
+        let has = |needle: &Path| {
             let n = needle.canonicalize().unwrap();
             dirs.iter()
                 .any(|d| d.canonicalize().map(|x| x == n).unwrap_or(false))

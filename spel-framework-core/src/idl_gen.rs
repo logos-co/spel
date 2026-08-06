@@ -170,6 +170,9 @@ fn generate_idl_inner(
                     _ => None,
                 })
                 .collect();
+            let scan_items = collect_file_items_following_mods(manifest_dir);
+            crate::extension::resolve_derived_offsets(&mut deps.extensions, &scan_items)
+                .map_err(IdlGenError::MalformedExtensionMetadata)?;
             crate::extension::rewrite_embedded_roles(
                 &mut deps.extensions.inject_specs,
                 &deps.extensions.embeds,

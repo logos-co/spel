@@ -323,6 +323,61 @@ fn e2e_test() {
 }
 
 // ---------------------------------------------------------------------------
+// Derived offsets — a marker without an offset kwarg builds end to end
+// ---------------------------------------------------------------------------
+
+/// The positive derive-mode proof: one `#[mini_slot]` carrier, a marker
+/// naming only its embedding account, and the offset resolved entirely
+/// from the field marker's derived const. A clean build means the
+/// resolution pass ran, the const path parsed at every consumer, and
+/// rustc accepted it.
+#[test]
+fn e2e_derived_offset_builds() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/derived_offset_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        output.status.success(),
+        "derived-offset fixture failed to build:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Derived offsets — a derivation with no carrier must not build
+// ---------------------------------------------------------------------------
+
+/// The negative derive-mode case: the marker omits the offset but no
+/// struct carries the slot field marker. The build must refuse with the
+/// missing-carrier error that names the fix, mark the field or declare
+/// the offset.
+#[test]
+fn e2e_no_carrier_refuses_to_compile() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/no_carrier_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        !output.status.success(),
+        "a derivation without a carrier must fail the build, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mark the embedded field or declare"),
+        "the build failed without the missing-carrier error:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Slot binding ambiguity — two carriers of one slot attribute must not build
 // ---------------------------------------------------------------------------
 

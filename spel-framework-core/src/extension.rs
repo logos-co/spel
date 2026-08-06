@@ -72,14 +72,16 @@ use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 mod inject;
 mod marker;
 mod metadata;
+mod slots;
 
 pub use inject::{
     active_wraps, apply_wrap_and_inject, resolve_canonical_constraint, rewrite_embedded_roles,
 };
 pub use marker::{
-    candidate_marker_names, has_extension_marker_candidates, parse_marker_args, EmbedDecl,
-    MarkerArgs,
+    candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
+    EmbedDecl, MarkerArgs, OffsetSpec,
 };
+pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_attr_name, SlotCarrier};
 
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded,
@@ -114,9 +116,10 @@ pub struct ExtensionDiscoveries {
     pub embed_state_types: HashMap<String, String>,
     /// Dispatch-only trailing args per discovered fn, resolved from
     /// `bound_args` metadata and the marker's kwargs. The dispatcher
-    /// appends these literals at the call site; the params were
+    /// appends each value at the call site as a literal or, for a
+    /// derived offset, as the carrier's const path; the params were
     /// stripped at discovery so no IDL or validation path sees them.
-    pub bound_calls: HashMap<String, Vec<usize>>,
+    pub bound_calls: HashMap<String, Vec<BoundValue>>,
     /// Marker names that matched a discovered extension, in marker
     /// order. Lets producers tell an unmatched candidate attr from a
     /// matched one when dependency resolution degrades.
@@ -206,7 +209,7 @@ struct MatchedExtension {
     wraps: Vec<(String, WrapInstructions)>,
     embeds: Vec<(String, EmbedDecl)>,
     embedded_state_types: HashMap<String, String>,
-    bound_calls: HashMap<String, Vec<usize>>,
+    bound_calls: HashMap<String, Vec<BoundValue>>,
     marker: String,
 }
 
@@ -338,8 +341,9 @@ pub fn discover_extensions<F: FnMut(String)>(
         if let Some(w) = wrap {
             wraps.push((marker_args.word.clone().unwrap_or_default(), w));
         }
+
+        let self_embed = marker_args.embed.clone();
         let is_embedded = marker_args.embed.is_some();
-        let embed_offset = marker_args.embed.as_ref().map(|e| e.offset);
         let mut embeds = Vec::new();
         let mut embedded_state_types = HashMap::new();
         if let Some(embed) = marker_args.embed {
@@ -385,7 +389,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 ));
             }
         }
-        let mut bound_calls = HashMap::new();
+        let mut bound_calls: HashMap<String, Vec<BoundValue>> = HashMap::new();
         let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
         for mut f in funcs {
             let mut values = Vec::new();
@@ -400,7 +404,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 found.push(pos);
                 values.push(resolve_bound_value(
                     bound,
-                    embed_offset,
+                    self_embed.as_ref(),
                     mod_attrs,
                     &crate_name,
                 )?);
@@ -448,30 +452,35 @@ pub fn discover_extensions<F: FnMut(String)>(
     Ok(flatten_in_marker_order(matched))
 }
 
-/// Resolve one bound arg to its compile-time value.
+/// Resolve one bound arg to its dispatch-time value.
 ///
 /// Self shape (`from = "offset"`) reads the extension's own marker's
-/// offset kwarg. Cross shape (`from = "<marker>::offset"`) reads the
-/// named peer marker's offset from the same module, so an extension
-/// can depend on where a peer embedded its state (freeze ADR-0012:
-/// freeze binding `admin_offset` from `admin_authority::offset`).
-/// A missing marker or missing kwarg falls back to `default`; a bound
-/// without a default makes both hard errors at the consumer's build.
+/// embed declaration. Cross shape (`from = "<marker>::offset"`) reads
+/// the named peer marker's, so an extension can depend on where a peer
+/// embedded its state (freeze ADR-0012: freeze binding `admin_offset`
+/// from `admin_authority::offset`).
+///
+/// An explicit offset resolves to its number, a marker without one
+/// stays a derivation for `resolve_derived_offsets` to lower, and the
+/// `default` applies only when there is no embed at all. Deriving is a
+/// resolution, not an absence: the default must never swallow it. A
+/// missing marker or missing embed without a default is a hard error
+/// at the consumer's build.
 fn resolve_bound_value(
     bound: &BoundArg,
-    self_offset: Option<usize>,
+    self_embed: Option<&EmbedDecl>,
     mod_attrs: &[Attribute],
     crate_name: &str,
-) -> Result<usize, String> {
-    let marker_offset = match bound.from.split_once("::") {
-        None => self_offset,
+) -> Result<BoundValue, String> {
+    let embed = match bound.from.split_once("::") {
+        None => self_embed.cloned(),
         Some((marker, _)) => {
             let Some(args) = mod_attrs
                 .iter()
                 .find_map(|a| parse_marker_args(a, marker).transpose())
                 .transpose()?
             else {
-                return bound.default.ok_or_else(|| {
+                return bound.default.map(BoundValue::Literal).ok_or_else(|| {
                     format!(
                         "extension '{crate_name}': bound_arg '{}' requires marker \
                         '#[{marker}]', which is not declared on this module, and \
@@ -480,16 +489,23 @@ fn resolve_bound_value(
                     )
                 });
             };
-            args.embed.map(|e| e.offset)
+            args.embed
         },
     };
-    marker_offset.or(bound.default).ok_or_else(|| {
-        format!(
-            "extension '{crate_name}': bound_arg '{}' reads '{}' but the marker \
-            carries no offset kwarg and the bound_arg declares no default",
-            bound.arg, bound.from
-        )
-    })
+    match embed {
+        Some(e) => Ok(match e.offset {
+            OffsetSpec::Literal(n) => BoundValue::Literal(n),
+            OffsetSpec::Path(p) => BoundValue::Path(p),
+            OffsetSpec::Derived => BoundValue::Derived { role: e.role },
+        }),
+        None => bound.default.map(BoundValue::Literal).ok_or_else(|| {
+            format!(
+                "extension `{crate_name}`: bound_arg `{}` read `{}` but the marker \
+                declares no embed and the bound_arg declares no default",
+                bound.arg, bound.from
+            )
+        }),
+    }
 }
 
 /// Read a crate's `[[package.metadata.spe.inject]]` blocks from its
@@ -1087,7 +1103,10 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
             vec!["account".to_string()],
             "offset must be stripped"
         );
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![32]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(32)])
+        );
 
         // Bare marker: dedicated mode resolves the default.
         let tmp = TempDir::new("bound-strip-dedicated");
@@ -1095,7 +1114,10 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
         let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
             .expect("dedicated discovery must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(0)])
+        );
     }
 
     #[test]
@@ -1125,7 +1147,10 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
         let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
             .expect("cross-marker discovery must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![16]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(16)])
+        );
 
         // Peer marker absent: the declared default applies.
         let tmp = TempDir::new("bound-cross-dedicated");
@@ -1133,7 +1158,10 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
         let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
             .expect("absent peer with default must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(0)])
+        );
     }
 
     #[test]
@@ -1362,7 +1390,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 EmbedDecl {
                     role: "gate_config".to_string(),
                     account: "prog_config".to_string(),
-                    offset: 32,
+                    offset: OffsetSpec::Literal(32),
                 }
             )]
         );
@@ -1478,7 +1506,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             EmbedDecl {
                 role: "nonexistent".to_string(),
                 account: "prog_config".to_string(),
-                offset: 8,
+                offset: OffsetSpec::Literal(8),
             },
         )];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
@@ -1513,7 +1541,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
             },
         )];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
@@ -2078,5 +2106,41 @@ self_exempt_marker = "my_exempt"
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
         let ext = discover_extensions(&graph.direct_dirs, &attrs, &mut |_| {}).unwrap();
         assert!(ext.wraps.is_empty());
+    }
+
+    // The dedicated-mode default fills a missing embed, never a derived
+    // one: deriving is a resolution, and a default of 0 silently
+    // pointing every gate at offset 0 is the failure this pins against.
+    #[test]
+    fn derived_embed_never_falls_back_to_the_default() {
+        let bound = BoundArg {
+            arg: "offset".into(),
+            from: "offset".into(),
+            default: Some(0),
+        };
+        let embed = EmbedDecl {
+            role: "gate_config".into(),
+            account: "cfg".into(),
+            offset: OffsetSpec::Derived,
+        };
+        let v = resolve_bound_value(&bound, Some(&embed), &[], "my-ext").expect("resolves");
+        assert_eq!(
+            v,
+            BoundValue::Derived {
+                role: "gate_config".into()
+            }
+        );
+    }
+
+    // No embed at all is what the default is for.
+    #[test]
+    fn absent_embed_falls_back_to_the_default() {
+        let bound = BoundArg {
+            arg: "offset".into(),
+            from: "offset".into(),
+            default: Some(0),
+        };
+        let v = resolve_bound_value(&bound, None, &[], "my-ext").expect("resolves");
+        assert_eq!(v, BoundValue::Literal(0));
     }
 }

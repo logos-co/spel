@@ -218,6 +218,86 @@ struct ArgParam {
     ty: Type,
 }
 
+/// The source file defining the target module, parsed. Candidates
+/// cover the common bin and module plus the manifest's
+/// declared bin paths; a file matches only if it defines the module,
+/// avoiding false matches. `None` when nothing does.
+fn locate_module_source(mod_name: &Ident) -> Option<(std::path::PathBuf, syn::File)> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let manifest = std::path::Path::new(&manifest_dir);
+    let module_path = mod_name.to_string();
+
+    let mut candidate_paths: Vec<std::path::PathBuf> = vec![
+        manifest.join("src/bin").join(format!("{module_path}.rs")), // src/bin/{name}.rs
+        manifest.join("src/bin").join(&module_path).join("main.rs"), // src/bin/{name}/main.rs
+        manifest.join("src").join(format!("{module_path}.rs")),     // src/{name}.rs
+        manifest.join("src").join(&module_path).join("mod.rs"),     // src/{name}/mod.rs
+        manifest.join("src").join("lib.rs"),                        // src/lib.rs
+        manifest.join("src").join("main.rs"),                       // src/main.rs
+    ];
+
+    // Scan src/bin/ for additional files and subdirectories
+    let src_bin = manifest.join("src/bin");
+    if let Ok(entries) = std::fs::read_dir(&src_bin) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if !candidate_paths.iter().any(|p| p == &path) {
+                    candidate_paths.push(path);
+                }
+            } else if path.is_dir() {
+                let main_rs = path.join("main.rs");
+                if main_rs.is_file() && !candidate_paths.iter().any(|p| p == &main_rs) {
+                    candidate_paths.push(main_rs);
+                }
+            }
+        }
+    }
+
+    // Scan src/ for additional files and subdirectories
+    let src = manifest.join("src");
+    if let Ok(entries) = std::fs::read_dir(&src) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if !candidate_paths.iter().any(|p| p == &path) {
+                    candidate_paths.push(path);
+                }
+            } else if path.is_dir() {
+                let mod_rs = path.join("mod.rs");
+                if mod_rs.is_file() && !candidate_paths.iter().any(|p| p == &mod_rs) {
+                    candidate_paths.push(mod_rs);
+                }
+            }
+        }
+    }
+
+    // Manifest 'declared bin paths: entry files outside src/
+    // (custom [[bin]] path, test harnesses) must not be missed,
+    // a missed entry file silently skips the slot assert.
+    for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+        if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
+            candidate_paths.push(bin_path);
+        }
+    }
+
+    for guest_path in candidate_paths {
+        if let Ok(content_str) = std::fs::read_to_string(&guest_path) {
+            if let Ok(parsed_file) = syn::parse_file(&content_str) {
+                if parsed_file
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, syn::Item::Mod(m) if m.ident == *mod_name))
+                {
+                    return Some((guest_path, parsed_file));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<TokenStream2> {
     let mod_name = &input.ident;
 
@@ -236,6 +316,24 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let mut slot_assert = proc_macro2::TokenStream::new();
+    let module_source = locate_module_source(mod_name);
+    match &module_source {
+        Some((path, _)) => {
+            let scan = slot_offsets::consumer_scan_items(path);
+            spel_framework_core::extension::resolve_derived_offsets(&mut deps.extensions, &scan)
+                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+        },
+        None if !deps.extensions.embeds.is_empty() => {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "embedded markers are declared but the module's source file \
+                could not be located, so slot offsets cannot be resolved and \
+                the slot checks cannot be emitted; refusing to compile rather \
+                than skip them silently",
+            ));
+        },
+        None => {},
+    }
     let bound_calls = deps.extensions.bound_calls.clone();
     let consumer_fns: Vec<ItemFn> = items
         .iter()
@@ -434,131 +532,39 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         segments.join("::")
     });
 
-    // Collect #[account_type] annotated types from the source file's top-level items.
-    // Expands the candidate set to cover common Rust module/bin layouts and verifies
-    // that the candidate file actually defines the target module, avoiding false matches.
-    let (accounts, types) = {
-        let module_path = mod_name.to_string();
-        let mut result = (Vec::new(), Vec::new());
-
-        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let manifest = std::path::Path::new(&manifest_dir);
-
-            // Check if a parsed file defines the target module
-            let file_matches_module = |parsed_file: &syn::File| {
-                parsed_file.items.iter().any(
-                    |item| matches!(item, syn::Item::Mod(item_mod) if item_mod.ident == *mod_name),
-                )
-            };
-
-            let mut candidate_paths: Vec<std::path::PathBuf> = vec![
-                manifest.join("src/bin").join(format!("{module_path}.rs")), // src/bin/{name}.rs
-                manifest.join("src/bin").join(&module_path).join("main.rs"), // src/bin/{name}/main.rs
-                manifest.join("src").join(format!("{module_path}.rs")),      // src/{name}.rs
-                manifest.join("src").join(&module_path).join("mod.rs"),      // src/{name}/mod.rs
-                manifest.join("src").join("lib.rs"),                         // src/lib.rs
-                manifest.join("src").join("main.rs"),                        // src/main.rs
-            ];
-
-            // Scan src/bin/ for additional files and subdirectories
-            let src_bin = manifest.join("src/bin");
-            if let Ok(entries) = std::fs::read_dir(&src_bin) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-                    {
-                        if !candidate_paths.iter().any(|p| p == &path) {
-                            candidate_paths.push(path);
-                        }
-                    } else if path.is_dir() {
-                        let main_rs = path.join("main.rs");
-                        if main_rs.is_file() && !candidate_paths.iter().any(|p| p == &main_rs) {
-                            candidate_paths.push(main_rs);
+    // Collect #[account_type] annotated types from the located module
+    // source: its top-level items, the module body, and path-dependency
+    // crate items so extension-library types reach the IDL.
+    let (accounts, types) = match &module_source {
+        Some((guest_path, parsed_file)) => {
+            let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
+            for item in &parsed_file.items {
+                if let syn::Item::Mod(m) = item {
+                    if m.ident == *mod_name {
+                        if let Some((_, mod_items)) = &m.content {
+                            all_items.extend(mod_items.clone());
                         }
                     }
                 }
             }
-
-            // Scan src/ for additional files and subdirectories
-            let src = manifest.join("src");
-            if let Ok(entries) = std::fs::read_dir(&src) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-                    {
-                        if !candidate_paths.iter().any(|p| p == &path) {
-                            candidate_paths.push(path);
-                        }
-                    } else if path.is_dir() {
-                        let mod_rs = path.join("mod.rs");
-                        if mod_rs.is_file() && !candidate_paths.iter().any(|p| p == &mod_rs) {
-                            candidate_paths.push(mod_rs);
-                        }
-                    }
-                }
-            }
-
-            // Manifest 'declared bin paths: entry files outside src/
-            // (custom [[bin]] path, test harnesses) must not be missed,
-            // a missed entry file silently skips the slot assert.
-            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
-                if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
-                    candidate_paths.push(bin_path);
-                }
-            }
-
-            let mut module_source_found = false;
-            for guest_path in &candidate_paths {
-                if let Ok(content_str) = std::fs::read_to_string(guest_path) {
-                    if let Ok(parsed_file) = syn::parse_file(&content_str) {
-                        if file_matches_module(&parsed_file) {
-                            module_source_found = true;
-                            // Collect from top-level items AND from inside the
-                            // #[lez_program] module body (account types are often
-                            // defined inside the module).
-                            let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
-                            for item in &parsed_file.items {
-                                if let syn::Item::Mod(m) = item {
-                                    if m.ident == *mod_name {
-                                        if let Some((_, mod_items)) = &m.content {
-                                            all_items.extend(mod_items.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            // Also include items from path-dependency crates, so types defined in
-                            // extension libraries (account types, instruction-arg types) reach the IDL.
-                            let (extra_items, _) =
-                                spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-                                    &deps.graph.transitive_dirs,
-                                    |w| eprintln!("warning: {w}"),
-                                );
-                            all_items.extend(extra_items);
-                            slot_assert.extend(slot_offsets::emit_agreement_asserts(
-                                guest_path,
-                                &deps.extensions.embeds,
-                            )?);
-                            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
-                                &deps.extensions.embeds,
-                                &deps.extensions.embed_state_types,
-                            )?);
-                            result = account_types::collect_account_types(&all_items);
-                            break;
-                        }
-                    }
-                }
-            }
-            if !module_source_found && !deps.extensions.embeds.is_empty() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "embedded markers are declared but the module's source \
-                    file could not be located, so the slot agreement checks \
-                    cannot be emitted; refusing to compile rather than skip \
-                    them silently",
-                ));
-            }
-        }
-        result
+            // Also include items from path-dependency crates, so types defined in
+            // extension libraries (account types, instruction-arg types) reach the IDL.
+            let (extra_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(
+                &deps.graph.transitive_dirs,
+                |w| eprintln!("warning: {w}"),
+            );
+            all_items.extend(extra_items);
+            slot_assert.extend(slot_offsets::emit_agreement_asserts(
+                guest_path,
+                &deps.extensions.embeds,
+            )?);
+            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
+                &deps.extensions.embeds,
+                &deps.extensions.embed_state_types,
+            )?);
+            account_types::collect_account_types(&all_items)
+        },
+        None => (Vec::new(), Vec::new()),
     };
 
     let idl_fn = generate_idl_fn(
@@ -970,7 +976,10 @@ fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2>
 fn generate_match_arms(
     mod_name: &Ident,
     instructions: &[InstructionInfo],
-    bound_calls: &std::collections::HashMap<String, Vec<usize>>,
+    bound_calls: &std::collections::HashMap<
+        String,
+        Vec<spel_framework_core::extension::BoundValue>,
+    >,
 ) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -1052,10 +1061,7 @@ fn generate_match_arms(
                     quote! { #name }
                 }));
                 if let Some(values) = bound_calls.get(&ix.fn_name.to_string()) {
-                    args.extend(values.iter().map(|v| {
-                        let lit = proc_macro2::Literal::usize_unsuffixed(*v);
-                        quote! { #lit }
-                    }));
+                    args.extend(values.iter().map(crate::slot_offsets::bound_value_tokens));
                 }
                 args
             };
@@ -2360,6 +2366,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let scan_items = slot_offsets::consumer_scan_items(std::path::Path::new(&resolved_path));
+    spel_framework_core::extension::resolve_derived_offsets(&mut deps.extensions, &scan_items)
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let consumer_fns: Vec<ItemFn> = items
         .iter()
         .filter_map(|i| match i {
@@ -2787,7 +2796,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(
                 caller: AccountWithMetadata,
                 mut config: AccountWithMetadata,
@@ -2820,7 +2829,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
                 Ok(SpelOutput::execute(vec![config.account], vec![]))
             }

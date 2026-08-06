@@ -3,18 +3,42 @@
 
 use syn::{punctuated::Punctuated, Attribute};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffsetSpec {
+    /// Explicit `offset = N` on the marker.
+    Literal(usize),
+    /// No offset kwarg: derived from the role's `*_slot` field marker.
+    Derived,
+    /// A resolved derivation: the carrier struct's offset const as a
+    /// path, e.g. `ProgConfig::MY_SLOT_OFFSET`. Written only by
+    /// `resolve_derived_offsets`, parsed back to tokens at emission.
+    Path(String),
+}
+
+/// A bound-arg value resolved at discovery time: either a concrete
+/// number from an explicit offset kwarg or the declared default, or a
+/// derivation the dispatcher lowers to the carrier struct's
+/// `<ROLE>_SLOT_OFFSET` const path at emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundValue {
+    Literal(usize),
+    Derived { role: String },
+    Path(String),
+}
+
 /// Embedded-mode declaration parsed from a module marker's kwargs,
 /// `#[admin_authority(admin_config = prog_config, offset = 32)]`:
 /// the inject role `admin_config` lives inside the consumer account
-/// `prog_config` at byte offset 32.
+/// `prog_config` at byte offset 32. The offset is `Derived` when the
+/// marker omits the kwarg, resolved later from the account struct's
+/// `*_slot` field marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedDecl {
     /// Inject-spec account name being relocated (the role).
     pub role: String,
     /// Consumer account the role's slot lives in.
     pub account: String,
-    /// Byte offset of the slot window inside the account's data.
-    pub offset: usize,
+    pub offset: OffsetSpec,
 }
 
 /// Everything a module marker's argument list can carry: an optional
@@ -33,15 +57,15 @@ pub struct MarkerArgs {
 /// Grammar: zero or more comma-separated items, each either a bare
 /// ident (mode word) or `key = value`. `offset = <int>` is reserved;
 /// exactly one other `role = account` pair may accompany it. A role
-/// without `offset`, an `offset` without a role, a second role pair,
-/// or a non-ident account value are hard errors.
+/// without `offset` derives the offset from the account struct's
+/// `*_slot` field marker. An `offset` without a role, a second role
+/// pair, or a non-ident account value are hard errors.
 ///
 /// # Errors
 ///
-/// `Err` on malformed arguments: two mode words, a role without an
-/// offset or an offset without a role, duplicate kwargs, a non-ident
-/// account value, or a non-integer offset. Callers surface it as a
-/// compile error.
+/// `Err` on malformed arguments: two mode words, an offset without a
+/// role, duplicate kwargs, a non-ident account value, or a
+/// non-integer offset. Callers surface it as a compile error.
 pub fn parse_marker_args(attr: &Attribute, ext_attr: &str) -> Result<Option<MarkerArgs>, String> {
     if !attr.path().is_ident(ext_attr) {
         return Ok(None);
@@ -131,19 +155,19 @@ pub fn parse_marker_args(attr: &Attribute, ext_attr: &str) -> Result<Option<Mark
         (Some((role, account)), Some(offset)) => Some(EmbedDecl {
             role,
             account,
-            offset,
+            offset: OffsetSpec::Literal(offset),
         }),
-        (None, None) => None,
-        (Some((role, _)), None) => {
-            return Err(format!(
-                "`#[{ext_attr}]`: `{role} = ...` requires an `offset = <bytes>` kwarg"
-            ));
-        },
+        (Some((role, account)), None) => Some(EmbedDecl {
+            role,
+            account,
+            offset: OffsetSpec::Derived,
+        }),
         (None, Some(_)) => {
             return Err(format!(
                 "`#[{ext_attr}]`: `offset` requires a `<role> = <account>` kwarg"
             ));
         },
+        (None, None) => None,
     };
     Ok(Some(args))
 }
@@ -236,7 +260,7 @@ mod tests {
             Some(EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
             })
         );
     }
@@ -250,7 +274,7 @@ mod tests {
             Some(EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "cfg".to_string(),
-                offset: 8,
+                offset: OffsetSpec::Literal(8),
             })
         );
     }
@@ -264,9 +288,16 @@ mod tests {
     }
 
     #[test]
-    fn marker_args_role_without_offset_is_error() {
-        let err = parse_err("#[my_gate(gate_config = prog_config)]");
-        assert!(err.contains("requires an `offset"), "got: {err}");
+    fn marker_args_role_without_offset_derives() {
+        let args = parsed("#[my_gate(gate_config = prog_config)]");
+        assert_eq!(
+            args.embed,
+            Some(EmbedDecl {
+                role: "gate_config".into(),
+                account: "prog_config".into(),
+                offset: OffsetSpec::Derived,
+            })
+        );
     }
 
     #[test]
