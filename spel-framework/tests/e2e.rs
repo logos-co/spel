@@ -321,3 +321,33 @@ fn e2e_test() {
         stderr
     );
 }
+
+// ---------------------------------------------------------------------------
+// Slot binding ambiguity — two carriers of one slot attribute must not build
+// ---------------------------------------------------------------------------
+
+/// Two structs carrying the same `*_slot` attribute make the embed
+/// binding ambiguous, and the expansion must refuse the build with the
+/// two-carrier error. This pins the error path end to end: the
+/// emission's `Result` has to survive the wiring in the program macro,
+/// not just exist in the emitting function.
+#[test]
+fn e2e_two_slot_carriers_refuse_to_compile() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/two_carrier_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        !output.status.success(),
+        "two slot carriers must fail the build, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("only one struct may embed this slot"),
+        "the build failed without the two-carrier ambiguity error:\n{stderr}"
+    );
+}

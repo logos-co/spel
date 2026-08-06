@@ -1,0 +1,18 @@
+[package]
+name = "mini-ext"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata.spel]
+extension_attr = "mini_ext"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_mini"
+
+  [[package.metadata.spel.inject.account]]
+  name = "mini_config"
+  seed = [{ const = "mini_config" }]
+
+[dependencies]
+mini-ext-macros = { path = "../mini_ext_macros" }

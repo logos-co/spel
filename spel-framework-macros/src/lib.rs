@@ -534,7 +534,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                             slot_assert.extend(slot_offsets::emit_agreement_asserts(
                                 guest_path,
                                 &deps.extensions.embeds,
-                            ));
+                            )?);
                             result = account_types::collect_account_types(&all_items);
                             break;
                         }
