@@ -38,7 +38,10 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
 /// `self_exempt_marker` opts out. `Some("crate::fn_name")` for
 /// extension-provided fns: the `exempt` qualified-name list is also
 /// consulted so a wrap can carve out an extension it depends on, and
-/// embedded role substitution applies only on this path.
+/// embedded role substitution applies only on this path. On both paths
+/// a fn that creates a gate's embedded account is skipped by that gate
+/// ([`creates_gated_embedded_account`]): the state the gate would
+/// decode cannot exist before the fn runs.
 ///
 /// Returns the names of the params `inject_gate_params` synthesized.
 ///
@@ -67,16 +70,6 @@ pub fn apply_wrap_and_inject(
     check_authored_location_kwargs(func, inject_specs, &offset_by_source)?;
 
     for wrap in active_wraps {
-        let exempt = func
-            .attrs
-            .iter()
-            .any(|a| a.path().is_ident(&wrap.self_exempt_marker))
-            || qualified
-                .map(|q| wrap.exempt.iter().any(|e| e == q))
-                .unwrap_or(false);
-        if exempt {
-            continue;
-        }
         let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper)
             .map_err(|e| format!("invalid wrapper path {:?}: {e}", wrap.wrapper))?;
         let wrapper_last = wrapper_path
@@ -84,6 +77,18 @@ pub fn apply_wrap_and_inject(
             .last()
             .map(|s| s.ident.to_string())
             .unwrap_or_default();
+
+        let exempt = func
+            .attrs
+            .iter()
+            .any(|a| a.path().is_ident(&wrap.self_exempt_marker))
+            || qualified
+                .map(|q| wrap.exempt.iter().any(|e| e == q))
+                .unwrap_or(false)
+            || creates_gated_embedded_account(func, inject_specs, &wrapper_last);
+        if exempt {
+            continue;
+        }
 
         let mut args: Vec<syn::MetaNameValue> = Vec::new();
         for spec in inject_specs {
@@ -232,6 +237,27 @@ pub fn rewrite_embedded_roles(
 
     check_embed_window_collisions(embeds)?;
     Ok(())
+}
+
+/// True when `func` creates an embedded account this wrap's gate would
+/// decode. The account being created is fresh and its slot is born
+/// vacant, so there is no state for the gate to enforce: gating the
+/// creator only makes initialization impossible. Dedicated mode never
+/// matches, no consumer fn declares the extension's own PDA with
+/// `#[account(init)]`.
+fn creates_gated_embedded_account(
+    func: &ItemFn,
+    inject_specs: &[InjectSpec],
+    wrapper_last: &str,
+) -> bool {
+    inject_specs
+        .iter()
+        .filter(|s| s.wrapper == wrapper_last)
+        .flat_map(|s| s.accounts.iter())
+        .filter(|a| a.embedded)
+        .any(|a| {
+            typed_params(func).any(|(pi, pt)| pi.ident == a.name.as_str() && param_has_init(pt))
+        })
 }
 
 /// An extension that declares an initializer wrapper makes it
@@ -1058,6 +1084,109 @@ mod tests {
             func.attrs.first(),
             Some(&expected),
             "wrap-stamped gate must carry the extension's offset"
+        );
+    }
+
+    // Post-rewrite embedded state plus an active wrap: the shape every
+    // auto-gate skip test below starts from.
+    fn embedded_wrap_fixture() -> (
+        Vec<InjectSpec>,
+        Vec<(String, crate::extension::EmbedDecl)>,
+        Vec<WrapInstructions>,
+    ) {
+        let specs = vec![InjectSpec {
+            wrapper: "my_gate".to_string(),
+            accounts: vec![InjectAccount {
+                name: "prog_config".to_string(),
+                role: "gate_config".to_string(),
+                seeds: vec![InjectSeed::Const("prog_config".to_string())],
+                signer: false,
+                embedded: true,
+            }],
+            source: "my_ext".to_string(),
+        }];
+        let embeds = vec![(
+            "my_ext".to_string(),
+            crate::extension::EmbedDecl {
+                role: "gate_config".to_string(),
+                account: "prog_config".to_string(),
+                offset: 32,
+            },
+        )];
+        let wraps = vec![WrapInstructions {
+            wrapper: "my_gate".to_string(),
+            skip: None,
+            self_exempt_marker: "my_exempt".to_string(),
+            exempt: vec![],
+        }];
+        (specs, embeds, wraps)
+    }
+
+    // The fn creating the embedding account is never auto-gated: the
+    // state the gate would decode cannot exist before this fn runs.
+    #[test]
+    fn embedding_creator_is_never_auto_gated() {
+        let (specs, embeds, wraps) = embedded_wrap_fixture();
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn initialize(
+                #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let injected = apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        assert!(
+            func.attrs.iter().all(|a| !a.path().is_ident("my_gate")),
+            "the embedding account's creator must not carry the gate"
+        );
+        assert!(
+            injected.is_empty(),
+            "a skipped gate must not inject params, got: {injected:?}"
+        );
+    }
+
+    // Creating some other account is a state change freeze exists to
+    // block: only init on the gate's own account lifts the gate.
+    #[test]
+    fn creator_of_a_sibling_account_stays_gated() {
+        let (specs, embeds, wraps) = embedded_wrap_fixture();
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn create_item(
+                #[account(pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+                #[account(init, pda = literal("item"))] mut item: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        assert!(
+            func.attrs
+                .first()
+                .is_some_and(|a| a.path().is_ident("my_gate")),
+            "init on a sibling account must not lift the gate"
+        );
+    }
+
+    // Dedicated mode: the gate's account is the extension's own PDA
+    // (embedded = false), so even a same-named init keeps the gate.
+    // Pins that the `embedded` flag guards the skip.
+    #[test]
+    fn dedicated_mode_creator_stays_gated() {
+        let (mut specs, _, wraps) = embedded_wrap_fixture();
+        specs[0].accounts[0].embedded = false;
+        let mut func: ItemFn = syn::parse_quote!(
+            pub fn initialize(
+                #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(&mut func, &wraps, &specs, &[], None).unwrap();
+        assert!(
+            func.attrs
+                .first()
+                .is_some_and(|a| a.path().is_ident("my_gate")),
+            "dedicated mode must keep the gate on every consumer fn"
         );
     }
 
