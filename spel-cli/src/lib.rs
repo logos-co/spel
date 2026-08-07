@@ -319,7 +319,11 @@ pub async fn run() {
                     for w in &dep_result.warnings {
                         eprintln!("{}", w);
                     }
-                    match generate_idl_from_file_with_deps(&sources[0], &dep_result.dirs) {
+                    match generate_idl_from_file_with_deps(
+                        &sources[0],
+                        &dep_result.dirs,
+                        &mut |w| eprintln!("{w}"),
+                    ) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -334,7 +338,9 @@ pub async fn run() {
                         for w in &dep_result.warnings {
                             eprintln!("{}", w);
                         }
-                        match generate_idl_from_file_with_deps(source, &dep_result.dirs) {
+                        match generate_idl_from_file_with_deps(source, &dep_result.dirs, &mut |w| {
+                            eprintln!("{w}")
+                        }) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
                                 match fs::write(
