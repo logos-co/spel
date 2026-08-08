@@ -14,5 +14,8 @@ wrapper = "require_mini"
   name = "mini_config"
   seed = [{ const = "mini_config" }]
 
+[package.metadata.spel.embedded]
+state_type = "mini_ext::MiniConfig"
+
 [dependencies]
 mini-ext-macros = { path = "../mini_ext_macros" }

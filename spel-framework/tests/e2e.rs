@@ -351,3 +351,24 @@ fn e2e_two_slot_carriers_refuse_to_compile() {
         "the build failed without the two-carrier ambiguity error:\n{stderr}"
     );
 }
+
+#[test]
+fn e2e_overlapping_windows_refuse_to_compile() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/overlapping_windows_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        !output.status.success(),
+        "overlapping embedded windows must fail the build, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("overlap in account `config`"),
+        "the build failed without the window collision assert:\n{stderr}"
+    );
+}

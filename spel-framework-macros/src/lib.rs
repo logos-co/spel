@@ -535,6 +535,10 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                                 guest_path,
                                 &deps.extensions.embeds,
                             )?);
+                            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
+                                &deps.extensions.embeds,
+                                &deps.extensions.embed_state_types,
+                            )?);
                             result = account_types::collect_account_types(&all_items);
                             break;
                         }

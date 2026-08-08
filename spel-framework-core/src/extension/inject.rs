@@ -319,7 +319,7 @@ fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Resul
             if a.account == b.account && a.offset == b.offset {
                 return Err(format!(
                     "extensions `{source_a}` and `{source_b}` both embed into \
-                    account `{}` at offset {}; overlapping windows cannot both \
+                    account `{}` at offset {}; identical offsets cannot both \
                     hold state, declare distinct offsets",
                     a.account, a.offset
                 ));

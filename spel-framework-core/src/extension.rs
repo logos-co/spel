@@ -58,7 +58,10 @@
 //! and [`discover_extensions`] stays public for callers that already
 //! hold a resolved graph.
 
-use std::path::{Path, PathBuf};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
 
 use syn::{Attribute, ItemFn};
 
@@ -77,7 +80,7 @@ pub use marker::{
 };
 
 use metadata::{
-    read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded_skip,
+    read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded,
     read_spel_extension_attr, read_spel_inject_specs, read_spel_wrap_instructions, BoundArg,
 };
 
@@ -102,11 +105,16 @@ pub struct ExtensionDiscoveries {
     /// the declaring extension's crate name so a role only ever
     /// rewrites its own extensions' inject entries.
     pub embeds: Vec<(String, EmbedDecl)>,
+    /// Embedded window state types per declaring extension, from
+    /// `embedded.state_type` metadata. The program macro emits window
+    /// collision asserts through `<state_type as FixedBorshSize>::SIZE`.
+    /// Populated only for extensions in embedded mode, which require it.
+    pub embed_state_types: HashMap<String, String>,
     /// Dispatch-only trailing args per discovered fn, resolved from
     /// `bound_args` metadata and the marker's kwargs. The dispatcher
     /// appends these literals at the call site; the params were
     /// stripped at discovery so no IDL or validation path sees them.
-    pub bound_calls: std::collections::HashMap<String, Vec<usize>>,
+    pub bound_calls: HashMap<String, Vec<usize>>,
     /// Marker names that matched a discovered extension, in marker
     /// order. Lets producers tell an unmatched candidate attr from a
     /// matched one when dependency resolution degrades.
@@ -195,7 +203,8 @@ struct MatchedExtension {
     inject_specs: Vec<InjectSpec>,
     wraps: Vec<(String, WrapInstructions)>,
     embeds: Vec<(String, EmbedDecl)>,
-    bound_calls: std::collections::HashMap<String, Vec<usize>>,
+    embedded_state_types: HashMap<String, String>,
+    bound_calls: HashMap<String, Vec<usize>>,
     marker: String,
 }
 
@@ -305,7 +314,7 @@ pub fn discover_extensions<F: FnMut(String)>(
             spec.source = crate_name.clone();
         }
         let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
-        let embedded_skip = read_spel_embedded_skip(&manifest_value, dep_dir)?;
+        let embedded = read_spel_embedded(&manifest_value, dep_dir)?;
         let has_wrap = wrap.is_some();
         let marker_args = mod_attrs
             .iter()
@@ -320,7 +329,18 @@ pub fn discover_extensions<F: FnMut(String)>(
         let is_embedded = marker_args.embed.is_some();
         let embed_offset = marker_args.embed.as_ref().map(|e| e.offset);
         let mut embeds = Vec::new();
+        let mut embedded_state_types = HashMap::new();
         if let Some(embed) = marker_args.embed {
+            let Some(state_type) = embedded.state_type.clone() else {
+                return Err(format!(
+                    "extension '{crate_name}' is used in embedded mode but its \
+                    metadata declares no `embedded.state_type`; name the type \
+                    occupying the embedded window (e.g. state_type = \
+                    \"{crate_name}::MyConfig\") so window collision asserts can \
+                    be emitted"
+                ));
+            };
+            embedded_state_types.insert(crate_name.clone(), state_type);
             embeds.push((crate_name.clone(), embed));
         }
 
@@ -332,7 +352,7 @@ pub fn discover_extensions<F: FnMut(String)>(
         let funcs: Vec<ItemFn> = if is_embedded {
             funcs
                 .into_iter()
-                .filter(|f| !embedded_skip.iter().any(|s| f.sig.ident == *s))
+                .filter(|f| !embedded.skip.iter().any(|s| f.sig.ident == *s))
                 .collect()
         } else {
             funcs
@@ -352,7 +372,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 ));
             }
         }
-        let mut bound_calls = std::collections::HashMap::new();
+        let mut bound_calls = HashMap::new();
         let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
         for mut f in funcs {
             let mut values = Vec::new();
@@ -400,6 +420,7 @@ pub fn discover_extensions<F: FnMut(String)>(
             inject_specs: injects,
             wraps,
             embeds,
+            embedded_state_types,
             bound_calls,
             marker: ext_attr.clone(),
         });
@@ -499,7 +520,7 @@ pub fn check_duplicate_instruction_names<I>(instructions: I) -> Result<(), Strin
 where
     I: IntoIterator<Item = (String, String)>,
 {
-    let mut seen: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut seen: HashMap<String, String> = HashMap::new();
     for (name, source) in instructions {
         if let Some(first) = seen.get(&name) {
             return Err(format!(
@@ -533,6 +554,7 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.inject_specs.extend(m.inject_specs);
         out.wraps.extend(m.wraps);
         out.embeds.extend(m.embeds);
+        out.embed_state_types.extend(m.embedded_state_types);
         out.bound_calls.extend(m.bound_calls);
         out.matched_markers.push(m.marker);
     }
@@ -939,6 +961,9 @@ wrapper = "my_gate"
 arg = "offset"
 from = "offset"
 default = 0
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
 "#;
         let lib_rs = r#"
 #[instruction]
@@ -1151,6 +1176,7 @@ wrapper = "my_gate"
 
 [package.metadata.spel.embedded]
 skip = ["ext_init"]
+state_type = "my_ext::ExtConfig"
 "#,
             r#"
 #[instruction]
@@ -1224,6 +1250,9 @@ wrapper = "my_gate"
   [[package.metadata.spel.inject.account]]
   name = "gate_config"
   seed = { const = "gate_config" }
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
 "#,
             r#"
 #[instruction]
@@ -1248,6 +1277,49 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 }
             )]
         );
+        assert_eq!(
+            ext.embed_state_types.get("my_ext").map(String::as_str),
+            Some("my_ext::ExtConfig"),
+            "the window state type must travel with the embed"
+        );
+    }
+
+    // Embedded mode requires the extension to name its window type:
+    // without it the window collision asserts cannot be emitted.
+    // Dedicated mode's indifference to the field is pinned by
+    // dedicated_mode_keeps_skipped_initializer, whose fixture has none.
+    #[test]
+    fn embedded_mode_without_state_type_is_a_hard_error() {
+        let tmp = TempDir::new("embed-no-state-type");
+        ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.inject]]
+wrapper = "my_gate"
+
+  [[package.metadata.spel.inject.account]]
+  name = "gate_config"
+  seed = { const = "gate_config" }
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext(gate_config = prog_config, offset = 32)]
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect_err("embedded mode without state_type must be refused");
+        assert!(
+            err.contains("my_ext") && err.contains("embedded.state_type"),
+            "message must name the crate and the field: {err}"
+        );
     }
 
     #[test]
@@ -1265,6 +1337,9 @@ wrapper = "my_gate"
   [[package.metadata.spel.inject.account]]
   name = "gate_config"
   seed = { const = "gate_config" }
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
 "#,
             r#"
 #[instruction]

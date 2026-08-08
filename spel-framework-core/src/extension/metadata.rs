@@ -308,22 +308,36 @@ pub(super) fn read_package_ident(value: &toml::Value) -> Option<String> {
     Some(name.replace('-', "_"))
 }
 
+/// What `[package.metadata.spel.embedded]` declares: how the extension
+/// behaves when a consumer embeds its slot.
+#[derive(Debug, PartialEq)]
+pub(super) struct EmbeddedMeta {
+    /// Discovered instructions the framework must not emit in embedded
+    /// mode. The slot is born initialized by the consumer's own
+    /// account-creating instruction, so the extension's initializer has
+    /// no role to play there.
+    pub skip: Vec<String>,
+    /// Path of the state type occupying the embedded window, e.g.
+    /// `admin_authority::AdminConfig`. The program macro emits window
+    /// collision asserts through `<state_type as FixedBorshSize>::SIZE`,
+    /// so the type must implement the trait. Required in embedded mode,
+    /// unused in dedicated mode.
+    pub state_type: Option<String>,
+}
+
 /// Read `[package.metadata.spel.embedded]` from a parsed manifest.
 ///
-/// `skip` names discovered instructions the framework mus not emit
-/// when the extension is in embedded mode. The slot is born
-/// initialized by the consumer's own account-creating instruction,
-/// so the extension's initializer has no role to play there. Absent
-/// section or absent `skip` is an empty list.
+/// An absent section is an all-default [`EmbeddedMeta`].
 ///
 /// # Errors
 ///
-/// `Err` when `skip` is present but not an array of strings. Callers
-/// surface it as a compile error.
-pub(super) fn read_spel_embedded_skip(
+/// `Err` when `skip` is present but not an array of strings, or when
+/// `state_type` is present but not a string. Callers surface it as a
+/// compile error.
+pub(super) fn read_spel_embedded(
     value: &toml::Value,
     crate_dir: &Path,
-) -> Result<Vec<String>, String> {
+) -> Result<EmbeddedMeta, String> {
     let malformed = |what: &str| malformed_metadata(crate_dir, what);
 
     let Some(embedded) = value
@@ -332,21 +346,38 @@ pub(super) fn read_spel_embedded_skip(
         .and_then(|m| m.get("spel"))
         .and_then(|s| s.get("embedded"))
     else {
-        return Ok(vec![]);
+        return Ok(EmbeddedMeta {
+            skip: vec![],
+            state_type: None,
+        });
     };
-    let Some(skip) = embedded.get("skip") else {
-        return Ok(vec![]);
+
+    let skip = match embedded.get("skip") {
+        None => vec![],
+        Some(skip) => {
+            let Some(arr) = skip.as_array() else {
+                return Err(malformed("embedded.skip must be an array of strings"));
+            };
+            arr.iter()
+                .map(|x| {
+                    x.as_str()
+                        .map(String::from)
+                        .ok_or_else(|| malformed("embedded.skip must be an array of strings"))
+                })
+                .collect::<Result<_, _>>()?
+        },
     };
-    let Some(arr) = skip.as_array() else {
-        return Err(malformed("embedded.skip must be an array of strings"));
-    };
-    arr.iter()
-        .map(|x| {
-            x.as_str()
+
+    let state_type = match embedded.get("state_type") {
+        None => None,
+        Some(v) => Some(
+            v.as_str()
                 .map(String::from)
-                .ok_or_else(|| malformed("embedded.skip must be an array of strings"))
-        })
-        .collect()
+                .ok_or_else(|| malformed("embedded.state_type must be a string"))?,
+        ),
+    };
+
+    Ok(EmbeddedMeta { skip, state_type })
 }
 
 /// Decode one TOML seed entry (`{ const = "..." }` or
@@ -701,14 +732,14 @@ skip = "ext_init"
 "#,
         );
         let value = read_manifest_value(tmp.path()).unwrap();
-        let err = read_spel_embedded_skip(&value, tmp.path())
-            .expect_err("a non-array skip must be rejected");
+        let err =
+            read_spel_embedded(&value, tmp.path()).expect_err("a non-array skip must be rejected");
         assert!(err.contains("embedded.skip"), "unexpected error: {err}");
     }
 
     #[test]
-    fn absent_embedded_section_is_empty_skip() {
-        let tmp = TempDir::new("embedded-skip-absent");
+    fn absent_embedded_section_is_all_defaults() {
+        let tmp = TempDir::new("embedded-absent");
         tmp.write(
             "Cargo.toml",
             r#"
@@ -721,7 +752,61 @@ extension_attr = "my_ext"
 "#,
         );
         let value = read_manifest_value(tmp.path()).unwrap();
-        assert_eq!(read_spel_embedded_skip(&value, tmp.path()), Ok(vec![]));
+        assert_eq!(
+            read_spel_embedded(&value, tmp.path()),
+            Ok(EmbeddedMeta {
+                skip: vec![],
+                state_type: None,
+            })
+        );
+    }
+
+    #[test]
+    fn embedded_section_reads_skip_and_state_type() {
+        let tmp = TempDir::new("embedded-full");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel.embedded]
+skip = ["ext_init"]
+state_type = "my_ext::ExtConfig"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        assert_eq!(
+            read_spel_embedded(&value, tmp.path()),
+            Ok(EmbeddedMeta {
+                skip: vec!["ext_init".to_string()],
+                state_type: Some("my_ext::ExtConfig".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn malformed_state_type_is_a_hard_error() {
+        let tmp = TempDir::new("embedded-state-type-malformed");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel.embedded]
+state_type = ["my_ext::ExtConfig"]
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_embedded(&value, tmp.path())
+            .expect_err("a non-string state_type must be rejected");
+        assert!(
+            err.contains("embedded.state_type"),
+            "unexpected error: {err}"
+        );
     }
 
     #[test]

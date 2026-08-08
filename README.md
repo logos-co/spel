@@ -290,6 +290,7 @@ Two more metadata tables drive the extension side:
 ```toml
 [package.metadata.spel.embedded]
 skip = ["admin_initialize"]
+state_type = "admin_authority::AdminConfig"
 
 [[package.metadata.spel.bound_args]]
 arg = "offset"
@@ -297,7 +298,7 @@ from = "offset"
 default = 0
 ```
 
-`embedded.skip` names discovered instructions dropped in embedded mode. `bound_args` declares a trailing fn param the framework strips at discovery and fills at the dispatch call site as a compile-time literal, resolved from the marker kwarg or the default. The value never appears in the IDL or the transaction, a caller-supplied offset would be a caller-controlled write location. Dedicated mode is the degenerate case offset zero over the extension's own PDA, one code path.
+`embedded.skip` names discovered instructions dropped in embedded mode. `embedded.state_type` names the type occupying the embedded window and is mandatory in embedded mode: the program macro emits a window collision assert per embed pair sharing an account, each window's length read through `<state_type as FixedBorshSize>::SIZE`, so two extensions claiming overlapping byte ranges refuse to compile. Touching windows are legal. Discovery itself rejects identical offsets in every producer, the CLI included, and defers the range check to rustc, the only party that knows sizes. `bound_args` declares a trailing fn param the framework strips at discovery and fills at the dispatch call site as a compile-time literal, resolved from the marker kwarg or the default. The value never appears in the IDL or the transaction, a caller-supplied offset would be a caller-controlled write location. Dedicated mode is the degenerate case offset zero over the extension's own PDA, one code path.
 
 `from` accepts two shapes. `"offset"` reads the extension's own marker. `"<marker>::offset"` reads a peer marker on the same module, so an extension can depend on where a peer embedded its state without depending on the peer's crate. `default` is optional. When the referenced marker or kwarg is absent the default applies, and a bound arg without a default makes both hard errors at the consumer's build, never a silent zero.
 

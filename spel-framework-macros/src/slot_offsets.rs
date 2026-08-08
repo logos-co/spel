@@ -10,6 +10,7 @@
 //! through unchanged.
 
 use proc_macro::TokenStream;
+use quote::quote;
 
 // ── account_type side: derive the offset ─────────────────────────────────
 
@@ -58,6 +59,69 @@ pub(crate) fn expand(item: TokenStream) -> TokenStream {
         }
     }
     .into()
+}
+
+/// Const asserts refusing overlapping embedded windows in one account.
+///
+/// Discovery rejects identical offsets, but only rustc knows window
+/// lengths, so range overlap is checked here: one assert per embed
+/// pair sharing an account, each window's length read from the
+/// extension's declared state type through `FixedBorshSize::SIZE`.
+/// Touching windows are legal.
+pub(crate) fn embed_window_collision_asserts(
+    embeds: &[(String, spel_framework_core::extension::EmbedDecl)],
+    state_types: &std::collections::HashMap<String, String>,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let mut out = proc_macro2::TokenStream::new();
+    for (i, (source_a, a)) in embeds.iter().enumerate() {
+        for (source_b, b) in embeds.iter().skip(i + 1) {
+            if a.account != b.account {
+                continue;
+            }
+            let ty_a = state_type_path(state_types, source_a)?;
+            let ty_b = state_type_path(state_types, source_b)?;
+            let off_a = a.offset;
+            let off_b = b.offset;
+            let message = format!(
+                "embedded windows of `{source_a}` (offset {off_a}) and \
+                `{source_b}` (offset {off_b}) overlap in account `{}`",
+                a.account
+            );
+            out.extend(quote! {
+                const _: () = assert!(
+                    #off_a + <#ty_a as ::spel_framework::FixedBorshSize>::SIZE <= #off_b
+                        || #off_b + <#ty_b as ::spel_framework::FixedBorshSize>::SIZE <= #off_a,
+                    #message
+                );
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// The declared state type of an embedded window, parsed to a path.
+fn state_type_path(
+    state_types: &std::collections::HashMap<String, String>,
+    source: &str,
+) -> syn::Result<syn::Path> {
+    let Some(raw) = state_types.get(source) else {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "extension '{source}' declares no embedded.state_type; \
+                discovery must have rejected this"
+            ),
+        ));
+    };
+    syn::parse_str(raw).map_err(|e| {
+        syn::Error::new(
+            proc_macro2::Span::call_site(),
+            format!(
+                "extension '{source}': embedded.state_type {raw:?} \
+                is not a valid type path: {e}"
+            ),
+        )
+    })
 }
 
 /// A field marked as an embedded slot, after its attribute was
@@ -315,5 +379,75 @@ mod tests {
             ts.contains("ADMIN_SLOT_OFFSET") && ts.contains("32"),
             "{ts}"
         );
+    }
+
+    fn embed(
+        source: &str,
+        account: &str,
+        offset: usize,
+    ) -> (String, spel_framework_core::extension::EmbedDecl) {
+        (
+            source.to_string(),
+            spel_framework_core::extension::EmbedDecl {
+                role: format!("{source}_config"),
+                account: account.to_string(),
+                offset,
+            },
+        )
+    }
+
+    fn state_types(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
+    }
+
+    // A shared account's embed pair becomes one assert: each window's
+    // length through its declared state type, offsets as literals.
+    #[test]
+    fn shared_account_pair_emits_a_range_assert() {
+        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 40)];
+        let types = state_types(&[
+            ("admin", "admin_authority::AdminConfig"),
+            ("freeze", "freeze_authority::FreezeConfig"),
+        ]);
+        let ts = embed_window_collision_asserts(&embeds, &types)
+            .expect("emits")
+            .to_string();
+        assert!(
+            ts.contains("AdminConfig") && ts.contains("FreezeConfig"),
+            "{ts}"
+        );
+        assert!(ts.contains("FixedBorshSize"), "{ts}");
+        assert!(ts.contains("overlap in account `cfg`"), "{ts}");
+    }
+
+    // Separate accounts have nothing to collide.
+    #[test]
+    fn separate_accounts_emit_no_collision_assert() {
+        let embeds = vec![embed("admin", "cfg_a", 32), embed("freeze", "cfg_b", 32)];
+        let types = state_types(&[("admin", "A"), ("freeze", "B")]);
+        let ts = embed_window_collision_asserts(&embeds, &types).expect("ok");
+        assert!(ts.is_empty(), "{ts}");
+    }
+
+    // A missing state type here is a framework bug, discovery fails
+    // closed before emission. The error still names the source.
+    #[test]
+    fn missing_state_type_is_an_error_naming_the_source() {
+        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 64)];
+        let types = state_types(&[("admin", "A")]);
+        let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
+        assert!(e.to_string().contains("freeze"), "{e}");
+    }
+
+    // A malformed declared path fails naming the offending string.
+    #[test]
+    fn invalid_state_type_path_is_an_error() {
+        let embeds = vec![embed("admin", "cfg", 32), embed("freeze", "cfg", 64)];
+        let types = state_types(&[("admin", "not a path!!"), ("freeze", "B")]);
+        let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
+        assert!(e.to_string().contains("not a path!!"), "{e}");
     }
 }
