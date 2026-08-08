@@ -41,14 +41,16 @@
 //! extension surface. Environmental issues (unreadable manifest, path
 //! dep pointing at a missing directory, a matched extension contributing
 //! nothing) are reported through the `on_warning` channel, following the
-//! `find_path_dep_dirs` precedent — with one exception. When dependency
-//! resolution loses the cargo metadata layer while a candidate marker
-//! matched no discovered extension, [`resolve_program_deps`] hard-errors
-//! instead: a git or registry extension cannot be located in that state,
-//! and compiling a program that may be silently missing its extension
-//! surface is the one failure this mechanism cannot afford. When every
-//! candidate marker matched a path dependency, the degradation stays a
-//! warning and the build proceeds.
+//! `find_path_dep_dirs` precedent — with one exception. A candidate
+//! marker that matched no discovered extension makes
+//! [`resolve_program_deps`] hard-error regardless of why: a typo or a
+//! transitive-only dependency under healthy resolution, or a git or
+//! registry extension that cannot be located once dependency resolution
+//! loses the cargo metadata layer. Compiling a program that may be
+//! silently missing its extension surface is the one failure this
+//! mechanism cannot afford. When every candidate marker matched a path
+//! dependency, resolution degradation stays a warning and the build
+//! proceeds.
 //!
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
@@ -214,8 +216,10 @@ struct MatchedExtension {
 ///
 /// # Errors
 ///
-/// `Err` on malformed spel metadata or a marker placed above
-/// `#[lez_program]`; callers surface it as a compile error.
+/// `Err` on malformed spel metadata, a marker placed above
+/// `#[lez_program]`, or a candidate marker matching no discovered
+/// extension, whatever the reason it did not match; callers surface it
+/// as a compile error.
 pub fn resolve_program_deps<F: FnMut(String)>(
     start: &Path,
     mod_attrs: &[Attribute],
@@ -229,11 +233,11 @@ pub fn resolve_program_deps<F: FnMut(String)>(
         ExtensionDiscoveries::default()
     };
     if with_metadata {
+        let unmatched: Vec<String> = candidate_marker_names(mod_attrs)
+            .into_iter()
+            .filter(|c| !extensions.matched_markers.contains(c))
+            .collect();
         if let Some(reason) = &graph.metadata_failure {
-            let unmatched: Vec<String> = candidate_marker_names(mod_attrs)
-                .into_iter()
-                .filter(|c| !extensions.matched_markers.contains(c))
-                .collect();
             if !unmatched.is_empty() {
                 return Err(format!(
                     "marker(s) {unmatched:?} matched no discoverable extension and \
@@ -245,6 +249,14 @@ pub fn resolve_program_deps<F: FnMut(String)>(
             on_warning(format!(
                 "dependency resolution degraded ({reason}); every marker matched a \
                 path dependency, continuing"
+            ));
+        } else if !unmatched.is_empty() {
+            return Err(format!(
+                "marker(s) {unmatched:?} matched no extension in the program's \
+                direct dependencies. A marker matches a direct dependency that \
+                declares extension_attr = \"<marker>\" in its spel metadata; \
+                check the marker for typos, and note that transitive \
+                dependencies aAre never discovered."
             ));
         }
     }
@@ -844,6 +856,41 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             deps.graph.direct_dirs.iter().any(|d| d.ends_with("my-ext")),
             "graph must contain the extension dir: {:?}",
             deps.graph.direct_dirs
+        );
+    }
+
+    // A marker that matches nothing while resolution is healthy must
+    // refuse, not silently drop the extension surface: the typo and the
+    // transitive-only dependency both land here.
+    #[test]
+    fn unmatched_marker_with_healthy_resolution_is_a_hard_error() {
+        let tmp = TempDir::new("program-deps-unmatched");
+        ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext]
+            #[my_extt]
+        );
+
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+            .expect_err("an unmatched marker must refuse to compile");
+        assert!(
+            err.contains("my_extt") && err.contains("transitive"),
+            "message must name the marker and the transitive rule: {err}"
+        );
+        assert!(
+            !err.contains("resolution failed"),
+            "healthy resolution must use the healthy-path message: {err}"
         );
     }
 
