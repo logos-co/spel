@@ -77,3 +77,85 @@ fn dry_run_conflicts_with_export() {
         stderr_of(&out)
     )
 }
+
+/// Minimal one-instruction IDL for exercising instruction-arg parsing.
+fn write_fixture_idl(dir: &std::path::Path) -> std::path::PathBuf {
+    let idl = serde_json::json!({
+        "version": "0.1.0",
+        "name": "fixture",
+        "instructions": [{
+            "name": "do_thing",
+            "accounts": [{ "name": "caller", "signer": true }],
+            "args": [{ "name": "new_value", "type": "u64" }]
+        }]
+    });
+    let path = dir.join("fixture-idl.json");
+    std::fs::write(&path, serde_json::to_vec_pretty(&idl).unwrap()).unwrap();
+    path
+}
+
+// Live-round regression (2026-08-09): --export placed after the '--'
+// separator was silently dropped and the transaction submitted to the
+// sequencer instead of being written to the blob file.
+#[test]
+fn misplaced_export_refuses_before_building_a_transaction() {
+    let dir = tempfile::tempdir().unwrap();
+    let idl = write_fixture_idl(dir.path());
+    let blob = dir.path().join("never-written.json");
+
+    let out = spel(&[
+        "--idl",
+        idl.to_str().unwrap(),
+        "--program",
+        &"ab".repeat(32),
+        "--",
+        "do-thing",
+        "--new-value",
+        "7",
+        "--caller",
+        &"11".repeat(32),
+        "--export",
+        blob.to_str().unwrap(),
+    ]);
+
+    assert!(!out.status.success(), "misplaced --export must refuse");
+    let err = stderr_of(&out);
+    assert!(
+        err.contains("--export: unknown argument"),
+        "stderr names the flag: {err}"
+    );
+    assert!(
+        err.contains("before the '--' separator"),
+        "stderr points at the fix: {err}"
+    );
+    assert!(!blob.exists(), "no blob may be written on refusal");
+}
+
+// Control: the same invocation with the flag in its global position
+// parses and reaches transaction building (--dry-run, no network).
+#[test]
+fn well_placed_args_still_parse() {
+    let dir = tempfile::tempdir().unwrap();
+    let idl = write_fixture_idl(dir.path());
+
+    let out = spel(&[
+        "--idl",
+        idl.to_str().unwrap(),
+        "--program",
+        &"ab".repeat(32),
+        "--dry-run",
+        "--",
+        "do-thing",
+        "--new-value",
+        "7",
+        "--caller",
+        &"11".repeat(32),
+    ]);
+
+    let err = stderr_of(&out);
+    assert!(
+        out.status.success(),
+        "dry-run with legal args must pass, stderr: {err}"
+    );
+    assert!(!err.contains("unknown argument"), "stderr: {err}");
+}

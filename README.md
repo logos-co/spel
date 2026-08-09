@@ -349,6 +349,10 @@ spel --idl program-idl.json -p program.bin \
   --co-signer <account-id> --export handover.json -- \
   admin-transfer --caller <current-admin> --evidence <new-admin> ...
 
+# --export and --co-signer are global flags and belong before the "--"
+# separator. Misplaced after it they are rejected with an error, the CLI
+# never falls through to a live submission.
+
 # The file travels to the co-signer over any channel.
 
 # Machine B: inspect and sign. Shows the summary embedded by machine A
