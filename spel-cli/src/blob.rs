@@ -22,20 +22,22 @@
 //! - `summary`: human-readable rendering of the transaction, produced by
 //!   the exporting CLI from the built bytes
 //! - `message_hex`: borsh-serialized nssa `Message`, hex. Signatures are
-//!   made over exactly these bytes
+//!   made over the 32-byte hash of these bytes
 //! - `signers`: account ids ("0x" plus hex) that must sign. The order
 //!   matches the nonce order inside the message and dictates the witness
 //!   order when the final transaction is assembled
 //! - `witnesses`: map from account id to `{pubkey, signature}`, both hex
 //!
 //! A blob goes stale when any listed signer's on-chain nonce changes,
-//! because the nonces inside `message_hex` no longer match. Signing or
-//! submitting a stale blob fails, and the flow restarts with a fresh
-//! export.
+//! because the nonces inside `message_hex` no longer match. Signing is
+//! a local operation and cannot notice, staleness surfaces when the
+//! transaction is submitted, and the flow restarts with a fresh export.
 //!
-//! Trust model v1: co-signers decide based on the embedded `summary`,
-//! trusting the exporting CLI to have rendered it from the real bytes.
-//! Independent decoding of `message_hex` against an IDL is a planned
+//! Trust model v1: the sign prompt decodes the operative content from
+//! `message_hex` itself, program id, account ids, nonces and the raw
+//! instruction data as hex, so a co-signer never depends on the
+//! exporter's `summary` for what they are signing. Decoding the
+//! instruction data against an IDL into named args is a planned
 //! upgrade.
 //!
 //! The format only depends on nssa types and borsh plus JSON encoding, so
@@ -55,7 +57,8 @@ use crate::hex::{decode_bytes_32, hex_decode};
 pub struct WitnessEntry {
     /// Schnorr public key, hex. Validated as a curve point on parse.
     pub pubkey: PublicKey,
-    /// Schnorr signature over the message bytes, hex (64 bytes).
+    /// Schnorr signature over the 32-byte hash of the message bytes,
+    /// hex (64 bytes).
     pub signature: String,
 }
 
@@ -67,7 +70,8 @@ pub struct TxBlob {
     /// Human-readable summary rendered by the exporting CLI. Trust model v1:
     /// co-signers read this before signing.
     pub summary: String,
-    /// Borsh-serialized nssa Message, hex. These exact bytes get signed.
+    /// Borsh-serialized nssa Message, hex. Signatures are made over the
+    /// 32-byte hash of these bytes.
     pub message_hex: String,
     /// Account ids ("0x" + hex) that must sign. ORDER MATTERS: it matches
     /// the nonce order inside the message and dictates witness order at submit.
@@ -106,9 +110,9 @@ impl TxBlob {
     }
 
     /// Raw message bytes. Signatures are made over and verified against
-    /// exactly these bytes.
+    /// the 32-byte hash of these bytes.
     pub fn message_bytes(&self) -> Result<Vec<u8>, String> {
-        hex_decode(&self.message_hex).map_err(|e| format!("blog message_hex: {}", e))
+        hex_decode(&self.message_hex).map_err(|e| format!("blob message_hex: {}", e))
     }
 
     /// Decoded message, for display and for assembling the final transaction.

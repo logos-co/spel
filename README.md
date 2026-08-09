@@ -366,10 +366,20 @@ of required signers, and the collected witnesses. The signers order
 matches the nonce order inside the message. The full format is
 documented in `spel-cli/src/blob.rs`.
 
+A signature authorizes exactly the message bytes in the file being
+signed, and every already-collected witness is verified against those
+same bytes before signing, so nobody can swap the message under
+existing signatures. What the prompt cannot do is read intent into raw
+instruction data. To verify a blob independently, rebuild the claimed
+transaction on your own machine with the same arguments and `--export`,
+and compare the decoded fields, instruction data included, against
+what the prompt shows. The two exports differ only in nonces fetched
+at different times.
+
 A partial transaction goes stale when any listed signer's on-chain
-nonce changes. Signing and submitting verify the collected witnesses
-first and fail with a clear error in that case, and the flow restarts
-with a fresh export.
+nonce changes. Signing is a local operation and cannot detect this,
+staleness surfaces at submission, which fails with a clear error, and
+the flow restarts with a fresh export.
 
 `--export` works without `--co-signer` too, for preparing a transaction
 on one machine and submitting it from another. It only supports public

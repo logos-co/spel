@@ -64,6 +64,13 @@ pub fn sign_command(path: &str) {
         .map(|b| format!("{:02x}", b))
         .collect();
     println!("Program ID: {}", program_id_hex);
+    let instruction_data_hex: String = message
+        .instruction_data
+        .iter()
+        .flat_map(|w| w.to_le_bytes())
+        .map(|b| format!("{:02x}", b))
+        .collect();
+    println!("Instruction data: 0x{}", instruction_data_hex);
     println!("Accounts:");
     for id in &message.account_ids {
         println!("  0x{}", hex_encode(id.value()));
