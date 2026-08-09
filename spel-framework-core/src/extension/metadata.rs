@@ -13,6 +13,9 @@ use super::{InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 /// param the framework fills at the dispatch call site from a module
 /// marker kwarg, never from the transaction. Excluded from the IDL by
 /// construction: discovery strips the param from the collected fn.
+/// Trailing is enforced, in bound_args block order: the dispatcher
+/// appends the values after the transaction args, so any other
+/// position is a hard error at discovery.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BoundArg {
     /// Trailing fn param name to strip and fill.

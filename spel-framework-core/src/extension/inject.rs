@@ -1167,6 +1167,49 @@ mod tests {
         );
     }
 
+    // The authored bare gate in embedded mode: injection first fills
+    // the missing caller, stamping then writes the location kwargs on
+    // the authored attr. The order is structurally fixed inside
+    // apply_wrap_and_inject, this pins its observable outcome as a
+    // unit.
+    #[test]
+    fn authored_bare_gate_gets_injection_and_then_stamping() {
+        let (mut specs, embeds, _) = embedded_wrap_fixture();
+        specs[0].accounts.push(InjectAccount {
+            name: "caller".to_string(),
+            role: "caller".to_string(),
+            seeds: vec![],
+            signer: true,
+            embedded: false,
+        });
+        let mut func: ItemFn = syn::parse_quote!(
+            #[my_gate]
+            pub fn update(
+                #[account(pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+                value: u64,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let injected = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap();
+        assert_eq!(
+            injected,
+            vec!["caller".to_string()],
+            "the authored gate's missing caller must be injected"
+        );
+        let attr = func.attrs.first().expect("the authored attr survives");
+        assert!(attr.path().is_ident("my_gate"), "authored gate stays first");
+        let syn::Meta::List(stamped) = &attr.meta else {
+            panic!("the authored gate must have been stamped with args");
+        };
+        let stamped = stamped.tokens.to_string();
+        assert!(
+            stamped.contains("offset = 32"),
+            "the authored gate must be stamped with the framework's \
+            location kwargs: {stamped}"
+        );
+    }
+
     // Dedicated mode: the gate's account is the extension's own PDA
     // (embedded = false), so even a same-named init keeps the gate.
     // Pins that the `embedded` flag guards the skip.

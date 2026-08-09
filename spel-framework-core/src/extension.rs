@@ -388,6 +388,7 @@ pub fn discover_extensions<F: FnMut(String)>(
         let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
         for mut f in funcs {
             let mut values = Vec::new();
+            let mut found: Vec<usize> = Vec::new();
             for bound in &bound_args {
                 let Some(pos) = f.sig.inputs.iter().position(|input| {
                     matches!(input, syn::FnArg::Typed(pt)
@@ -395,14 +396,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 }) else {
                     continue;
                 };
-                f.sig.inputs = f
-                    .sig
-                    .inputs
-                    .iter()
-                    .enumerate()
-                    .filter(|(i, _)| *i != pos)
-                    .map(|(_, input)| input.clone())
-                    .collect();
+                found.push(pos);
                 values.push(resolve_bound_value(
                     bound,
                     embed_offset,
@@ -410,6 +404,18 @@ pub fn discover_extensions<F: FnMut(String)>(
                     &crate_name,
                 )?);
             }
+            let n = f.sig.inputs.len();
+            let k = found.len();
+            let trailing_in_order = found.iter().enumerate().all(|(i, pos)| *pos == n - k + i);
+            if !trailing_in_order {
+                return Err(format!(
+                    "extension '{crate_name}': bound_args params of `{}` must be \
+                    the trailing params, in bound_args block order; the dispatcher \
+                    appends their values after the transaction args",
+                    f.sig.ident
+                ));
+            }
+            f.sig.inputs = f.sig.inputs.iter().take(n - k).cloned().collect();
             if !values.is_empty() {
                 bound_calls.insert(f.sig.ident.to_string(), values);
             }
@@ -988,6 +994,41 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
         assert!(
             err.contains("only \"offset\" carries a value"),
             "unexpected error: {err}"
+        );
+    }
+
+    // A bound param anywhere but trailing would silently shift the
+    // remaining args, the dispatcher appends bound values last. Refuse.
+    #[test]
+    fn non_trailing_bound_param_is_a_hard_error() {
+        let metadata = r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[[package.metadata.spel.bound_args]]
+arg = "offset"
+from = "offset"
+default = 0
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
+"#;
+        let lib_rs = r#"
+#[instruction]
+pub fn ext_action(offset: usize, account: AccountWithMetadata) -> SpelResult { todo!() }
+"#;
+        let tmp = TempDir::new("bound-non-trailing");
+        ext_fixture(&tmp, metadata, lib_rs);
+        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
+            #[lez_program]
+            #[my_ext(gate_config = prog_config, offset = 32)]
+        );
+        let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+            .expect_err("a non-trailing bound param must be refused");
+        assert!(
+            err.contains("ext_action") && err.contains("trailing"),
+            "message must name the fn and the rule: {err}"
         );
     }
 
