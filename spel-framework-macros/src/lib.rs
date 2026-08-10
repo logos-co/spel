@@ -312,6 +312,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &input.attrs,
+        items,
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -1061,7 +1062,7 @@ fn generate_match_arms(
                     quote! { #name }
                 }));
                 if let Some(values) = bound_calls.get(&ix.fn_name.to_string()) {
-                    args.extend(values.iter().map(crate::slot_offsets::bound_value_tokens));
+                    args.extend(values.iter().map(slot_offsets::bound_value_tokens));
                 }
                 args
             };
@@ -2363,6 +2364,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &program_mod.attrs,
+        items,
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;

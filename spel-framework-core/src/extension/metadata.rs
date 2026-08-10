@@ -313,7 +313,7 @@ pub(super) fn read_package_ident(value: &toml::Value) -> Option<String> {
 
 /// What `[package.metadata.spel.embedded]` declares: how the extension
 /// behaves when a consumer embeds its slot.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub(super) struct EmbeddedMeta {
     /// Discovered instructions the framework must not emit in embedded
     /// mode. The slot is born initialized by the consumer's own
@@ -326,6 +326,21 @@ pub(super) struct EmbeddedMeta {
     /// so the type must implement the trait. Required in embedded mode,
     /// unused in dedicated mode.
     pub state_type: Option<String>,
+    /// The inferred-embed anchor, when the extension declares one. The
+    /// half-declared forms are rejected at parse, so a populated anchor
+    /// is always a complete one.
+    pub anchor: Option<EmbedAnchor>,
+}
+
+/// An extension's embed anchor: `embedded.anchor_attr` names the
+/// consumer-side attribute whose fn creates the embedding account,
+/// `embedded.anchor_role` the inject role it binds. An anchored
+/// extension also declares `state_type`, any consumer may put it in
+/// embedded mode.
+#[derive(Debug, PartialEq)]
+pub(super) struct EmbedAnchor {
+    pub attr: String,
+    pub role: String,
 }
 
 /// Read `[package.metadata.spel.embedded]` from a parsed manifest.
@@ -349,10 +364,7 @@ pub(super) fn read_spel_embedded(
         .and_then(|m| m.get("spel"))
         .and_then(|s| s.get("embedded"))
     else {
-        return Ok(EmbeddedMeta {
-            skip: vec![],
-            state_type: None,
-        });
+        return Ok(EmbeddedMeta::default());
     };
 
     let skip = match embedded.get("skip") {
@@ -371,16 +383,39 @@ pub(super) fn read_spel_embedded(
         },
     };
 
-    let state_type = match embedded.get("state_type") {
-        None => None,
-        Some(v) => Some(
-            v.as_str()
-                .map(String::from)
-                .ok_or_else(|| malformed("embedded.state_type must be a string"))?,
-        ),
+    let opt_string = |key: &str| -> Result<Option<String>, String> {
+        match embedded.get(key) {
+            None => Ok(None),
+            Some(v) => v
+                .as_str()
+                .map(|s| Some(s.to_string()))
+                .ok_or_else(|| malformed(&format!("embedded.{key} must be a string"))),
+        }
     };
 
-    Ok(EmbeddedMeta { skip, state_type })
+    let state_type = opt_string("state_type")?;
+    let anchor = match (opt_string("anchor_attr")?, opt_string("anchor_role")?) {
+        (Some(attr), Some(role)) => Some(EmbedAnchor { attr, role }),
+        (None, None) => None,
+        _ => {
+            return Err(malformed(
+                "embedded.anchor_attr and embedded.anchor_role must be declared together",
+            ));
+        },
+    };
+    if anchor.is_some() && state_type.is_none() {
+        return Err(malformed(
+            "an anchored extension must declare embedded.state_type; any \
+            consumer may put it in embedded mode, and the window collision \
+            asserts read the window size through it",
+        ));
+    }
+
+    Ok(EmbeddedMeta {
+        skip,
+        state_type,
+        anchor,
+    })
 }
 
 /// Decode one TOML seed entry (`{ const = "..." }` or
@@ -757,10 +792,7 @@ extension_attr = "my_ext"
         let value = read_manifest_value(tmp.path()).unwrap();
         assert_eq!(
             read_spel_embedded(&value, tmp.path()),
-            Ok(EmbeddedMeta {
-                skip: vec![],
-                state_type: None,
-            })
+            Ok(EmbeddedMeta::default())
         );
     }
 
@@ -785,6 +817,7 @@ state_type = "my_ext::ExtConfig"
             Ok(EmbeddedMeta {
                 skip: vec!["ext_init".to_string()],
                 state_type: Some("my_ext::ExtConfig".to_string()),
+                ..EmbeddedMeta::default()
             })
         );
     }
@@ -855,5 +888,81 @@ self_exempt_marker = "x_exempt"
         let err = read_spel_wrap_instructions(&value, tmp.path())
             .expect_err("empty skip word must be rejected");
         assert!(err.contains("skip"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn embedded_anchor_pair_parses() {
+        let tmp = TempDir::new("embedded-anchor-pair");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let meta = read_spel_embedded(&value, tmp.path()).unwrap();
+        assert_eq!(
+            meta.anchor,
+            Some(EmbedAnchor {
+                attr: "ext_init".to_string(),
+                role: "ext_config".to_string(),
+            })
+        );
+    }
+
+    // Half an anchor declaration is a broken extension, not a mode.
+    #[test]
+    fn half_declared_anchor_refuses_both_ways() {
+        for (label, line) in [
+            ("attr", "anchor_attr = \"ext_init\""),
+            ("role", "anchor_role = \"ext_config\""),
+        ] {
+            let tmp = TempDir::new(&format!("embedded-anchor-half-{label}"));
+            tmp.write(
+                "Cargo.toml",
+                &format!(
+                    "[package]\nname = \"my-ext\"\nversion = \"0.1.0\"\n\n\
+                    [package.metadata.spel.embedded]\n{line}\n"
+                ),
+            );
+            let value = read_manifest_value(tmp.path()).unwrap();
+            let err = read_spel_embedded(&value, tmp.path())
+                .expect_err("half-declared anchor must be rejected");
+            assert!(err.contains("declared together"), "{label}: {err}");
+        }
+    }
+
+    // An anchored extension is embeddable by any consumer's choice, so
+    // the manifest must be self-consistent at authoring time, not at the
+    // first anchored consumer's build.
+    #[test]
+    fn anchored_without_state_type_refuses() {
+        let tmp = TempDir::new("embedded-anchor-no-state-type");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel.embedded]
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_embedded(&value, tmp.path())
+            .expect_err("an anchor without state_type must be rejected");
+        assert!(err.contains("state_type"), "unexpected error: {err}");
     }
 }

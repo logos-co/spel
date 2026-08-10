@@ -665,7 +665,7 @@ fn stamp_authored_gates(
 }
 
 // Named, typed params of a fn: the only shape gate machinery reads.
-fn typed_params(func: &ItemFn) -> impl Iterator<Item = (&syn::PatIdent, &syn::PatType)> {
+pub(super) fn typed_params(func: &ItemFn) -> impl Iterator<Item = (&syn::PatIdent, &syn::PatType)> {
     func.sig.inputs.iter().filter_map(|input| match input {
         FnArg::Typed(pt) => match &*pt.pat {
             syn::Pat::Ident(pi) => Some((pi, pt)),
@@ -698,7 +698,7 @@ fn param_pda_seeds(pt: &syn::PatType) -> Option<Vec<InjectSeed>> {
 }
 
 // True when the param's `#[account]` attr carries `init`.
-fn param_has_init(pt: &syn::PatType) -> bool {
+pub(super) fn param_has_init(pt: &syn::PatType) -> bool {
     pt.attrs.iter().any(|attr| {
         if !attr.path().is_ident("account") {
             return false;
@@ -1144,7 +1144,7 @@ mod tests {
             crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: crate::extension::OffsetSpec::Literal(32),
+                offset: OffsetSpec::Literal(32),
             },
         )];
         let wraps = vec![WrapInstructions {

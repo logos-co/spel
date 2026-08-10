@@ -14,7 +14,6 @@
 //! with rustc evaluating what discovery-time code cannot. Structs
 //! without slot attributes pass through unchanged.
 
-use proc_macro::TokenStream;
 use quote::quote;
 use spel_framework_core::extension::{
     find_slot_carrier, BoundValue, EmbedDecl, OffsetSpec, SlotCarrier,

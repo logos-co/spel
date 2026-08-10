@@ -160,9 +160,13 @@ fn generate_idl_inner(
     let mut warn = |w: String| eprintln!("⚠️  {w}");
     let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
         Some(manifest_dir) => {
-            let mut deps =
-                crate::extension::resolve_program_deps(manifest_dir, &program_mod.attrs, &mut warn)
-                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            let mut deps = crate::extension::resolve_program_deps(
+                manifest_dir,
+                &program_mod.attrs,
+                items,
+                &mut warn,
+            )
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
             let consumer_fns: Vec<ItemFn> = items
                 .iter()
                 .filter_map(|i| match i {

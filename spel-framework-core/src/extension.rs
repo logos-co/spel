@@ -86,6 +86,7 @@ pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_attr_name, Slot
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded,
     read_spel_extension_attr, read_spel_inject_specs, read_spel_wrap_instructions, BoundArg,
+    EmbeddedMeta,
 };
 
 /// What the consumer's direct dependencies contribute to its program:
@@ -226,12 +227,13 @@ struct MatchedExtension {
 pub fn resolve_program_deps<F: FnMut(String)>(
     start: &Path,
     mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
     on_warning: &mut F,
 ) -> Result<ProgramDeps, String> {
     let with_metadata = has_extension_marker_candidates(mod_attrs);
     let graph = crate::dep_walk::resolve_dep_graph(start, with_metadata, on_warning);
     let extensions = if with_metadata {
-        discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?
+        discover_extensions(&graph.direct_dirs, mod_attrs, mod_items, on_warning)?
     } else {
         ExtensionDiscoveries::default()
     };
@@ -275,6 +277,11 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 /// it decides instruction order in the dispatcher and IDL, and the
 /// account order of injected params.
 ///
+/// `mod_items` are the program module's top-level items, the only
+/// place a dispatched fn (and so an embed anchor) can live. File-backed
+/// modules and path deps never participate, unlike the carrier scan
+/// for derived offsets. Tests without anchors pass `&[]`.
+///
 /// # Errors
 ///
 /// `Err` on malformed spel metadata (callers surface it as a compile
@@ -282,6 +289,7 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 pub fn discover_extensions<F: FnMut(String)>(
     dep_dirs: &[PathBuf],
     mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
     on_warning: &mut F,
 ) -> Result<ExtensionDiscoveries, String> {
     let mut matched: Vec<MatchedExtension> = Vec::new();
@@ -342,11 +350,17 @@ pub fn discover_extensions<F: FnMut(String)>(
             wraps.push((marker_args.word.clone().unwrap_or_default(), w));
         }
 
-        let self_embed = marker_args.embed.clone();
-        let is_embedded = marker_args.embed.is_some();
+        let resolved_embed = resolve_embed_decl(
+            marker_args.embed,
+            &embedded,
+            mod_items,
+            &crate_name,
+            &ext_attr,
+        )?;
+        let is_embedded = resolved_embed.is_some();
         let mut embeds = Vec::new();
         let mut embedded_state_types = HashMap::new();
-        if let Some(embed) = marker_args.embed {
+        if let Some(embed) = &resolved_embed {
             let Some(state_type) = embedded.state_type.clone() else {
                 return Err(format!(
                     "extension '{crate_name}' is used in embedded mode but its \
@@ -357,7 +371,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 ));
             };
             embedded_state_types.insert(crate_name.clone(), state_type);
-            embeds.push((crate_name.clone(), embed));
+            embeds.push((crate_name.clone(), embed.clone()));
         }
 
         let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
@@ -404,7 +418,7 @@ pub fn discover_extensions<F: FnMut(String)>(
                 found.push(pos);
                 values.push(resolve_bound_value(
                     bound,
-                    self_embed.as_ref(),
+                    resolved_embed.as_ref(),
                     mod_attrs,
                     &crate_name,
                 )?);
@@ -596,6 +610,28 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
     out
 }
 
+/// Decide an extension's embedded declaration: the marker's role kwarg
+/// for anchorless extensions, anchor inference for anchored ones, and
+/// a hard error when both speak.
+fn resolve_embed_decl(
+    marker_embed: Option<EmbedDecl>,
+    embedded: &EmbeddedMeta,
+    mod_items: &[syn::Item],
+    crate_name: &str,
+    ext_attr: &str,
+) -> Result<Option<EmbedDecl>, String> {
+    match (marker_embed, &embedded.anchor) {
+        (Some(_), Some(_)) => Err(format!(
+            "extension `{crate_name}` declares an embed anchor \
+            (embedded.anchor_attr); the marker's role kwarg is retired for \
+            it, the anchor fn names the embedding account. Drop the kwarg \
+            from #[{ext_attr}]"
+        )),
+        (None, Some(a)) => marker::infer_anchor_embed(mod_items, &a.attr, &a.role, crate_name),
+        (embed, None) => Ok(embed),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,7 +645,7 @@ mod tests {
         on_warning: &mut F,
     ) -> Result<Vec<(ItemFn, syn::Path)>, String> {
         let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
-        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
+        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, &[], on_warning)?.instructions)
     }
 
     fn wrap_fixture(tmp: &TempDir, wrap_toml: &str) {
@@ -872,7 +908,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
 
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect("discovery through the producer entry point");
         assert_eq!(deps.extensions.instructions.len(), 1);
         assert!(
@@ -905,7 +941,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_extt]
         );
 
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("an unmatched marker must refuse to compile");
         assert!(
             err.contains("my_extt") && err.contains("transitive"),
@@ -952,7 +988,7 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
             #[doc = "no markers here"]
         );
         let mut warnings = Vec::new();
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |w| {
             warnings.push(w)
         })
         .expect("no markers is not an error");
@@ -979,7 +1015,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[lez_program]
         );
 
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("misplaced marker must propagate");
         assert!(
             err.contains("above #[lez_program]"),
@@ -1006,7 +1042,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("an unknown bound_args.from must be rejected");
         assert!(
             err.contains("only \"offset\" carries a value"),
@@ -1041,7 +1077,7 @@ pub fn ext_action(offset: usize, account: AccountWithMetadata) -> SpelResult { t
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("a non-trailing bound param must be refused");
         assert!(
             err.contains("ext_action") && err.contains("trailing"),
@@ -1083,7 +1119,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded discovery must succeed");
         let (func, _) = &ext.instructions[0];
         let param_names: Vec<String> = func
@@ -1112,7 +1148,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
         let tmp = TempDir::new("bound-strip-dedicated");
         let mod_attrs = ext_fixture(&tmp, metadata, lib_rs);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("dedicated discovery must succeed");
         assert_eq!(
             ext.bound_calls.get("ext_action"),
@@ -1145,7 +1181,7 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
             #[peer_ext(peer_config = prog_config, offset = 16)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("cross-marker discovery must succeed");
         assert_eq!(
             ext.bound_calls.get("ext_action"),
@@ -1156,7 +1192,7 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
         let tmp = TempDir::new("bound-cross-dedicated");
         let mod_attrs = ext_fixture(&tmp, metadata, lib_rs);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("absent peer with default must succeed");
         assert_eq!(
             ext.bound_calls.get("ext_action"),
@@ -1183,7 +1219,7 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("absent peer without default must be rejected");
         assert!(
             err.contains("requires marker '#[peer_ext]'"),
@@ -1212,7 +1248,7 @@ edition = "2021"
             #[lez_program]
             #[ghost_ext]
         );
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("unmatched marker with failed metadata must refuse to compile");
         assert!(
             err.contains("refusing to compile"),
@@ -1263,7 +1299,7 @@ my-ext = { path = "../my-ext" }
             #[my_ext]
         );
         let mut warnings = Vec::new();
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |w| {
             warnings.push(w)
         })
         .expect("matched path marker must compile through a degraded resolution");
@@ -1308,7 +1344,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded discovery must succeed");
         let names: Vec<String> = ext
             .instructions
@@ -1339,7 +1375,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("dedicated discovery must succeed");
         let names: Vec<String> = ext
             .instructions
@@ -1381,7 +1417,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded marker must be collected");
         assert_eq!(
             ext.embeds,
@@ -1431,7 +1467,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("embedded mode without state_type must be refused");
         assert!(
             err.contains("my_ext") && err.contains("embedded.state_type"),
@@ -1475,7 +1511,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             }
         )];
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let mut ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let mut ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded marker must be collected");
         rewrite_embedded_roles(&mut ext.inject_specs, &ext.embeds, &consumer_fns)
             .expect("rewrite must succeed");
@@ -1609,7 +1645,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("inject block must be collected");
         assert_eq!(ext.inject_specs.len(), 1);
         assert_eq!(ext.inject_specs[0].wrapper, "my_gate");
@@ -1675,7 +1711,7 @@ ext-b = { path = "../ext-b" }
             #[ext_b]
             #[ext_a]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &b_first, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &b_first, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.inject_specs[0].wrapper, "ext_b_gate");
         assert_eq!(ext.inject_specs[1].wrapper, "ext_a_gate");
         assert_eq!(ext.instructions[0].0.sig.ident, "ext_b_action");
@@ -1687,7 +1723,7 @@ ext-b = { path = "../ext-b" }
             #[ext_a]
             #[ext_b]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &a_first, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &a_first, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.inject_specs[0].wrapper, "ext_a_gate");
         assert_eq!(ext.inject_specs[1].wrapper, "ext_b_gate");
     }
@@ -1714,7 +1750,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         );
 
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("marker above lez_program must fail discovery");
         assert!(
             err.contains("above #[lez_program]"),
@@ -1739,7 +1775,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         );
 
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("marker below lez_program must be accepted");
         assert_eq!(ext.instructions.len(), 1);
     }
@@ -2052,7 +2088,7 @@ self_exempt_marker = "my_exempt"
             #[my_ext]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps.len(), 1);
         assert_eq!(ext.wraps[0].0, "");
         assert!(ext.wraps[0].1.skip.is_none());
@@ -2077,7 +2113,7 @@ self_exempt_marker = "my_exempt"
             #[my_ext]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps.len(), 1);
         assert_eq!(ext.wraps[0].0, "");
 
@@ -2087,7 +2123,7 @@ self_exempt_marker = "my_exempt"
             #[lez_program]
             #[my_ext(manual)]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &manual, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &manual, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps[0].0, "manual");
     }
 
@@ -2104,7 +2140,7 @@ self_exempt_marker = "my_exempt"
         );
         let attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &attrs, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &attrs, &[], &mut |_| {}).unwrap();
         assert!(ext.wraps.is_empty());
     }
 
@@ -2142,5 +2178,141 @@ self_exempt_marker = "my_exempt"
         };
         let v = resolve_bound_value(&bound, None, &[], "my-ext").expect("resolves");
         assert_eq!(v, BoundValue::Literal(0));
+    }
+
+    fn anchor_meta(anchor: Option<(&str, &str)>) -> EmbeddedMeta {
+        EmbeddedMeta {
+            anchor: anchor.map(|(attr, role)| metadata::EmbedAnchor {
+                attr: attr.to_string(),
+                role: role.to_string(),
+            }),
+            ..EmbeddedMeta::default()
+        }
+    }
+
+    fn kwarg_embed() -> EmbedDecl {
+        EmbedDecl {
+            role: "ext_config".into(),
+            account: "cfg".into(),
+            offset: OffsetSpec::Literal(32),
+        }
+    }
+
+    // The four arms of the embed decision, in one place.
+    #[test]
+    fn marker_kwarg_with_anchor_metadata_refuses() {
+        let err = resolve_embed_decl(
+            Some(kwarg_embed()),
+            &anchor_meta(Some(("ext_init", "ext_config"))),
+            &[],
+            "my-ext",
+            "my_ext",
+        )
+        .expect_err("two writers must refuse");
+        assert!(err.contains("anchor") && err.contains("my_ext"), "{err}");
+    }
+
+    #[test]
+    fn marker_kwarg_without_anchor_passes_through() {
+        let embed = resolve_embed_decl(
+            Some(kwarg_embed()),
+            &anchor_meta(None),
+            &[],
+            "my-ext",
+            "my_ext",
+        )
+        .unwrap()
+        .expect("the kwarg decl survives");
+        assert_eq!(embed.account, "cfg");
+    }
+
+    #[test]
+    fn anchor_without_kwarg_infers_from_the_module() {
+        let items: Vec<syn::Item> = syn::parse_file(
+            "#[ext_init]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        )
+        .unwrap()
+        .items;
+        let embed = resolve_embed_decl(
+            None,
+            &anchor_meta(Some(("ext_init", "ext_config"))),
+            &items,
+            "my-ext",
+            "my_ext",
+        )
+        .unwrap()
+        .expect("the anchor infers");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.offset, OffsetSpec::Derived);
+    }
+
+    #[test]
+    fn neither_kwarg_nor_anchor_is_dedicated() {
+        let embed = resolve_embed_decl(None, &anchor_meta(None), &[], "my-ext", "my_ext").unwrap();
+        assert!(embed.is_none());
+    }
+
+    // The reason inference lives in discovery: embedded.skip filters the
+    // instruction set right there, so an inferred embed must drop the
+    // extension's initializer exactly like a kwarg-declared one.
+    #[test]
+    fn anchored_extension_infers_embed_and_skips_initializer() {
+        let tmp = TempDir::new("program-deps-anchored");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[package.metadata.spel.embedded]
+skip = ["ext_init"]
+state_type = "my_ext::ExtConfig"
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+            r#"
+#[instruction]
+pub fn ext_init(account: AccountWithMetadata) -> SpelResult { todo!() }
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let items: Vec<syn::Item> = syn::parse_file(
+            "#[ext_init]\npub fn initialize(#[account(init)] my_cfg: A) -> R { todo!() }",
+        )
+        .unwrap()
+        .items;
+
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &items, &mut |_| {})
+            .expect("anchored discovery succeeds");
+        assert_eq!(
+            deps.extensions.embeds,
+            vec![(
+                "my_ext".to_string(),
+                EmbedDecl {
+                    role: "ext_config".into(),
+                    account: "my_cfg".into(),
+                    offset: OffsetSpec::Derived,
+                }
+            )]
+        );
+        let names: Vec<String> = deps
+            .extensions
+            .instructions
+            .iter()
+            .map(|(f, _)| f.sig.ident.to_string())
+            .collect();
+        assert!(
+            !names.contains(&"ext_init".to_string()),
+            "the skip filter must fire on an inferred embed: {names:?}"
+        );
+        assert!(names.contains(&"ext_action".to_string()), "{names:?}");
+        assert_eq!(
+            deps.extensions
+                .embed_state_types
+                .get("my_ext")
+                .map(String::as_str),
+            Some("my_ext::ExtConfig")
+        );
     }
 }

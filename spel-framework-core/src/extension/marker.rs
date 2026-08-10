@@ -195,6 +195,98 @@ pub fn candidate_marker_names(mod_attrs: &[Attribute]) -> Vec<String> {
         .collect()
 }
 
+/// Infer an anchored extension's embedded declaration from the module.
+///
+/// The anchor attr marks the consumer fn that creates the embedding
+/// account. Its optional `<role> = <param>` kwarg names the account
+/// among several `#[account(init)]` params; with exactly one init
+/// param the kwarg may be omitted. No fn carrying the attr means
+/// dedicated mode.
+///
+/// # Errors
+///
+/// `Err` when two fns carry the anchor, when the kwarg names anything
+/// but an init param, or when several init params exist and no kwarg
+/// picks one. Callers surface it as a compile error.
+pub(super) fn infer_anchor_embed(
+    mod_items: &[syn::Item],
+    anchor_attr: &str,
+    role: &str,
+    crate_name: &str,
+) -> Result<Option<EmbedDecl>, String> {
+    let fail = |what: String| format!("extension `{crate_name}`: {what}");
+
+    let anchors: Vec<(&syn::ItemFn, &Attribute)> = mod_items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) => f
+                .attrs
+                .iter()
+                .find(|a| attr_is(a, anchor_attr))
+                .map(|a| (f, a)),
+            _ => None,
+        })
+        .collect();
+
+    let (func, attr) = match anchors.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        many => {
+            let names: Vec<String> = many.iter().map(|(f, _)| f.sig.ident.to_string()).collect();
+            return Err(fail(format!(
+                "#[{anchor_attr}] appears on {} fns ({}); exactly one fn may \
+                anchor the embed",
+                many.len(),
+                names.join(", ")
+            )));
+        },
+    };
+
+    let init_params: Vec<&syn::Ident> = super::inject::typed_params(func)
+        .filter(|(_, pt)| super::inject::param_has_init(pt))
+        .map(|(pi, _)| &pi.ident)
+        .collect();
+
+    let account = match (
+        anchor_kwarg(attr, anchor_attr, role)?,
+        init_params.as_slice(),
+    ) {
+        (Some(name), inits) if inits.iter().any(|i| **i == name) => name,
+        (Some(name), _) => {
+            return Err(fail(format!(
+                "#[{anchor_attr}({role} = {name})] on fn `{}` names no \
+                #[account(init)] param; the embedding account must be created \
+                by this fn",
+                func.sig.ident
+            )));
+        },
+        (None, [one]) => one.to_string(),
+        (None, []) => {
+            return Err(fail(format!(
+                "#[{anchor_attr}] on fn `{}` has no #[account(init)] param; \
+                the anchor fn creates the embedding account",
+                func.sig.ident
+            )));
+        },
+        (None, several) => {
+            let names: Vec<String> = several.iter().map(ToString::to_string).collect();
+            return Err(fail(format!(
+                "#[{anchor_attr}] on fn `{}` has several #[account(init)] \
+                params ({}); name the embedding account with \
+                #[{anchor_attr}({role} = <param>)]",
+                func.sig.ident,
+                names.join(", ")
+            )));
+        },
+    };
+
+    Ok(Some(EmbedDecl {
+        role: role.to_string(),
+        account,
+        offset: OffsetSpec::Derived,
+    }))
+}
+
 fn is_marker_candidate(ident: &str) -> bool {
     !matches!(
         ident,
@@ -209,6 +301,43 @@ fn is_marker_candidate(ident: &str) -> bool {
             | "forbid"
             | "deprecated"
     )
+}
+
+/// The attr's last path segment equals `name`, matching the bare
+/// re-export form and qualified `admin_authority::admin_initialize`.
+fn attr_is(attr: &Attribute, name: &str) -> bool {
+    attr.path().segments.last().is_some_and(|s| s.ident == name)
+}
+
+/// The located anchor attr's optional `<role> = <param>` kwarg. Other
+/// kwargs pass through untouched, the gate machinery owns them.
+fn anchor_kwarg(attr: &Attribute, anchor_attr: &str, role: &str) -> Result<Option<String>, String> {
+    if matches!(attr.meta, syn::Meta::Path(_)) {
+        return Ok(None);
+    }
+    let metas = attr
+        .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map_err(|e| format!("`#[{anchor_attr}]`: unparsable arguments: {e}"))?;
+    for m in &metas {
+        let syn::Meta::NameValue(nv) = m else {
+            continue;
+        };
+        if !nv.path.is_ident(role) {
+            continue;
+        }
+        let ident = match &nv.value {
+            syn::Expr::Path(p) => p.path.get_ident(),
+            _ => None,
+        };
+        return match ident {
+            Some(id) => Ok(Some(id.to_string())),
+            None => Err(format!(
+                "#[{anchor_attr}({role} = ...)]: the value must be a \
+                plain param name"
+            )),
+        };
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -386,5 +515,83 @@ mod tests {
             candidate_marker_names(&m.attrs),
             vec!["my_ext".to_string(), "freeze_authority".to_string()]
         );
+    }
+
+    fn mod_fns(src: &str) -> Vec<syn::Item> {
+        syn::parse_file(src).expect("fixture parses").items
+    }
+
+    #[test]
+    fn anchor_with_single_init_infers_the_account() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn initialize(#[account(init, pda = literal(\"cfg\"))] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("one init param infers");
+        assert_eq!(embed.role, "ext_config");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.offset, OffsetSpec::Derived);
+    }
+
+    #[test]
+    fn anchor_kwarg_picks_among_several_inits() {
+        let items = mod_fns(
+            "#[ext_init(ext_config = vault)]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("the kwarg picks");
+        assert_eq!(embed.account, "vault");
+    }
+
+    #[test]
+    fn anchor_kwarg_naming_non_init_param_refuses() {
+        let items = mod_fns(
+            "#[ext_init(ext_config = s)]\npub fn initialize(#[account(init)] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("a non-init kwarg target must refuse");
+        assert!(err.contains("names no #[account(init)]"), "{err}");
+    }
+
+    #[test]
+    fn several_inits_without_kwarg_refuse_listing_candidates() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("ambiguity must refuse");
+        assert!(err.contains("cfg") && err.contains("vault"), "{err}");
+        assert!(
+            err.contains("ext_config = "),
+            "must show the kwarg form: {err}"
+        );
+    }
+
+    #[test]
+    fn anchor_without_init_param_refuses() {
+        let items =
+            mod_fns("#[ext_init]\npub fn initialize(#[account(signer)] s: A) -> R { todo!() }");
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("an anchor that creates nothing must refuse");
+        assert!(err.contains("no #[account(init)] param"), "{err}");
+    }
+
+    #[test]
+    fn two_anchor_fns_refuse_naming_both() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn a(#[account(init)] cfg: A) -> R { todo!() }\n#[ext_init]\npub fn b(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("two anchors must refuse");
+        assert!(err.contains('a') && err.contains('b'), "{err}");
+    }
+
+    #[test]
+    fn no_anchor_fn_is_dedicated() {
+        let items = mod_fns("pub fn plain(#[account(init)] cfg: A) -> R { todo!() }");
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext").unwrap();
+        assert!(embed.is_none(), "no anchor means dedicated mode");
     }
 }
