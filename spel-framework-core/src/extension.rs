@@ -197,7 +197,6 @@ impl PreparedProgram {
             func,
             &self.active_wraps,
             &self.inject_specs,
-            &self.embeds,
             self.locations,
             qualified,
         )
@@ -314,6 +313,11 @@ pub struct InjectSpec {
     // Crate name of the extension that declared this spec. Names the
     // offender when two extensions inject conflicting params.
     pub source: String,
+    /// Where the declaring extension's state sits inside the consumer's
+    /// account, set by [`rewrite_embedded_roles`]. `Some` exactly when
+    /// this extension is in embedded mode, which is what makes the
+    /// framework the only writer of the gate's location kwargs.
+    pub embedded_offset: Option<OffsetSpec>,
 }
 
 /// Parsed `[package.metadata.spel.wrap_instructions]` for an extension
@@ -1673,6 +1677,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 embedded: false,
             }],
             source: "my_ext".to_string(),
+            embedded_offset: None,
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
@@ -1711,6 +1716,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 embedded: false,
             }],
             source: "my_ext".to_string(),
+            embedded_offset: None,
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
@@ -1747,8 +1753,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             }
         );
         let injected =
-            apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
-                .unwrap();
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap();
         assert_eq!(injected, vec!["prog_config".to_string()]);
         let expected: Attribute =
             syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);

@@ -226,6 +226,7 @@ pub(super) fn read_spel_inject_specs(
             wrapper: wrapper.to_string(),
             accounts,
             source: String::new(),
+            embedded_offset: None,
         });
     }
     Ok(specs)

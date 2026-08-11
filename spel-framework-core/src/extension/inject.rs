@@ -121,19 +121,18 @@ pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
     active_wraps: &[ActiveWrap],
     inject_specs: &[InjectSpec],
-    embeds: &[Embed],
     locations: GateLocations,
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
     if locations == GateLocations::Emit {
-        if let Some(e) = embeds
+        if let Some(spec) = inject_specs
             .iter()
-            .find(|e| e.decl.offset == super::OffsetSpec::Derived)
+            .find(|s| s.embedded_offset == Some(super::OffsetSpec::Derived))
         {
             return Err(format!(
                 "extension `{}` reached the gate pass with an unresolved \
                 derived offset; `resolve_derived_offsets` must run after discovery",
-                e.source
+                spec.source
             ));
         }
     }
@@ -142,18 +141,10 @@ pub fn apply_wrap_and_inject(
     }
 
     let remap = build_remap(inject_specs, func);
-    // Membership answers "is this extension embedded", which decides
-    // the authored-kwarg rejection on every producer. The value is read
-    // only when this one writes locations.
-    let offset_by_source: HashMap<&str, &super::OffsetSpec> = embeds
-        .iter()
-        .map(|e| (e.source.as_str(), &e.decl.offset))
-        .collect();
-    let gate_offset = |spec: &InjectSpec| match locations {
-        GateLocations::Emit => offset_by_source.get(spec.source.as_str()).copied(),
-        GateLocations::Omit => None,
-    };
-    check_authored_location_kwargs(func, inject_specs, &offset_by_source)?;
+    // A spec in embedded mode carries its offset. Whether it has one at
+    // all decides the authored-kwarg rejection on every producer; the
+    // value is read only when this producer writes locations.
+    check_authored_location_kwargs(func, inject_specs)?;
 
     for wrap in active_wraps {
         let (wrapper_path, wrapper_last) = (&wrap.path, &wrap.last);
@@ -174,7 +165,11 @@ pub fn apply_wrap_and_inject(
             if &spec.wrapper != wrapper_last {
                 continue;
             }
-            args.extend(spec_gate_args(spec, &remap, gate_offset(spec))?);
+            let offset = match locations {
+                GateLocations::Emit => spec.embedded_offset.as_ref(),
+                GateLocations::Omit => None,
+            };
+            args.extend(spec_gate_args(spec, &remap, offset)?);
         }
         let attr: Attribute = if args.is_empty() {
             parse_quote! { #[#wrapper_path] }
@@ -190,7 +185,7 @@ pub fn apply_wrap_and_inject(
     // omits them has nothing to stamp. It runs after injection either
     // way, so the bare-attr-activates-injection rule already fired.
     if locations == GateLocations::Emit {
-        stamp_authored_gates(func, inject_specs, &remap, &offset_by_source)?;
+        stamp_authored_gates(func, inject_specs, &remap)?;
     }
 
     Ok(injected)
@@ -303,6 +298,7 @@ pub fn rewrite_embedded_roles(
 
         let mut hit = false;
         for spec in specs.iter_mut().filter(|s| &s.source == source) {
+            spec.embedded_offset = Some(embed.offset.clone());
             for acc in spec.accounts.iter_mut().filter(|a| a.role == embed.role) {
                 acc.name = embed.account.clone();
                 acc.seeds = seeds.clone();
@@ -684,7 +680,6 @@ fn stamp_authored_gates(
     func: &mut ItemFn,
     inject_specs: &[InjectSpec],
     remap: &HashMap<String, String>,
-    offset_by_source: &HashMap<&str, &super::OffsetSpec>,
 ) -> Result<(), String> {
     for attr in func.attrs.iter_mut() {
         if !matches!(attr.meta, syn::Meta::Path(_)) {
@@ -694,10 +689,10 @@ fn stamp_authored_gates(
             if !attr_is(attr, &spec.wrapper) {
                 continue;
             }
-            let Some(off) = offset_by_source.get(spec.source.as_str()) else {
+            let Some(off) = &spec.embedded_offset else {
                 continue;
             };
-            let args = spec_gate_args(spec, remap, Some(*off))?;
+            let args = spec_gate_args(spec, remap, Some(off))?;
             let path = attr.path().clone();
             *attr = parse_quote! { #[#path(#(#args),*)] };
         }
@@ -842,15 +837,13 @@ fn substitute_embedded_params(func: &mut ItemFn, inject_specs: &[InjectSpec]) {
 fn check_authored_location_kwargs(
     func: &ItemFn,
     inject_specs: &[InjectSpec],
-    offset_by_source: &HashMap<&str, &super::OffsetSpec>,
 ) -> Result<(), String> {
     for attr in &func.attrs {
         if !matches!(attr.meta, syn::Meta::List(_)) {
             continue;
         }
         for spec in inject_specs {
-            if !attr_is(attr, &spec.wrapper) || !offset_by_source.contains_key(spec.source.as_str())
-            {
+            if !attr_is(attr, &spec.wrapper) || spec.embedded_offset.is_none() {
                 continue;
             }
             let mut offending: Option<String> = None;
@@ -924,6 +917,7 @@ mod tests {
     // A rewritten spec plus its embed decl: embedded mode for `my_ext`.
     fn embedded_fixture() -> (Vec<InjectSpec>, Vec<Embed>) {
         let specs = vec![InjectSpec {
+            embedded_offset: Some(OffsetSpec::Literal(32)),
             wrapper: "my_gate".to_string(),
             accounts: vec![
                 InjectAccount {
@@ -1067,6 +1061,7 @@ mod tests {
     fn undeclared_initializer_means_no_coverage_gate() {
         let (mut specs, embeds) = embedded_fixture();
         specs.push(InjectSpec {
+            embedded_offset: None,
             wrapper: "gate_initialize".to_string(),
             accounts: vec![],
             source: "my_ext".to_string(),
@@ -1104,15 +1099,15 @@ mod tests {
 
     #[test]
     fn consumer_location_kwarg_on_embedded_gate_is_error() {
-        let (specs, embeds) = embedded_fixture();
+        let (specs, _) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(gate_config = my_own)]
             pub fn update(value: u64) -> SpelResult {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
-            .unwrap_err();
+        let err =
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap_err();
         assert!(
             err.contains("gate_config") && err.contains("update"),
             "got: {err}"
@@ -1121,21 +1116,21 @@ mod tests {
 
     #[test]
     fn consumer_offset_kwarg_on_embedded_gate_is_error() {
-        let (specs, embeds) = embedded_fixture();
+        let (specs, _) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(offset = 64)]
             pub fn update(value: u64) -> SpelResult {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
-            .unwrap_err();
+        let err =
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap_err();
         assert!(err.contains("offset"), "got: {err}");
     }
 
     #[test]
     fn signer_kwarg_stays_allowed_in_embedded_mode() {
-        let (specs, embeds) = embedded_fixture();
+        let (specs, _) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(caller = my_signer)]
             pub fn update(
@@ -1145,26 +1140,30 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+        apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None)
             .expect("signer naming is orthogonal to slot location");
     }
 
     #[test]
     fn dedicated_manual_kwargs_stay_allowed() {
-        let (specs, _) = embedded_fixture();
+        let (mut specs, _) = embedded_fixture();
+        // Dedicated mode: no embedded offset, so the location kwargs are
+        // the consumer's to write.
+        specs[0].embedded_offset = None;
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(gate_config = my_own, offset = 64)]
             pub fn update(value: u64) -> SpelResult {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &[], GateLocations::Emit, None)
+        apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None)
             .expect("without an embed decl the lockdown must not fire");
     }
 
     #[test]
     fn wrap_stamped_attr_carries_embedded_offset() {
         let specs = vec![InjectSpec {
+            embedded_offset: Some(OffsetSpec::Literal(32)),
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
                 name: "prog_config".to_string(),
@@ -1174,17 +1173,6 @@ mod tests {
                 embedded: false,
             }],
             source: "my_ext".to_string(),
-        }];
-        let embeds = vec![Embed {
-            source: "my_ext".to_string(),
-            carrier: None,
-            state_type: "my_ext::MyConfig".to_string(),
-            decl: crate::extension::EmbedDecl {
-                role: "gate_config".to_string(),
-                account: "prog_config".to_string(),
-                offset: OffsetSpec::Literal(32),
-                initializer: None,
-            },
         }];
         let wraps = active(vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
@@ -1197,15 +1185,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(
-            &mut func,
-            &wraps,
-            &specs,
-            &embeds,
-            GateLocations::Emit,
-            None,
-        )
-        .unwrap();
+        apply_wrap_and_inject(&mut func, &wraps, &specs, GateLocations::Emit, None).unwrap();
         let expected: Attribute =
             syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);
         assert_eq!(
@@ -1221,11 +1201,10 @@ mod tests {
     // Only the location kwarg differs, and only on tokens nobody reads.
     #[test]
     fn omitted_locations_inject_what_emitted_ones_do() {
-        let (specs, embeds) = embedded_fixture();
-        let mut resolved = embeds.clone();
-        resolved[0].decl.offset = OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".to_string());
-        let mut derived = embeds;
-        derived[0].decl.offset = OffsetSpec::Derived;
+        let (mut resolved, _) = embedded_fixture();
+        resolved[0].embedded_offset = Some(OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".to_string()));
+        let (mut derived, _) = embedded_fixture();
+        derived[0].embedded_offset = Some(OffsetSpec::Derived);
         let authored: ItemFn = syn::parse_quote!(
             #[my_gate]
             pub fn update(value: u64) -> SpelResult {
@@ -1234,19 +1213,12 @@ mod tests {
         );
 
         let mut dispatcher = authored.clone();
-        let emitted = apply_wrap_and_inject(
-            &mut dispatcher,
-            &[],
-            &specs,
-            &resolved,
-            GateLocations::Emit,
-            None,
-        )
-        .expect("the dispatcher takes a resolved derivation");
+        let emitted =
+            apply_wrap_and_inject(&mut dispatcher, &[], &resolved, GateLocations::Emit, None)
+                .expect("the dispatcher takes a resolved derivation");
         let mut idl = authored;
-        let omitted =
-            apply_wrap_and_inject(&mut idl, &[], &specs, &derived, GateLocations::Omit, None)
-                .expect("an IDL producer takes an unresolved one");
+        let omitted = apply_wrap_and_inject(&mut idl, &[], &derived, GateLocations::Omit, None)
+            .expect("an IDL producer takes an unresolved one");
 
         assert_eq!(emitted, omitted, "same params injected");
         assert_eq!(
@@ -1268,23 +1240,24 @@ mod tests {
     // reaches the dispatcher unresolved is still a framework bug.
     #[test]
     fn emitted_locations_still_refuse_an_unresolved_derivation() {
-        let (specs, mut embeds) = embedded_fixture();
-        embeds[0].decl.offset = OffsetSpec::Derived;
+        let (mut specs, _) = embedded_fixture();
+        specs[0].embedded_offset = Some(OffsetSpec::Derived);
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate]
             pub fn update(value: u64) -> SpelResult {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
-            .unwrap_err();
+        let err =
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap_err();
         assert!(err.contains("resolve_derived_offsets"), "got: {err}");
     }
 
     // Post-rewrite embedded state plus an active wrap: the shape every
     // auto-gate skip test below starts from.
-    fn embedded_wrap_fixture() -> (Vec<InjectSpec>, Vec<Embed>, Vec<ActiveWrap>) {
+    fn embedded_wrap_fixture() -> (Vec<InjectSpec>, Vec<ActiveWrap>) {
         let specs = vec![InjectSpec {
+            embedded_offset: Some(OffsetSpec::Literal(32)),
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
                 name: "prog_config".to_string(),
@@ -1295,31 +1268,20 @@ mod tests {
             }],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![Embed {
-            source: "my_ext".to_string(),
-            carrier: None,
-            state_type: "my_ext::MyConfig".to_string(),
-            decl: crate::extension::EmbedDecl {
-                role: "gate_config".to_string(),
-                account: "prog_config".to_string(),
-                offset: OffsetSpec::Literal(32),
-                initializer: None,
-            },
-        }];
         let wraps = active(vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
             skip: None,
             self_exempt_marker: "my_exempt".to_string(),
             exempt: vec![],
         }]);
-        (specs, embeds, wraps)
+        (specs, wraps)
     }
 
     // The fn creating the embedding account is never auto-gated: the
     // state the gate would decode cannot exist before this fn runs.
     #[test]
     fn embedding_creator_is_never_auto_gated() {
-        let (specs, embeds, wraps) = embedded_wrap_fixture();
+        let (specs, wraps) = embedded_wrap_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             pub fn initialize(
                 #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
@@ -1327,15 +1289,8 @@ mod tests {
                 todo!()
             }
         );
-        let injected = apply_wrap_and_inject(
-            &mut func,
-            &wraps,
-            &specs,
-            &embeds,
-            GateLocations::Emit,
-            None,
-        )
-        .unwrap();
+        let injected =
+            apply_wrap_and_inject(&mut func, &wraps, &specs, GateLocations::Emit, None).unwrap();
         assert!(
             func.attrs.iter().all(|a| !a.path().is_ident("my_gate")),
             "the embedding account's creator must not carry the gate"
@@ -1350,7 +1305,7 @@ mod tests {
     // block: only init on the gate's own account lifts the gate.
     #[test]
     fn creator_of_a_sibling_account_stays_gated() {
-        let (specs, embeds, wraps) = embedded_wrap_fixture();
+        let (specs, wraps) = embedded_wrap_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             pub fn create_item(
                 #[account(pda = literal("prog_config"))] prog_config: AccountWithMetadata,
@@ -1359,15 +1314,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(
-            &mut func,
-            &wraps,
-            &specs,
-            &embeds,
-            GateLocations::Emit,
-            None,
-        )
-        .unwrap();
+        apply_wrap_and_inject(&mut func, &wraps, &specs, GateLocations::Emit, None).unwrap();
         assert!(
             func.attrs
                 .first()
@@ -1383,7 +1330,7 @@ mod tests {
     // unit.
     #[test]
     fn authored_bare_gate_gets_injection_and_then_stamping() {
-        let (mut specs, embeds, _) = embedded_wrap_fixture();
+        let (mut specs, _) = embedded_wrap_fixture();
         specs[0].accounts.push(InjectAccount {
             name: "caller".to_string(),
             role: "caller".to_string(),
@@ -1401,8 +1348,7 @@ mod tests {
             }
         );
         let injected =
-            apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
-                .unwrap();
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap();
         assert_eq!(
             injected,
             vec!["caller".to_string()],
@@ -1426,7 +1372,7 @@ mod tests {
     // Pins that the `embedded` flag guards the skip.
     #[test]
     fn dedicated_mode_creator_stays_gated() {
-        let (mut specs, _, wraps) = embedded_wrap_fixture();
+        let (mut specs, wraps) = embedded_wrap_fixture();
         specs[0].accounts[0].embedded = false;
         let mut func: ItemFn = syn::parse_quote!(
             pub fn initialize(
@@ -1435,7 +1381,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &wraps, &specs, &[], GateLocations::Emit, None).unwrap();
+        apply_wrap_and_inject(&mut func, &wraps, &specs, GateLocations::Emit, None).unwrap();
         assert!(
             func.attrs
                 .first()
@@ -1447,6 +1393,7 @@ mod tests {
     #[test]
     fn substituted_role_param_takes_consumer_name_and_constraint() {
         let specs = vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
                 name: "prog_config".to_string(),
@@ -1469,7 +1416,6 @@ mod tests {
             &mut func,
             &[],
             &specs,
-            &[],
             GateLocations::Emit,
             Some("my_ext::ext_transfer"),
         )
@@ -1496,6 +1442,7 @@ mod tests {
     #[test]
     fn substitution_fires_when_embedding_account_shares_role_name() {
         let specs = vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
                 name: "gate_config".to_string(),
@@ -1517,7 +1464,6 @@ mod tests {
             &mut func,
             &[],
             &specs,
-            &[],
             GateLocations::Emit,
             Some("my_ext::ext_transfer"),
         )
@@ -1549,7 +1495,6 @@ mod tests {
             &mut func,
             &[],
             &specs,
-            &[],
             GateLocations::Emit,
             Some("my_ext::ext_transfer"),
         )
@@ -1663,6 +1608,7 @@ mod tests {
     use syn::Pat;
     fn gate_specs() -> Vec<InjectSpec> {
         vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             source: "ext-a".into(),
             accounts: vec![
@@ -1734,6 +1680,7 @@ mod tests {
     #[test]
     fn inject_emits_compound_pda_attr() {
         let specs = vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "other_gate".to_string(),
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
@@ -1799,6 +1746,7 @@ mod tests {
         // resolution, so `marker_account` remaps to `my_frozen` and no
         // injection happens.
         let specs = vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             source: "ext-c".into(),
             accounts: vec![
@@ -1838,6 +1786,7 @@ mod tests {
     fn two_specs_append_in_order_with_running_cursor() {
         let mut specs = gate_specs();
         specs.push(InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
@@ -1877,6 +1826,7 @@ mod tests {
     fn identical_shared_param_dedups_to_first_position() {
         let mut specs = gate_specs();
         specs.push(InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
@@ -1901,6 +1851,7 @@ mod tests {
     fn conflicting_shared_param_is_a_hard_error() {
         let mut specs = gate_specs();
         specs.push(InjectSpec {
+            embedded_offset: None,
             wrapper: "my_gate".to_string(),
             source: "ext-b".into(),
             accounts: vec![InjectAccount {
@@ -1930,6 +1881,7 @@ mod tests {
         // authored role param: substitution is global across extensions.
         // This is the admin-embedded cell of freeze's renounce.
         let specs = vec![InjectSpec {
+            embedded_offset: None,
             wrapper: "require_admin".to_string(),
             accounts: vec![InjectAccount {
                 name: "prog_config".to_string(),
@@ -1953,7 +1905,6 @@ mod tests {
             &mut func,
             &[],
             &specs,
-            &[],
             GateLocations::Emit,
             Some("freeze_authority::freeze_authority_renounce"),
         )
@@ -1973,6 +1924,7 @@ mod tests {
     fn same_account_same_offset_embeds_are_rejected() {
         let mut specs = vec![
             InjectSpec {
+                embedded_offset: None,
                 wrapper: "gate_a".to_string(),
                 accounts: vec![InjectAccount {
                     name: "cfg_a".to_string(),
@@ -1984,6 +1936,7 @@ mod tests {
                 source: "ext_a".to_string(),
             },
             InjectSpec {
+                embedded_offset: None,
                 wrapper: "gate_b".to_string(),
                 accounts: vec![InjectAccount {
                     name: "cfg_b".to_string(),
