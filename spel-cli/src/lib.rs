@@ -344,8 +344,10 @@ pub async fn run() {
                 return;
             },
             "generate-idl" => {
-                use generate_idl::{discover_sources, find_path_dep_dirs};
-                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
+                use generate_idl::discover_sources;
+                use spel_framework_core::{
+                    dep_walk::resolve_dep_graph, idl_gen::generate_idl_from_file_with_graph,
+                };
 
                 let arg = remaining_args.get(2).map(|s| s.as_str());
                 let sources = discover_sources(arg).unwrap_or_else(|e| {
@@ -353,16 +355,17 @@ pub async fn run() {
                     process::exit(1);
                 });
 
+                // One graph per source, serving both extension discovery
+                // and the account-type scan.
+                let resolve = |source: &std::path::Path| {
+                    resolve_dep_graph(source, true, &mut |w| eprintln!("{}", w))
+                };
+
                 if sources.len() == 1 {
-                    let dep_result = find_path_dep_dirs(&sources[0]);
-                    for w in &dep_result.warnings {
-                        eprintln!("{}", w);
-                    }
-                    match generate_idl_from_file_with_deps(
-                        &sources[0],
-                        &dep_result.dirs,
-                        &mut |w| eprintln!("{w}"),
-                    ) {
+                    let graph = resolve(&sources[0]);
+                    match generate_idl_from_file_with_graph(&sources[0], graph, &mut |w| {
+                        eprintln!("{w}")
+                    }) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -373,11 +376,8 @@ pub async fn run() {
                     // Multiple programs: write <name>-idl.json for each
                     let mut had_error = false;
                     for source in &sources {
-                        let dep_result = find_path_dep_dirs(source);
-                        for w in &dep_result.warnings {
-                            eprintln!("{}", w);
-                        }
-                        match generate_idl_from_file_with_deps(source, &dep_result.dirs, &mut |w| {
+                        let graph = resolve(source);
+                        match generate_idl_from_file_with_graph(source, graph, &mut |w| {
                             eprintln!("{w}")
                         }) {
                             Ok(idl) => {

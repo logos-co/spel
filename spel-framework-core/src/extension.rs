@@ -229,6 +229,26 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 ) -> Result<ProgramDeps, String> {
     let with_metadata = has_extension_marker_candidates(mod_attrs);
     let graph = crate::dep_walk::resolve_dep_graph(start, with_metadata, on_warning);
+    resolve_program_deps_with_graph(graph, mod_attrs, mod_items, on_warning)
+}
+
+/// [`resolve_program_deps`] over a graph the caller already resolved.
+///
+/// A producer that needs the graph for its own work hands it over
+/// rather than paying for a second `cargo metadata` of the same
+/// manifest. Discovery reads `direct_dirs`, so a graph resolved with
+/// metadata enabled satisfies every marker a self-resolved one would.
+///
+/// # Errors
+///
+/// The same as [`resolve_program_deps`].
+pub fn resolve_program_deps_with_graph<F: FnMut(String)>(
+    graph: crate::dep_walk::DepGraph,
+    mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
+    on_warning: &mut F,
+) -> Result<ProgramDeps, String> {
+    let with_metadata = has_extension_marker_candidates(mod_attrs);
     let extensions = if with_metadata {
         discover_extensions(&graph.direct_dirs, mod_attrs, mod_items, on_warning)?
     } else {
@@ -2000,6 +2020,84 @@ lib-no-meta = { path = "../lib-no-meta" }
             ),
         ];
         assert!(check_duplicate_instruction_names(pairs).is_ok());
+    }
+
+    // A producer holding a resolved graph hands it to IDL generation
+    // rather than paying for a second resolution of one manifest. The
+    // document must not depend on which entry point produced it.
+    #[test]
+    fn graph_entry_point_matches_the_dep_dirs_one() {
+        let tmp = TempDir::new("idl-graph-entry");
+        tmp.write(
+            "my-ext/Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        tmp.write(
+            "my-ext/src/lib.rs",
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+
+#[account_type]
+pub struct ExtState { pub v: u64 }
+"#,
+        );
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+"#,
+        );
+        tmp.write(
+            "user/src/main.rs",
+            r#"
+#[lez_program]
+#[my_ext]
+mod user_program {
+    #[instruction]
+    pub fn update_value(account: AccountWithMetadata, value: u64) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let source = tmp.path().join("user/src/main.rs");
+        let graph = crate::dep_walk::resolve_dep_graph(&source, true, &mut |_| {});
+        let dirs = graph.transitive_dirs.clone();
+
+        let from_graph =
+            crate::idl_gen::generate_idl_from_file_with_graph(&source, graph, &mut |_| {})
+                .expect("generation over a caller-supplied graph");
+        let from_dirs =
+            crate::idl_gen::generate_idl_from_file_with_deps(&source, &dirs, &mut |_| {})
+                .expect("generation that resolves its own graph");
+
+        assert_eq!(
+            serde_json::to_value(&from_graph).unwrap(),
+            serde_json::to_value(&from_dirs).unwrap(),
+            "the graph the caller supplies must not change the document"
+        );
+        assert!(
+            from_graph
+                .instructions
+                .iter()
+                .any(|i| i.name == "ext_action"),
+            "the extension's instruction must survive both paths: {:?}",
+            from_graph.instructions
+        );
     }
 
     #[test]

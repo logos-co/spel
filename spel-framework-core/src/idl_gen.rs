@@ -109,6 +109,37 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
         &source_path.display().to_string(),
         &extra_items,
         Some(source_path),
+        None,
+    )
+}
+
+/// Parse a SPEL program source file and return its [`SpelIdl`], over a
+/// dependency graph the caller already resolved.
+///
+/// The graph serves both halves of the work: extension discovery reads
+/// its `direct_dirs`, and the account types scanned into the IDL come
+/// from its `transitive_dirs`. A caller holding a graph passes it here
+/// instead of paying for a second `cargo metadata` of one manifest.
+///
+/// `on_warning` carries the same non-fatal notes as in
+/// [`generate_idl_from_file_with_deps`].
+///
+/// # Errors
+///
+/// The same as [`generate_idl_from_file_with_deps`].
+pub fn generate_idl_from_file_with_graph<F: FnMut(String)>(
+    source_path: &Path,
+    graph: crate::dep_walk::DepGraph,
+    on_warning: &mut F,
+) -> Result<SpelIdl, IdlGenError> {
+    let content = std::fs::read_to_string(source_path)?;
+    let (extra_items, _) = collect_items_from_crate_dirs(&graph.transitive_dirs, on_warning);
+    generate_idl_inner(
+        &content,
+        &source_path.display().to_string(),
+        &extra_items,
+        Some(source_path),
+        Some(graph),
     )
 }
 
@@ -118,7 +149,7 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 /// production code goes through `generate_idl_from_file_with_deps`.
 #[cfg(test)]
 fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, IdlGenError> {
-    generate_idl_inner(content, source_label, &[], None)
+    generate_idl_inner(content, source_label, &[], None, None)
 }
 
 /// Core IDL generation logic. `extra_items` are synthetic items collected from
@@ -129,6 +160,7 @@ fn generate_idl_inner(
     source_label: &str,
     extra_items: &[syn::Item],
     manifest_dir: Option<&Path>,
+    graph: Option<crate::dep_walk::DepGraph>,
 ) -> Result<SpelIdl, IdlGenError> {
     let path_str = source_label.to_string();
 
@@ -160,12 +192,20 @@ fn generate_idl_inner(
     let mut warn = |w: String| eprintln!("⚠️  {w}");
     let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
         Some(manifest_dir) => {
-            let mut deps = crate::extension::resolve_program_deps(
-                manifest_dir,
-                &program_mod.attrs,
-                items,
-                &mut warn,
-            )
+            let mut deps = match graph {
+                Some(graph) => crate::extension::resolve_program_deps_with_graph(
+                    graph,
+                    &program_mod.attrs,
+                    items,
+                    &mut warn,
+                ),
+                None => crate::extension::resolve_program_deps(
+                    manifest_dir,
+                    &program_mod.attrs,
+                    items,
+                    &mut warn,
+                ),
+            }
             .map_err(IdlGenError::MalformedExtensionMetadata)?;
             let consumer_fns: Vec<ItemFn> = items
                 .iter()
