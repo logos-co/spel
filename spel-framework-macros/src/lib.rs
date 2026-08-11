@@ -320,7 +320,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    let mut deps = spel_framework_core::extension::resolve_program_deps(
+    let deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &input.attrs,
         items,
@@ -329,47 +329,28 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let mut slot_assert = proc_macro2::TokenStream::new();
     let module_source = locate_module_source(mod_name);
+    if module_source.is_none() && !deps.extensions.embeds.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embedded markers are declared but the module's source file \
+            could not be located, so slot offsets cannot be resolved and \
+            the slot checks cannot be emitted; refusing to compile rather \
+            than skip them silently",
+        ));
+    }
     // The binding scan set, built once: offset resolution and the
     // agreement asserts bind roles to carriers against the same items.
     let scan_items: Vec<syn::Item> = module_source
         .as_ref()
         .map(|(path, _)| slot_offsets::consumer_scan_items(path))
         .unwrap_or_default();
-    match &module_source {
-        Some(_) => {
-            spel_framework_core::extension::resolve_derived_offsets(
-                &mut deps.extensions,
-                &scan_items,
-            )
-            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-        },
-        None if !deps.extensions.embeds.is_empty() => {
-            return Err(syn::Error::new(
-                proc_macro2::Span::call_site(),
-                "embedded markers are declared but the module's source file \
-                could not be located, so slot offsets cannot be resolved and \
-                the slot checks cannot be emitted; refusing to compile rather \
-                than skip them silently",
-            ));
-        },
-        None => {},
-    }
-    let bound_calls = deps.extensions.bound_calls.clone();
-    let consumer_fns: Vec<ItemFn> = items
-        .iter()
-        .filter_map(|i| match i {
-            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-            _ => None,
-        })
-        .collect();
-    spel_framework_core::extension::rewrite_embedded_roles(
-        &mut deps.extensions.inject_specs,
-        &deps.extensions.embeds,
-        &consumer_fns,
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-
-    let active_wraps: Vec<_> = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
+    let mut program = deps
+        .prepare(
+            items,
+            spel_framework_core::extension::Carriers::Resolve(&scan_items),
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let bound_calls = program.bound_calls.clone();
 
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -380,15 +361,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
                     let mut func = func.clone();
-                    let injected = spel_framework_core::extension::apply_wrap_and_inject(
-                        &mut func,
-                        &active_wraps,
-                        &deps.extensions.inject_specs,
-                        &deps.extensions.embeds,
-                        spel_framework_core::extension::GateLocations::Emit,
-                        None,
-                    )
-                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                    let injected = program
+                        .gate(&mut func, None)
+                        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                     let mut info = parse_instruction(func)?;
                     info.injected = injected;
                     instructions.push(info);
@@ -409,28 +384,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         ));
     }
 
-    for (func, crate_path) in deps.extensions.instructions {
-        let mut func = func;
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        spel_framework_core::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &deps.extensions.inject_specs,
-            &deps.extensions.embeds,
-            spel_framework_core::extension::GateLocations::Emit,
-            Some(&qualified),
-        )
-        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
-        let name = &info.fn_name;
+        let (crate_path, name) = (&ext.crate_path, &info.fn_name);
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }
@@ -572,16 +532,16 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             // Also include items from path-dependency crates, so types defined in
             // extension libraries (account types, instruction-arg types) reach the IDL.
             let (extra_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-                &deps.graph.transitive_dirs,
+                &program.graph.transitive_dirs,
                 |w| eprintln!("warning: {w}"),
             );
             all_items.extend(extra_items);
             slot_assert.extend(slot_offsets::emit_agreement_asserts(
                 &scan_items,
-                &deps.extensions.embeds,
+                &program.embeds,
             )?);
             slot_assert.extend(slot_offsets::embed_window_collision_asserts(
-                &deps.extensions.embeds,
+                &program.embeds,
             )?);
             account_types::collect_account_types(&all_items)
         },
@@ -2366,30 +2326,16 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    let mut deps = spel_framework_core::extension::resolve_program_deps(
+    // `Carriers::Skip`: `generate_idl!` emits IDL JSON, which carries no
+    // offset, so nothing here could read a resolved derivation.
+    let mut program = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &program_mod.attrs,
         items,
         &mut |_| {},
     )
+    .and_then(|deps| deps.prepare(items, spel_framework_core::extension::Carriers::Skip))
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    // No carrier scan here: `generate_idl!` emits IDL JSON, which
-    // carries no offset, so the derivations stay unresolved and the
-    // gate pass runs under `spel_framework_core::extension::GateLocations::Omit`.
-    let consumer_fns: Vec<ItemFn> = items
-        .iter()
-        .filter_map(|i| match i {
-            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-            _ => None,
-        })
-        .collect();
-    spel_framework_core::extension::rewrite_embedded_roles(
-        &mut deps.extensions.inject_specs,
-        &deps.extensions.embeds,
-        &consumer_fns,
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    let active_wraps = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
 
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -2397,15 +2343,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                let injected = spel_framework_core::extension::apply_wrap_and_inject(
-                    &mut func,
-                    &active_wraps,
-                    &deps.extensions.inject_specs,
-                    &deps.extensions.embeds,
-                    spel_framework_core::extension::GateLocations::Omit,
-                    None,
-                )
-                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                let injected = program
+                    .gate(&mut func, None)
+                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                 let mut info = parse_instruction(func)?;
                 info.injected = injected;
                 instructions.push(info);
@@ -2420,26 +2360,12 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         ));
     }
 
-    for (func, crate_path) in deps.extensions.instructions {
-        let mut func = func.clone();
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        spel_framework_core::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &deps.extensions.inject_specs,
-            &deps.extensions.embeds,
-            spel_framework_core::extension::GateLocations::Omit,
-            Some(&qualified),
-        )
-        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        let crate_path = ext.crate_path;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -2490,7 +2416,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // depends on it via `path = "..."`.
     let (extra_items, dep_source_files) =
         spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-            &deps.graph.transitive_dirs,
+            &program.graph.transitive_dirs,
             |w| eprintln!("warning: {w}"),
         );
     all_items.extend(extra_items);

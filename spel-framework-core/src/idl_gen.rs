@@ -190,51 +190,28 @@ fn generate_idl_inner(
     // Resolve the dependency side first: inject specs apply to the
     // consumer's own instructions below.
     let mut warn = |w: String| eprintln!("⚠️  {w}");
-    let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
-        Some(manifest_dir) => {
-            let mut deps = match graph {
-                Some(graph) => crate::extension::resolve_program_deps_with_graph(
-                    graph,
-                    &program_mod.attrs,
-                    items,
-                    &mut warn,
-                ),
-                None => crate::extension::resolve_program_deps(
-                    manifest_dir,
-                    &program_mod.attrs,
-                    items,
-                    &mut warn,
-                ),
-            }
-            .map_err(IdlGenError::MalformedExtensionMetadata)?;
-            let consumer_fns: Vec<ItemFn> = items
-                .iter()
-                .filter_map(|i| match i {
-                    syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-                    _ => None,
-                })
-                .collect();
-            // Derived offsets stay unresolved on this path. The IDL has
-            // no offset field and the gate attrs are dropped by
-            // `parse_instruction`, so resolving one would mean scanning
-            // the consumer's crate for a slot carrier to compute a value
-            // nothing here can read. The gate pass runs under
-            // `GateLocations::Omit` for the same reason.
-            crate::extension::rewrite_embedded_roles(
-                &mut deps.extensions.inject_specs,
-                &deps.extensions.embeds,
-                &consumer_fns,
-            )
-            .map_err(IdlGenError::MalformedExtensionMetadata)?;
-            let active_wraps = crate::extension::active_wraps(&deps.extensions.wraps);
-            (
-                deps.extensions.instructions,
-                deps.extensions.inject_specs,
-                active_wraps,
-                deps.extensions.embeds,
-            )
-        },
-        None => (vec![], vec![], vec![], vec![]),
+    // `Carriers::Skip`: the IDL has no offset field and the gate attrs
+    // are dropped by `parse_instruction`, so a resolved derivation could
+    // not reach this output, and resolving one would mean scanning the
+    // consumer's crate for a slot carrier to compute a dead value.
+    let mut program = match manifest_dir {
+        Some(manifest_dir) => match graph {
+            Some(graph) => crate::extension::resolve_program_deps_with_graph(
+                graph,
+                &program_mod.attrs,
+                items,
+                &mut warn,
+            ),
+            None => crate::extension::resolve_program_deps(
+                manifest_dir,
+                &program_mod.attrs,
+                items,
+                &mut warn,
+            ),
+        }
+        .and_then(|deps| deps.prepare(items, crate::extension::Carriers::Skip))
+        .map_err(IdlGenError::MalformedExtensionMetadata)?,
+        None => crate::extension::PreparedProgram::default(),
     };
 
     // Collect instruction functions
@@ -243,15 +220,9 @@ fn generate_idl_inner(
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                crate::extension::apply_wrap_and_inject(
-                    &mut func,
-                    &active_wraps,
-                    &inject_specs,
-                    &embeds,
-                    crate::extension::GateLocations::Omit,
-                    None,
-                )
-                .map_err(IdlGenError::MalformedExtensionMetadata)?;
+                program
+                    .gate(&mut func, None)
+                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
                 instructions.push(parse_instruction(func)?);
             }
         }
@@ -261,28 +232,13 @@ fn generate_idl_inner(
         return Err(IdlGenError::NoInstructions(path_str));
     }
 
-    for (func, crate_path) in ext_instructions {
-        let mut func = func;
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        crate::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &inject_specs,
-            &embeds,
-            crate::extension::GateLocations::Omit,
-            Some(&qualified),
-        )
-        .map_err(IdlGenError::MalformedExtensionMetadata)?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
         let mut info = parse_instruction(func)?;
-        let name = &info.fn_name;
+        let (crate_path, name) = (&ext.crate_path, &info.fn_name);
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }

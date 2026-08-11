@@ -129,6 +129,147 @@ pub struct ProgramDeps {
     pub extensions: ExtensionDiscoveries,
 }
 
+/// Whether a producer resolves derived offsets, and against what.
+///
+/// The two halves of that question always had one answer and were
+/// asked separately: a producer that resolves carriers is the one that
+/// writes location kwargs, and a producer that does not resolve must
+/// not write them. Passing this to [`ProgramDeps::prepare`] settles
+/// both at once.
+pub enum Carriers<'a> {
+    /// Resolve every derivation against these items, then write
+    /// locations onto the gate attrs. The dispatcher's answer.
+    Resolve(&'a [syn::Item]),
+    /// Leave derivations unresolved and write no locations. The IDL
+    /// producers' answer: the IDL has no offset field, so a resolved
+    /// one could not reach their output.
+    Skip,
+}
+
+/// An extension-provided instruction fn, ready for the gate pass.
+pub struct PreparedInstruction {
+    pub func: ItemFn,
+    /// Absolute path to the declaring crate, e.g. `::admin_authority`.
+    pub crate_path: syn::Path,
+    /// `crate::fn_name`, the form a wrap's `exempt` list matches.
+    pub qualified: String,
+}
+
+/// The dependency side of a program, in the state the gate pass wants.
+///
+/// [`ProgramDeps::prepare`] is the only way to build one, so the passes
+/// that must precede the gate pass cannot be run out of order, skipped,
+/// or applied with mismatched arguments: [`PreparedProgram::gate`]
+/// supplies the specs, embeds, wraps, and location mode together.
+#[derive(Default)]
+pub struct PreparedProgram {
+    /// The dependency graph, for callers that scan dependency sources.
+    pub graph: crate::dep_walk::DepGraph,
+    /// Gate param inject specs, embedded roles already rewritten.
+    pub inject_specs: Vec<InjectSpec>,
+    /// Embedded-mode declarations, offsets resolved under
+    /// [`Carriers::Resolve`].
+    pub embeds: Vec<Embed>,
+    /// Wrap configs the consumer's marker args did not skip.
+    pub active_wraps: Vec<WrapInstructions>,
+    /// Dispatch-only trailing args per discovered fn.
+    pub bound_calls: HashMap<String, Vec<BoundValue>>,
+    /// Instruction fns the extensions contribute.
+    pub instructions: Vec<PreparedInstruction>,
+    /// Whether the gate pass writes location kwargs, decided with the
+    /// carriers rather than separately at each call site.
+    pub locations: GateLocations,
+}
+
+impl PreparedProgram {
+    /// Run the gate pass over one instruction fn.
+    ///
+    /// `qualified = None` for a consumer-authored fn, `Some` for an
+    /// extension-provided one (see [`apply_wrap_and_inject`]).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`apply_wrap_and_inject`].
+    pub fn gate(&self, func: &mut ItemFn, qualified: Option<&str>) -> Result<Vec<String>, String> {
+        apply_wrap_and_inject(
+            func,
+            &self.active_wraps,
+            &self.inject_specs,
+            &self.embeds,
+            self.locations,
+            qualified,
+        )
+    }
+}
+
+impl ProgramDeps {
+    /// Run every pass the gate pass depends on, in the one order that
+    /// works: resolve derivations, rewrite embedded roles against the
+    /// consumer's own instructions, then filter the wraps the marker
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when a derivation has no slot carrier, when an embedded
+    /// role matches no inject account, when the embedding account has
+    /// no canonical declaration, or when two embeds collide. Callers
+    /// surface it as a compile error.
+    pub fn prepare(
+        mut self,
+        mod_items: &[syn::Item],
+        carriers: Carriers<'_>,
+    ) -> Result<PreparedProgram, String> {
+        let locations = match carriers {
+            Carriers::Resolve(items) => {
+                resolve_derived_offsets(&mut self.extensions, items)?;
+                GateLocations::Emit
+            },
+            Carriers::Skip => GateLocations::Omit,
+        };
+
+        let consumer_fns = collect_instruction_fns(mod_items);
+        rewrite_embedded_roles(
+            &mut self.extensions.inject_specs,
+            &self.extensions.embeds,
+            &consumer_fns,
+        )?;
+
+        let instructions = self
+            .extensions
+            .instructions
+            .into_iter()
+            .map(|(func, crate_path)| PreparedInstruction {
+                qualified: qualified_instruction_name(&crate_path, &func.sig.ident),
+                func,
+                crate_path,
+            })
+            .collect();
+
+        Ok(PreparedProgram {
+            graph: self.graph,
+            active_wraps: active_wraps(&self.extensions.wraps),
+            inject_specs: self.extensions.inject_specs,
+            embeds: self.extensions.embeds,
+            bound_calls: self.extensions.bound_calls,
+            instructions,
+            locations,
+        })
+    }
+}
+
+/// The `crate::fn_name` form a wrap's `exempt` list matches, built from
+/// the declaring crate's path and the fn's own name.
+fn qualified_instruction_name(crate_path: &syn::Path, fn_name: &syn::Ident) -> String {
+    format!(
+        "{}::{fn_name}",
+        crate_path
+            .segments
+            .first()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default()
+    )
+}
+
 /// One component of an injected account's PDA seed.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InjectSeed {
@@ -568,7 +709,7 @@ pub fn read_inject_specs(crate_dir: &Path) -> Result<Vec<InjectSpec>, String> {
 /// Used by framework codegen to pull instruction definitions out of
 /// extension libraries (e.g. admin-authority) that ship pre-defined
 /// instructions to be merged into a consuming program's IDL + dispatcher.
-fn collect_instruction_fns(items: &[syn::Item]) -> Vec<ItemFn> {
+pub fn collect_instruction_fns(items: &[syn::Item]) -> Vec<ItemFn> {
     items
         .iter()
         .filter_map(|it| match it {
@@ -2037,6 +2178,24 @@ lib-no-meta = { path = "../lib-no-meta" }
     // A producer holding a resolved graph hands it to IDL generation
     // rather than paying for a second resolution of one manifest. The
     // document must not depend on which entry point produced it.
+    #[test]
+    // Resolving carriers and writing locations were once two decisions
+    // a producer made separately, and a producer that got them out of
+    // step either wrote an unresolved offset or scanned for a carrier it
+    // had no use for. One answer now settles both.
+    #[test]
+    fn carriers_decide_whether_locations_are_written() {
+        let prepared = ProgramDeps::default()
+            .prepare(&[], Carriers::Resolve(&[]))
+            .expect("nothing to resolve");
+        assert_eq!(prepared.locations, GateLocations::Emit);
+
+        let prepared = ProgramDeps::default()
+            .prepare(&[], Carriers::Skip)
+            .expect("nothing to resolve");
+        assert_eq!(prepared.locations, GateLocations::Omit);
+    }
+
     #[test]
     fn graph_entry_point_matches_the_dep_dirs_one() {
         let tmp = TempDir::new("idl-graph-entry");

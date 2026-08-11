@@ -35,12 +35,14 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
 /// resolve a slot carrier no output of theirs can observe. Injection is
 /// unaffected either way, the prepended attr activates specs in both
 /// its bare and its kwarg-carrying form.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum GateLocations {
     /// Write `offset = ...`. An unresolved derivation reaching this
     /// producer is a framework bug and fails closed.
     Emit,
     /// Leave it off. Offsets may arrive unresolved; nothing reads them.
+    /// The default: writing a location is the choice that needs making.
+    #[default]
     Omit,
 }
 
