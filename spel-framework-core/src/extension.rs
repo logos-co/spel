@@ -830,47 +830,16 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
     #[test]
     fn discover_extension_instructions_picks_up_matching_ext() {
         let tmp = TempDir::new("discover-match");
-
-        // Extension crate at <tmp>/my-ext/
-        tmp.write(
-            "my-ext/Cargo.toml",
+        let mod_attrs = ext_fixture(
+            &tmp,
             r#"
-[package]
-name = "my-ext"
-version = "0.1.0"
-edition = "2021"
-
 [package.metadata.spel]
 extension_attr = "my_ext"
 "#,
-        );
-        tmp.write(
-            "my-ext/src/lib.rs",
             r#"
 #[instruction]
 pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
-        );
-
-        // User crate at <tmp>/user/ depending on my-ext
-        tmp.write(
-            "user/Cargo.toml",
-            r#"
-[package]
-name = "user"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-my-ext = { path = "../my-ext" }
-"#,
-        );
-        tmp.write("user/src/lib.rs", "");
-
-        // mod_attrs simulating: #[lez_program] #[my_ext] mod user { ... }
-        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
-            #[lez_program]
-            #[my_ext]
         );
 
         let found =
@@ -2064,37 +2033,16 @@ extension_attr = "my_ext"
     #[test]
     fn discover_extension_instructions_skips_when_attr_absent_on_mod() {
         let tmp = TempDir::new("discover-skip-attr");
-
-        tmp.write(
-            "my-ext/Cargo.toml",
+        // The fixture's own marker attrs are discarded: this test is
+        // about a module that carries no extension marker at all.
+        ext_fixture(
+            &tmp,
             r#"
-[package]
-name = "my-ext"
-version = "0.1.0"
-edition = "2021"
-
 [package.metadata.spel]
 extension_attr = "my_ext"
 "#,
-        );
-        tmp.write(
-            "my-ext/src/lib.rs",
             r#"#[instruction] pub fn ext_action() -> SpelResult { todo!() }"#,
         );
-        tmp.write(
-            "user/Cargo.toml",
-            r#"
-[package]
-name = "user"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-my-ext = { path = "../my-ext" }
-"#,
-        );
-        tmp.write("user/src/lib.rs", "");
-
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
 
         let found =
@@ -2175,14 +2123,9 @@ lib-no-meta = { path = "../lib-no-meta" }
         assert!(check_duplicate_instruction_names(pairs).is_ok());
     }
 
-    // A producer holding a resolved graph hands it to IDL generation
-    // rather than paying for a second resolution of one manifest. The
-    // document must not depend on which entry point produced it.
-    #[test]
-    // Resolving carriers and writing locations were once two decisions
-    // a producer made separately, and a producer that got them out of
-    // step either wrote an unresolved offset or scanned for a carrier it
-    // had no use for. One answer now settles both.
+    // Resolving carriers and writing location kwargs are one decision:
+    // a producer that writes a location is exactly the one that resolved
+    // the carrier it names.
     #[test]
     fn carriers_decide_whether_locations_are_written() {
         let prepared = ProgramDeps::default()
@@ -2196,6 +2139,9 @@ lib-no-meta = { path = "../lib-no-meta" }
         assert_eq!(prepared.locations, GateLocations::Omit);
     }
 
+    // A producer holding a resolved graph hands it to IDL generation
+    // instead of paying for a second resolution of one manifest. The
+    // document must not depend on which entry point produced it.
     #[test]
     fn graph_entry_point_matches_the_dep_dirs_one() {
         let tmp = TempDir::new("idl-graph-entry");

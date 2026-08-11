@@ -340,8 +340,19 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     }
     // The binding scan set, built once: offset resolution and the
     // agreement asserts bind roles to carriers against the same items.
+    // Only a program with an embed or a derived bound value has a role
+    // to bind, and the scan reads the consumer's sources and every local
+    // path dependency, so a program with neither skips it.
+    let binds_a_carrier = !deps.extensions.embeds.is_empty()
+        || deps.extensions.bound_calls.values().flatten().any(|v| {
+            matches!(
+                v,
+                spel_framework_core::extension::BoundValue::Derived { .. }
+            )
+        });
     let scan_items: Vec<syn::Item> = module_source
         .as_ref()
+        .filter(|_| binds_a_carrier)
         .map(|(path, _)| slot_offsets::consumer_scan_items(path))
         .unwrap_or_default();
     let mut program = deps

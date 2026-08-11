@@ -42,6 +42,42 @@ pub struct DepGraph {
     pub metadata_failure: Option<String>,
 }
 
+/// The `[dependencies]` entries carrying a `path`, as directories.
+///
+/// An entry pointing somewhere that is not a directory warns and is
+/// dropped, so both walks agree on what counts as a usable path dep.
+fn path_dep_dirs_of<F: FnMut(String)>(
+    value: &toml::Value,
+    manifest_dir: &Path,
+    on_warning: &mut F,
+) -> Vec<PathBuf> {
+    let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for (name, dep) in table {
+        let Some(rel) = dep.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let dir = manifest_dir.join(rel);
+        if dir.is_dir() {
+            dirs.push(dir);
+        } else {
+            on_warning(format!(
+                "path dependency '{name}' points to non-existent directory: {}",
+                dir.display()
+            ));
+        }
+    }
+    dirs
+}
+
+/// A path in canonical form, or unchanged when it cannot be resolved.
+/// Used as the dedup key throughout the walk.
+fn canonical_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
 /// Parsed and validated `Cargo.toml`, or `None` after warning.
 fn read_manifest_toml<F: FnMut(String)>(
     manifest: &Path,
@@ -131,23 +167,7 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
     resolve_path_deps_recursive(&manifest, &mut transitive_dirs, &mut visited, on_warning);
 
     // Direct path deps straight from the [dependencies] table.
-    let mut direct_dirs = Vec::new();
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dir = manifest_dir.join(rel);
-                if dir.is_dir() {
-                    direct_dirs.push(dir);
-                } else {
-                    on_warning(format!(
-                        "path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dir.display()
-                    ));
-                }
-            }
-        }
-    }
+    let mut direct_dirs = path_dep_dirs_of(&value, &manifest_dir, on_warning);
 
     // One subprocess feeds both merges.
     let mut metadata_failure = None;
@@ -155,17 +175,15 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         match cargo_metadata_json(&manifest, on_warning) {
             Some(meta) => {
                 for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
-                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    let canonical = canonical_key(&dir);
                     if visited.insert(canonical) {
                         transitive_dirs.push(dir);
                     }
                 }
-                let mut seen: HashSet<PathBuf> = direct_dirs
-                    .iter()
-                    .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
-                    .collect();
+                let mut seen: HashSet<PathBuf> =
+                    direct_dirs.iter().map(|d| canonical_key(d)).collect();
                 for dir in direct_normal_dep_dirs(&meta, &manifest) {
-                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    let canonical = canonical_key(&dir);
                     if seen.insert(canonical) {
                         direct_dirs.push(dir);
                     }
@@ -329,12 +347,7 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
         None => return,
     };
 
-    // Deduplicate by canonical path.
-    let canonical = match &manifest_dir.canonicalize() {
-        Ok(c) => c.clone(),
-        Err(_) => manifest_dir.clone(),
-    };
-    if !visited.insert(canonical) {
+    if !visited.insert(canonical_key(&manifest_dir)) {
         return; // already processed — cycle or duplicate
     }
 
@@ -347,34 +360,16 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
         return;
     }
 
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dep_dir = manifest_dir.join(rel);
-                if !dep_dir.is_dir() {
-                    on_warning(format!(
-                        "⚠️  path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dep_dir.display()
-                    ));
-                    continue;
-                }
-                // Deduplicate by canonical path.
-                let canonical = match &dep_dir.canonicalize() {
-                    Ok(c) => c.clone(),
-                    Err(_) => dep_dir.clone(),
-                };
-                if visited.contains(&canonical) {
-                    continue;
-                }
-                dirs.push(dep_dir.clone());
+    for dep_dir in path_dep_dirs_of(&value, &manifest_dir, on_warning) {
+        if visited.contains(&canonical_key(&dep_dir)) {
+            continue;
+        }
+        dirs.push(dep_dir.clone());
 
-                // Recurse into the dependency's own Cargo.toml for transitive deps.
-                let dep_manifest = dep_dir.join("Cargo.toml");
-                if dep_manifest.exists() {
-                    resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
-                }
-            }
+        // Recurse into the dependency's own Cargo.toml for transitive deps.
+        let dep_manifest = dep_dir.join("Cargo.toml");
+        if dep_manifest.exists() {
+            resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
         }
     }
 }

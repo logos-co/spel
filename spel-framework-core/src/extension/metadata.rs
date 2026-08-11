@@ -394,6 +394,15 @@ pub(super) fn read_spel_embedded(
     };
 
     let state_type = opt_string("state_type")?;
+    // Checked here so a typo is reported against the manifest that
+    // carries it, in the same family as every other shape error.
+    if let Some(raw) = &state_type {
+        syn::parse_str::<syn::Path>(raw).map_err(|e| {
+            malformed(&format!(
+                "embedded.state_type {raw:?} is not a type path: {e}"
+            ))
+        })?;
+    }
     let anchor = match (opt_string("anchor_attr")?, opt_string("anchor_role")?) {
         (Some(attr), Some(role)) => Some(EmbedAnchor { attr, role }),
         (None, None) => None,
@@ -795,6 +804,30 @@ extension_attr = "my_ext"
         assert_eq!(
             read_spel_embedded(&value, tmp.path()),
             Ok(EmbeddedMeta::default())
+        );
+    }
+
+    // The extension author's own build is where a malformed state type
+    // is cheapest to fix, and where the offending manifest is named.
+    #[test]
+    fn state_type_that_is_not_a_type_path_is_refused() {
+        let tmp = TempDir::new("embedded-bad-state-type");
+        tmp.write(
+            "Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+
+[package.metadata.spel.embedded]
+state_type = "not a path!!"
+"#,
+        );
+        let value = read_manifest_value(tmp.path()).unwrap();
+        let err = read_spel_embedded(&value, tmp.path()).expect_err("must refuse");
+        assert!(
+            err.contains("not a path!!") && err.contains("Cargo.toml"),
+            "the error must name the value and the manifest: {err}"
         );
     }
 
