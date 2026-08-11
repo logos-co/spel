@@ -26,6 +26,63 @@ pub enum BoundValue {
     Path(String),
 }
 
+impl OffsetSpec {
+    /// The offset as an expression: the declared literal, or the
+    /// carrier's const path once a derivation is resolved. `subject`
+    /// names the role or extension for the unresolved-offset message.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the spec is still `Derived`, which means the
+    /// resolution pass never ran, or when a resolved path does not
+    /// parse as an expression.
+    pub fn to_expr(&self, subject: &str) -> Result<syn::Expr, String> {
+        match self {
+            OffsetSpec::Literal(n) => Ok(literal_offset_expr(*n)),
+            OffsetSpec::Path(p) => const_path_expr(p),
+            OffsetSpec::Derived => Err(unresolved_offset(subject)),
+        }
+    }
+}
+
+impl BoundValue {
+    /// The bound value as an expression, by the same lowering embedded
+    /// offsets take: the dispatcher's call argument and the marker's
+    /// gate kwarg can never render one derivation two ways.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the value is still `Derived`, which means the
+    /// resolution pass never ran, or when a resolved path does not
+    /// parse as an expression.
+    pub fn to_expr(&self) -> Result<syn::Expr, String> {
+        match self {
+            BoundValue::Literal(n) => Ok(literal_offset_expr(*n)),
+            BoundValue::Path(p) => const_path_expr(p),
+            BoundValue::Derived { role } => Err(unresolved_offset(role)),
+        }
+    }
+}
+
+/// A byte count as an unsuffixed integer expression.
+fn literal_offset_expr(n: usize) -> syn::Expr {
+    let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
+    syn::parse_quote!(#lit)
+}
+
+/// A resolved carrier path (`Cfg::MY_SLOT_OFFSET`) as an expression.
+fn const_path_expr(path: &str) -> Result<syn::Expr, String> {
+    syn::parse_str(path)
+        .map_err(|e| format!("resolved carrier path {path:?} is not an expression: {e}"))
+}
+
+fn unresolved_offset(subject: &str) -> String {
+    format!(
+        "`{subject}` reached emission with an unresolved derived \
+        offset; `resolve_derived_offsets` must run after discovery"
+    )
+}
+
 /// Embedded-mode declaration parsed from a module marker's kwargs,
 /// `#[admin_authority(admin_config = prog_config, offset = 32)]`:
 /// the inject role `admin_config` lives inside the consumer account
@@ -305,7 +362,7 @@ fn is_marker_candidate(ident: &str) -> bool {
 
 /// The attr's last path segment equals `name`, matching the bare
 /// re-export form and qualified `admin_authority::admin_initialize`.
-fn attr_is(attr: &Attribute, name: &str) -> bool {
+pub(super) fn attr_is(attr: &Attribute, name: &str) -> bool {
     attr.path().segments.last().is_some_and(|s| s.ident == name)
 }
 

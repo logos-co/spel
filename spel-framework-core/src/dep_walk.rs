@@ -338,27 +338,8 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
         return; // already processed — cycle or duplicate
     }
 
-    let content = match std::fs::read_to_string(manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
+    let Some(value) = read_manifest_toml(manifest, on_warning) else {
+        return;
     };
 
     // Skip workspace roots — they have no [dependencies].

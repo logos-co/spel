@@ -186,6 +186,17 @@ struct AccountParam {
     is_rest: bool,
 }
 
+impl spel_framework_core::idl_gen::MergeableAccount for AccountParam {
+    fn param_name(&self) -> &Ident {
+        &self.name
+    }
+
+    fn merge_constraints(&mut self, repeat: &Self) {
+        self.constraints.mutable |= repeat.constraints.mutable;
+        self.constraints.signer |= repeat.constraints.signer;
+    }
+}
+
 #[derive(Default)]
 struct AccountConstraints {
     mutable: bool,
@@ -318,11 +329,19 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let mut slot_assert = proc_macro2::TokenStream::new();
     let module_source = locate_module_source(mod_name);
+    // The binding scan set, built once: offset resolution and the
+    // agreement asserts bind roles to carriers against the same items.
+    let scan_items: Vec<syn::Item> = module_source
+        .as_ref()
+        .map(|(path, _)| slot_offsets::consumer_scan_items(path))
+        .unwrap_or_default();
     match &module_source {
-        Some((path, _)) => {
-            let scan = slot_offsets::consumer_scan_items(path);
-            spel_framework_core::extension::resolve_derived_offsets(&mut deps.extensions, &scan)
-                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+        Some(_) => {
+            spel_framework_core::extension::resolve_derived_offsets(
+                &mut deps.extensions,
+                &scan_items,
+            )
+            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         },
         None if !deps.extensions.embeds.is_empty() => {
             return Err(syn::Error::new(
@@ -537,7 +556,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     // source: its top-level items, the module body, and path-dependency
     // crate items so extension-library types reach the IDL.
     let (accounts, types) = match &module_source {
-        Some((guest_path, parsed_file)) => {
+        Some((_, parsed_file)) => {
             let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
             for item in &parsed_file.items {
                 if let syn::Item::Mod(m) = item {
@@ -556,7 +575,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             );
             all_items.extend(extra_items);
             slot_assert.extend(slot_offsets::emit_agreement_asserts(
-                guest_path,
+                &scan_items,
                 &deps.extensions.embeds,
             )?);
             slot_assert.extend(slot_offsets::embed_window_collision_asserts(
@@ -680,17 +699,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     }
 
     let call_accounts: Vec<Ident> = accounts.iter().map(|a| a.name.clone()).collect();
-    let mut deduped: Vec<AccountParam> = Vec::new();
-    for a in accounts {
-        match deduped.iter_mut().find(|d| d.name == a.name) {
-            Some(kept) => {
-                kept.constraints.mutable |= a.constraints.mutable;
-                kept.constraints.signer |= a.constraints.signer;
-            },
-            None => deduped.push(a),
-        }
-    }
-    let accounts = deduped;
+    let accounts = spel_framework_core::idl_gen::merge_duplicate_accounts(accounts);
 
     Ok(InstructionInfo {
         fn_name,
@@ -1278,11 +1287,14 @@ impl<'a> ExecuteTransformer<'a> {
 
     /// Post-state clones for the injected params, in accounts order.
     /// Injected params never appear in a consumer-authored accounts
-    /// expression, the consumer does not know they exist.
-    fn injected_clones(&self) -> Vec<TokenStream2> {
+    /// expression, the consumer does not know they exist. `skip` names
+    /// the accounts the body already lists, so an injected param a
+    /// consumer happens to name is cloned once.
+    fn injected_clones(&self, skip: &[Ident]) -> Vec<TokenStream2> {
         self.accounts
             .iter()
             .filter(|a| self.injected.iter().any(|n| a.name == *n))
+            .filter(|a| !skip.iter().any(|i| *i == a.name))
             .map(|a| {
                 let ident = &a.name;
                 quote! { #ident.account.clone() }
@@ -1314,19 +1326,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
         // Try vec![ident, ...] pattern first (fixed-size accounts, most common case)
         if let Some(account_idents) = extract_vec_macro_idents(&accounts_arg) {
-            // Verify all account names are known before transforming
-            let mut account_clones: Vec<TokenStream2> = Vec::new();
             // Injected params the body does not know about: pass their
             // post-state through unchanged, in declaration order (they sit
             // at the front of self.accounts, keeping claims alignment).
-            for acc in self.accounts {
-                if self.injected.iter().any(|n| acc.name == *n)
-                    && !account_idents.iter().any(|i| *i == acc.name)
-                {
-                    let ident = &acc.name;
-                    account_clones.push(quote! { #ident.account.clone() });
-                }
-            }
+            let mut account_clones: Vec<TokenStream2> = self.injected_clones(&account_idents);
+            // Verify all account names are known before transforming
             for ident in &account_idents {
                 if !self.accounts.iter().any(|a| a.name == *ident) {
                     return; // unknown account — don't transform
@@ -1348,7 +1352,7 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             return;
         }
 
-        let injected_clones: Vec<TokenStream2> = self.injected_clones();
+        let injected_clones: Vec<TokenStream2> = self.injected_clones(&[]);
         // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
         // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
         if self.has_rest() {

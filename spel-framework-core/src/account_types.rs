@@ -9,7 +9,10 @@ use std::collections::HashSet;
 
 use syn::{Attribute, Item, ItemEnum, ItemStruct, Type};
 
-use crate::idl::{IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef};
+use crate::{
+    idl::{IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef},
+    idl_gen::{is_account_type, is_context_type, is_vec_account_type},
+};
 
 // ─── Account type scanning ────────────────────────────────────────────────
 
@@ -224,26 +227,7 @@ fn last_ident(ty: &Type) -> Option<String> {
 /// True for instruction params that are accounts rather than data args:
 /// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
 fn is_account_shaped(ty: &Type) -> bool {
-    match last_ident(ty).as_deref() {
-        Some("AccountWithMetadata") | Some("ProgramContext") => true,
-        Some("Vec") => {
-            // reach into Vec<...>'s generic argument
-            if let Type::Path(p) = ty {
-                if let Some(seg) = p.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return matches!(
-                                last_ident(inner).as_deref(),
-                                Some("AccountWithMetadata")
-                            );
-                        }
-                    }
-                }
-            }
-            false
-        },
-        _ => false,
-    }
+    is_account_type(ty) || is_vec_account_type(ty) || is_context_type(ty)
 }
 
 /// Scan `items` for `#[account_type]`-annotated types and return:

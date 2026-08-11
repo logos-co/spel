@@ -16,7 +16,7 @@
 
 use quote::quote;
 use spel_framework_core::extension::{
-    find_slot_carrier, BoundValue, EmbedDecl, OffsetSpec, SlotCarrier,
+    find_slot_carrier, slot_offset_const_name, BoundValue, EmbedDecl, OffsetSpec, SlotCarrier,
 };
 
 // ── account_type side: derive the offset ─────────────────────────────────
@@ -182,7 +182,7 @@ fn offset_const(
     slot: &SlotField,
     preceding: &[syn::Type],
 ) -> proc_macro2::TokenStream {
-    let const_ident = quote::format_ident!("{}_OFFSET", slot.attr_name.to_uppercase());
+    let const_ident = quote::format_ident!("{}", slot_offset_const_name(&slot.attr_name));
     quote::quote! {
         impl #struct_ident {
             pub const #const_ident: usize =
@@ -195,7 +195,7 @@ fn offset_const(
 /// must land at the derived offset, pinning the size arithmetic to real
 /// serialization.
 fn layout_test(struct_ident: &syn::Ident, slot: &SlotField) -> proc_macro2::TokenStream {
-    let const_ident = quote::format_ident!("{}_OFFSET", slot.attr_name.to_uppercase());
+    let const_ident = quote::format_ident!("{}", slot_offset_const_name(&slot.attr_name));
     let test_ident = quote::format_ident!("__{}_offset_matches_layout", slot.attr_name);
     let field_ident = &slot.ident;
     let field_ty = &slot.ty;
@@ -227,15 +227,18 @@ fn layout_test(struct_ident: &syn::Ident, slot: &SlotField) -> proc_macro2::Toke
 /// agreement assert, the carrier const is their single source of
 /// truth. Window collisions are a separate emission,
 /// [`embed_window_collision_asserts`].
+///
+/// Takes the binding scan set the offset resolution pass already built
+/// ([`consumer_scan_items`]): one scan of the consumer and its path
+/// deps per expansion, and one set of items both passes bind against.
 pub(crate) fn emit_agreement_asserts(
-    guest_path: &std::path::Path,
+    scan_items: &[syn::Item],
     embeds: &[(String, EmbedDecl)],
 ) -> syn::Result<proc_macro2::TokenStream> {
-    let scan_items = consumer_scan_items(guest_path);
     let mut out = proc_macro2::TokenStream::new();
     for (_, embed) in embeds {
         if let OffsetSpec::Literal(off) = embed.offset {
-            if let Some(c) = find_slot_carrier(&scan_items, &embed.role)
+            if let Some(c) = find_slot_carrier(scan_items, &embed.role)
                 .map_err(|m| syn::Error::new(proc_macro2::Span::call_site(), m))?
             {
                 out.extend(agreement_assert(&c, off));
@@ -288,51 +291,26 @@ fn carrier_tokens(c: &SlotCarrier) -> proc_macro2::TokenStream {
     quote::quote! { #struct_ident::#const_ident }
 }
 
-/// One embed's offset as tokens: the declared literal, or the
-/// carrier's const path when the marker derived it. A `Derived` offset
-/// here means the resolution pass never ran, which is a framework bug
-/// rather than a consumer mistake, so it names the missing step.
+/// One embed's offset as assert tokens, through the shared lowering.
+/// A `Derived` offset here means the resolution pass never ran, which
+/// is a framework bug rather than a consumer mistake, so the error
+/// names the missing step.
 fn offset_tokens(embed: &EmbedDecl) -> syn::Result<proc_macro2::TokenStream> {
-    match &embed.offset {
-        OffsetSpec::Literal(n) => Ok(quote::quote! { #n }),
-        OffsetSpec::Path(p) => {
-            let path: syn::Expr = syn::parse_str(p)?;
-            Ok(quote::quote! { #path })
-        },
-        OffsetSpec::Derived => Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "`{}` reached assert emission with an unresolved derived \
-                offset; `resolve_derived_offsets` must run after discovery",
-                embed.role
-            ),
-        )),
-    }
+    let expr = embed
+        .offset
+        .to_expr(&embed.role)
+        .map_err(|m| syn::Error::new(proc_macro2::Span::call_site(), m))?;
+    Ok(quote::quote! { #expr })
 }
 
-/// One resolved bound value as a dispatch call argument: the literal,
-/// or the carrier's const path. `offset_tokens`' twin for the
-/// dispatcher, which appends these to the generated call. An unresolved
-/// `Derived` here means the resolution pass never ran; a proc-macro
-/// panic is a compile error, so the invariant fails loudly at the
-/// consumer's build.
+/// One resolved bound value as a dispatch call argument, through the
+/// same lowering the asserts and the stamped gate kwargs take. An
+/// unresolved `Derived` here means the resolution pass never ran; a
+/// proc-macro panic is a compile error, so the invariant fails loudly
+/// at the consumer's build.
 pub(crate) fn bound_value_tokens(v: &BoundValue) -> proc_macro2::TokenStream {
-    match v {
-        BoundValue::Literal(n) => {
-            let lit = proc_macro2::Literal::usize_unsuffixed(*n);
-            quote::quote! { #lit }
-        },
-        BoundValue::Path(p) => {
-            let path: syn::Expr =
-                syn::parse_str(p).expect("a resolved carrier path parses as an expression");
-            quote::quote! { #path }
-        },
-        BoundValue::Derived { role } => panic!(
-            "`{role}` reached dispatch emission with an unresolved \
-            derived offset; resolve_derived_offsets must run after \
-            discovery"
-        ),
-    }
+    let expr = v.to_expr().unwrap_or_else(|m| panic!("{m}"));
+    quote::quote! { #expr }
 }
 
 #[cfg(test)]

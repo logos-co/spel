@@ -746,6 +746,44 @@ struct AccountParam {
     is_rest: bool,
 }
 
+/// A parsed account param that the shared duplicate merge can fold.
+/// The IDL's account list and the dispatcher's must dedupe by the same
+/// rule or a program's accounts and claims stop lining up, so both
+/// producers implement this and call [`merge_duplicate_accounts`].
+pub trait MergeableAccount {
+    /// The param name the merge keys on.
+    fn param_name(&self) -> &Ident;
+    /// Fold a repeat's constraints into the account already kept.
+    fn merge_constraints(&mut self, repeat: &Self);
+}
+
+/// Repeated account params become one account at the first
+/// declaration's position, carrying the union of the constraints.
+pub fn merge_duplicate_accounts<T: MergeableAccount>(accounts: Vec<T>) -> Vec<T> {
+    let mut deduped: Vec<T> = Vec::new();
+    for a in accounts {
+        match deduped
+            .iter_mut()
+            .find(|kept| kept.param_name() == a.param_name())
+        {
+            Some(kept) => kept.merge_constraints(&a),
+            None => deduped.push(a),
+        }
+    }
+    deduped
+}
+
+impl MergeableAccount for AccountParam {
+    fn param_name(&self) -> &Ident {
+        &self.name
+    }
+
+    fn merge_constraints(&mut self, repeat: &Self) {
+        self.constraints.mutable |= repeat.constraints.mutable;
+        self.constraints.signer |= repeat.constraints.signer;
+    }
+}
+
 #[derive(Default)]
 struct AccountConstraints {
     mutable: bool,
@@ -813,17 +851,7 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         }
     }
 
-    let mut deduped: Vec<AccountParam> = Vec::new();
-    for a in accounts {
-        match deduped.iter_mut().find(|d| d.name == a.name) {
-            Some(kept) => {
-                kept.constraints.mutable |= a.constraints.mutable;
-                kept.constraints.signer |= a.constraints.signer;
-            },
-            None => deduped.push(a),
-        }
-    }
-    let accounts = deduped;
+    let accounts = merge_duplicate_accounts(accounts);
 
     Ok(InstructionInfo {
         fn_name,
@@ -843,7 +871,7 @@ fn extract_param_name(pat_type: &PatType) -> Result<Ident, IdlGenError> {
     }
 }
 
-fn is_context_type(ty: &Type) -> bool {
+pub(crate) fn is_context_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "ProgramContext";
@@ -852,7 +880,7 @@ fn is_context_type(ty: &Type) -> bool {
     false
 }
 
-fn is_account_type(ty: &Type) -> bool {
+pub(crate) fn is_account_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "AccountWithMetadata";
@@ -861,7 +889,7 @@ fn is_account_type(ty: &Type) -> bool {
     false
 }
 
-fn is_vec_account_type(ty: &Type) -> bool {
+pub(crate) fn is_vec_account_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "Vec" {

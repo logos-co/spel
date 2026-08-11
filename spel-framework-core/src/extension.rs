@@ -5,7 +5,7 @@
 //! `[package.metadata.spel]` in their `Cargo.toml`. Each qualifying
 //! crate contributes through one entry point:
 //!
-//! - [`discover_extensions`] returns an [`ExtensionDiscoveries`]: the
+//! - `discover_extensions` returns an [`ExtensionDiscoveries`]: the
 //!   cross-crate `#[instruction]` fns to be merged into the consumer's
 //!   dispatcher and IDL, the gate param inject specs applied by
 //!   [`apply_wrap_and_inject`], the wrap configs, and any embedded-mode
@@ -55,10 +55,9 @@
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
-//! `read_spel_inject_specs`, `collect_instruction_fns`) are
-//! module-private; producers go through [`resolve_program_deps`],
-//! and [`discover_extensions`] stays public for callers that already
-//! hold a resolved graph.
+//! `read_spel_inject_specs`, `collect_instruction_fns`,
+//! `discover_extensions`) are module-private; producers go through
+//! [`resolve_program_deps`].
 
 use std::{
     collections::HashMap,
@@ -74,14 +73,12 @@ mod marker;
 mod metadata;
 mod slots;
 
-pub use inject::{
-    active_wraps, apply_wrap_and_inject, resolve_canonical_constraint, rewrite_embedded_roles,
-};
+pub use inject::{active_wraps, apply_wrap_and_inject, rewrite_embedded_roles};
 pub use marker::{
     candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
     EmbedDecl, MarkerArgs, OffsetSpec,
 };
-pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_attr_name, SlotCarrier};
+pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_offset_const_name, SlotCarrier};
 
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded,
@@ -286,7 +283,7 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 ///
 /// `Err` on malformed spel metadata (callers surface it as a compile
 /// error). Environmental skips are reported via `on_warning`.
-pub fn discover_extensions<F: FnMut(String)>(
+fn discover_extensions<F: FnMut(String)>(
     dep_dirs: &[PathBuf],
     mod_attrs: &[Attribute],
     mod_items: &[syn::Item],
@@ -304,21 +301,16 @@ pub fn discover_extensions<F: FnMut(String)>(
         let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
             continue;
         };
-        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
+        let Some(marker_pos) = mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)) else {
             continue;
-        }
-        if let (Some(lez), Some(marker)) = (
-            lez_pos,
-            mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)),
-        ) {
-            if marker < lez {
-                return Err(format!(
-                    "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
-                    above expand first and are invisible to the compiled program, so the \
-                    extension would appear in the IDL but not in the dispatcher. Move \
-                    #[{ext_attr}] below #[lez_program]."
-                ));
-            }
+        };
+        if lez_pos.is_some_and(|lez| marker_pos < lez) {
+            return Err(format!(
+                "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
+                above expand first and are invisible to the compiled program, so the \
+                extension would appear in the IDL but not in the dispatcher. Move \
+                #[{ext_attr}] below #[lez_program]."
+            ));
         }
         let Some(crate_name) = read_package_ident(&manifest_value) else {
             on_warning(format!(
@@ -328,10 +320,6 @@ pub fn discover_extensions<F: FnMut(String)>(
             continue;
         };
 
-        let marker_pos = mod_attrs
-            .iter()
-            .position(|a| a.path().is_ident(&ext_attr))
-            .unwrap_or(usize::MAX);
         let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
         for spec in &mut injects {
             spec.source = crate_name.clone();

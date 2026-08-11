@@ -15,8 +15,16 @@ pub struct SlotCarrier {
 
 /// The field-marker attribute a role binds: `my_config` binds
 /// `#[my_slot]`.
-pub fn slot_attr_name(role: &str) -> String {
+fn slot_attr_name(role: &str) -> String {
     format!("{}_slot", role.strip_suffix("_config").unwrap_or(role))
+}
+
+/// The offset const a slot attribute derives: `#[my_slot]` carries
+/// `MY_SLOT_OFFSET`. The macro emits the const under this name and the
+/// resolver builds the path that reads it, so the convention has one
+/// definition rather than one per side.
+pub fn slot_offset_const_name(attr_name: &str) -> String {
+    format!("{}_OFFSET", attr_name.to_uppercase())
 }
 
 /// Binds a role to the one consumer struct carrying its slot
@@ -59,7 +67,7 @@ pub fn find_slot_carrier(items: &[syn::Item], role: &str) -> Result<Option<SlotC
 
     Ok(found.map(|struct_ident| SlotCarrier {
         struct_name: struct_ident.to_string(),
-        const_name: format!("{}_OFFSET", &attr_name.to_uppercase()),
+        const_name: slot_offset_const_name(&attr_name),
         attr_name,
     }))
 }

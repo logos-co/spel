@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use syn::{parse_quote, Attribute, FnArg, ItemFn};
 
-use super::{InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
+use super::{marker::attr_is, InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 
 /// Filter `deps.extensions.wraps` down to the wraps whose extension
 /// marker carries no skip-word arg matching `WrapInstructions::skip`.
@@ -108,7 +108,7 @@ pub fn apply_wrap_and_inject(
                 spec,
                 &remap,
                 offset_by_source.get(spec.source.as_str()).copied(),
-            ));
+            )?);
         }
         let attr: Attribute = if args.is_empty() {
             parse_quote! { #[#wrapper_path] }
@@ -118,9 +118,9 @@ pub fn apply_wrap_and_inject(
         func.attrs.insert(0, attr);
     }
 
-    let injected = inject_gate_params(func, inject_specs)?;
+    let injected = inject_gate_params(func, inject_specs, &remap)?;
 
-    stamp_authored_gates(func, inject_specs, &remap, &offset_by_source);
+    stamp_authored_gates(func, inject_specs, &remap, &offset_by_source)?;
 
     Ok(injected)
 }
@@ -137,7 +137,7 @@ pub fn apply_wrap_and_inject(
 /// `Err` when no declaration carries `init` plus a `pda` constraint,
 /// or when two declarations disagree, naming both fns. Callers
 /// surface it as a compile error.
-pub fn resolve_canonical_constraint(fns: &[ItemFn], account: &str) -> Result<syn::Expr, String> {
+fn resolve_canonical_constraint(fns: &[ItemFn], account: &str) -> Result<syn::Expr, String> {
     struct Decl {
         fn_name: String,
         has_init: bool,
@@ -290,12 +290,7 @@ fn check_initializer_coverage(
     for func in consumer_fns {
         let creates = typed_params(func)
             .any(|(pi, pt)| pi.ident == embed.account.as_str() && param_has_init(pt));
-        let annotated = func.attrs.iter().any(|a| {
-            a.path()
-                .segments
-                .last()
-                .is_some_and(|s| s.ident == init_attr.as_str())
-        });
+        let annotated = func.attrs.iter().any(|a| attr_is(a, &init_attr));
 
         if !creates && !annotated {
             continue;
@@ -361,7 +356,9 @@ fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Resul
 /// kwarg contract that superseded the old args-form-is-manual rule.
 /// The wrapper is matched by the attr path's last segment, so the
 /// fully qualified attrs prepended by auto-wrap activate specs too.
-/// Returns the names actually injected.
+/// Returns the names actually injected. `remap` is the one built by
+/// [`apply_wrap_and_inject`]: nothing between there and here touches a
+/// param signature, so recomputing it could only produce the same map.
 ///
 /// When two specs want the same param name: identical constraints share
 /// one account at the first injector's position, the cheap shared-signer
@@ -371,8 +368,11 @@ fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Resul
 ///
 /// `Err` when two extensions inject the same param name with different
 /// constraints; callers surface it as a compile error.
-fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
-    let remap = build_remap(specs, func);
+fn inject_gate_params(
+    func: &mut ItemFn,
+    specs: &[InjectSpec],
+    remap: &HashMap<String, String>,
+) -> Result<Vec<String>, String> {
     let mut injected = Vec::new();
     let mut injected_by: HashMap<String, (&InjectAccount, &str)> = HashMap::new();
     let mut pos = insert_position(func);
@@ -400,7 +400,7 @@ fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<Str
             if has_param_named(func, &effective) {
                 continue; // consumer declared it: declared win
             }
-            func.sig.inputs.insert(pos, build_inject_param(acc, &remap));
+            func.sig.inputs.insert(pos, build_inject_param(acc, remap));
             pos += 1;
             injected.push(acc.name.clone());
             injected_by.insert(effective.clone(), (acc, spec.source.as_str()));
@@ -448,11 +448,7 @@ fn build_remap(specs: &[InjectSpec], func: &ItemFn) -> HashMap<String, String> {
 
 fn spec_activates(spec: &InjectSpec, func: &ItemFn) -> bool {
     func.attrs.iter().any(|a| {
-        a.path()
-            .segments
-            .last()
-            .is_some_and(|s| s.ident == spec.wrapper)
-            && matches!(a.meta, syn::Meta::Path(_) | syn::Meta::List(_))
+        attr_is(a, &spec.wrapper) && matches!(a.meta, syn::Meta::Path(_) | syn::Meta::List(_))
     })
 }
 
@@ -467,21 +463,7 @@ fn has_param_named(func: &ItemFn, name: &str) -> bool {
 fn find_signer_param(func: &ItemFn) -> Option<String> {
     let mut found: Option<String> = None;
     for (_, pt) in typed_params(func) {
-        let is_signer = pt.attrs.iter().any(|a| {
-            if !a.path().is_ident("account") {
-                return false;
-            }
-            let mut hit = false;
-            a.parse_nested_meta(|meta| {
-                if meta.path.is_ident("signer") {
-                    hit = true;
-                }
-                Ok(())
-            })
-            .ok();
-            hit
-        });
-        if !is_signer {
+        if !param_has_flag(pt, "signer") {
             continue;
         }
         let syn::Pat::Ident(pi) = &*pt.pat else {
@@ -507,7 +489,16 @@ fn find_pda_compound_param(
     seeds: &[InjectSeed],
     remap: &HashMap<String, String>,
 ) -> Option<String> {
-    let target: Vec<InjectSeed> = seeds
+    let target = remap_seeds(seeds, remap);
+    typed_params(func)
+        .find(|(_, pt)| param_pda_seeds(pt).is_some_and(|s| s == target))
+        .map(|(pi, _)| pi.ident.to_string())
+}
+
+// Account seeds under the consumer's param names; const seeds are
+// names of nothing and pass through.
+fn remap_seeds(seeds: &[InjectSeed], remap: &HashMap<String, String>) -> Vec<InjectSeed> {
+    seeds
         .iter()
         .map(|s| match s {
             InjectSeed::Const(v) => InjectSeed::Const(v.clone()),
@@ -515,10 +506,7 @@ fn find_pda_compound_param(
                 InjectSeed::Account(remap.get(v).cloned().unwrap_or_else(|| v.clone()))
             },
         })
-        .collect();
-    typed_params(func)
-        .find(|(_, pt)| param_pda_seeds(pt).is_some_and(|s| s == target))
-        .map(|(pi, _)| pi.ident.to_string())
+        .collect()
 }
 
 // One `literal("x")` / `account("y")` call as a structured seed.
@@ -565,26 +553,13 @@ fn insert_position(func: &ItemFn) -> usize {
 // `#[account(...)]` constraint.
 fn build_inject_param(acc: &InjectAccount, remap: &HashMap<String, String>) -> FnArg {
     let ident = syn::Ident::new(&acc.name, proc_macro2::Span::call_site());
-    let seed_exprs: Vec<syn::Expr> = acc
-        .seeds
-        .iter()
-        .map(|s| match s {
-            InjectSeed::Const(v) => {
-                let lit = syn::LitStr::new(v, proc_macro2::Span::call_site());
-                parse_quote! { literal(#lit) }
-            },
-            InjectSeed::Account(v) => {
-                let name = remap.get(v).unwrap_or(v);
-                let lit = syn::LitStr::new(name, proc_macro2::Span::call_site());
-                parse_quote! { account(#lit) }
-            },
-        })
-        .collect();
-    match (&seed_exprs[..], acc.signer) {
-        ([], true) => parse_quote! { #[account(signer)] #ident: AccountWithMetadata },
-        ([], false) => parse_quote! { #ident: AccountWithMetadata },
-        ([single], _) => parse_quote! { #[account(pda = #single)] #ident: AccountWithMetadata },
-        (multi, _) => parse_quote! { #[account(pda = [#(#multi),*])] #ident: AccountWithMetadata },
+    match (
+        seeds_to_pda_expr(&remap_seeds(&acc.seeds, remap)),
+        acc.signer,
+    ) {
+        (None, true) => parse_quote! { #[account(signer)] #ident: AccountWithMetadata },
+        (None, false) => parse_quote! { #ident: AccountWithMetadata },
+        (Some(pda), _) => parse_quote! { #[account(pda = #pda)] #ident: AccountWithMetadata },
     }
 }
 
@@ -601,11 +576,16 @@ fn expr_to_seeds(expr: &syn::Expr) -> Option<Vec<InjectSeed>> {
 
 /// Kwargs a gate attr carries for  `spec`: `role = resolved_name` per
 /// account, plus the extension's embedded offset when one is declared
+///
+/// # Errors
+///
+/// Propagates the shared offset lowering's error: an unresolved
+/// derivation or an unparsable carrier path.
 fn spec_gate_args(
     spec: &InjectSpec,
     remap: &HashMap<String, String>,
     offset: Option<&super::OffsetSpec>,
-) -> Vec<syn::MetaNameValue> {
+) -> Result<Vec<syn::MetaNameValue>, String> {
     let mut args = Vec::new();
     for acc in &spec.accounts {
         let resolved = remap
@@ -617,20 +597,10 @@ fn spec_gate_args(
         args.push(parse_quote! { #key = #val});
     }
     if let Some(off) = offset {
-        let value: syn::Expr = match off {
-            super::OffsetSpec::Literal(n) => {
-                let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
-                parse_quote!(#lit)
-            },
-            super::OffsetSpec::Path(p) => {
-                syn::parse_str(p).expect("a resolved carrier path parses as an expression")
-            },
-            // The entry guard in `apply_wrap_and_inject` rejects these.
-            super::OffsetSpec::Derived => unreachable!("unresolved derived offset   "),
-        };
+        let value = off.to_expr(&spec.source)?;
         args.push(parse_quote! { offset = #value });
     }
-    args
+    Ok(args)
 }
 
 // Rewrite consumer-authored bare gate attrs to carry the framework's
@@ -642,26 +612,24 @@ fn stamp_authored_gates(
     inject_specs: &[InjectSpec],
     remap: &HashMap<String, String>,
     offset_by_source: &HashMap<&str, &super::OffsetSpec>,
-) {
+) -> Result<(), String> {
     for attr in func.attrs.iter_mut() {
         if !matches!(attr.meta, syn::Meta::Path(_)) {
             continue;
         }
-        let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
-            continue;
-        };
         for spec in inject_specs {
-            if spec.wrapper != last {
+            if !attr_is(attr, &spec.wrapper) {
                 continue;
             }
             let Some(off) = offset_by_source.get(spec.source.as_str()) else {
                 continue;
             };
-            let args = spec_gate_args(spec, remap, Some(*off));
+            let args = spec_gate_args(spec, remap, Some(*off))?;
             let path = attr.path().clone();
             *attr = parse_quote! { #[#path(#(#args),*)] };
         }
     }
+    Ok(())
 }
 
 // Named, typed params of a fn: the only shape gate machinery reads.
@@ -699,19 +667,24 @@ fn param_pda_seeds(pt: &syn::PatType) -> Option<Vec<InjectSeed>> {
 
 // True when the param's `#[account]` attr carries `init`.
 pub(super) fn param_has_init(pt: &syn::PatType) -> bool {
+    param_has_flag(pt, "init")
+}
+
+// True when the param's `#[account]` attr carries a bare `flag`.
+fn param_has_flag(pt: &syn::PatType, flag: &str) -> bool {
     pt.attrs.iter().any(|attr| {
         if !attr.path().is_ident("account") {
             return false;
         }
-        let mut has_init = false;
+        let mut hit = false;
         attr.parse_nested_meta(|meta| {
-            if meta.path.is_ident("init") {
-                has_init = true;
+            if meta.path.is_ident(flag) {
+                hit = true;
             }
             Ok(())
         })
         .ok();
-        has_init
+        hit
     })
 }
 
@@ -802,11 +775,9 @@ fn check_authored_location_kwargs(
         if !matches!(attr.meta, syn::Meta::List(_)) {
             continue;
         }
-        let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
-            continue;
-        };
         for spec in inject_specs {
-            if spec.wrapper != last || !offset_by_source.contains_key(spec.source.as_str()) {
+            if !attr_is(attr, &spec.wrapper) || !offset_by_source.contains_key(spec.source.as_str())
+            {
                 continue;
             }
             let mut offending: Option<String> = None;
@@ -860,6 +831,12 @@ mod tests {
 
     fn expr(src: &str) -> syn::Expr {
         syn::parse_str(src).unwrap()
+    }
+
+    // The injection pass under the remap its production caller builds.
+    fn inject(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
+        let remap = build_remap(specs, func);
+        inject_gate_params(func, specs, &remap)
     }
 
     // A rewritten spec plus its embed decl: embedded mode for `my_ext`.
@@ -922,7 +899,7 @@ mod tests {
             }
         );
         let before = gated.sig.inputs.len();
-        let injected = inject_gate_params(&mut gated, &specs).expect("inject succeeds");
+        let injected = inject(&mut gated, &specs).expect("inject succeeds");
         assert!(
             injected.is_empty(),
             "same-spec params must be reused under their own names, injected: {injected:?}"
@@ -1493,7 +1470,7 @@ mod tests {
             #[my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        let injected = inject(&mut func, &specs).unwrap();
         assert_eq!(
             injected,
             vec!["gate_config".to_string(), "caller".to_string()]
@@ -1502,7 +1479,7 @@ mod tests {
 
         // Second run: everything declared now, nothing injected, fn untouched.
         let before = func.sig.inputs.len();
-        assert!(inject_gate_params(&mut func, &specs).unwrap().is_empty());
+        assert!(inject(&mut func, &specs).unwrap().is_empty());
         assert_eq!(func.sig.inputs.len(), before);
 
         // Ungated fn: untouched.
@@ -1510,7 +1487,7 @@ mod tests {
             #[instruction]
             pub fn other(x: u64) -> SpelResult { todo!() }
         };
-        assert!(inject_gate_params(&mut plain, &specs).unwrap().is_empty());
+        assert!(inject(&mut plain, &specs).unwrap().is_empty());
     }
 
     #[test]
@@ -1523,7 +1500,7 @@ mod tests {
             #[my_ext_macros::my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        let injected = inject(&mut func, &specs).unwrap();
         assert_eq!(
             injected,
             vec!["gate_config".to_string(), "caller".to_string()]
@@ -1551,10 +1528,7 @@ mod tests {
             #[other_gate]
             pub fn transfer(caller: AccountWithMetadata) -> SpelResult { todo!() }
         };
-        assert_eq!(
-            inject_gate_params(&mut func, &specs).unwrap(),
-            vec!["marker_account"]
-        );
+        assert_eq!(inject(&mut func, &specs).unwrap(), vec!["marker_account"]);
 
         let FnArg::Typed(pt) = &func.sig.inputs[0] else {
             panic!("injected param must be typed");
@@ -1586,9 +1560,7 @@ mod tests {
                 new_value: u64,
             ) -> SpelResult { todo!() }
         };
-        assert!(inject_gate_params(&mut func, &gate_specs())
-            .unwrap()
-            .is_empty());
+        assert!(inject(&mut func, &gate_specs()).unwrap().is_empty());
         assert_eq!(func.sig.inputs.len(), 3);
     }
 
@@ -1634,7 +1606,7 @@ mod tests {
                 amount: u64,
             ) -> SpelResult { todo!() }
         };
-        assert!(inject_gate_params(&mut func, &specs).unwrap().is_empty());
+        assert!(inject(&mut func, &specs).unwrap().is_empty());
         assert_eq!(func.sig.inputs.len(), 3);
     }
 
@@ -1657,7 +1629,7 @@ mod tests {
             #[my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        let injected = inject(&mut func, &specs).unwrap();
         assert_eq!(injected, vec!["gate_config", "caller", "other_config"]);
         let names: Vec<String> = func
             .sig
@@ -1696,7 +1668,7 @@ mod tests {
             #[my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let injected = inject_gate_params(&mut func, &specs).unwrap();
+        let injected = inject(&mut func, &specs).unwrap();
         assert_eq!(injected, vec!["gate_config", "caller"]);
         assert_eq!(func.sig.inputs.len(), 3);
     }
@@ -1720,8 +1692,7 @@ mod tests {
             #[my_gate]
             pub fn update_value(new_value: u64) -> SpelResult { todo!() }
         };
-        let err = inject_gate_params(&mut func, &specs)
-            .expect_err("conflicting constraints must be rejected");
+        let err = inject(&mut func, &specs).expect_err("conflicting constraints must be rejected");
         assert!(
             err.contains("ext-a") && err.contains("ext-b"),
             "must name both extensions: {err}"
