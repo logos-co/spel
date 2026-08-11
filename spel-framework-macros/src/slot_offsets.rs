@@ -16,8 +16,7 @@
 
 use quote::quote;
 use spel_framework_core::extension::{
-    find_slot_carrier, slot_offset_const_name, BoundValue, Embed, EmbedDecl, OffsetSpec,
-    SlotCarrier,
+    slot_offset_const_name, BoundValue, Embed, EmbedDecl, OffsetSpec, SlotCarrier,
 };
 
 // ── account_type side: derive the offset ─────────────────────────────────
@@ -222,21 +221,14 @@ fn layout_test(struct_ident: &syn::Ident, slot: &SlotField) -> proc_macro2::Toke
 /// Takes the binding scan set the offset resolution pass already built
 /// ([`consumer_scan_items`]): one scan of the consumer and its path
 /// deps per expansion, and one set of items both passes bind against.
-pub(crate) fn emit_agreement_asserts(
-    scan_items: &[syn::Item],
-    embeds: &[Embed],
-) -> syn::Result<proc_macro2::TokenStream> {
+pub(crate) fn emit_agreement_asserts(embeds: &[Embed]) -> proc_macro2::TokenStream {
     let mut out = proc_macro2::TokenStream::new();
     for embed in embeds {
-        if let OffsetSpec::Literal(off) = embed.decl.offset {
-            if let Some(c) = find_slot_carrier(scan_items, &embed.decl.role)
-                .map_err(|m| syn::Error::new(proc_macro2::Span::call_site(), m))?
-            {
-                out.extend(agreement_assert(&c, off));
-            }
+        if let (OffsetSpec::Literal(off), Some(carrier)) = (&embed.decl.offset, &embed.carrier) {
+            out.extend(agreement_assert(carrier, *off));
         }
     }
-    Ok(out)
+    out
 }
 
 /// The consumer's binding scan set: the entry file with its inline and
@@ -308,10 +300,6 @@ pub(crate) fn bound_value_tokens(v: &BoundValue) -> proc_macro2::TokenStream {
 mod tests {
     use super::*;
 
-    fn items(src: &str) -> Vec<syn::Item> {
-        syn::parse_file(src).expect("fixture parses").items
-    }
-
     fn embed(source: &str, account: &str, offset: OffsetSpec, state_type: &str) -> Embed {
         Embed {
             source: source.to_string(),
@@ -322,50 +310,17 @@ mod tests {
                 initializer: None,
             },
             state_type: state_type.to_string(),
+            carrier: None,
         }
     }
 
     #[test]
-    fn binds_the_roles_slot_attr() {
-        let its = items("#[account_type]\npub struct Cfg { pub v: u64, #[admin_slot] pub a: u8 }");
-        let c = find_slot_carrier(&its, "admin_config")
-            .expect("unambiguous")
-            .expect("binds");
-        assert_eq!(c.struct_name, "Cfg");
-        assert_eq!(c.const_name, "ADMIN_SLOT_OFFSET");
-    }
-
-    #[test]
-    fn role_without_config_suffix_uses_the_full_role() {
-        let its = items("pub struct S { #[vault_slot] pub s: u8 }");
-        let c = find_slot_carrier(&its, "vault").unwrap().expect("binds");
-        assert_eq!(c.attr_name, "vault_slot");
-    }
-
-    #[test]
-    fn no_carrier_emits_nothing() {
-        let its = items("pub struct S { pub v: u64 }");
-        assert!(find_slot_carrier(&its, "admin_config").unwrap().is_none());
-    }
-
-    #[test]
-    fn two_carriers_is_an_error_naming_both() {
-        let its = items(
-            "pub struct Alpha { #[admin_slot] pub a: u8 }\npub struct Beta { #[admin_slot] pub b: u8 }",
-        );
-        let Err(msg) = find_slot_carrier(&its, "admin_config") else {
-            panic!("expected the two-carrier ambiguity error");
-        };
-        assert!(
-            msg.contains("Alpha") && msg.contains("Beta"),
-            "message: {msg}"
-        );
-    }
-
-    #[test]
     fn agreement_assert_names_both_sides() {
-        let its = items("pub struct Cfg { #[admin_slot] pub a: u8 }");
-        let c = find_slot_carrier(&its, "admin_config").unwrap().unwrap();
+        let c = SlotCarrier {
+            struct_name: "Cfg".to_string(),
+            const_name: "ADMIN_SLOT_OFFSET".to_string(),
+            attr_name: "admin_slot".to_string(),
+        };
         let ts = agreement_assert(&c, 32).to_string();
         assert!(
             ts.contains("ADMIN_SLOT_OFFSET") && ts.contains("32"),

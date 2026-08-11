@@ -13,16 +13,55 @@ use super::{marker::attr_is, Embed, InjectAccount, InjectSeed, InjectSpec, WrapI
 ///
 /// A wrap with `skip = Some("manual")` is dropped for a marker written
 /// `#[freeze_authority(manual)]`, kept for `#[freeze_authority]`. A wrap
-/// with `skip = None` is always kept.
-pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstructions> {
+/// with `skip = None` is always kept. Each survivor carries its
+/// attribute path parsed, see [`ActiveWrap`].
+///
+/// # Errors
+///
+/// `Err` when a kept wrap declares a wrapper that is not a valid Rust
+/// attribute path. Callers surface it as a compile error.
+pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Result<Vec<ActiveWrap>, String> {
     wraps
         .iter()
         .filter(|(arg, wrap)| match &wrap.skip {
             Some(s) => arg != s,
             None => true,
         })
-        .map(|(_, wrap)| wrap.clone())
+        .map(|(_, wrap)| ActiveWrap::new(wrap.clone()))
         .collect()
+}
+
+/// A wrap the consumer's marker kept, with its attribute path parsed.
+///
+/// The path is the same for every instruction the wrap gates, so it is
+/// parsed once per program and the gate pass reads it. A declared path
+/// that is not a Rust attribute path is the extension author's mistake
+/// and is reported against the program, not against each fn.
+pub struct ActiveWrap {
+    /// What the extension declared: wrapper name, skip word, exemptions.
+    pub config: WrapInstructions,
+    /// The wrapper as an attribute path, ready to prepend.
+    pub path: syn::Path,
+    /// Last segment of that path, the name inject specs match by. The
+    /// framework prepends fully qualified attrs, so matching on the last
+    /// segment is what lets those activate a spec.
+    pub last: String,
+}
+
+impl ActiveWrap {
+    /// # Errors
+    ///
+    /// `Err` when the declared wrapper is not a valid attribute path.
+    fn new(config: WrapInstructions) -> Result<Self, String> {
+        let path: syn::Path = syn::parse_str(&config.wrapper)
+            .map_err(|e| format!("invalid wrapper path {:?}: {e}", config.wrapper))?;
+        let last = path
+            .segments
+            .last()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default();
+        Ok(Self { config, path, last })
+    }
 }
 
 /// Whether a producer writes the framework's location kwargs onto the
@@ -80,7 +119,7 @@ pub enum GateLocations {
 /// pass unresolved.
 pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
-    active_wraps: &[WrapInstructions],
+    active_wraps: &[ActiveWrap],
     inject_specs: &[InjectSpec],
     embeds: &[Embed],
     locations: GateLocations,
@@ -117,29 +156,22 @@ pub fn apply_wrap_and_inject(
     check_authored_location_kwargs(func, inject_specs, &offset_by_source)?;
 
     for wrap in active_wraps {
-        let wrapper_path: syn::Path = syn::parse_str(&wrap.wrapper)
-            .map_err(|e| format!("invalid wrapper path {:?}: {e}", wrap.wrapper))?;
-        let wrapper_last = wrapper_path
-            .segments
-            .last()
-            .map(|s| s.ident.to_string())
-            .unwrap_or_default();
-
+        let (wrapper_path, wrapper_last) = (&wrap.path, &wrap.last);
         let exempt = func
             .attrs
             .iter()
-            .any(|a| a.path().is_ident(&wrap.self_exempt_marker))
+            .any(|a| a.path().is_ident(&wrap.config.self_exempt_marker))
             || qualified
-                .map(|q| wrap.exempt.iter().any(|e| e == q))
+                .map(|q| wrap.config.exempt.iter().any(|e| e == q))
                 .unwrap_or(false)
-            || creates_gated_embedded_account(func, inject_specs, &wrapper_last);
+            || creates_gated_embedded_account(func, inject_specs, wrapper_last);
         if exempt {
             continue;
         }
 
         let mut args: Vec<syn::MetaNameValue> = Vec::new();
         for spec in inject_specs {
-            if spec.wrapper != wrapper_last {
+            if &spec.wrapper != wrapper_last {
                 continue;
             }
             args.extend(spec_gate_args(spec, &remap, gate_offset(spec))?);
@@ -874,6 +906,15 @@ mod tests {
         syn::parse_str(src).unwrap()
     }
 
+    // Wrap configs with their attribute paths parsed, as the gate pass
+    // receives them from `active_wraps`.
+    fn active(configs: Vec<WrapInstructions>) -> Vec<ActiveWrap> {
+        configs
+            .into_iter()
+            .map(|c| ActiveWrap::new(c).expect("fixture wrapper paths parse"))
+            .collect()
+    }
+
     // The injection pass under the remap its production caller builds.
     fn inject(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<String>, String> {
         let remap = build_remap(specs, func);
@@ -904,6 +945,7 @@ mod tests {
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
+            carrier: None,
             state_type: "my_ext::MyConfig".to_string(),
             decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
@@ -1135,6 +1177,7 @@ mod tests {
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
+            carrier: None,
             state_type: "my_ext::MyConfig".to_string(),
             decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
@@ -1143,12 +1186,12 @@ mod tests {
                 initializer: None,
             },
         }];
-        let wraps = vec![WrapInstructions {
+        let wraps = active(vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
             skip: None,
             self_exempt_marker: "my_exempt".to_string(),
             exempt: vec![],
-        }];
+        }]);
         let mut func: ItemFn = syn::parse_quote!(
             pub fn update(value: u64) -> SpelResult {
                 todo!()
@@ -1240,7 +1283,7 @@ mod tests {
 
     // Post-rewrite embedded state plus an active wrap: the shape every
     // auto-gate skip test below starts from.
-    fn embedded_wrap_fixture() -> (Vec<InjectSpec>, Vec<Embed>, Vec<WrapInstructions>) {
+    fn embedded_wrap_fixture() -> (Vec<InjectSpec>, Vec<Embed>, Vec<ActiveWrap>) {
         let specs = vec![InjectSpec {
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
@@ -1254,6 +1297,7 @@ mod tests {
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
+            carrier: None,
             state_type: "my_ext::MyConfig".to_string(),
             decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
@@ -1262,12 +1306,12 @@ mod tests {
                 initializer: None,
             },
         }];
-        let wraps = vec![WrapInstructions {
+        let wraps = active(vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
             skip: None,
             self_exempt_marker: "my_exempt".to_string(),
             exempt: vec![],
-        }];
+        }]);
         (specs, embeds, wraps)
     }
 
@@ -1962,6 +2006,7 @@ mod tests {
             vec![
                 Embed {
                     source: "ext_a".to_string(),
+                    carrier: None,
                     state_type: "ext_a::CfgA".to_string(),
                     decl: crate::extension::EmbedDecl {
                         role: "cfg_a".to_string(),
@@ -1972,6 +2017,7 @@ mod tests {
                 },
                 Embed {
                     source: "ext_b".to_string(),
+                    carrier: None,
                     state_type: "ext_b::CfgB".to_string(),
                     decl: crate::extension::EmbedDecl {
                         role: "cfg_b".to_string(),

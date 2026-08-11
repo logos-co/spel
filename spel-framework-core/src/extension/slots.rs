@@ -14,6 +14,7 @@ use super::{marker::BoundValue, ExtensionDiscoveries, OffsetSpec};
 
 /// A role's slot carrier: the consumer struct holding the `*_slot`
 /// field and the offset const `#[account_type]` derived for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotCarrier {
     pub struct_name: String,
     pub const_name: String,
@@ -110,10 +111,19 @@ pub fn resolve_derived_offsets(
     items: &[syn::Item],
 ) -> Result<(), String> {
     for embed in &mut ext.embeds {
-        if embed.decl.offset == OffsetSpec::Derived {
-            embed.decl.offset =
-                OffsetSpec::Path(carrier_path(&require_carrier(items, &embed.decl.role)?));
-        }
+        // Every embed binds its carrier here, whatever its offset came
+        // from, so one pass owns the binding and the emission side reads
+        // it. A derivation must have one, since it has no other source
+        // for the offset. A literal takes one when the consumer marked
+        // the field, and the agreement assert compares the two; with no
+        // marked field there is nothing to compare and nothing to emit.
+        embed.carrier = if embed.decl.offset == OffsetSpec::Derived {
+            let carrier = require_carrier(items, &embed.decl.role)?;
+            embed.decl.offset = OffsetSpec::Path(carrier_path(&carrier));
+            Some(carrier)
+        } else {
+            find_slot_carrier(items, &embed.decl.role)?
+        };
     }
     for values in ext.bound_calls.values_mut() {
         for v in values {
@@ -138,6 +148,7 @@ mod tests {
         let mut ext = ExtensionDiscoveries::default();
         ext.embeds.push(Embed {
             source: "my-ext".into(),
+            carrier: None,
             state_type: "my_ext::Cfg".into(),
             decl: EmbedDecl {
                 role: "gate_config".into(),
@@ -148,6 +159,43 @@ mod tests {
         });
         ext.bound_calls.insert("action".into(), vec![bound]);
         ext
+    }
+
+    #[test]
+    fn binds_the_roles_slot_attr() {
+        let its = items("#[account_type]\npub struct Cfg { pub v: u64, #[admin_slot] pub a: u8 }");
+        let c = find_slot_carrier(&its, "admin_config")
+            .expect("unambiguous")
+            .expect("binds");
+        assert_eq!(c.struct_name, "Cfg");
+        assert_eq!(c.const_name, "ADMIN_SLOT_OFFSET");
+    }
+
+    #[test]
+    fn role_without_config_suffix_uses_the_full_role() {
+        let its = items("pub struct S { #[vault_slot] pub s: u8 }");
+        let c = find_slot_carrier(&its, "vault").unwrap().expect("binds");
+        assert_eq!(c.attr_name, "vault_slot");
+    }
+
+    #[test]
+    fn no_carrier_binds_nothing() {
+        let its = items("pub struct S { pub v: u64 }");
+        assert!(find_slot_carrier(&its, "admin_config").unwrap().is_none());
+    }
+
+    #[test]
+    fn two_carriers_is_an_error_naming_both() {
+        let its = items(
+            "pub struct Alpha { #[admin_slot] pub a: u8 }\npub struct Beta { #[admin_slot] pub b: u8 }",
+        );
+        let Err(msg) = find_slot_carrier(&its, "admin_config") else {
+            panic!("expected the two-carrier ambiguity error");
+        };
+        assert!(
+            msg.contains("Alpha") && msg.contains("Beta"),
+            "message: {msg}"
+        );
     }
 
     // The pass lowers both carriers of a derivation: the embed's offset

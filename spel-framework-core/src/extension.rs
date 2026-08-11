@@ -73,7 +73,9 @@ mod marker;
 mod metadata;
 mod slots;
 
-pub use inject::{active_wraps, apply_wrap_and_inject, rewrite_embedded_roles, GateLocations};
+pub use inject::{
+    active_wraps, apply_wrap_and_inject, rewrite_embedded_roles, ActiveWrap, GateLocations,
+};
 pub use marker::{
     candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
     EmbedDecl, MarkerArgs, OffsetSpec,
@@ -171,7 +173,7 @@ pub struct PreparedProgram {
     /// [`Carriers::Resolve`].
     pub embeds: Vec<Embed>,
     /// Wrap configs the consumer's marker args did not skip.
-    pub active_wraps: Vec<WrapInstructions>,
+    pub active_wraps: Vec<ActiveWrap>,
     /// Dispatch-only trailing args per discovered fn.
     pub bound_calls: HashMap<String, Vec<BoundValue>>,
     /// Instruction fns the extensions contribute.
@@ -247,7 +249,7 @@ impl ProgramDeps {
 
         Ok(PreparedProgram {
             graph: self.graph,
-            active_wraps: active_wraps(&self.extensions.wraps),
+            active_wraps: active_wraps(&self.extensions.wraps)?,
             inject_specs: self.extensions.inject_specs,
             embeds: self.extensions.embeds,
             bound_calls: self.extensions.bound_calls,
@@ -362,6 +364,10 @@ pub struct Embed {
     /// Type occupying the window, from `embedded.state_type` metadata.
     /// Window collision asserts read its `FixedBorshSize::SIZE`.
     pub state_type: String,
+    /// The consumer struct carrying this role's `*_slot` field, bound by
+    /// [`resolve_derived_offsets`]. `None` under [`Carriers::Skip`], and
+    /// for a literal offset whose role no struct marks.
+    pub carrier: Option<SlotCarrier>,
 }
 
 /// Producer entry point: marker pre-check, graph resolution, and
@@ -534,6 +540,7 @@ fn discover_extensions<F: FnMut(String)>(
                 source: crate_name.clone(),
                 decl,
                 state_type,
+                carrier: None,
             });
         }
 
@@ -1553,6 +1560,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             ext.embeds,
             vec![Embed {
                 source: "my_ext".to_string(),
+                carrier: None,
                 // The window state type travels with the embed, so an
                 // embed can always report its own length.
                 state_type: "my_ext::ExtConfig".to_string(),
@@ -1668,6 +1676,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
+            carrier: None,
             state_type: "my_ext::ExtConfig".to_string(),
             decl: EmbedDecl {
                 role: "nonexistent".to_string(),
@@ -1705,6 +1714,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         }];
         let embeds = vec![Embed {
             source: "my_ext".to_string(),
+            carrier: None,
             state_type: "my_ext::ExtConfig".to_string(),
             decl: EmbedDecl {
                 role: "gate_config".to_string(),
@@ -2499,6 +2509,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             deps.extensions.embeds,
             vec![Embed {
                 source: "my_ext".to_string(),
+                carrier: None,
                 state_type: "my_ext::ExtConfig".to_string(),
                 decl: EmbedDecl {
                     role: "ext_config".into(),

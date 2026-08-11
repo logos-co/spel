@@ -547,10 +547,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 |w| eprintln!("warning: {w}"),
             );
             all_items.extend(extra_items);
-            slot_assert.extend(slot_offsets::emit_agreement_asserts(
-                &scan_items,
-                &program.embeds,
-            )?);
+            slot_assert.extend(slot_offsets::emit_agreement_asserts(&program.embeds));
             slot_assert.extend(slot_offsets::embed_window_collision_asserts(
                 &program.embeds,
             )?);
