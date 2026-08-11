@@ -5,7 +5,7 @@
 //! in `spel-framework-core` and the proc-macro path (`lez_program`, `generate_idl!`) use this
 //! logic to ensure consistent IDL output.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use syn::{Attribute, Item, ItemEnum, ItemStruct, Type};
 
@@ -181,38 +181,47 @@ fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
     }
 }
 
-/// Look up a type by name in the top-level items of a file and parse it.
+/// The nameable type items, by name, first declaration winning.
+///
+/// `items` merges the consumer's file with every crate in its
+/// dependency graph, so one name can appear more than once. Building
+/// from the back leaves the earliest declaration in the map.
+fn index_type_items(items: &[Item]) -> HashMap<String, &Item> {
+    items
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            Item::Struct(s) => Some((s.ident.to_string(), item)),
+            Item::Enum(e) => Some((e.ident.to_string(), item)),
+            Item::Type(t) => Some((t.ident.to_string(), item)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Look up a type by name in an [`index_type_items`] index and parse it.
 /// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
-fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
-    for item in items {
-        match item {
-            Item::Struct(s) if s.ident == name => {
-                return parse_struct_account_type(s).map(|at| IdlTypeDef {
-                    name: name.to_string(),
-                    ..at.type_
-                });
-            },
-            Item::Enum(e) if e.ident == name => {
-                let mut def = parse_enum_account_type(e).type_;
-                def.name = name.to_string();
-                return Some(def);
-            },
-            Item::Type(t) if t.ident == name => {
-                // Type alias: resolve the target and emit its def under the
-                // alias name, so instruction args referencing the alias find
-                // a matching entry in the IDL's `types` array.
-                if let Some(target) = last_ident(&t.ty) {
-                    if let Some(mut def) = find_and_parse_type(items, &target) {
-                        def.name = name.to_string();
-                        return Some(def);
-                    }
-                }
-                return None;
-            },
-            _ => {},
-        }
+fn find_and_parse_type(index: &HashMap<String, &Item>, name: &str) -> Option<IdlTypeDef> {
+    match index.get(name)? {
+        Item::Struct(s) => parse_struct_account_type(s).map(|at| IdlTypeDef {
+            name: name.to_string(),
+            ..at.type_
+        }),
+        Item::Enum(e) => {
+            let mut def = parse_enum_account_type(e).type_;
+            def.name = name.to_string();
+            Some(def)
+        },
+        // Type alias: resolve the target and emit its def under the
+        // alias name, so instruction args referencing the alias find
+        // a matching entry in the IDL's `types` array.
+        Item::Type(t) => {
+            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?)?;
+            def.name = name.to_string();
+            Some(def)
+        },
+        _ => None,
     }
-    None
 }
 
 /// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
@@ -302,6 +311,7 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
         }
     }
 
+    let index = index_type_items(items);
     while !queue.is_empty() {
         let batch: Vec<String> = std::mem::take(&mut queue);
         for name in batch {
@@ -309,7 +319,7 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
                 continue;
             }
             visited.insert(name.clone());
-            if let Some(def) = find_and_parse_type(items, &name) {
+            if let Some(def) = find_and_parse_type(&index, &name) {
                 // Enqueue any new references from this helper type.
                 for ref_name in collect_defined_refs(&def) {
                     if !visited.contains(&ref_name) {
@@ -338,6 +348,30 @@ mod tests {
 
     fn items(src: &str) -> Vec<Item> {
         syn::parse_file(src).expect("failed to parse source").items
+    }
+
+    #[test]
+    fn first_declaration_of_a_repeated_name_wins() {
+        // The scanned items merge the consumer's file with every crate in
+        // its dependency graph, so one name can appear more than once. It
+        // resolves to the first declaration in item order, not to
+        // whichever one the lookup index happened to keep.
+        let src = r#"
+            pub struct Helper { pub first: u8 }
+            pub struct Helper { pub second: u8 }
+
+            #[account_type]
+            pub struct VaultState {
+                pub helper: Helper,
+            }
+        "#;
+        let (_, helpers) = collect_account_types(&items(src));
+        let helper = helpers
+            .iter()
+            .find(|t| t.name == "Helper")
+            .expect("the referenced helper resolves");
+        let fields: Vec<&str> = helper.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(fields, vec!["first"]);
     }
 
     #[test]

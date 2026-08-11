@@ -526,8 +526,9 @@ wrapper = "my_gate"
 
     #[test]
     fn malformed_inject_seed_is_a_hard_error() {
-        // A bare-string seed used to be swallowed, injecting the account
-        // unconstrained where a PDA-verified one was intended.
+        // Refusing this matters: a bare-string seed accepted as written
+        // injects the account unconstrained where a PDA-verified one is
+        // intended.
         let tmp = TempDir::new("inject-bad-seed");
         tmp.write(
             "Cargo.toml",
@@ -601,8 +602,9 @@ wrapper = "other_gate"
 
     #[test]
     fn malformed_compound_seed_entry_is_a_hard_error() {
-        // An entry that is neither const nor account used to be silently
-        // skipped, shortening the seed list and deriving a wrong PDA.
+        // Refusing this matters: an entry that is neither const nor
+        // account, skipped rather than refused, shortens the seed list
+        // and derives a wrong PDA.
         let tmp = TempDir::new("inject-bad-compound");
         tmp.write(
             "Cargo.toml",
