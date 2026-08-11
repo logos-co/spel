@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use syn::{parse_quote, Attribute, FnArg, ItemFn};
 
-use super::{marker::attr_is, InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
+use super::{marker::attr_is, Embed, InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 
 /// Filter `deps.extensions.wraps` down to the wraps whose extension
 /// marker carries no skip-word arg matching `WrapInstructions::skip`.
@@ -80,18 +80,19 @@ pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
     active_wraps: &[WrapInstructions],
     inject_specs: &[InjectSpec],
-    embeds: &[(String, super::EmbedDecl)],
+    embeds: &[Embed],
     locations: GateLocations,
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
     if locations == GateLocations::Emit {
-        if let Some((source, _)) = embeds
+        if let Some(e) = embeds
             .iter()
-            .find(|(_, e)| e.offset == super::OffsetSpec::Derived)
+            .find(|e| e.decl.offset == super::OffsetSpec::Derived)
         {
             return Err(format!(
-                "extension `{source}` reached the gate pass with an unresolved \
-                derived offset; `resolve_derived_offsets` must run after discovery"
+                "extension `{}` reached the gate pass with an unresolved \
+                derived offset; `resolve_derived_offsets` must run after discovery",
+                e.source
             ));
         }
     }
@@ -105,7 +106,7 @@ pub fn apply_wrap_and_inject(
     // only when this one writes locations.
     let offset_by_source: HashMap<&str, &super::OffsetSpec> = embeds
         .iter()
-        .map(|(source, e)| (source.as_str(), &e.offset))
+        .map(|e| (e.source.as_str(), &e.decl.offset))
         .collect();
     let gate_offset = |spec: &InjectSpec| match locations {
         GateLocations::Emit => offset_by_source.get(spec.source.as_str()).copied(),
@@ -246,10 +247,15 @@ fn resolve_canonical_constraint(fns: &[ItemFn], account: &str) -> Result<syn::Ex
 /// surface it as a compile error.
 pub fn rewrite_embedded_roles(
     specs: &mut [InjectSpec],
-    embeds: &[(String, super::EmbedDecl)],
+    embeds: &[Embed],
     consumer_fns: &[ItemFn],
 ) -> Result<(), String> {
-    for (source, embed) in embeds {
+    for Embed {
+        source,
+        decl: embed,
+        ..
+    } in embeds
+    {
         let canonical = resolve_canonical_constraint(consumer_fns, &embed.account)?;
         let seeds = expr_to_seeds(&canonical).ok_or_else(|| {
             format!(
@@ -353,9 +359,11 @@ fn check_initializer_coverage(
 /// number at this point, so pairs involving one are checked by the
 /// const assert `slot_offsets` emits over the carriers' offset consts,
 /// which rustc evaluates once the layout is known.
-fn check_embed_window_collisions(embeds: &[(String, super::EmbedDecl)]) -> Result<(), String> {
-    for (i, (source_a, a)) in embeds.iter().enumerate() {
-        for (source_b, b) in &embeds[i + 1..] {
+fn check_embed_window_collisions(embeds: &[Embed]) -> Result<(), String> {
+    for (i, a) in embeds.iter().enumerate() {
+        for b in &embeds[i + 1..] {
+            let (source_a, source_b) = (&a.source, &b.source);
+            let (a, b) = (&a.decl, &b.decl);
             if a.account != b.account {
                 continue;
             }
@@ -871,7 +879,7 @@ mod tests {
     }
 
     // A rewritten spec plus its embed decl: embedded mode for `my_ext`.
-    fn embedded_fixture() -> (Vec<InjectSpec>, Vec<(String, crate::extension::EmbedDecl)>) {
+    fn embedded_fixture() -> (Vec<InjectSpec>, Vec<Embed>) {
         let specs = vec![InjectSpec {
             wrapper: "my_gate".to_string(),
             accounts: vec![
@@ -892,15 +900,16 @@ mod tests {
             ],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            crate::extension::EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            state_type: "my_ext::MyConfig".to_string(),
+            decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
                 initializer: None,
             },
-        )];
+        }];
         (specs, embeds)
     }
 
@@ -946,9 +955,9 @@ mod tests {
     // The embedded fixture with a declared initializer: the embed
     // carries the anchor attr, which makes the coverage check
     // mandatory for `my_ext`.
-    fn initializer_fixture() -> (Vec<InjectSpec>, Vec<(String, crate::extension::EmbedDecl)>) {
+    fn initializer_fixture() -> (Vec<InjectSpec>, Vec<Embed>) {
         let (specs, mut embeds) = embedded_fixture();
-        embeds[0].1.initializer = Some("gate_initialize".to_string());
+        embeds[0].decl.initializer = Some("gate_initialize".to_string());
         (specs, embeds)
     }
 
@@ -1034,7 +1043,7 @@ mod tests {
     #[test]
     fn unconventional_initializer_name_still_gates() {
         let (mut specs, mut embeds) = embedded_fixture();
-        embeds[0].1.initializer = Some("bootstrap_gate".to_string());
+        embeds[0].decl.initializer = Some("bootstrap_gate".to_string());
         let create: ItemFn = syn::parse_quote!(
             pub fn create(
                 #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
@@ -1122,15 +1131,16 @@ mod tests {
             }],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            crate::extension::EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            state_type: "my_ext::MyConfig".to_string(),
+            decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
                 initializer: None,
             },
-        )];
+        }];
         let wraps = vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
             skip: None,
@@ -1168,9 +1178,9 @@ mod tests {
     fn omitted_locations_inject_what_emitted_ones_do() {
         let (specs, embeds) = embedded_fixture();
         let mut resolved = embeds.clone();
-        resolved[0].1.offset = OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".to_string());
+        resolved[0].decl.offset = OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".to_string());
         let mut derived = embeds;
-        derived[0].1.offset = OffsetSpec::Derived;
+        derived[0].decl.offset = OffsetSpec::Derived;
         let authored: ItemFn = syn::parse_quote!(
             #[my_gate]
             pub fn update(value: u64) -> SpelResult {
@@ -1214,7 +1224,7 @@ mod tests {
     #[test]
     fn emitted_locations_still_refuse_an_unresolved_derivation() {
         let (specs, mut embeds) = embedded_fixture();
-        embeds[0].1.offset = OffsetSpec::Derived;
+        embeds[0].decl.offset = OffsetSpec::Derived;
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate]
             pub fn update(value: u64) -> SpelResult {
@@ -1228,11 +1238,7 @@ mod tests {
 
     // Post-rewrite embedded state plus an active wrap: the shape every
     // auto-gate skip test below starts from.
-    fn embedded_wrap_fixture() -> (
-        Vec<InjectSpec>,
-        Vec<(String, crate::extension::EmbedDecl)>,
-        Vec<WrapInstructions>,
-    ) {
+    fn embedded_wrap_fixture() -> (Vec<InjectSpec>, Vec<Embed>, Vec<WrapInstructions>) {
         let specs = vec![InjectSpec {
             wrapper: "my_gate".to_string(),
             accounts: vec![InjectAccount {
@@ -1244,15 +1250,16 @@ mod tests {
             }],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            crate::extension::EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            state_type: "my_ext::MyConfig".to_string(),
+            decl: crate::extension::EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
                 initializer: None,
             },
-        )];
+        }];
         let wraps = vec![WrapInstructions {
             wrapper: "my_gate".to_string(),
             skip: None,
@@ -1951,24 +1958,26 @@ mod tests {
         );
         let embeds = |off_b: usize| {
             vec![
-                (
-                    "ext_a".to_string(),
-                    crate::extension::EmbedDecl {
+                Embed {
+                    source: "ext_a".to_string(),
+                    state_type: "ext_a::CfgA".to_string(),
+                    decl: crate::extension::EmbedDecl {
                         role: "cfg_a".to_string(),
                         account: "shared".to_string(),
                         offset: OffsetSpec::Literal(32),
                         initializer: None,
                     },
-                ),
-                (
-                    "ext_b".to_string(),
-                    crate::extension::EmbedDecl {
+                },
+                Embed {
+                    source: "ext_b".to_string(),
+                    state_type: "ext_b::CfgB".to_string(),
+                    decl: crate::extension::EmbedDecl {
                         role: "cfg_b".to_string(),
                         account: "shared".to_string(),
                         offset: OffsetSpec::Literal(off_b),
                         initializer: None,
                     },
-                ),
+                },
             ]
         };
         let err = rewrite_embedded_roles(&mut specs, &embeds(32), std::slice::from_ref(&consumer))

@@ -16,7 +16,8 @@
 
 use quote::quote;
 use spel_framework_core::extension::{
-    find_slot_carrier, slot_offset_const_name, BoundValue, EmbedDecl, OffsetSpec, SlotCarrier,
+    find_slot_carrier, slot_offset_const_name, BoundValue, Embed, EmbedDecl, OffsetSpec,
+    SlotCarrier,
 };
 
 // ── account_type side: derive the offset ─────────────────────────────────
@@ -77,17 +78,18 @@ pub(crate) fn expand(item: proc_macro::TokenStream) -> proc_macro::TokenStream {
 /// `FixedBorshSize::SIZE`, each offset lowered as its literal or its
 /// carrier const path. Touching windows are legal.
 pub(crate) fn embed_window_collision_asserts(
-    embeds: &[(String, EmbedDecl)],
-    state_types: &std::collections::HashMap<String, String>,
+    embeds: &[Embed],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut out = proc_macro2::TokenStream::new();
-    for (i, (source_a, a)) in embeds.iter().enumerate() {
-        for (source_b, b) in embeds.iter().skip(i + 1) {
+    for (i, ea) in embeds.iter().enumerate() {
+        for eb in embeds.iter().skip(i + 1) {
+            let (a, b) = (&ea.decl, &eb.decl);
             if a.account != b.account {
                 continue;
             }
-            let ty_a = state_type_path(state_types, source_a)?;
-            let ty_b = state_type_path(state_types, source_b)?;
+            let (source_a, source_b) = (&ea.source, &eb.source);
+            let ty_a = state_type_path(ea)?;
+            let ty_b = state_type_path(eb)?;
             let (off_a, off_b) = (offset_tokens(a)?, offset_tokens(b)?);
             let message = format!(
                 "embedded windows of `{source_a}` (offset {off_a}) and \
@@ -107,25 +109,14 @@ pub(crate) fn embed_window_collision_asserts(
 }
 
 /// The declared state type of an embedded window, parsed to a path.
-fn state_type_path(
-    state_types: &std::collections::HashMap<String, String>,
-    source: &str,
-) -> syn::Result<syn::Path> {
-    let Some(raw) = state_types.get(source) else {
-        return Err(syn::Error::new(
-            proc_macro2::Span::call_site(),
-            format!(
-                "extension '{source}' declares no embedded.state_type; \
-                discovery must have rejected this"
-            ),
-        ));
-    };
-    syn::parse_str(raw).map_err(|e| {
+fn state_type_path(embed: &Embed) -> syn::Result<syn::Path> {
+    syn::parse_str(&embed.state_type).map_err(|e| {
         syn::Error::new(
             proc_macro2::Span::call_site(),
             format!(
-                "extension '{source}': embedded.state_type {raw:?} \
-                is not a valid type path: {e}"
+                "extension '{}': embedded.state_type {:?} \
+                is not a valid type path: {e}",
+                embed.source, embed.state_type
             ),
         )
     })
@@ -233,12 +224,12 @@ fn layout_test(struct_ident: &syn::Ident, slot: &SlotField) -> proc_macro2::Toke
 /// deps per expansion, and one set of items both passes bind against.
 pub(crate) fn emit_agreement_asserts(
     scan_items: &[syn::Item],
-    embeds: &[(String, EmbedDecl)],
+    embeds: &[Embed],
 ) -> syn::Result<proc_macro2::TokenStream> {
     let mut out = proc_macro2::TokenStream::new();
-    for (_, embed) in embeds {
-        if let OffsetSpec::Literal(off) = embed.offset {
-            if let Some(c) = find_slot_carrier(scan_items, &embed.role)
+    for embed in embeds {
+        if let OffsetSpec::Literal(off) = embed.decl.offset {
+            if let Some(c) = find_slot_carrier(scan_items, &embed.decl.role)
                 .map_err(|m| syn::Error::new(proc_macro2::Span::call_site(), m))?
             {
                 out.extend(agreement_assert(&c, off));
@@ -321,16 +312,17 @@ mod tests {
         syn::parse_file(src).expect("fixture parses").items
     }
 
-    fn embed(role: &str, account: &str, offset: OffsetSpec) -> (String, EmbedDecl) {
-        (
-            role.to_string(),
-            EmbedDecl {
-                role: role.to_string(),
+    fn embed(source: &str, account: &str, offset: OffsetSpec, state_type: &str) -> Embed {
+        Embed {
+            source: source.to_string(),
+            decl: EmbedDecl {
+                role: source.to_string(),
                 account: account.to_string(),
                 offset,
                 initializer: None,
             },
-        )
+            state_type: state_type.to_string(),
+        }
     }
 
     #[test]
@@ -381,26 +373,25 @@ mod tests {
         );
     }
 
-    fn state_types(pairs: &[(&str, &str)]) -> std::collections::HashMap<String, String> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.to_string()))
-            .collect()
-    }
-
     // A shared account's embed pair becomes one assert: each window's
     // length through its declared state type, offsets as literals.
     #[test]
     fn shared_account_pair_emits_a_range_assert() {
         let embeds = vec![
-            embed("admin", "cfg", OffsetSpec::Literal(32)),
-            embed("freeze", "cfg", OffsetSpec::Literal(40)),
+            embed(
+                "admin",
+                "cfg",
+                OffsetSpec::Literal(32),
+                "admin_authority::AdminConfig",
+            ),
+            embed(
+                "freeze",
+                "cfg",
+                OffsetSpec::Literal(40),
+                "freeze_authority::FreezeConfig",
+            ),
         ];
-        let types = state_types(&[
-            ("admin", "admin_authority::AdminConfig"),
-            ("freeze", "freeze_authority::FreezeConfig"),
-        ]);
-        let ts = embed_window_collision_asserts(&embeds, &types)
+        let ts = embed_window_collision_asserts(&embeds)
             .expect("emits")
             .to_string();
         assert!(
@@ -415,36 +406,21 @@ mod tests {
     #[test]
     fn separate_accounts_emit_no_collision_assert() {
         let embeds = vec![
-            embed("admin", "cfg_a", OffsetSpec::Literal(32)),
-            embed("freeze", "cfg_b", OffsetSpec::Literal(32)),
+            embed("admin", "cfg_a", OffsetSpec::Literal(32), "A"),
+            embed("freeze", "cfg_b", OffsetSpec::Literal(32), "B"),
         ];
-        let types = state_types(&[("admin", "A"), ("freeze", "B")]);
-        let ts = embed_window_collision_asserts(&embeds, &types).expect("ok");
+        let ts = embed_window_collision_asserts(&embeds).expect("ok");
         assert!(ts.is_empty(), "{ts}");
-    }
-
-    // A missing state type here is a framework bug, discovery fails
-    // closed before emission. The error still names the source.
-    #[test]
-    fn missing_state_type_is_an_error_naming_the_source() {
-        let embeds = vec![
-            embed("admin", "cfg", OffsetSpec::Literal(32)),
-            embed("freeze", "cfg", OffsetSpec::Literal(64)),
-        ];
-        let types = state_types(&[("admin", "A")]);
-        let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
-        assert!(e.to_string().contains("freeze"), "{e}");
     }
 
     // A malformed declared path fails naming the offending string.
     #[test]
     fn invalid_state_type_path_is_an_error() {
         let embeds = vec![
-            embed("admin", "cfg", OffsetSpec::Literal(32)),
-            embed("freeze", "cfg", OffsetSpec::Literal(64)),
+            embed("admin", "cfg", OffsetSpec::Literal(32), "not a path!!"),
+            embed("freeze", "cfg", OffsetSpec::Literal(64), "B"),
         ];
-        let types = state_types(&[("admin", "not a path!!"), ("freeze", "B")]);
-        let e = embed_window_collision_asserts(&embeds, &types).expect_err("must fail");
+        let e = embed_window_collision_asserts(&embeds).expect_err("must fail");
         assert!(e.to_string().contains("not a path!!"), "{e}");
     }
 
@@ -459,15 +435,16 @@ mod tests {
                 "admin_config",
                 "config",
                 OffsetSpec::Path("Cfg::ADMIN_SLOT_OFFSET".into()),
+                "A",
             ),
             embed(
                 "freeze_config",
                 "config",
                 OffsetSpec::Path("Cfg::FREEZE_SLOT_OFFSET".into()),
+                "B",
             ),
         ];
-        let types = state_types(&[("admin_config", "A"), ("freeze_config", "B")]);
-        let ts = embed_window_collision_asserts(&embeds, &types)
+        let ts = embed_window_collision_asserts(&embeds)
             .expect("both sides resolve")
             .to_string();
         assert!(
@@ -481,8 +458,8 @@ mod tests {
     // it fails loudly naming the pass that should have run.
     #[test]
     fn unresolved_derived_offset_names_the_missing_pass() {
-        let (_, e) = embed("admin_config", "config", OffsetSpec::Derived);
-        let Err(err) = offset_tokens(&e) else {
+        let e = embed("admin_config", "config", OffsetSpec::Derived, "A");
+        let Err(err) = offset_tokens(&e.decl) else {
             panic!("expected the unresolved-derived error");
         };
         assert!(

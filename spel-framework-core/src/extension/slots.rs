@@ -109,9 +109,10 @@ pub fn resolve_derived_offsets(
     ext: &mut ExtensionDiscoveries,
     items: &[syn::Item],
 ) -> Result<(), String> {
-    for (_, embed) in &mut ext.embeds {
-        if embed.offset == OffsetSpec::Derived {
-            embed.offset = OffsetSpec::Path(carrier_path(&require_carrier(items, &embed.role)?));
+    for embed in &mut ext.embeds {
+        if embed.decl.offset == OffsetSpec::Derived {
+            embed.decl.offset =
+                OffsetSpec::Path(carrier_path(&require_carrier(items, &embed.decl.role)?));
         }
     }
     for values in ext.bound_calls.values_mut() {
@@ -127,7 +128,7 @@ pub fn resolve_derived_offsets(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::extension::EmbedDecl;
+    use crate::extension::{Embed, EmbedDecl};
 
     fn items(src: &str) -> Vec<syn::Item> {
         syn::parse_file(src).expect("fixture parses").items
@@ -135,15 +136,16 @@ mod tests {
 
     fn discoveries(offset: OffsetSpec, bound: BoundValue) -> ExtensionDiscoveries {
         let mut ext = ExtensionDiscoveries::default();
-        ext.embeds.push((
-            "my-ext".into(),
-            EmbedDecl {
+        ext.embeds.push(Embed {
+            source: "my-ext".into(),
+            state_type: "my_ext::Cfg".into(),
+            decl: EmbedDecl {
                 role: "gate_config".into(),
                 account: "cfg".into(),
                 offset,
                 initializer: None,
             },
-        ));
+        });
         ext.bound_calls.insert("action".into(), vec![bound]);
         ext
     }
@@ -161,7 +163,7 @@ mod tests {
         );
         resolve_derived_offsets(&mut ext, &its).expect("resolves");
         assert_eq!(
-            ext.embeds[0].1.offset,
+            ext.embeds[0].decl.offset,
             OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".into())
         );
         assert_eq!(
@@ -177,7 +179,7 @@ mod tests {
         let its = items("pub struct Cfg { #[gate_slot] pub s: u8 }");
         let mut ext = discoveries(OffsetSpec::Literal(32), BoundValue::Literal(32));
         resolve_derived_offsets(&mut ext, &its).expect("resolves");
-        assert_eq!(ext.embeds[0].1.offset, OffsetSpec::Literal(32));
+        assert_eq!(ext.embeds[0].decl.offset, OffsetSpec::Literal(32));
         assert_eq!(ext.bound_calls["action"][0], BoundValue::Literal(32));
     }
 

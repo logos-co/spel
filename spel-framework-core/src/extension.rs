@@ -103,15 +103,10 @@ pub struct ExtensionDiscoveries {
     /// Active wrap configs, paired with the consumer marker attr's arg
     /// (`""` for a bare marker) so callers can honor `skip`.
     pub wraps: Vec<(String, WrapInstructions)>,
-    /// Embedded-mode declarations from the module markers, paired with
-    /// the declaring extension's crate name so a role only ever
-    /// rewrites its own extensions' inject entries.
-    pub embeds: Vec<(String, EmbedDecl)>,
-    /// Embedded window state types per declaring extension, from
-    /// `embedded.state_type` metadata. The program macro emits window
-    /// collision asserts through `<state_type as FixedBorshSize>::SIZE`.
-    /// Populated only for extensions in embedded mode, which require it.
-    pub embed_state_types: HashMap<String, String>,
+    /// Embedded-mode declarations from the module markers, each naming
+    /// the declaring extension so a role only ever rewrites its own
+    /// extensions' inject entries.
+    pub embeds: Vec<Embed>,
     /// Dispatch-only trailing args per discovered fn, resolved from
     /// `bound_args` metadata and the marker's kwargs. The dispatcher
     /// appends each value at the call site as a literal or, for a
@@ -205,10 +200,27 @@ struct MatchedExtension {
     instructions: Vec<(ItemFn, syn::Path)>,
     inject_specs: Vec<InjectSpec>,
     wraps: Vec<(String, WrapInstructions)>,
-    embeds: Vec<(String, EmbedDecl)>,
-    embedded_state_types: HashMap<String, String>,
+    embeds: Vec<Embed>,
     bound_calls: HashMap<String, Vec<BoundValue>>,
     marker: String,
+}
+
+/// One extension's embedded-mode declaration: which extension declared
+/// it, where its window sits, and the type occupying that window.
+///
+/// The three travel together because embedded mode requires all three:
+/// discovery refuses an embed whose extension declares no
+/// `embedded.state_type`, so a window always knows its own length and
+/// the collision asserts can be emitted from the embed alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Embed {
+    /// Crate name of the declaring extension.
+    pub source: String,
+    /// Role, embedding account, and offset from the module marker.
+    pub decl: EmbedDecl,
+    /// Type occupying the window, from `embedded.state_type` metadata.
+    /// Window collision asserts read its `FixedBorshSize::SIZE`.
+    pub state_type: String,
 }
 
 /// Producer entry point: marker pre-check, graph resolution, and
@@ -367,8 +379,7 @@ fn discover_extensions<F: FnMut(String)>(
         )?;
         let is_embedded = resolved_embed.is_some();
         let mut embeds = Vec::new();
-        let mut embedded_state_types = HashMap::new();
-        if let Some(embed) = &resolved_embed {
+        if let Some(decl) = resolved_embed {
             let Some(state_type) = embedded.state_type.clone() else {
                 return Err(format!(
                     "extension '{crate_name}' is used in embedded mode but its \
@@ -378,8 +389,11 @@ fn discover_extensions<F: FnMut(String)>(
                     be emitted"
                 ));
             };
-            embedded_state_types.insert(crate_name.clone(), state_type);
-            embeds.push((crate_name.clone(), embed.clone()));
+            embeds.push(Embed {
+                source: crate_name.clone(),
+                decl,
+                state_type,
+            });
         }
 
         let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
@@ -426,7 +440,7 @@ fn discover_extensions<F: FnMut(String)>(
                 found.push(pos);
                 values.push(resolve_bound_value(
                     bound,
-                    resolved_embed.as_ref(),
+                    embeds.first().map(|e| &e.decl),
                     mod_attrs,
                     &crate_name,
                 )?);
@@ -465,7 +479,6 @@ fn discover_extensions<F: FnMut(String)>(
             inject_specs: injects,
             wraps,
             embeds,
-            embedded_state_types,
             bound_calls,
             marker: ext_attr.clone(),
         });
@@ -611,7 +624,6 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.inject_specs.extend(m.inject_specs);
         out.wraps.extend(m.wraps);
         out.embeds.extend(m.embeds);
-        out.embed_state_types.extend(m.embedded_state_types);
         out.bound_calls.extend(m.bound_calls);
         out.matched_markers.push(m.marker);
     }
@@ -1429,20 +1441,18 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             .expect("embedded marker must be collected");
         assert_eq!(
             ext.embeds,
-            vec![(
-                "my_ext".to_string(),
-                EmbedDecl {
+            vec![Embed {
+                source: "my_ext".to_string(),
+                // The window state type travels with the embed, so an
+                // embed can always report its own length.
+                state_type: "my_ext::ExtConfig".to_string(),
+                decl: EmbedDecl {
                     role: "gate_config".to_string(),
                     account: "prog_config".to_string(),
                     offset: OffsetSpec::Literal(32),
                     initializer: None,
-                }
-            )]
-        );
-        assert_eq!(
-            ext.embed_state_types.get("my_ext").map(String::as_str),
-            Some("my_ext::ExtConfig"),
-            "the window state type must travel with the embed"
+                },
+            }]
         );
     }
 
@@ -1546,15 +1556,16 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             }],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            state_type: "my_ext::ExtConfig".to_string(),
+            decl: EmbedDecl {
                 role: "nonexistent".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(8),
                 initializer: None,
             },
-        )];
+        }];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
             pub fn initialize(
                 #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
@@ -1582,15 +1593,16 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             }],
             source: "my_ext".to_string(),
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            state_type: "my_ext::ExtConfig".to_string(),
+            decl: EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
                 initializer: None,
             },
-        )];
+        }];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
             pub fn initialize(
                 #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
@@ -2380,15 +2392,16 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             .expect("anchored discovery succeeds");
         assert_eq!(
             deps.extensions.embeds,
-            vec![(
-                "my_ext".to_string(),
-                EmbedDecl {
+            vec![Embed {
+                source: "my_ext".to_string(),
+                state_type: "my_ext::ExtConfig".to_string(),
+                decl: EmbedDecl {
                     role: "ext_config".into(),
                     account: "my_cfg".into(),
                     offset: OffsetSpec::Derived,
                     initializer: Some("ext_init".into()),
-                }
-            )]
+                },
+            }]
         );
         let names: Vec<String> = deps
             .extensions
@@ -2401,12 +2414,5 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             "the skip filter must fire on an inferred embed: {names:?}"
         );
         assert!(names.contains(&"ext_action".to_string()), "{names:?}");
-        assert_eq!(
-            deps.extensions
-                .embed_state_types
-                .get("my_ext")
-                .map(String::as_str),
-            Some("my_ext::ExtConfig")
-        );
     }
 }
