@@ -1,7 +1,14 @@
 //! Slot-carrier resolution: binds an embedded role to the consumer
 //! struct carrying its `*_slot` field, and lowers derived offsets to
-//! the carrier's const path. Shared by the dispatcher expansion and
-//! the CLI IDL path so both fail identically on a missing carrier.
+//! the carrier's const path.
+//!
+//! The dispatcher expansion runs this; the IDL producers do not. An
+//! offset reaches consumer code only through a gate attr, which the
+//! IDL producers discard, so they run the gate pass under
+//! `GateLocations::Omit` and never need a carrier. Keeping the scan on
+//! one side keeps one binding scan set: a carrier living in a local
+//! path dependency resolves for the party that reads it, and no second
+//! producer can disagree about which items were in scope.
 
 use super::{marker::BoundValue, ExtensionDiscoveries, OffsetSpec};
 

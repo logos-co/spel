@@ -174,9 +174,12 @@ fn generate_idl_inner(
                     _ => None,
                 })
                 .collect();
-            let scan_items = collect_file_items_following_mods(manifest_dir);
-            crate::extension::resolve_derived_offsets(&mut deps.extensions, &scan_items)
-                .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            // Derived offsets stay unresolved on this path. The IDL has
+            // no offset field and the gate attrs are dropped by
+            // `parse_instruction`, so resolving one would mean scanning
+            // the consumer's crate for a slot carrier to compute a value
+            // nothing here can read. The gate pass runs under
+            // `GateLocations::Omit` for the same reason.
             crate::extension::rewrite_embedded_roles(
                 &mut deps.extensions.inject_specs,
                 &deps.extensions.embeds,
@@ -205,6 +208,7 @@ fn generate_idl_inner(
                     &active_wraps,
                     &inject_specs,
                     &embeds,
+                    crate::extension::GateLocations::Omit,
                     None,
                 )
                 .map_err(IdlGenError::MalformedExtensionMetadata)?;
@@ -233,6 +237,7 @@ fn generate_idl_inner(
             &active_wraps,
             &inject_specs,
             &embeds,
+            crate::extension::GateLocations::Omit,
             Some(&qualified),
         )
         .map_err(IdlGenError::MalformedExtensionMetadata)?;

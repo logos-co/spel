@@ -25,6 +25,25 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
         .collect()
 }
 
+/// Whether a producer writes the framework's location kwargs onto the
+/// gate attrs it prepends.
+///
+/// The dispatcher writes them: the gate attr expands in the consumer's
+/// crate and reads `offset` to find its state. The IDL producers do
+/// not: they read the fn signature and discard the attrs, so a written
+/// offset would be dead tokens, and demanding one would make them
+/// resolve a slot carrier no output of theirs can observe. Injection is
+/// unaffected either way, the prepended attr activates specs in both
+/// its bare and its kwarg-carrying form.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateLocations {
+    /// Write `offset = ...`. An unresolved derivation reaching this
+    /// producer is a framework bug and fails closed.
+    Emit,
+    /// Leave it off. Offsets may arrive unresolved; nothing reads them.
+    Omit,
+}
+
 /// The shared gate pass, four phases in order: substitute embedded
 /// role params on discovered fns, prepend each active wrap's
 /// attribute, inject missing gate params, then stamp authored bare
@@ -45,37 +64,53 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
 ///
 /// Returns the names of the params `inject_gate_params` synthesized.
 ///
+/// `locations` says whether this producer writes the offset kwarg; see
+/// [`GateLocations`]. The accounts it injects are identical either way,
+/// which is what keeps the IDL's account list and the dispatcher's in
+/// agreement without the IDL producers resolving a carrier.
+///
 /// # Errors
 ///
 /// Propagates `inject_gate_params` errors and fails when a declared
-/// wrapper path is not a valid Rust attribute path and when a
+/// wrapper path is not a valid Rust attribute path, when a
 /// consumer-authored gate attr carries a location kwarg in embedded
-/// mode.
+/// mode, and, under [`GateLocations::Emit`], when an offset reaches the
+/// pass unresolved.
 pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
     active_wraps: &[WrapInstructions],
     inject_specs: &[InjectSpec],
     embeds: &[(String, super::EmbedDecl)],
+    locations: GateLocations,
     qualified: Option<&str>,
 ) -> Result<Vec<String>, String> {
-    if let Some((source, _)) = embeds
-        .iter()
-        .find(|(_, e)| e.offset == super::OffsetSpec::Derived)
-    {
-        return Err(format!(
-            "extension `{source}` reached the gate pass with an unresolved \
-            derived offset; `resolve_derived_offsets` must run after discovery"
-        ));
+    if locations == GateLocations::Emit {
+        if let Some((source, _)) = embeds
+            .iter()
+            .find(|(_, e)| e.offset == super::OffsetSpec::Derived)
+        {
+            return Err(format!(
+                "extension `{source}` reached the gate pass with an unresolved \
+                derived offset; `resolve_derived_offsets` must run after discovery"
+            ));
+        }
     }
     if qualified.is_some() {
         substitute_embedded_params(func, inject_specs);
     }
 
     let remap = build_remap(inject_specs, func);
+    // Membership answers "is this extension embedded", which decides
+    // the authored-kwarg rejection on every producer. The value is read
+    // only when this one writes locations.
     let offset_by_source: HashMap<&str, &super::OffsetSpec> = embeds
         .iter()
         .map(|(source, e)| (source.as_str(), &e.offset))
         .collect();
+    let gate_offset = |spec: &InjectSpec| match locations {
+        GateLocations::Emit => offset_by_source.get(spec.source.as_str()).copied(),
+        GateLocations::Omit => None,
+    };
     check_authored_location_kwargs(func, inject_specs, &offset_by_source)?;
 
     for wrap in active_wraps {
@@ -104,11 +139,7 @@ pub fn apply_wrap_and_inject(
             if spec.wrapper != wrapper_last {
                 continue;
             }
-            args.extend(spec_gate_args(
-                spec,
-                &remap,
-                offset_by_source.get(spec.source.as_str()).copied(),
-            )?);
+            args.extend(spec_gate_args(spec, &remap, gate_offset(spec))?);
         }
         let attr: Attribute = if args.is_empty() {
             parse_quote! { #[#wrapper_path] }
@@ -120,7 +151,12 @@ pub fn apply_wrap_and_inject(
 
     let injected = inject_gate_params(func, inject_specs, &remap)?;
 
-    stamp_authored_gates(func, inject_specs, &remap, &offset_by_source)?;
+    // Stamping only ever writes location kwargs, so a producer that
+    // omits them has nothing to stamp. It runs after injection either
+    // way, so the bare-attr-activates-injection rule already fired.
+    if locations == GateLocations::Emit {
+        stamp_authored_gates(func, inject_specs, &remap, &offset_by_source)?;
+    }
 
     Ok(injected)
 }
@@ -1022,7 +1058,8 @@ mod tests {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap_err();
+        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+            .unwrap_err();
         assert!(
             err.contains("gate_config") && err.contains("update"),
             "got: {err}"
@@ -1038,7 +1075,8 @@ mod tests {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap_err();
+        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+            .unwrap_err();
         assert!(err.contains("offset"), "got: {err}");
     }
 
@@ -1054,7 +1092,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None)
+        apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
             .expect("signer naming is orthogonal to slot location");
     }
 
@@ -1067,7 +1105,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &[], None)
+        apply_wrap_and_inject(&mut func, &[], &specs, &[], GateLocations::Emit, None)
             .expect("without an embed decl the lockdown must not fire");
     }
 
@@ -1104,7 +1142,15 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        apply_wrap_and_inject(
+            &mut func,
+            &wraps,
+            &specs,
+            &embeds,
+            GateLocations::Emit,
+            None,
+        )
+        .unwrap();
         let expected: Attribute =
             syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);
         assert_eq!(
@@ -1112,6 +1158,72 @@ mod tests {
             Some(&expected),
             "wrap-stamped gate must carry the extension's offset"
         );
+    }
+
+    // The IDL producers read the fn signature and drop the attrs, so
+    // they never resolve a carrier: an unresolved derivation reaches
+    // them legally, and the accounts they see are the dispatcher's.
+    // Only the location kwarg differs, and only on tokens nobody reads.
+    #[test]
+    fn omitted_locations_inject_what_emitted_ones_do() {
+        let (specs, embeds) = embedded_fixture();
+        let mut resolved = embeds.clone();
+        resolved[0].1.offset = OffsetSpec::Path("Cfg::GATE_SLOT_OFFSET".to_string());
+        let mut derived = embeds;
+        derived[0].1.offset = OffsetSpec::Derived;
+        let authored: ItemFn = syn::parse_quote!(
+            #[my_gate]
+            pub fn update(value: u64) -> SpelResult {
+                todo!()
+            }
+        );
+
+        let mut dispatcher = authored.clone();
+        let emitted = apply_wrap_and_inject(
+            &mut dispatcher,
+            &[],
+            &specs,
+            &resolved,
+            GateLocations::Emit,
+            None,
+        )
+        .expect("the dispatcher takes a resolved derivation");
+        let mut idl = authored;
+        let omitted =
+            apply_wrap_and_inject(&mut idl, &[], &specs, &derived, GateLocations::Omit, None)
+                .expect("an IDL producer takes an unresolved one");
+
+        assert_eq!(emitted, omitted, "same params injected");
+        assert_eq!(
+            idl.sig.inputs, dispatcher.sig.inputs,
+            "the signature the IDL is read from must match the dispatcher's"
+        );
+        let stamped: Attribute = syn::parse_quote!(
+            #[my_gate(gate_config = prog_config, caller = caller, offset = Cfg::GATE_SLOT_OFFSET)]
+        );
+        assert_eq!(dispatcher.attrs.first(), Some(&stamped));
+        assert_eq!(
+            idl.attrs.first(),
+            Some(&syn::parse_quote!(#[my_gate])),
+            "nothing stamps a location an IDL producer would discard"
+        );
+    }
+
+    // The tripwire survives where it means something: a derivation that
+    // reaches the dispatcher unresolved is still a framework bug.
+    #[test]
+    fn emitted_locations_still_refuse_an_unresolved_derivation() {
+        let (specs, mut embeds) = embedded_fixture();
+        embeds[0].1.offset = OffsetSpec::Derived;
+        let mut func: ItemFn = syn::parse_quote!(
+            #[my_gate]
+            pub fn update(value: u64) -> SpelResult {
+                todo!()
+            }
+        );
+        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+            .unwrap_err();
+        assert!(err.contains("resolve_derived_offsets"), "got: {err}");
     }
 
     // Post-rewrite embedded state plus an active wrap: the shape every
@@ -1162,7 +1274,15 @@ mod tests {
                 todo!()
             }
         );
-        let injected = apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        let injected = apply_wrap_and_inject(
+            &mut func,
+            &wraps,
+            &specs,
+            &embeds,
+            GateLocations::Emit,
+            None,
+        )
+        .unwrap();
         assert!(
             func.attrs.iter().all(|a| !a.path().is_ident("my_gate")),
             "the embedding account's creator must not carry the gate"
@@ -1186,7 +1306,15 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &wraps, &specs, &embeds, None).unwrap();
+        apply_wrap_and_inject(
+            &mut func,
+            &wraps,
+            &specs,
+            &embeds,
+            GateLocations::Emit,
+            None,
+        )
+        .unwrap();
         assert!(
             func.attrs
                 .first()
@@ -1219,7 +1347,9 @@ mod tests {
                 todo!()
             }
         );
-        let injected = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap();
+        let injected =
+            apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+                .unwrap();
         assert_eq!(
             injected,
             vec!["caller".to_string()],
@@ -1252,7 +1382,7 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &wraps, &specs, &[], None).unwrap();
+        apply_wrap_and_inject(&mut func, &wraps, &specs, &[], GateLocations::Emit, None).unwrap();
         assert!(
             func.attrs
                 .first()
@@ -1282,7 +1412,15 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &[], Some("my_ext::ext_transfer")).unwrap();
+        apply_wrap_and_inject(
+            &mut func,
+            &[],
+            &specs,
+            &[],
+            GateLocations::Emit,
+            Some("my_ext::ext_transfer"),
+        )
+        .unwrap();
 
         let FnArg::Typed(pt) = &func.sig.inputs[0] else {
             panic!("expected typed param");
@@ -1322,7 +1460,15 @@ mod tests {
                 todo!()
             }
         );
-        apply_wrap_and_inject(&mut func, &[], &specs, &[], Some("my_ext::ext_transfer")).unwrap();
+        apply_wrap_and_inject(
+            &mut func,
+            &[],
+            &specs,
+            &[],
+            GateLocations::Emit,
+            Some("my_ext::ext_transfer"),
+        )
+        .unwrap();
         let FnArg::Typed(pt) = &func.sig.inputs[0] else {
             panic!("expected typed param");
         };
@@ -1346,7 +1492,15 @@ mod tests {
             }
         );
         let before = func.clone();
-        apply_wrap_and_inject(&mut func, &[], &specs, &[], Some("my_ext::ext_transfer")).unwrap();
+        apply_wrap_and_inject(
+            &mut func,
+            &[],
+            &specs,
+            &[],
+            GateLocations::Emit,
+            Some("my_ext::ext_transfer"),
+        )
+        .unwrap();
         assert_eq!(
             func, before,
             "dedicated mode must not rewrite discovered fns"
@@ -1747,6 +1901,7 @@ mod tests {
             &[],
             &specs,
             &[],
+            GateLocations::Emit,
             Some("freeze_authority::freeze_authority_renounce"),
         )
         .unwrap();

@@ -73,7 +73,7 @@ mod marker;
 mod metadata;
 mod slots;
 
-pub use inject::{active_wraps, apply_wrap_and_inject, rewrite_embedded_roles};
+pub use inject::{active_wraps, apply_wrap_and_inject, rewrite_embedded_roles, GateLocations};
 pub use marker::{
     candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
     EmbedDecl, MarkerArgs, OffsetSpec,
@@ -1594,7 +1594,9 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 todo!()
             }
         );
-        let injected = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap();
+        let injected =
+            apply_wrap_and_inject(&mut func, &[], &specs, &embeds, GateLocations::Emit, None)
+                .unwrap();
         assert_eq!(injected, vec!["prog_config".to_string()]);
         let expected: Attribute =
             syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);

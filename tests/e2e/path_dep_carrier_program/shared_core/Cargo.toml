@@ -1,0 +1,10 @@
+[package]
+name = "shared-core"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+spel-framework = { path = "../../../../spel-framework" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.0", features = ["host"], package = "lee_core" }
+serde = { version = "1", features = ["derive"] }

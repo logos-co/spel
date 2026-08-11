@@ -385,6 +385,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                         &active_wraps,
                         &deps.extensions.inject_specs,
                         &deps.extensions.embeds,
+                        spel_framework_core::extension::GateLocations::Emit,
                         None,
                     )
                     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -424,6 +425,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             &active_wraps,
             &deps.extensions.inject_specs,
             &deps.extensions.embeds,
+            spel_framework_core::extension::GateLocations::Emit,
             Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -2372,9 +2374,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    let scan_items = slot_offsets::consumer_scan_items(std::path::Path::new(&resolved_path));
-    spel_framework_core::extension::resolve_derived_offsets(&mut deps.extensions, &scan_items)
-        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    // No carrier scan here: `generate_idl!` emits IDL JSON, which
+    // carries no offset, so the derivations stay unresolved and the
+    // gate pass runs under `spel_framework_core::extension::GateLocations::Omit`.
     let consumer_fns: Vec<ItemFn> = items
         .iter()
         .filter_map(|i| match i {
@@ -2401,6 +2403,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
                     &active_wraps,
                     &deps.extensions.inject_specs,
                     &deps.extensions.embeds,
+                    spel_framework_core::extension::GateLocations::Omit,
                     None,
                 )
                 .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -2434,6 +2437,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             &active_wraps,
             &deps.extensions.inject_specs,
             &deps.extensions.embeds,
+            spel_framework_core::extension::GateLocations::Omit,
             Some(&qualified),
         )
         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;

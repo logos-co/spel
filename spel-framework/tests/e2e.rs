@@ -349,6 +349,94 @@ fn e2e_derived_offset_builds() {
 }
 
 // ---------------------------------------------------------------------------
+// Derived offsets — a carrier in a path dependency, and an IDL that
+// needs no carrier at all
+// ---------------------------------------------------------------------------
+
+fn path_dep_carrier_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/path_dep_carrier_program")
+}
+
+/// The shared-core layout: the `#[mini_slot]` carrier lives in a local
+/// path dependency, not the program's entry file. Only the dispatcher
+/// resolves derivations, and its binding scan has to reach through the
+/// path dep to find the carrier. A clean build is that proof.
+#[test]
+fn e2e_path_dep_carrier_builds() {
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(path_dep_carrier_dir().join("Cargo.toml"))
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        output.status.success(),
+        "path-dep carrier fixture failed to build:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The same program through the CLI's IDL entry point, which is where
+/// this layout used to break: the IDL producers once resolved carriers
+/// against the entry file alone, so a carrier in a path dep made them
+/// refuse a program that compiles. They no longer resolve at all, the
+/// IDL has no offset to carry.
+///
+/// The assertion is producer agreement, the invariant the shared gate
+/// pass exists for: the IDL the dispatcher emitted from inside the
+/// consumer's crate and the IDL the CLI derives from its source must be
+/// the same document, including the account the gate injected into
+/// `bump`. Reintroducing carrier resolution on the CLI path turns this
+/// into the missing-carrier error instead.
+#[test]
+fn e2e_path_dep_carrier_producers_agree() {
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(path_dep_carrier_dir().join("Cargo.toml"))
+        .output()
+        .expect("Failed to run fixture binary");
+    assert!(
+        output.status.success(),
+        "cargo run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dispatcher_idl: serde_json::Value =
+        serde_json::from_str(String::from_utf8(output.stdout).unwrap().trim())
+            .expect("the dispatcher's IDL JSON is valid");
+
+    let cli_idl = spel_framework_core::idl_gen::generate_idl_from_file(
+        &path_dep_carrier_dir().join("src/lib.rs"),
+    )
+    .expect("IDL generation must not need a slot carrier");
+    let cli_idl = serde_json::to_value(&cli_idl).expect("the CLI's IDL serializes");
+
+    // Instructions are the gate pass's output and the thing the drift
+    // broke. The account-type section is a separate subsystem whose
+    // contents depend on which dependency dirs the caller hands in, so
+    // it is not part of this comparison.
+    assert_eq!(
+        cli_idl["instructions"], dispatcher_idl["instructions"],
+        "the CLI and the dispatcher must agree on every instruction"
+    );
+
+    let bump = cli_idl["instructions"]
+        .as_array()
+        .expect("instructions is an array")
+        .iter()
+        .find(|i| i["name"] == "bump")
+        .expect("the gated instruction reaches the IDL");
+    assert!(
+        bump["accounts"]
+            .as_array()
+            .expect("accounts is an array")
+            .iter()
+            .any(|a| a["name"] == "config"),
+        "the gate's injected account must be listed with the offset \
+         never resolved: {bump}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Derived offsets — a derivation with no carrier must not build
 // ---------------------------------------------------------------------------
 
