@@ -1415,6 +1415,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                     role: "gate_config".to_string(),
                     account: "prog_config".to_string(),
                     offset: OffsetSpec::Literal(32),
+                    initializer: None,
                 }
             )]
         );
@@ -1531,6 +1532,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 role: "nonexistent".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(8),
+                initializer: None,
             },
         )];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
@@ -1566,6 +1568,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
+                initializer: None,
             },
         )];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
@@ -2146,6 +2149,7 @@ self_exempt_marker = "my_exempt"
             role: "gate_config".into(),
             account: "cfg".into(),
             offset: OffsetSpec::Derived,
+            initializer: None,
         };
         let v = resolve_bound_value(&bound, Some(&embed), &[], "my-ext").expect("resolves");
         assert_eq!(
@@ -2183,6 +2187,7 @@ self_exempt_marker = "my_exempt"
             role: "ext_config".into(),
             account: "cfg".into(),
             offset: OffsetSpec::Literal(32),
+            initializer: None,
         }
     }
 
@@ -2281,6 +2286,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                     role: "ext_config".into(),
                     account: "my_cfg".into(),
                     offset: OffsetSpec::Derived,
+                    initializer: Some("ext_init".into()),
                 }
             )]
         );

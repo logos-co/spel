@@ -223,7 +223,7 @@ pub fn rewrite_embedded_roles(
             )
         })?;
 
-        check_initializer_coverage(specs, source, embed, consumer_fns)?;
+        check_initializer_coverage(embed, consumer_fns)?;
 
         let mut hit = false;
         for spec in specs.iter_mut().filter(|s| &s.source == source) {
@@ -269,28 +269,23 @@ fn creates_gated_embedded_account(
         })
 }
 
-/// An extension that declares an initializer wrapper makes it
-/// mandatory: every instruction that creates the embedding account must
-/// carry it, or the program ships born renounced. Extensions without
-/// one (freeze is born vacant by design) are untouched.
+/// An extension that declares an initializer, the embed anchor from
+/// `embedded.anchor_attr`, makes it mandatory: every instruction that
+/// creates the embedding account must carry it, or the program ships
+/// born renounced. Extensions without one (freeze is born vacant by
+/// design) are untouched; a wrapper whose name happens to match the
+/// retired `<role>_initialize` convention implies nothing.
 fn check_initializer_coverage(
-    specs: &[InjectSpec],
-    source: &str,
     embed: &super::EmbedDecl,
     consumer_fns: &[ItemFn],
 ) -> Result<(), String> {
-    let prefix = embed.role.strip_suffix("_config").unwrap_or(&embed.role);
-    let init_attr = format!("{prefix}_initialize");
-    let declares_initializer = specs
-        .iter()
-        .any(|s| s.source == source && s.wrapper == init_attr);
-    if !declares_initializer {
+    let Some(init_attr) = &embed.initializer else {
         return Ok(());
-    }
+    };
     for func in consumer_fns {
         let creates = typed_params(func)
             .any(|(pi, pt)| pi.ident == embed.account.as_str() && param_has_init(pt));
-        let annotated = func.attrs.iter().any(|a| attr_is(a, &init_attr));
+        let annotated = func.attrs.iter().any(|a| attr_is(a, init_attr));
 
         if !creates && !annotated {
             continue;
@@ -867,6 +862,7 @@ mod tests {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
+                initializer: None,
             },
         )];
         (specs, embeds)
@@ -911,27 +907,18 @@ mod tests {
         );
     }
 
-    // Specs of embedded_fixture plus an initializer wrapper, which
-    // makes the coverage check mandatory for `my_ext`.
-    fn initializer_specs() -> (Vec<InjectSpec>, Vec<(String, crate::extension::EmbedDecl)>) {
-        let (mut specs, embeds) = embedded_fixture();
-        specs.push(InjectSpec {
-            wrapper: "gate_initialize".to_string(),
-            accounts: vec![InjectAccount {
-                name: "caller".to_string(),
-                role: "caller".to_string(),
-                seeds: vec![],
-                signer: true,
-                embedded: false,
-            }],
-            source: "my_ext".to_string(),
-        });
+    // The embedded fixture with a declared initializer: the embed
+    // carries the anchor attr, which makes the coverage check
+    // mandatory for `my_ext`.
+    fn initializer_fixture() -> (Vec<InjectSpec>, Vec<(String, crate::extension::EmbedDecl)>) {
+        let (specs, mut embeds) = embedded_fixture();
+        embeds[0].1.initializer = Some("gate_initialize".to_string());
         (specs, embeds)
     }
 
     #[test]
     fn embedding_creator_without_initializer_attr_is_refused() {
-        let (mut specs, embeds) = initializer_specs();
+        let (mut specs, embeds) = initializer_fixture();
         let create: ItemFn = syn::parse_quote!(
             pub fn create(
                 #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
@@ -948,7 +935,7 @@ mod tests {
 
     #[test]
     fn annotated_creator_passes_the_coverage_check() {
-        let (mut specs, embeds) = initializer_specs();
+        let (mut specs, embeds) = initializer_fixture();
         let create: ItemFn = syn::parse_quote!(
             #[gate_initialize]
             pub fn create(
@@ -962,7 +949,7 @@ mod tests {
 
     #[test]
     fn initializer_attr_without_init_param_is_refused() {
-        let (mut specs, embeds) = initializer_specs();
+        let (mut specs, embeds) = initializer_fixture();
         let create: ItemFn = syn::parse_quote!(
             #[gate_initialize]
             pub fn create(
@@ -984,9 +971,17 @@ mod tests {
         );
     }
 
+    // The declaration is the whole trigger: an embed without an
+    // initializer gets no coverage gate, even when a wrapper happens
+    // to match the retired `<role>_initialize` naming convention.
     #[test]
-    fn extension_without_initializer_spec_skips_the_check() {
+    fn undeclared_initializer_means_no_coverage_gate() {
         let (mut specs, embeds) = embedded_fixture();
+        specs.push(InjectSpec {
+            wrapper: "gate_initialize".to_string(),
+            accounts: vec![],
+            source: "my_ext".to_string(),
+        });
         let create: ItemFn = syn::parse_quote!(
             pub fn create(
                 #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
@@ -995,7 +990,27 @@ mod tests {
             }
         );
         rewrite_embedded_roles(&mut specs, &embeds, &[create])
-            .expect("born-vacant extensions are untouched");
+            .expect("no declaration, no gate; born-vacant extensions are untouched");
+    }
+
+    // The declared name is the entire rule: an initializer that breaks
+    // the retired naming convention still gates every creator.
+    #[test]
+    fn unconventional_initializer_name_still_gates() {
+        let (mut specs, mut embeds) = embedded_fixture();
+        embeds[0].1.initializer = Some("bootstrap_gate".to_string());
+        let create: ItemFn = syn::parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let err = rewrite_embedded_roles(&mut specs, &embeds, &[create]).unwrap_err();
+        assert!(
+            err.contains("bootstrap_gate") && err.contains("born renounced"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -1075,6 +1090,7 @@ mod tests {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
+                initializer: None,
             },
         )];
         let wraps = vec![WrapInstructions {
@@ -1122,6 +1138,7 @@ mod tests {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
+                initializer: None,
             },
         )];
         let wraps = vec![WrapInstructions {
@@ -1785,6 +1802,7 @@ mod tests {
                         role: "cfg_a".to_string(),
                         account: "shared".to_string(),
                         offset: OffsetSpec::Literal(32),
+                        initializer: None,
                     },
                 ),
                 (
@@ -1793,6 +1811,7 @@ mod tests {
                         role: "cfg_b".to_string(),
                         account: "shared".to_string(),
                         offset: OffsetSpec::Literal(off_b),
+                        initializer: None,
                     },
                 ),
             ]

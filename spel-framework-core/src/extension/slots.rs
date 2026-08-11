@@ -134,6 +134,7 @@ mod tests {
                 role: "gate_config".into(),
                 account: "cfg".into(),
                 offset,
+                initializer: None,
             },
         ));
         ext.bound_calls.insert("action".into(), vec![bound]);

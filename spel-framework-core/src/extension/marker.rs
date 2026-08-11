@@ -96,6 +96,12 @@ pub struct EmbedDecl {
     /// Consumer account the role's slot lives in.
     pub account: String,
     pub offset: OffsetSpec,
+    /// The extension's declared initializer attr, `embedded.anchor_attr`.
+    /// `Some` only for anchored extensions; the declaration is what
+    /// makes the initializer coverage gate mandatory. `None` on the
+    /// marker-kwarg path: an anchorless extension declares no
+    /// initializer and gets no gate.
+    pub initializer: Option<String>,
 }
 
 /// Everything a module marker's argument list can carry: an optional
@@ -213,11 +219,13 @@ pub fn parse_marker_args(attr: &Attribute, ext_attr: &str) -> Result<Option<Mark
             role,
             account,
             offset: OffsetSpec::Literal(offset),
+            initializer: None,
         }),
         (Some((role, account)), None) => Some(EmbedDecl {
             role,
             account,
             offset: OffsetSpec::Derived,
+            initializer: None,
         }),
         (None, Some(_)) => {
             return Err(format!(
@@ -341,6 +349,7 @@ pub(super) fn infer_anchor_embed(
         role: role.to_string(),
         account,
         offset: OffsetSpec::Derived,
+        initializer: Some(anchor_attr.to_string()),
     }))
 }
 
@@ -447,6 +456,7 @@ mod tests {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
                 offset: OffsetSpec::Literal(32),
+                initializer: None,
             })
         );
     }
@@ -461,6 +471,7 @@ mod tests {
                 role: "gate_config".to_string(),
                 account: "cfg".to_string(),
                 offset: OffsetSpec::Literal(8),
+                initializer: None,
             })
         );
     }
@@ -482,6 +493,7 @@ mod tests {
                 role: "gate_config".into(),
                 account: "prog_config".into(),
                 offset: OffsetSpec::Derived,
+                initializer: None,
             })
         );
     }
