@@ -376,18 +376,16 @@ fn e2e_path_dep_carrier_builds() {
     );
 }
 
-/// The same program through the CLI's IDL entry point, which is where
-/// this layout used to break: the IDL producers once resolved carriers
-/// against the entry file alone, so a carrier in a path dep made them
-/// refuse a program that compiles. They no longer resolve at all, the
-/// IDL has no offset to carry.
+/// The same program through the CLI's IDL entry point. The IDL carries
+/// no offset, so its producers resolve no carrier, and a carrier living
+/// in a path dependency is none of their business.
 ///
 /// The assertion is producer agreement, the invariant the shared gate
 /// pass exists for: the IDL the dispatcher emitted from inside the
 /// consumer's crate and the IDL the CLI derives from its source must be
 /// the same document, including the account the gate injected into
-/// `bump`. Reintroducing carrier resolution on the CLI path turns this
-/// into the missing-carrier error instead.
+/// `bump`. Carrier resolution on the CLI path turns this into the
+/// missing-carrier error instead.
 #[test]
 fn e2e_path_dep_carrier_producers_agree() {
     let output = Command::new("cargo")

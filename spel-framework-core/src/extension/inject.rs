@@ -309,8 +309,8 @@ fn creates_gated_embedded_account(
 /// `embedded.anchor_attr`, makes it mandatory: every instruction that
 /// creates the embedding account must carry it, or the program ships
 /// born renounced. Extensions without one (freeze is born vacant by
-/// design) are untouched; a wrapper whose name happens to match the
-/// retired `<role>_initialize` convention implies nothing.
+/// design) are untouched; a wrapper whose name merely matches the
+/// `<role>_initialize` shape implies nothing.
 fn check_initializer_coverage(
     embed: &super::EmbedDecl,
     consumer_fns: &[ItemFn],
@@ -1008,8 +1008,8 @@ mod tests {
     }
 
     // The declaration is the whole trigger: an embed without an
-    // initializer gets no coverage gate, even when a wrapper happens
-    // to match the retired `<role>_initialize` naming convention.
+    // initializer gets no coverage gate, even when a wrapper's name
+    // matches the `<role>_initialize` shape.
     #[test]
     fn undeclared_initializer_means_no_coverage_gate() {
         let (mut specs, embeds) = embedded_fixture();
@@ -1029,8 +1029,8 @@ mod tests {
             .expect("no declaration, no gate; born-vacant extensions are untouched");
     }
 
-    // The declared name is the entire rule: an initializer that breaks
-    // the retired naming convention still gates every creator.
+    // The declared name is the entire rule: an initializer named
+    // outside the `<role>_initialize` shape still gates every creator.
     #[test]
     fn unconventional_initializer_name_still_gates() {
         let (mut specs, mut embeds) = embedded_fixture();
