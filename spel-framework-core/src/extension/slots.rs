@@ -85,15 +85,29 @@ pub fn carrier_path(c: &SlotCarrier) -> String {
     format!("{}::{}", c.struct_name, c.const_name)
 }
 
-/// The carrier for a role that must have one.
-fn require_carrier(items: &[syn::Item], role: &str) -> Result<SlotCarrier, String> {
+/// The carrier for a role that must have one. `initializer` is the
+/// anchor attr when the embed was inferred: the fix differs, because an
+/// anchored extension has no offset kwarg to fall back to.
+fn require_carrier(
+    items: &[syn::Item],
+    role: &str,
+    initializer: Option<&str>,
+) -> Result<SlotCarrier, String> {
     find_slot_carrier(items, role)?.ok_or_else(|| {
-        format!(
-            "`{role}` derives its offset but no struct carries a #[{}] \
-            field; mark the embedded field or declare `offset = <bytes> \
-            on the marker",
-            slot_attr_name(role)
-        )
+        let slot = slot_attr_name(role);
+        match initializer {
+            Some(anchor) => format!(
+                "`{role}` derives its offset but no struct carries a #[{slot}] \
+                field; the fn carrying #[{anchor}] puts this extension in \
+                embedded mode, so mark the embedding field with #[{slot}], or \
+                remove #[{anchor}] for dedicated mode"
+            ),
+            None => format!(
+                "`{role}` derives its offset but no struct carries a #[{slot}] \
+                field; mark the embedded field or declare `offset = <bytes>` \
+                on the marker"
+            ),
+        }
     })
 }
 
@@ -118,7 +132,8 @@ pub fn resolve_derived_offsets(
         // the field, and the agreement assert compares the two; with no
         // marked field there is nothing to compare and nothing to emit.
         embed.carrier = if embed.decl.offset == OffsetSpec::Derived {
-            let carrier = require_carrier(items, &embed.decl.role)?;
+            let carrier =
+                require_carrier(items, &embed.decl.role, embed.decl.initializer.as_deref())?;
             embed.decl.offset = OffsetSpec::Path(carrier_path(&carrier));
             Some(carrier)
         } else {
@@ -128,7 +143,12 @@ pub fn resolve_derived_offsets(
     for values in ext.bound_calls.values_mut() {
         for v in values {
             if let BoundValue::Derived { role } = v {
-                *v = BoundValue::Path(carrier_path(&require_carrier(items, role)?));
+                let initializer = ext
+                    .embeds
+                    .iter()
+                    .find(|e| e.decl.role == *role)
+                    .and_then(|e| e.decl.initializer.as_deref());
+                *v = BoundValue::Path(carrier_path(&require_carrier(items, role, initializer)?));
             }
         }
     }
@@ -229,6 +249,27 @@ mod tests {
         resolve_derived_offsets(&mut ext, &its).expect("resolves");
         assert_eq!(ext.embeds[0].decl.offset, OffsetSpec::Literal(32));
         assert_eq!(ext.bound_calls["action"][0], BoundValue::Literal(32));
+    }
+
+    // An anchored extension cannot fall back to an offset kwarg, so its
+    // missing-carrier error offers the two fixes that exist: mark the
+    // field, or drop the anchor for dedicated mode.
+    #[test]
+    fn anchored_missing_carrier_names_the_anchor() {
+        let its = items("pub struct Cfg { pub s: u8 }");
+        let mut ext = discoveries(OffsetSpec::Derived, BoundValue::Literal(0));
+        ext.embeds[0].decl.initializer = Some("gate_initialize".into());
+        let Err(msg) = resolve_derived_offsets(&mut ext, &its) else {
+            panic!("expected the missing-carrier error");
+        };
+        assert!(
+            msg.contains("#[gate_initialize]") && msg.contains("dedicated mode"),
+            "message: {msg}"
+        );
+        assert!(
+            !msg.contains("offset = <bytes>"),
+            "an anchored extension has no offset kwarg to suggest: {msg}"
+        );
     }
 
     // A derivation with no carrier struct is a consumer mistake and the

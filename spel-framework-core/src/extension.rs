@@ -122,6 +122,7 @@ pub struct ExtensionDiscoveries {
     /// instructions ship in the consumer's binary, so the accounts those
     /// instructions write are the program's own.
     pub activated_dirs: Vec<PathBuf>,
+    pub dormant_anchors: Vec<DormantAnchor>,
 }
 
 #[derive(Debug, Default)]
@@ -324,6 +325,7 @@ impl ProgramDeps {
         let locations = match carriers {
             Carriers::Resolve(items) => {
                 resolve_derived_offsets(&mut self.extensions, items)?;
+                check_dormant_anchors(&self.extensions.dormant_anchors, items)?;
                 GateLocations::Emit
             },
             Carriers::Skip => GateLocations::Omit,
@@ -380,6 +382,26 @@ fn check_layout_collisions(groups: &[(PathBuf, Vec<syn::Item>)]) -> Result<(), S
                     dir.display()
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+/// A slot field marker with no anchored fn ships born renounced: the
+/// struct declares embedded intent and nothing bootstraps the window.
+/// Refused rather than silently compiled as dedicated mode. Runs only
+/// with carriers in scope. The IDL producer skip it, the consumer's
+/// build is the gate.
+fn check_dormant_anchors(dormant: &[DormantAnchor], items: &[syn::Item]) -> Result<(), String> {
+    for anchor in dormant {
+        if let Some(carrier) = find_slot_carrier(items, &anchor.role)? {
+            return Err(format!(
+                "struct `{}` carries a #[{}] field but no fn carries \
+                #[{}]; the embedded slot would ship born renounced. \
+                Anchor the account-creating instruction with #[{}], or \
+                remove the #[{}] marker for dedicated mode",
+                carrier.struct_name, carrier.attr_name, anchor.attr, anchor.attr, carrier.attr_name
+            ));
         }
     }
     Ok(())
@@ -498,6 +520,7 @@ struct MatchedExtension {
     bound_calls: HashMap<String, Vec<BoundValue>>,
     marker: String,
     dir: PathBuf,
+    dormant_anchor: Option<DormantAnchor>,
 }
 
 /// One extension's embedded-mode declaration: which extension declared
@@ -520,6 +543,20 @@ pub struct Embed {
     /// [`resolve_derived_offsets`]. `None` under [`Carriers::Skip`], and
     /// for a literal offset whose role no struct marks.
     pub carrier: Option<SlotCarrier>,
+}
+
+/// An anchor-capable extension that resolved to dedicated mode: it
+/// declares `embedded.anchor_attr` and no fn carries the attr. Kept so
+/// the dispatcher can refuse a slot carrier with no anchor. The shape
+/// where the embedded slot would ship born renounced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DormantAnchor {
+    /// Crate name of the declaring extension.
+    pub source: String,
+    /// The anchor attr no fn carries.
+    pub attr: String,
+    /// The role whose `*_slot` field marker declares embedded intent.
+    pub role: String,
 }
 
 /// Producer entry point: marker pre-check, graph resolution, and
@@ -701,6 +738,18 @@ fn match_extension<F: FnMut(String)>(
     .collect();
     let is_embedded = !embeds.is_empty();
 
+    // Anchor declared, no fn carries it: dedicated mode, unless the
+    // consumer marked a slot field. prepare() refuses that shape.
+    let dormant_anchor = if embeds.is_empty() {
+        embedded.anchor.as_ref().map(|a| DormantAnchor {
+            source: crate_name.clone(),
+            attr: a.attr.clone(),
+            role: a.role.clone(),
+        })
+    } else {
+        None
+    };
+
     let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
     let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
 
@@ -742,6 +791,7 @@ fn match_extension<F: FnMut(String)>(
         bound_calls,
         marker: ext_attr,
         dir,
+        dormant_anchor,
     }))
 }
 
@@ -1012,6 +1062,7 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.bound_calls.extend(m.bound_calls);
         out.matched_markers.push(m.marker);
         out.activated_dirs.push(m.dir);
+        out.dormant_anchors.extend(m.dormant_anchor);
     }
     out
 }
@@ -2532,6 +2583,83 @@ lib-no-meta = { path = "../lib-no-meta" }
                 .any(|f| f.ends_with("un/src/lib.rs")),
             "the lookup reports the file it read for rebuild tracking"
         );
+    }
+
+    // Anchor declared, no fn carries it, nothing marked: dedicated mode,
+    // and discovery records the dormancy for the carrier check.
+    #[test]
+    fn unanchored_extension_records_a_dormant_anchor() {
+        let tmp = TempDir::new("dormant-anchor");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
+            .expect("dedicated resolution succeeds");
+        assert_eq!(
+            deps.extensions.dormant_anchors,
+            vec![DormantAnchor {
+                source: "my_ext".to_string(),
+                attr: "ext_init".to_string(),
+                role: "ext_config".to_string(),
+            }]
+        );
+        assert!(deps.extensions.embeds.is_empty());
+    }
+
+    // A slot field marker with no anchored fn would ship born renounced,
+    // so prepare refuses it, naming the struct and both attrs.
+    #[test]
+    fn slot_carrier_without_anchor_refuses() {
+        let mut deps = ProgramDeps::default();
+        deps.extensions.dormant_anchors.push(DormantAnchor {
+            source: "my_ext".to_string(),
+            attr: "ext_init".to_string(),
+            role: "ext_config".to_string(),
+        });
+        let items: Vec<syn::Item> =
+            syn::parse_file("pub struct ProgConfig { pub v: u64, #[ext_slot] pub s: u8 }")
+                .unwrap()
+                .items;
+        let Err(err) = deps.prepare(&[], Carriers::Resolve(&items)) else {
+            panic!("a marked field with no anchor must refuse");
+        };
+        assert!(
+            err.contains("ProgConfig")
+                && err.contains("#[ext_init]")
+                && err.contains("born renounced"),
+            "got: {err}"
+        );
+    }
+
+    // Without the marked field the same dormancy is plain dedicated
+    // mode, which is what an anchor-capable extension looks like for
+    // every consumer that does not embed it.
+    #[test]
+    fn dormant_anchor_without_carrier_is_dedicated_mode() {
+        let mut deps = ProgramDeps::default();
+        deps.extensions.dormant_anchors.push(DormantAnchor {
+            source: "my_ext".to_string(),
+            attr: "ext_init".to_string(),
+            role: "ext_config".to_string(),
+        });
+        let items: Vec<syn::Item> = syn::parse_file("pub struct ProgConfig { pub v: u64 }")
+            .unwrap()
+            .items;
+        deps.prepare(&[], Carriers::Resolve(&items))
+            .expect("no marked field, dedicated mode stands");
     }
 
     // The connected set is the author's own code plus the extensions
