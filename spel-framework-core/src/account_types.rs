@@ -16,245 +16,6 @@ use crate::{
 
 // ─── Account type scanning ────────────────────────────────────────────────
 
-/// Check if an item has the `#[account_type]` attribute.
-///
-/// Matches both the bare form `#[account_type]` and the fully-qualified
-/// form `#[spel_framework_macros::account_type]` (idiomatic when importing
-/// via a path rather than a `use` declaration).
-pub fn has_account_type_attr(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|a| {
-        let path = a.path();
-        path.is_ident("account_type")
-            || path
-                .segments
-                .last()
-                .is_some_and(|s| s.ident == "account_type")
-    })
-}
-
-/// Convert a Rust `syn::Type` to an IDL type representation.
-pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
-    match ty {
-        Type::Path(type_path) => {
-            let segment = match type_path.path.segments.last() {
-                Some(s) => s,
-                None => return IdlType::Primitive("unknown".to_string()),
-            };
-            let ident = segment.ident.to_string();
-            match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
-                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
-                "Vec" => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return IdlType::Vec {
-                                vec: Box::new(syn_type_to_idl_type(inner)),
-                            };
-                        }
-                    }
-                    IdlType::Primitive("vec<unknown>".to_string())
-                },
-                "Option" => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return IdlType::Option {
-                                option: Box::new(syn_type_to_idl_type(inner)),
-                            };
-                        }
-                    }
-                    IdlType::Primitive("option<unknown>".to_string())
-                },
-                "ProgramId" => IdlType::Primitive("program_id".to_string()),
-                "AccountId" => IdlType::Primitive("account_id".to_string()),
-                other => IdlType::Defined {
-                    defined: other.to_string(),
-                },
-            }
-        },
-        Type::Array(arr) => {
-            let elem = syn_type_to_idl_type(&arr.elem);
-            if let syn::Expr::Lit(lit) = &arr.len {
-                if let syn::Lit::Int(n) = &lit.lit {
-                    if let Ok(size) = n.base10_parse::<usize>() {
-                        return IdlType::Array {
-                            array: (Box::new(elem), size),
-                        };
-                    }
-                }
-            }
-            IdlType::Array {
-                array: (Box::new(elem), 0),
-            }
-        },
-        _ => IdlType::Primitive("unknown".to_string()),
-    }
-}
-
-/// Parse a named struct annotated with `#[account_type]` into an [`IdlAccountType`].
-/// Returns `None` for tuple / unit structs (no named fields to describe).
-pub fn parse_struct_account_type(item: &ItemStruct) -> Option<IdlAccountType> {
-    let fields = if let syn::Fields::Named(named) = &item.fields {
-        named
-            .named
-            .iter()
-            .filter_map(|f| {
-                f.ident.as_ref().map(|ident| IdlField {
-                    name: ident.to_string(),
-                    type_: syn_type_to_idl_type(&f.ty),
-                })
-            })
-            .collect()
-    } else {
-        return None;
-    };
-    Some(IdlAccountType {
-        name: item.ident.to_string(),
-        type_: IdlTypeDef {
-            name: String::new(),
-            kind: "struct".to_string(),
-            fields,
-            variants: vec![],
-        },
-    })
-}
-
-/// Parse an enum annotated with `#[account_type]` into an [`IdlAccountType`].
-/// Only named-field variants are supported; tuple variants are emitted with no fields.
-pub fn parse_enum_account_type(item: &ItemEnum) -> IdlAccountType {
-    let variants = item
-        .variants
-        .iter()
-        .map(|v| {
-            let fields = if let syn::Fields::Named(named) = &v.fields {
-                named
-                    .named
-                    .iter()
-                    .filter_map(|f| {
-                        f.ident.as_ref().map(|ident| IdlField {
-                            name: ident.to_string(),
-                            type_: syn_type_to_idl_type(&f.ty),
-                        })
-                    })
-                    .collect()
-            } else {
-                vec![]
-            };
-            IdlEnumVariant {
-                name: v.ident.to_string(),
-                fields,
-            }
-        })
-        .collect();
-    IdlAccountType {
-        name: item.ident.to_string(),
-        type_: IdlTypeDef {
-            name: String::new(),
-            kind: "enum".to_string(),
-            fields: vec![],
-            variants,
-        },
-    }
-}
-
-/// Collect all `Defined { name }` type references that appear anywhere within a
-/// type definition (fields of structs, fields of enum variants).
-fn collect_defined_refs(type_def: &IdlTypeDef) -> Vec<String> {
-    let mut refs = Vec::new();
-    for field in &type_def.fields {
-        collect_defined_refs_from_type(&field.type_, &mut refs);
-    }
-    for variant in &type_def.variants {
-        for field in &variant.fields {
-            collect_defined_refs_from_type(&field.type_, &mut refs);
-        }
-    }
-    refs
-}
-
-fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
-    match ty {
-        IdlType::Defined { defined } => out.push(defined.clone()),
-        IdlType::Vec { vec } => collect_defined_refs_from_type(vec, out),
-        IdlType::Option { option } => collect_defined_refs_from_type(option, out),
-        IdlType::Array { array: (inner, _) } => collect_defined_refs_from_type(inner, out),
-        IdlType::Primitive(_) => {},
-    }
-}
-
-/// The nameable type items, by name, first declaration winning.
-///
-/// `items` merges the consumer's file with every crate in its
-/// dependency graph, so one name can appear more than once. Building
-/// from the back leaves the earliest declaration in the map.
-fn index_type_items(items: &[Item]) -> HashMap<String, &Item> {
-    items
-        .iter()
-        .rev()
-        .filter_map(|item| match item {
-            Item::Struct(s) => Some((s.ident.to_string(), item)),
-            Item::Enum(e) => Some((e.ident.to_string(), item)),
-            Item::Type(t) => Some((t.ident.to_string(), item)),
-            _ => None,
-        })
-        .collect()
-}
-
-/// The definition of `name` among `items`, aliases followed within the
-/// same items. For sources that parse one file at a time.
-pub(crate) fn type_def_from_items(items: &[Item], name: &str) -> Option<IdlTypeDef> {
-    find_and_parse_type(&index_type_items(items), name, &mut NoTypeDefs)
-}
-
-/// Look up a type by name in an [`index_type_items`] index and parse it.
-/// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
-fn find_and_parse_type(
-    index: &HashMap<String, &Item>,
-    name: &str,
-    defs: &mut impl TypeDefSource,
-) -> Option<IdlTypeDef> {
-    let Some(item) = index.get(name) else {
-        // Not declared in the items in hand; ask the source. This is
-        // also the alias-target path: an alias in a connected crate may
-        // point at a type an unowned crate declares.
-        return defs.find(name);
-    };
-    match item {
-        Item::Struct(s) => parse_struct_account_type(s).map(|at| IdlTypeDef {
-            name: name.to_string(),
-            ..at.type_
-        }),
-        Item::Enum(e) => {
-            let mut def = parse_enum_account_type(e).type_;
-            def.name = name.to_string();
-            Some(def)
-        },
-        // Type alias: resolve the target and emit its def under the
-        // alias name, so instruction args referencing the alias find
-        // a matching entry in the IDL's `types` array.
-        Item::Type(t) => {
-            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?, defs)?;
-            def.name = name.to_string();
-            Some(def)
-        },
-        _ => None,
-    }
-}
-
-/// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
-/// → `AccountWithMetadata`. `None` for non-path types (references, tuples).
-fn last_ident(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
-        _ => None,
-    }
-}
-
-/// True for instruction params that are accounts rather than data args:
-/// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
-fn is_account_shaped(ty: &Type) -> bool {
-    is_account_type(ty) || is_vec_account_type(ty) || is_context_type(ty)
-}
-
 /// Where a referenced type's definition is found when the scanned items
 /// do not declare it.
 ///
@@ -388,6 +149,245 @@ pub fn collect_account_types_from(
     helper_types.sort_by(|a, b| a.name.cmp(&b.name));
 
     (accounts, helper_types)
+}
+
+/// Check if an item has the `#[account_type]` attribute.
+///
+/// Matches both the bare form `#[account_type]` and the fully-qualified
+/// form `#[spel_framework_macros::account_type]` (idiomatic when importing
+/// via a path rather than a `use` declaration).
+pub fn has_account_type_attr(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|a| {
+        let path = a.path();
+        path.is_ident("account_type")
+            || path
+                .segments
+                .last()
+                .is_some_and(|s| s.ident == "account_type")
+    })
+}
+
+/// Parse a named struct annotated with `#[account_type]` into an [`IdlAccountType`].
+/// Returns `None` for tuple / unit structs (no named fields to describe).
+pub fn parse_struct_account_type(item: &ItemStruct) -> Option<IdlAccountType> {
+    let fields = if let syn::Fields::Named(named) = &item.fields {
+        named
+            .named
+            .iter()
+            .filter_map(|f| {
+                f.ident.as_ref().map(|ident| IdlField {
+                    name: ident.to_string(),
+                    type_: syn_type_to_idl_type(&f.ty),
+                })
+            })
+            .collect()
+    } else {
+        return None;
+    };
+    Some(IdlAccountType {
+        name: item.ident.to_string(),
+        type_: IdlTypeDef {
+            name: String::new(),
+            kind: "struct".to_string(),
+            fields,
+            variants: vec![],
+        },
+    })
+}
+
+/// Parse an enum annotated with `#[account_type]` into an [`IdlAccountType`].
+/// Only named-field variants are supported; tuple variants are emitted with no fields.
+pub fn parse_enum_account_type(item: &ItemEnum) -> IdlAccountType {
+    let variants = item
+        .variants
+        .iter()
+        .map(|v| {
+            let fields = if let syn::Fields::Named(named) = &v.fields {
+                named
+                    .named
+                    .iter()
+                    .filter_map(|f| {
+                        f.ident.as_ref().map(|ident| IdlField {
+                            name: ident.to_string(),
+                            type_: syn_type_to_idl_type(&f.ty),
+                        })
+                    })
+                    .collect()
+            } else {
+                vec![]
+            };
+            IdlEnumVariant {
+                name: v.ident.to_string(),
+                fields,
+            }
+        })
+        .collect();
+    IdlAccountType {
+        name: item.ident.to_string(),
+        type_: IdlTypeDef {
+            name: String::new(),
+            kind: "enum".to_string(),
+            fields: vec![],
+            variants,
+        },
+    }
+}
+
+/// Convert a Rust `syn::Type` to an IDL type representation.
+pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
+    match ty {
+        Type::Path(type_path) => {
+            let segment = match type_path.path.segments.last() {
+                Some(s) => s,
+                None => return IdlType::Primitive("unknown".to_string()),
+            };
+            let ident = segment.ident.to_string();
+            match ident.as_str() {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
+                "Vec" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return IdlType::Vec {
+                                vec: Box::new(syn_type_to_idl_type(inner)),
+                            };
+                        }
+                    }
+                    IdlType::Primitive("vec<unknown>".to_string())
+                },
+                "Option" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return IdlType::Option {
+                                option: Box::new(syn_type_to_idl_type(inner)),
+                            };
+                        }
+                    }
+                    IdlType::Primitive("option<unknown>".to_string())
+                },
+                "ProgramId" => IdlType::Primitive("program_id".to_string()),
+                "AccountId" => IdlType::Primitive("account_id".to_string()),
+                other => IdlType::Defined {
+                    defined: other.to_string(),
+                },
+            }
+        },
+        Type::Array(arr) => {
+            let elem = syn_type_to_idl_type(&arr.elem);
+            if let syn::Expr::Lit(lit) = &arr.len {
+                if let syn::Lit::Int(n) = &lit.lit {
+                    if let Ok(size) = n.base10_parse::<usize>() {
+                        return IdlType::Array {
+                            array: (Box::new(elem), size),
+                        };
+                    }
+                }
+            }
+            IdlType::Array {
+                array: (Box::new(elem), 0),
+            }
+        },
+        _ => IdlType::Primitive("unknown".to_string()),
+    }
+}
+
+/// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
+/// → `AccountWithMetadata`. `None` for non-path types (references, tuples).
+fn last_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// True for instruction params that are accounts rather than data args:
+/// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
+fn is_account_shaped(ty: &Type) -> bool {
+    is_account_type(ty) || is_vec_account_type(ty) || is_context_type(ty)
+}
+
+/// Collect all `Defined { name }` type references that appear anywhere within a
+/// type definition (fields of structs, fields of enum variants).
+fn collect_defined_refs(type_def: &IdlTypeDef) -> Vec<String> {
+    let mut refs = Vec::new();
+    for field in &type_def.fields {
+        collect_defined_refs_from_type(&field.type_, &mut refs);
+    }
+    for variant in &type_def.variants {
+        for field in &variant.fields {
+            collect_defined_refs_from_type(&field.type_, &mut refs);
+        }
+    }
+    refs
+}
+
+fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
+    match ty {
+        IdlType::Defined { defined } => out.push(defined.clone()),
+        IdlType::Vec { vec } => collect_defined_refs_from_type(vec, out),
+        IdlType::Option { option } => collect_defined_refs_from_type(option, out),
+        IdlType::Array { array: (inner, _) } => collect_defined_refs_from_type(inner, out),
+        IdlType::Primitive(_) => {},
+    }
+}
+
+/// The nameable type items, by name, first declaration winning.
+///
+/// `items` merges the consumer's file with every crate in its
+/// dependency graph, so one name can appear more than once. Building
+/// from the back leaves the earliest declaration in the map.
+fn index_type_items(items: &[Item]) -> HashMap<String, &Item> {
+    items
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            Item::Struct(s) => Some((s.ident.to_string(), item)),
+            Item::Enum(e) => Some((e.ident.to_string(), item)),
+            Item::Type(t) => Some((t.ident.to_string(), item)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Look up a type by name in an [`index_type_items`] index and parse it.
+/// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
+fn find_and_parse_type(
+    index: &HashMap<String, &Item>,
+    name: &str,
+    defs: &mut impl TypeDefSource,
+) -> Option<IdlTypeDef> {
+    let Some(item) = index.get(name) else {
+        // Not declared in the items in hand; ask the source. This is
+        // also the alias-target path: an alias in a connected crate may
+        // point at a type an unowned crate declares.
+        return defs.find(name);
+    };
+    match item {
+        Item::Struct(s) => parse_struct_account_type(s).map(|at| IdlTypeDef {
+            name: name.to_string(),
+            ..at.type_
+        }),
+        Item::Enum(e) => {
+            let mut def = parse_enum_account_type(e).type_;
+            def.name = name.to_string();
+            Some(def)
+        },
+        // Type alias: resolve the target and emit its def under the
+        // alias name, so instruction args referencing the alias find
+        // a matching entry in the IDL's `types` array.
+        Item::Type(t) => {
+            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?, defs)?;
+            def.name = name.to_string();
+            Some(def)
+        },
+        _ => None,
+    }
+}
+
+/// The definition of `name` among `items`, aliases followed within the
+/// same items. For sources that parse one file at a time.
+pub(crate) fn type_def_from_items(items: &[Item], name: &str) -> Option<IdlTypeDef> {
+    find_and_parse_type(&index_type_items(items), name, &mut NoTypeDefs)
 }
 
 #[cfg(test)]
