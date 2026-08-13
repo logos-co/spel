@@ -59,13 +59,12 @@
 //! `discover_extensions`) are module-private; producers go through
 //! [`resolve_program_deps`].
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use syn::{Attribute, ItemFn};
 
+use crate::account_types::has_account_type_attr;
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
 mod inject;
@@ -119,6 +118,10 @@ pub struct ExtensionDiscoveries {
     /// order. Lets producers tell an unmatched candidate attr from a
     /// matched one when dependency resolution degrades.
     pub matched_markers: Vec<String>,
+    /// Crate dir of each activated extension, in marker order. Their
+    /// instructions ship in the consumer's binary, so the accounts those
+    /// instructions write are the program's own.
+    pub activated_dirs: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -181,6 +184,11 @@ pub struct PreparedProgram {
     /// Whether the gate pass writes location kwargs, decided with the
     /// carriers rather than separately at each call site.
     pub locations: GateLocations,
+    /// Crates whose `#[account_type]` declares one of this program's
+    /// account layouts: owned sources plus activated extensions, deduped
+    /// by canonical path. Captured at prepare time, when both inputs
+    /// still exist.
+    pub connected_dirs: Vec<PathBuf>,
 }
 
 impl PreparedProgram {
@@ -199,6 +207,98 @@ impl PreparedProgram {
             &self.inject_specs,
             self.locations,
             qualified,
+        )
+    }
+
+    /// The item set whose `#[account_type]` declares this program's
+    /// account layouts: the consumer's own items, then each connected
+    /// crate's, checked for colliding names while the declaring crate
+    /// is still known.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when two connected crates declare an account layout of the
+    /// same name, naming the type and both paths. Two layouts of one
+    /// name make the IDL ambiguous, and both declarations are code the
+    /// author owns or activated, so it is theirs to resolve. Callers
+    /// surface it as a compile error.
+    pub fn layout_items(
+        &self,
+        consumer_source: &Path,
+        consumer_items: Vec<syn::Item>,
+    ) -> Result<(Vec<syn::Item>, Vec<PathBuf>), String> {
+        let (mut connected, files_read) = self.connected_groups();
+        self.demote_embedded_state(&mut connected);
+
+        let mut groups = vec![(consumer_source.to_path_buf(), consumer_items)];
+        groups.extend(connected);
+        check_layout_collisions(&groups)?;
+
+        // Consumer first: its declarations shadow same-named dependency
+        // items in the flattened set.
+        Ok((
+            groups.into_iter().flat_map(|(_, items)| items).collect(),
+            files_read,
+        ))
+    }
+
+    /// Each connected crate's items under its dir, plus every file
+    /// read, for callers that register cargo dependencies.
+    fn connected_groups(&self) -> (Vec<(PathBuf, Vec<syn::Item>)>, Vec<PathBuf>) {
+        let mut groups = Vec::new();
+        let mut files_read = Vec::new();
+        for dir in &self.connected_dirs {
+            let (items, files) = collect_items_from_crate_dirs(std::slice::from_ref(dir), |w| {
+                eprintln!("warning: {w}")
+            });
+            files_read.extend(files);
+            groups.push((dir.clone(), items));
+        }
+        (groups, files_read)
+    }
+
+    /// An embedded extension's state type is a window inside the
+    /// consumer's account, not an account of its own: strip its
+    /// annotation so it reaches the IDL as a referenced type. The
+    /// consumer's items are not in `groups`, so a same-named consumer
+    /// struct, which is a different type, is untouched. Dedicated mode
+    /// has no embed entry and nothing to strip.
+    fn demote_embedded_state(&self, groups: &mut [(PathBuf, Vec<syn::Item>)]) {
+        let embedded_state: HashSet<&str> = self
+            .embeds
+            .iter()
+            .filter_map(|e| e.state_type.rsplit("::").next())
+            .collect();
+        for (_, items) in groups.iter_mut() {
+            for item in items.iter_mut() {
+                let (attrs, name) = match item {
+                    syn::Item::Struct(s) => (&mut s.attrs, s.ident.to_string()),
+                    syn::Item::Enum(e) => (&mut e.attrs, e.ident.to_string()),
+                    _ => continue,
+                };
+                if embedded_state.contains(name.as_str()) {
+                    attrs.retain(|a| !has_account_type_attr(std::slice::from_ref(a)));
+                }
+            }
+        }
+    }
+
+    /// The rest of the dependency graph, as the source referenced types
+    /// are resolved from on demand.
+    pub fn unowned_defs(&self) -> crate::idl_gen::UnownedTypeDefs {
+        use crate::dep_walk::canonical_key;
+        let connected: HashSet<PathBuf> = self
+            .connected_dirs
+            .iter()
+            .map(|d| canonical_key(d))
+            .collect();
+        crate::idl_gen::UnownedTypeDefs::new(
+            self.graph
+                .transitive_dirs
+                .iter()
+                .filter(|d| !connected.contains(&canonical_key(d)))
+                .cloned()
+                .collect(),
         )
     }
 }
@@ -220,6 +320,7 @@ impl ProgramDeps {
         mod_items: &[syn::Item],
         carriers: Carriers<'_>,
     ) -> Result<PreparedProgram, String> {
+        let connected_dirs = self.connected_dirs();
         let locations = match carriers {
             Carriers::Resolve(items) => {
                 resolve_derived_offsets(&mut self.extensions, items)?;
@@ -254,8 +355,34 @@ impl ProgramDeps {
             bound_calls: self.extensions.bound_calls,
             instructions,
             locations,
+            connected_dirs,
         })
     }
+}
+
+/// Two layouts of one name make the IDL ambiguous. Both declarations
+/// sit in code the author owns or activated, so the error names the
+/// type and both crates and leaves the rename to them.
+fn check_layout_collisions(groups: &[(PathBuf, Vec<syn::Item>)]) -> Result<(), String> {
+    let mut seen: HashMap<String, &Path> = HashMap::new();
+    for (dir, items) in groups {
+        for item in items {
+            let name = match item {
+                syn::Item::Struct(s) if has_account_type_attr(&s.attrs) => s.ident.to_string(),
+                syn::Item::Enum(e) if has_account_type_attr(&e.attrs) => e.ident.to_string(),
+                _ => continue,
+            };
+            if let Some(first) = seen.insert(name.clone(), dir) {
+                return Err(format!(
+                    "account layout `{name}` is declared in both `{}` and `{}`; \
+                    two layouts of one name make the IDL ambiguous, rename one",
+                    first.display(),
+                    dir.display()
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The `crate::fn_name` form a wrap's `exempt` list matches, built from
@@ -269,6 +396,26 @@ fn qualified_instruction_name(crate_path: &syn::Path, fn_name: &syn::Ident) -> S
             .map(|s| s.ident.to_string())
             .unwrap_or_default()
     )
+}
+
+impl ProgramDeps {
+    /// Crates whose `#[account_type]` declares one of this program's
+    /// account layouts: the code its author owns, plus the extensions
+    /// they activated. Derived from the two lists rather than stored
+    /// beside them, so it cannot fall out of step with either.
+    ///
+    /// An extension linked by path appears in both, so the result is
+    /// deduplicated by canonical path.
+    pub fn connected_dirs(&self) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        self.graph
+            .owned_dirs
+            .iter()
+            .chain(&self.extensions.activated_dirs)
+            .filter(|dir| seen.insert(crate::dep_walk::canonical_key(dir)))
+            .cloned()
+            .collect()
+    }
 }
 
 /// One component of an injected account's PDA seed.
@@ -350,6 +497,7 @@ struct MatchedExtension {
     embeds: Vec<Embed>,
     bound_calls: HashMap<String, Vec<BoundValue>>,
     marker: String,
+    dir: PathBuf,
 }
 
 /// One extension's embedded-mode declaration: which extension declared
@@ -487,6 +635,7 @@ fn discover_extensions<F: FnMut(String)>(
         let Some(marker_pos) = mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)) else {
             continue;
         };
+        let dir = dep_dir.clone();
         if lez_pos.is_some_and(|lez| marker_pos < lez) {
             return Err(format!(
                 "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
@@ -633,6 +782,7 @@ fn discover_extensions<F: FnMut(String)>(
             embeds,
             bound_calls,
             marker: ext_attr.clone(),
+            dir,
         });
     }
 
@@ -778,6 +928,7 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.embeds.extend(m.embeds);
         out.bound_calls.extend(m.bound_calls);
         out.matched_markers.push(m.marker);
+        out.activated_dirs.push(m.dir);
     }
     out
 }
@@ -2138,6 +2289,209 @@ lib-no-meta = { path = "../lib-no-meta" }
         assert!(check_duplicate_instruction_names(pairs).is_ok());
     }
 
+    // Two layouts of one name make the IDL ambiguous, and both sit in
+    // code the author owns or activated, so the error names both crates
+    // and leaves the rename to them.
+    #[test]
+    fn colliding_layouts_name_both_crates() {
+        let tmp = TempDir::new("dup-layouts");
+        tmp.write(
+            "a/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u64 }",
+        );
+        tmp.write(
+            "b/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u8 }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("a"), tmp.path().join("b")],
+            ..Default::default()
+        };
+        let err = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .unwrap_err();
+        assert!(
+            err.contains("Same") && err.contains("/a") && err.contains("/b"),
+            "the error names the type and both crates: {err}"
+        );
+    }
+
+    // An embedded extension's state type is a window inside the
+    // consumer's account: its annotation is stripped so it arrives by
+    // reference, while the extension's other layouts stay.
+    #[test]
+    fn embedded_state_type_is_not_a_layout() {
+        let tmp = TempDir::new("demote-embedded");
+        tmp.write(
+            "ext/src/lib.rs",
+            "#[account_type]\npub struct ExtConfig { pub v: u64 }\n\
+             #[account_type]\npub struct Keeper { pub v: u64 }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            embeds: vec![Embed {
+                source: "my_ext".to_string(),
+                state_type: "my_ext::ExtConfig".to_string(),
+                carrier: None,
+                decl: EmbedDecl {
+                    role: "ext_config".to_string(),
+                    account: "cfg".to_string(),
+                    offset: OffsetSpec::Literal(0),
+                    initializer: None,
+                },
+            }],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .expect("no collision");
+
+        let annotated: Vec<String> = layout
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) if has_account_type_attr(&s.attrs) => {
+                    Some(s.ident.to_string())
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(annotated, vec!["Keeper".to_string()]);
+        assert!(
+            layout
+                .iter()
+                .any(|i| matches!(i, syn::Item::Struct(s) if s.ident == "ExtConfig")),
+            "the demoted type stays in the item set for reference resolution"
+        );
+    }
+
+    // The consumer's group is exempt from the demotion: a same-named
+    // consumer struct is a different type and keeps its annotation.
+    #[test]
+    fn consumer_layout_survives_a_same_named_embed() {
+        let tmp = TempDir::new("demote-exempt");
+        tmp.write("ext/src/lib.rs", "");
+        let consumer_items =
+            syn::parse_file("#[account_type]\npub struct ExtConfig { pub own: u64 }")
+                .unwrap()
+                .items;
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            embeds: vec![Embed {
+                source: "my_ext".to_string(),
+                state_type: "my_ext::ExtConfig".to_string(),
+                carrier: None,
+                decl: EmbedDecl {
+                    role: "ext_config".to_string(),
+                    account: "cfg".to_string(),
+                    offset: OffsetSpec::Literal(0),
+                    initializer: None,
+                },
+            }],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), consumer_items)
+            .expect("no collision");
+        assert!(
+            layout.iter().any(|i| matches!(i, syn::Item::Struct(s)
+                    if s.ident == "ExtConfig" && has_account_type_attr(&s.attrs))),
+            "the consumer's own layout keeps its annotation"
+        );
+    }
+
+    // The whole pipeline over a fabricated graph: an unowned crate's
+    // annotation is inert, while a type it declares is still described
+    // once something connected references it.
+    #[test]
+    fn unowned_annotations_are_inert_and_references_resolve() {
+        let tmp = TempDir::new("unowned-inert");
+        tmp.write(
+            "conn/src/lib.rs",
+            "#[account_type]\npub struct Wrapper { pub e: ExtEnum }",
+        );
+        tmp.write(
+            "un/src/lib.rs",
+            "#[account_type]\npub struct Planted { pub v: u64 }\n\
+             pub enum ExtEnum { A, B }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("conn")],
+            graph: crate::dep_walk::DepGraph {
+                transitive_dirs: vec![tmp.path().join("conn"), tmp.path().join("un")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .expect("no collision");
+        let mut defs = program.unowned_defs();
+        let (accounts, types) =
+            crate::account_types::collect_account_types_from(&layout, &mut defs);
+
+        let account_names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            account_names,
+            vec!["Wrapper"],
+            "the unowned annotation is inert"
+        );
+        assert!(
+            types.iter().any(|t| t.name == "ExtEnum"),
+            "the referenced type resolves on demand: {types:?}"
+        );
+        assert!(
+            !types.iter().any(|t| t.name == "Planted"),
+            "nothing references the planted type, so it appears nowhere"
+        );
+        assert!(
+            defs.files_read()
+                .iter()
+                .any(|f| f.ends_with("un/src/lib.rs")),
+            "the lookup reports the file it read for rebuild tracking"
+        );
+    }
+
+    // The connected set is the author's own code plus the extensions
+    // they switched on. An extension linked by path is in both lists and
+    // must still appear once.
+    #[test]
+    fn connected_dirs_are_owned_plus_activated_without_repeats() {
+        let tmp = TempDir::new("connected-dirs");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
+            .expect("discovery succeeds");
+
+        assert_eq!(
+            deps.extensions.activated_dirs.len(),
+            1,
+            "the matched extension is recorded"
+        );
+        let connected = deps.connected_dirs();
+        let canonical: HashSet<_> = connected
+            .iter()
+            .map(|d| crate::dep_walk::canonical_key(d))
+            .collect();
+        assert_eq!(
+            canonical.len(),
+            connected.len(),
+            "a path-linked extension is owned and activated, and appears once: {connected:?}"
+        );
+        assert!(
+            connected.iter().any(|d| d.ends_with("my-ext")),
+            "the extension's crate is connected: {connected:?}"
+        );
+    }
+
     // Resolving carriers and writing location kwargs are one decision:
     // a producer that writes a location is exactly the one that resolved
     // the carrier it names.
@@ -2210,9 +2564,8 @@ mod user_program {
         let graph = crate::dep_walk::resolve_dep_graph(&source, true, &mut |_| {});
         let dirs = graph.transitive_dirs.clone();
 
-        let from_graph =
-            crate::idl_gen::generate_idl_from_file_with_graph(&source, graph, &mut |_| {})
-                .expect("generation over a caller-supplied graph");
+        let from_graph = crate::idl_gen::generate_idl_from_file_with_graph(&source, graph)
+            .expect("generation over a caller-supplied graph");
         let from_dirs =
             crate::idl_gen::generate_idl_from_file_with_deps(&source, &dirs, &mut |_| {})
                 .expect("generation that resolves its own graph");

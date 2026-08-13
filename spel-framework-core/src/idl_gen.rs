@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 
 use syn::{Attribute, FnArg, Ident, ItemFn, Pat, PatType, Type};
 
-use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelIdl};
+use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, IdlTypeDef, SpelIdl};
 
-use crate::account_types::{collect_account_types, syn_type_to_idl_type};
+use crate::account_types::{
+    collect_account_types, collect_account_types_from, syn_type_to_idl_type,
+};
 
 use crate::extension::{check_duplicate_instruction_names, instruction_source_label};
 
@@ -31,6 +33,7 @@ pub enum IdlGenError {
     NoInstructions(String),
     MalformedExtensionMetadata(String),
     DuplicateInstruction(String),
+    DuplicateAccountLayout(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -49,6 +52,9 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::DuplicateInstruction(e) => {
                 write!(f, "Duplicate instruction: '{e}'")
+            },
+            IdlGenError::DuplicateAccountLayout(e) => {
+                write!(f, "Duplicate account layout: '{e}'")
             },
         }
     }
@@ -121,23 +127,18 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 /// from its `transitive_dirs`. A caller holding a graph passes it here
 /// instead of paying for a second `cargo metadata` of one manifest.
 ///
-/// `on_warning` carries the same non-fatal notes as in
-/// [`generate_idl_from_file_with_deps`].
-///
 /// # Errors
 ///
 /// The same as [`generate_idl_from_file_with_deps`].
-pub fn generate_idl_from_file_with_graph<F: FnMut(String)>(
+pub fn generate_idl_from_file_with_graph(
     source_path: &Path,
     graph: crate::dep_walk::DepGraph,
-    on_warning: &mut F,
 ) -> Result<SpelIdl, IdlGenError> {
     let content = std::fs::read_to_string(source_path)?;
-    let (extra_items, _) = collect_items_from_crate_dirs(&graph.transitive_dirs, on_warning);
     generate_idl_inner(
         &content,
         &source_path.display().to_string(),
-        &extra_items,
+        &[],
         Some(source_path),
         Some(graph),
     )
@@ -162,6 +163,7 @@ fn generate_idl_inner(
     manifest_dir: Option<&Path>,
     graph: Option<crate::dep_walk::DepGraph>,
 ) -> Result<SpelIdl, IdlGenError> {
+    let scans_the_graph = graph.is_some();
     let path_str = source_label.to_string();
 
     let file = syn::parse_file(content)?;
@@ -333,7 +335,28 @@ fn generate_idl_inner(
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
     all_items.extend_from_slice(extra_items);
-    let (accounts, types) = collect_account_types(&all_items);
+    let (accounts, types) = if scans_the_graph {
+        // A graph caller gets connected-source layouts, with everything
+        // they reference resolved on demand from the rest of the graph.
+        let mut consumer_items: Vec<syn::Item> = file.items.clone();
+        consumer_items.extend(items.clone());
+        let Some(source) = manifest_dir else {
+            // Both graph callers pass their source path; a graph without
+            // one is a caller bug, not a generation condition.
+            unreachable!("a graph arrives only with a source path")
+        };
+        let (layout, _) = program
+            .layout_items(source, consumer_items)
+            .map_err(IdlGenError::DuplicateAccountLayout)?;
+        let mut defs = program.unowned_defs();
+        collect_account_types_from(&layout, &mut defs)
+    } else {
+        // A caller that named its dirs gets exactly those.
+        let mut all_items: Vec<syn::Item> = file.items.clone();
+        all_items.extend(items.clone());
+        all_items.extend_from_slice(extra_items);
+        collect_account_types(&all_items)
+    };
 
     Ok(SpelIdl {
         version: "0.1.0".to_string(),
@@ -387,6 +410,76 @@ pub fn collect_items_from_crate_dirs<F: FnMut(String)>(
         }
     }
     (items, files_read)
+}
+
+/// Finds a referenced type's declaration in the unowned part of the
+/// dependency graph.
+///
+/// Owned sources and activated extensions are parsed up front and their
+/// items arrive in the `items` slice; everything else is read only when
+/// the walk asks for a name. Files are text-filtered before they are
+/// parsed and each AST is dropped as soon as the name is resolved, so
+/// nothing is retained across the generation.
+pub struct UnownedTypeDefs {
+    dirs: Vec<PathBuf>,
+    /// Every file parsed during lookups, reported so compile-time
+    /// callers can register them as cargo dependencies.
+    files_read: Vec<PathBuf>,
+}
+
+impl UnownedTypeDefs {
+    pub fn new(dirs: Vec<PathBuf>) -> Self {
+        Self {
+            dirs,
+            files_read: Vec::new(),
+        }
+    }
+
+    /// Every file whose parse contributed to a lookup, for callers that
+    /// register dependency files with cargo.
+    pub fn files_read(&self) -> &[PathBuf] {
+        &self.files_read
+    }
+}
+
+impl crate::account_types::TypeDefSource for UnownedTypeDefs {
+    fn find(&mut self, name: &str) -> Option<IdlTypeDef> {
+        for dir in &self.dirs {
+            let mut stack = vec![dir.join("src")];
+            while let Some(d) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                        continue;
+                    }
+                    if path.extension().is_none_or(|e| e != "rs") {
+                        continue;
+                    }
+                    let Ok(text) = std::fs::read_to_string(&path) else {
+                        continue;
+                    };
+                    // A declaration of `name` must contain it, so the
+                    // substring test can exclude but never miss.
+                    if !text.contains(name) || has_metavar_glued_literal(&text) {
+                        continue;
+                    }
+                    let Ok(file) = syn::parse_file(&text) else {
+                        continue;
+                    };
+                    self.files_read.push(path.clone());
+                    if let Some(def) = crate::account_types::type_def_from_items(&file.items, name)
+                    {
+                        return Some(def);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
 /// Parse a source file and every module file it declares, returning the

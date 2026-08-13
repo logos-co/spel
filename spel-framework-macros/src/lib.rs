@@ -526,32 +526,31 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     });
 
     // Collect #[account_type] annotated types from the located module
-    // source: its top-level items, the module body, and path-dependency
-    // crate items so extension-library types reach the IDL.
+    // source: its top-level items, the module body, and the connected
+    // crates' items, with referenced types resolved on demand.
     let (accounts, types) = match &module_source {
-        Some((_, parsed_file)) => {
-            let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
+        Some((guest_path, parsed_file)) => {
+            // The consumer's own items: the file's top level plus the
+            // program module's body.
+            let mut consumer_items: Vec<syn::Item> = parsed_file.items.clone();
             for item in &parsed_file.items {
                 if let syn::Item::Mod(m) = item {
                     if m.ident == *mod_name {
                         if let Some((_, mod_items)) = &m.content {
-                            all_items.extend(mod_items.clone());
+                            consumer_items.extend(mod_items.clone());
                         }
                     }
                 }
             }
-            // Also include items from path-dependency crates, so types defined in
-            // extension libraries (account types, instruction-arg types) reach the IDL.
-            let (extra_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-                &program.graph.transitive_dirs,
-                |w| eprintln!("warning: {w}"),
-            );
-            all_items.extend(extra_items);
+            let (layout, _) = program
+                .layout_items(guest_path, consumer_items)
+                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
             slot_assert.extend(slot_offsets::emit_agreement_asserts(&program.embeds));
             slot_assert.extend(slot_offsets::embed_window_collision_asserts(
                 &program.embeds,
             )?);
-            account_types::collect_account_types(&all_items)
+            let mut defs = program.unowned_defs();
+            account_types::collect_account_types_from(&layout, &mut defs)
         },
         None => (Vec::new(), Vec::new()),
     };
@@ -2418,18 +2417,18 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
 
-    // Also scan path-dependency crates for #[account_type] types.
-    // This handles the common project structure where account types are defined
-    // in a shared core crate (e.g. my_program_core) and the program binary
-    // depends on it via `path = "..."`.
-    let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-            &program.graph.transitive_dirs,
-            |w| eprintln!("warning: {w}"),
-        );
-    all_items.extend(extra_items);
-
-    let (accounts, types) = account_types::collect_account_types(&all_items);
+    // Layouts come from connected sources; referenced types are resolved
+    // on demand from the rest of the graph. Both report the files they
+    // read, so cargo re-expands this macro when any of them changes.
+    let (layout, layout_files) = program
+        .layout_items(std::path::Path::new(&resolved_path), all_items)
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let mut defs = program.unowned_defs();
+    let (accounts, types) = account_types::collect_account_types_from(&layout, &mut defs);
+    let dep_source_files: Vec<std::path::PathBuf> = layout_files
+        .into_iter()
+        .chain(defs.files_read().iter().cloned())
+        .collect();
 
     // Generate the IDL JSON
     let idl_json = generate_idl_json(

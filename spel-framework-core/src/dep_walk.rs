@@ -2,14 +2,17 @@
 //! discovery.
 //!
 //! [`resolve_dep_graph`] resolves a crate's dependencies in one pass and
-//! returns a [`DepGraph`] with two lists of deliberately different reach:
+//! returns a [`DepGraph`] with three lists of deliberately different
+//! reach:
 //!
-//! - `transitive_dirs`: types referenced by a program's instructions may
-//!   come through any runtime dependency, so IDL type collection follows
-//!   the whole graph.
+//! - `transitive_dirs`: a referenced type may live anywhere in the
+//!   runtime graph, so on-demand type resolution may reach any of it.
 //! - `direct_dirs`: extension discovery must never pick up a dependency
 //!   of a dependency (trust model's two-action rule), so it stops at the
 //!   consumer's own `Cargo.toml`.
+//! - `owned_dirs`: an `#[account_type]` counts as the program's own
+//!   layout only in code the author path-linked, so the annotation scan
+//!   stops there.
 //!
 //! Both lists merge two sources: a manifest walk for path dependencies
 //! (fast, no subprocess) and a single shared `cargo metadata` call for
@@ -40,6 +43,10 @@ pub struct DepGraph {
     /// Callers with extension marker treat `Some` as a hard error: a
     /// git or registry extension may be silently missing.
     pub metadata_failure: Option<String>,
+    /// Local path dependencies, transitively, and nothing else. The crates
+    /// the program's author linked by hand, so an `#[account_type]` in one
+    /// is the program's own account layout.
+    pub owned_dirs: Vec<PathBuf>,
 }
 
 /// The `[dependencies]` entries carrying a `path`, as directories.
@@ -73,8 +80,9 @@ fn path_dep_dirs_of<F: FnMut(String)>(
 }
 
 /// A path in canonical form, or unchanged when it cannot be resolved.
-/// Used as the dedup key throughout the walk.
-fn canonical_key(path: &Path) -> PathBuf {
+/// Used as the dedup key throughout the walk, and by callers that merge
+/// dir lists this module produced.
+pub(crate) fn canonical_key(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
@@ -124,6 +132,7 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         transitive_dirs: Vec::new(),
         direct_dirs: Vec::new(),
         metadata_failure: with_cargo_metadata.then_some(reason),
+        owned_dirs: Vec::new(),
     };
 
     let Some(manifest) = find_crate_manifest(start, on_warning) else {
@@ -162,9 +171,18 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
 
     // Transitive path walk. `visited` also excludes the crate itself from
     // the metadata merge below.
-    let mut transitive_dirs = Vec::new();
     let mut visited = HashSet::new();
-    resolve_path_deps_recursive(&manifest, &mut transitive_dirs, &mut visited, on_warning);
+    // The path walk's own output. Everything the metadata layer adds
+    // below lands in `transitive_dirs` only, so what the author
+    // path-linked stays separable from what cargo resolved for them.
+    let owned_dirs = {
+        let mut dirs = Vec::new();
+        resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, on_warning);
+        dirs
+    };
+    // Taken before the metadata merge below: what the author path-linked
+    // is what the program owns.
+    let mut transitive_dirs = owned_dirs.clone();
 
     // Direct path deps straight from the [dependencies] table.
     let mut direct_dirs = path_dep_dirs_of(&value, &manifest_dir, on_warning);
@@ -199,6 +217,7 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         transitive_dirs,
         direct_dirs,
         metadata_failure,
+        owned_dirs,
     }
 }
 
@@ -661,6 +680,55 @@ mod tests {
 
     use super::*;
     use crate::test_utils::TempDir;
+
+    // `owned_dirs` is the path walk and nothing else, which is what makes
+    // an `#[account_type]` in one of them the program's own account
+    // layout. It is the path walk's own output, taken before the metadata
+    // layer merges git and registry crates in, so it equals what a
+    // metadata-free resolution returns.
+    #[test]
+    fn owned_dirs_are_the_path_walk_without_the_metadata_layer() {
+        let tmp = TempDir::new("owned-dirs");
+
+        tmp.write(
+            "core/Cargo.toml",
+            r#"
+[package]
+name = "token_core"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            r#"
+[package]
+name = "token-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+token_core = { path = "../../core" }
+"#,
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let with_metadata = resolve_dep_graph(&program, true, &mut |_| {});
+        let path_only = resolve_dep_graph(&program, false, &mut |_| {});
+
+        assert_eq!(
+            with_metadata.owned_dirs, path_only.transitive_dirs,
+            "owned_dirs must not pick up anything the metadata layer contributed"
+        );
+        assert_eq!(with_metadata.owned_dirs.len(), 1);
+        assert!(
+            with_metadata.owned_dirs[0].ends_with("core"),
+            "expected the path dependency, got {:?}",
+            with_metadata.owned_dirs[0]
+        );
+    }
 
     #[test]
     fn resolve_dep_graph_returns_local_path_deps() {

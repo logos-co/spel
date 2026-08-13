@@ -363,9 +363,7 @@ pub async fn run() {
 
                 if sources.len() == 1 {
                     let graph = resolve(&sources[0]);
-                    match generate_idl_from_file_with_graph(&sources[0], graph, &mut |w| {
-                        eprintln!("{w}")
-                    }) {
+                    match generate_idl_from_file_with_graph(&sources[0], graph) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -377,9 +375,7 @@ pub async fn run() {
                     let mut had_error = false;
                     for source in &sources {
                         let graph = resolve(source);
-                        match generate_idl_from_file_with_graph(source, graph, &mut |w| {
-                            eprintln!("{w}")
-                        }) {
+                        match generate_idl_from_file_with_graph(source, graph) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
                                 match fs::write(

@@ -199,10 +199,26 @@ fn index_type_items(items: &[Item]) -> HashMap<String, &Item> {
         .collect()
 }
 
+/// The definition of `name` among `items`, aliases followed within the
+/// same items. For sources that parse one file at a time.
+pub(crate) fn type_def_from_items(items: &[Item], name: &str) -> Option<IdlTypeDef> {
+    find_and_parse_type(&index_type_items(items), name, &mut NoTypeDefs)
+}
+
 /// Look up a type by name in an [`index_type_items`] index and parse it.
 /// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
-fn find_and_parse_type(index: &HashMap<String, &Item>, name: &str) -> Option<IdlTypeDef> {
-    match index.get(name)? {
+fn find_and_parse_type(
+    index: &HashMap<String, &Item>,
+    name: &str,
+    defs: &mut impl TypeDefSource,
+) -> Option<IdlTypeDef> {
+    let Some(item) = index.get(name) else {
+        // Not declared in the items in hand; ask the source. This is
+        // also the alias-target path: an alias in a connected crate may
+        // point at a type an unowned crate declares.
+        return defs.find(name);
+    };
+    match item {
         Item::Struct(s) => parse_struct_account_type(s).map(|at| IdlTypeDef {
             name: name.to_string(),
             ..at.type_
@@ -216,7 +232,7 @@ fn find_and_parse_type(index: &HashMap<String, &Item>, name: &str) -> Option<Idl
         // alias name, so instruction args referencing the alias find
         // a matching entry in the IDL's `types` array.
         Item::Type(t) => {
-            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?)?;
+            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?, defs)?;
             def.name = name.to_string();
             Some(def)
         },
@@ -239,6 +255,29 @@ fn is_account_shaped(ty: &Type) -> bool {
     is_account_type(ty) || is_vec_account_type(ty) || is_context_type(ty)
 }
 
+/// Where a referenced type's definition is found when the scanned items
+/// do not declare it.
+///
+/// Annotations are discovered only in connected sources, so a type
+/// reached by reference may live in a crate that was never scanned.
+/// `AdminConfig.slot: AuthoritySlot` is the standing example: the field
+/// names a type from the extension's own dependency. The walk asks for
+/// it by name, and only then does anything go looking.
+pub trait TypeDefSource {
+    /// The definition of `name`, or `None` when nothing declares it.
+    fn find(&mut self, name: &str) -> Option<IdlTypeDef>;
+}
+
+/// Resolves nothing: every reference is every reference is answered from
+/// the scanned items alone.
+pub struct NoTypeDefs;
+
+impl TypeDefSource for NoTypeDefs {
+    fn find(&mut self, _name: &str) -> Option<IdlTypeDef> {
+        None
+    }
+}
+
 /// Scan `items` for `#[account_type]`-annotated types and return:
 /// - `accounts`: directly annotated types (primary account data layouts)
 /// - `types`: helper types referenced by account types but not themselves annotated
@@ -246,6 +285,15 @@ fn is_account_shaped(ty: &Type) -> bool {
 /// Helper types are resolved transitively: if `Vault` references `VaultStatus`
 /// and `VaultStatus` references `StatusFlags`, all three end up in the IDL.
 pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
+    collect_account_types_from(items, &mut NoTypeDefs)
+}
+
+/// [`collect_account_types`] with somewhere to look for definitions the
+/// scanned items do not contain.
+pub fn collect_account_types_from(
+    items: &[Item],
+    defs: &mut impl TypeDefSource,
+) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
     // Pass 1: collect directly annotated types.
     let mut accounts: Vec<IdlAccountType> = Vec::new();
     let mut annotated_names: HashSet<String> = HashSet::new();
@@ -319,7 +367,7 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
                 continue;
             }
             visited.insert(name.clone());
-            if let Some(def) = find_and_parse_type(&index, &name) {
+            if let Some(def) = find_and_parse_type(&index, &name, defs) {
                 // Enqueue any new references from this helper type.
                 for ref_name in collect_defined_refs(&def) {
                     if !visited.contains(&ref_name) {
@@ -328,9 +376,9 @@ pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTyp
                 }
                 helper_types.push(def);
             }
-            // If the type isn't found in the file (e.g. it's from an external crate),
-            // leave it as an unresolved Defined reference in the IDL. The decoder will
-            // report a clear error if it encounters that reference at runtime.
+            // Nothing declares it anywhere the program can see, so it stays an
+            // unresolved Defined reference in the IDL. The decoder reports a
+            // clear error if it meets that reference at runtime.
         }
     }
 
@@ -348,6 +396,66 @@ mod tests {
 
     fn items(src: &str) -> Vec<Item> {
         syn::parse_file(src).expect("failed to parse source").items
+    }
+
+    /// Answers exactly one name, counting the asks.
+    struct OneDef {
+        name: &'static str,
+        asked: Vec<String>,
+    }
+
+    impl TypeDefSource for OneDef {
+        fn find(&mut self, name: &str) -> Option<IdlTypeDef> {
+            self.asked.push(name.to_string());
+            (name == self.name).then(|| IdlTypeDef {
+                name: name.to_string(),
+                kind: "struct".to_string(),
+                fields: vec![IdlField {
+                    name: "holder".to_string(),
+                    type_: IdlType::Primitive("account_id".to_string()),
+                }],
+                variants: vec![],
+            })
+        }
+    }
+
+    // A referenced type the items do not declare is asked of the source;
+    // the def it returns joins `types` like any locally resolved helper.
+    #[test]
+    fn missing_reference_is_answered_by_the_source() {
+        let src = r#"
+            #[account_type]
+            pub struct AdminConfig { pub slot: AuthoritySlot }
+        "#;
+        let mut defs = OneDef {
+            name: "AuthoritySlot",
+            asked: vec![],
+        };
+        let (_, helpers) = collect_account_types_from(&items(src), &mut defs);
+        assert_eq!(defs.asked, vec!["AuthoritySlot"]);
+        assert!(helpers.iter().any(|t| t.name == "AuthoritySlot"));
+    }
+
+    // The alias-target path: the alias is in hand, its target is not.
+    // The def comes back under the alias name, which is what keeps
+    // `AdminCandidate` in the IDL when its target lives in an unowned
+    // crate.
+    #[test]
+    fn alias_target_is_resolved_through_the_source() {
+        let src = r#"
+            #[account_type]
+            pub struct Wrapper { pub c: AdminCandidate }
+            pub type AdminCandidate = AuthorityCandidate;
+        "#;
+        let mut defs = OneDef {
+            name: "AuthorityCandidate",
+            asked: vec![],
+        };
+        let (_, helpers) = collect_account_types_from(&items(src), &mut defs);
+        assert!(
+            helpers.iter().any(|t| t.name == "AdminCandidate"),
+            "the target's def must come back under the alias name: {helpers:?}"
+        );
     }
 
     #[test]
