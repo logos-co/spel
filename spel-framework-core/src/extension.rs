@@ -620,173 +620,256 @@ fn discover_extensions<F: FnMut(String)>(
     mod_items: &[syn::Item],
     on_warning: &mut F,
 ) -> Result<ExtensionDiscoveries, String> {
-    let mut matched: Vec<MatchedExtension> = Vec::new();
-
     let lez_pos = mod_attrs
         .iter()
         .position(|a| a.path().is_ident("lez_program"));
+    let mut matched: Vec<MatchedExtension> = Vec::new();
     for dep_dir in dep_dirs {
-        let Some(manifest_value) = read_manifest_value(dep_dir) else {
-            continue;
-        };
-        let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
-            continue;
-        };
-        let Some(marker_pos) = mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)) else {
-            continue;
-        };
-        let dir = dep_dir.clone();
-        if lez_pos.is_some_and(|lez| marker_pos < lez) {
-            return Err(format!(
-                "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
-                above expand first and are invisible to the compiled program, so the \
-                extension would appear in the IDL but not in the dispatcher. Move \
-                #[{ext_attr}] below #[lez_program]."
-            ));
+        if let Some(m) = match_extension(dep_dir, lez_pos, mod_attrs, mod_items, on_warning)? {
+            matched.push(m);
         }
-        let Some(crate_name) = read_package_ident(&manifest_value) else {
-            on_warning(format!(
-                "extension at '{}' matched module attribute but has no [package].name, skipped",
-                dep_dir.display()
-            ));
-            continue;
-        };
+    }
+    Ok(flatten_in_marker_order(matched))
+}
 
-        let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
-        for spec in &mut injects {
-            spec.source = crate_name.clone();
-        }
-        let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
-        let embedded = read_spel_embedded(&manifest_value, dep_dir)?;
-        let has_wrap = wrap.is_some();
-        let marker_args = mod_attrs
-            .iter()
-            .find_map(|a| parse_marker_args(a, &ext_attr).transpose())
-            .transpose()?
-            .unwrap_or_default();
+/// One dependency dir against the module: `None` when it is not an
+/// extension the consumer activated, `Some` with everything it
+/// contributes when it is.
+///
+/// The opening reads stay in sequence rather than behind names: manifest,
+/// `extension_attr`, marker match and package ident together are the
+/// four conditions that must all hold before a crate counts as an
+/// activated extension.
+///
+/// # Errors
+///
+/// `Err` on malformed spel metadata, a marker above `#[lez_program]`,
+/// embedded mode without `embedded.state_type`, or misdeclared bound
+/// args. Callers surface it as a compile error.
+fn match_extension<F: FnMut(String)>(
+    dep_dir: &Path,
+    lez_pos: Option<usize>,
+    mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
+    on_warning: &mut F,
+) -> Result<Option<MatchedExtension>, String> {
+    let dir = dep_dir.to_path_buf();
+    let Some(manifest_value) = read_manifest_value(dep_dir) else {
+        return Ok(None);
+    };
+    let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
+        return Ok(None);
+    };
+    let Some(marker_pos) = mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)) else {
+        return Ok(None);
+    };
+    check_marker_below_lez(&ext_attr, marker_pos, lez_pos)?;
+    let Some(crate_name) = read_package_ident(&manifest_value) else {
+        on_warning(format!(
+            "extension at '{}' matched module attribute but has no [package].name, skipped",
+            dep_dir.display()
+        ));
+        return Ok(None);
+    };
 
-        let mut wraps = Vec::new();
-        if let Some(w) = wrap {
-            wraps.push((marker_args.word.clone().unwrap_or_default(), w));
-        }
+    let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
+    for spec in &mut injects {
+        spec.source = crate_name.clone();
+    }
+    let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
+    let embedded = read_spel_embedded(&manifest_value, dep_dir)?;
+    let has_wrap = wrap.is_some();
+    let marker_args = mod_attrs
+        .iter()
+        .find_map(|a| parse_marker_args(a, &ext_attr).transpose())
+        .transpose()?
+        .unwrap_or_default();
 
-        let resolved_embed = resolve_embed_decl(
-            marker_args.embed,
-            &embedded,
-            mod_items,
-            &crate_name,
-            &ext_attr,
-        )?;
-        let is_embedded = resolved_embed.is_some();
-        let mut embeds = Vec::new();
-        if let Some(decl) = resolved_embed {
-            let Some(state_type) = embedded.state_type.clone() else {
-                return Err(format!(
-                    "extension '{crate_name}' is used in embedded mode but its \
-                    metadata declares no `embedded.state_type`; name the type \
-                    occupying the embedded window (e.g. state_type = \
-                    \"{crate_name}::MyConfig\") so window collision asserts can \
-                    be emitted"
-                ));
-            };
-            embeds.push(Embed {
-                source: crate_name.clone(),
-                decl,
-                state_type,
-                carrier: None,
-            });
-        }
-
-        let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
-        let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
-
-        let (items, _) =
-            collect_items_from_crate_dirs(std::slice::from_ref(dep_dir), &mut *on_warning);
-        let funcs = collect_instruction_fns(&items);
-        let funcs: Vec<ItemFn> = if is_embedded {
-            funcs
-                .into_iter()
-                .filter(|f| !embedded.skip.iter().any(|s| f.sig.ident == *s))
-                .collect()
-        } else {
-            funcs
-        };
-        let bound_args = read_spel_bound_args(&manifest_value, dep_dir)?;
-        for bound in &bound_args {
-            let kwarg = bound
-                .from
-                .split_once("::")
-                .map_or(bound.from.as_str(), |(_, k)| k);
-            if kwarg != "offset" {
-                return Err(format!(
-                    "extension '{crate_name}': bound_args.from = \"{}\" names kwarg \
-                    \"{kwarg}\", which is not a marker kwarg the framework knows; \
-                    only \"offset\" carries a value",
-                    bound.from
-                ));
-            }
-        }
-        let mut bound_calls: HashMap<String, Vec<BoundValue>> = HashMap::new();
-        let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
-        for mut f in funcs {
-            let mut values = Vec::new();
-            let mut found: Vec<usize> = Vec::new();
-            for bound in &bound_args {
-                let Some(pos) = f.sig.inputs.iter().position(|input| {
-                    matches!(input, syn::FnArg::Typed(pt)
-                        if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
-                }) else {
-                    continue;
-                };
-                found.push(pos);
-                values.push(resolve_bound_value(
-                    bound,
-                    embeds.first().map(|e| &e.decl),
-                    mod_attrs,
-                    &crate_name,
-                )?);
-            }
-            let n = f.sig.inputs.len();
-            let k = found.len();
-            let trailing_in_order = found.iter().enumerate().all(|(i, pos)| *pos == n - k + i);
-            if !trailing_in_order {
-                return Err(format!(
-                    "extension '{crate_name}': bound_args params of `{}` must be \
-                    the trailing params, in bound_args block order; the dispatcher \
-                    appends their values after the transaction args",
-                    f.sig.ident
-                ));
-            }
-            f.sig.inputs = f.sig.inputs.iter().take(n - k).cloned().collect();
-            if !values.is_empty() {
-                bound_calls.insert(f.sig.ident.to_string(), values);
-            }
-            stripped.push(f);
-        }
-        let funcs = stripped;
-        if funcs.is_empty() && injects.is_empty() && !has_wrap {
-            on_warning(format!(
-                "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
-                #[instruction] fns, no inject specs, and no wrap config"
-            ));
-        }
-        let mut instructions = Vec::new();
-        for func in funcs {
-            instructions.push((func, crate_path.clone()));
-        }
-        matched.push(MatchedExtension {
-            marker_pos,
-            instructions,
-            inject_specs: injects,
-            wraps,
-            embeds,
-            bound_calls,
-            marker: ext_attr.clone(),
-            dir,
-        });
+    let mut wraps = Vec::new();
+    if let Some(w) = wrap {
+        wraps.push((marker_args.word.clone().unwrap_or_default(), w));
     }
 
-    Ok(flatten_in_marker_order(matched))
+    let embeds: Vec<Embed> = resolve_embed(
+        marker_args.embed,
+        &embedded,
+        mod_items,
+        &crate_name,
+        &ext_attr,
+    )?
+    .into_iter()
+    .collect();
+    let is_embedded = !embeds.is_empty();
+
+    let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
+    let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
+
+    let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(&dir), &mut *on_warning);
+    let funcs = collect_instruction_fns(&items);
+    let funcs: Vec<ItemFn> = if is_embedded {
+        funcs
+            .into_iter()
+            .filter(|f| !embedded.skip.iter().any(|s| f.sig.ident == *s))
+            .collect()
+    } else {
+        funcs
+    };
+    let bound_args = read_spel_bound_args(&manifest_value, dep_dir)?;
+    let (funcs, bound_calls) = strip_bound_args(
+        funcs,
+        &bound_args,
+        embeds.first().map(|e| &e.decl),
+        mod_attrs,
+        &crate_name,
+    )?;
+
+    if funcs.is_empty() && injects.is_empty() && !has_wrap {
+        on_warning(format!(
+            "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
+            #[instruction] fns, no inject specs, and no wrap config"
+        ));
+    }
+    let instructions = funcs
+        .into_iter()
+        .map(|func| (func, crate_path.clone()))
+        .collect();
+    Ok(Some(MatchedExtension {
+        marker_pos,
+        instructions,
+        inject_specs: injects,
+        wraps,
+        embeds,
+        bound_calls,
+        marker: ext_attr,
+        dir,
+    }))
+}
+
+/// A marker above `#[lez_program]` expands first and is invisible to
+/// the compiled program: the extension would appear in the IDL but not
+/// in the dispatcher, so the placement is refused.
+fn check_marker_below_lez(
+    ext_attr: &str,
+    marker_pos: usize,
+    lez_pos: Option<usize>,
+) -> Result<(), String> {
+    if lez_pos.is_some_and(|lez| marker_pos < lez) {
+        return Err(format!(
+            "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
+            above expand first and are invisible to the compiled program, so the \
+            extension would appear in the IDL but not in the dispatcher. Move \
+            #[{ext_attr}] below #[lez_program]."
+        ));
+    }
+    Ok(())
+}
+
+/// Decide an extension's embed, requiring its window type with it.
+///
+/// Embedded mode needs `embedded.state_type`: the window collision
+/// asserts read the window's size through it, so an embed without one
+/// is refused at discovery rather than surfacing at emission.
+fn resolve_embed(
+    marker_embed: Option<EmbedDecl>,
+    embedded: &EmbeddedMeta,
+    mod_items: &[syn::Item],
+    crate_name: &str,
+    ext_attr: &str,
+) -> Result<Option<Embed>, String> {
+    let Some(decl) = resolve_embed_decl(marker_embed, embedded, mod_items, crate_name, ext_attr)?
+    else {
+        return Ok(None);
+    };
+    let Some(state_type) = embedded.state_type.clone() else {
+        return Err(format!(
+            "extension '{crate_name}' is used in embedded mode but its \
+            metadata declares no `embedded.state_type`; name the type \
+            occupying the embedded window (e.g. state_type = \
+            \"{crate_name}::MyConfig\") so window collision asserts can \
+            be emitted"
+        ));
+    };
+    Ok(Some(Embed {
+        source: crate_name.to_string(),
+        decl,
+        state_type,
+        carrier: None,
+    }))
+}
+
+/// A crate's discovered fns with their bound params stripped, paired
+/// with the values the dispatcher appends per fn.
+type StrippedFns = (Vec<ItemFn>, HashMap<String, Vec<BoundValue>>);
+
+/// Resolve an extension's bound args against the module's markers and
+/// strip the bound trailing params form it's discovered fns.
+///
+/// Each bound arg names a trailing fn param the dispatcher fills at the
+/// call site as a compile-time literal; the params come off here so no
+/// IDL or validation path ever sees them. Trailing is enforced in
+/// bound_args block order, because the dispatcher appends the values
+/// after the transaction args.
+///
+/// # Errors
+///
+/// `Err` when a bound arg references a kwarg the framework does not
+/// know, when a referenced marker or kwarg is absent with no declared
+/// default, or when the bound params are not the trailing params in
+/// declaration order. Callers surface it as a compile error.
+fn strip_bound_args(
+    funcs: Vec<ItemFn>,
+    bound_args: &[BoundArg],
+    embed: Option<&EmbedDecl>,
+    mod_attrs: &[Attribute],
+    crate_name: &str,
+) -> Result<StrippedFns, String> {
+    for bound in bound_args {
+        let kwarg = bound
+            .from
+            .split_once("::")
+            .map_or(bound.from.as_str(), |(_, k)| k);
+        if kwarg != "offset" {
+            return Err(format!(
+                "extension '{crate_name}': bound_args.from = \"{}\" names kwarg \
+                \"{kwarg}\", which is not a marker kwarg the framework knows; \
+                only \"offset\" carries a value",
+                bound.from
+            ));
+        }
+    }
+    let mut bound_calls: HashMap<String, Vec<BoundValue>> = HashMap::new();
+    let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
+    for mut f in funcs {
+        let mut values = Vec::new();
+        let mut found: Vec<usize> = Vec::new();
+        for bound in bound_args {
+            let Some(pos) = f.sig.inputs.iter().position(|input| {
+                matches!(input, syn::FnArg::Typed(pt)
+                    if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
+            }) else {
+                continue;
+            };
+            found.push(pos);
+            values.push(resolve_bound_value(bound, embed, mod_attrs, crate_name)?);
+        }
+        let n = f.sig.inputs.len();
+        let k = found.len();
+        let trailing_in_order = found.iter().enumerate().all(|(i, pos)| *pos == n - k + i);
+        if !trailing_in_order {
+            return Err(format!(
+                "extension '{crate_name}': bound_args params of `{}` must be \
+                the trailing params, in bound_args block order; the dispatcher \
+                appends their values after the transaction args",
+                f.sig.ident
+            ));
+        }
+        f.sig.inputs = f.sig.inputs.iter().take(n - k).cloned().collect();
+        if !values.is_empty() {
+            bound_calls.insert(f.sig.ident.to_string(), values);
+        }
+        stripped.push(f);
+    }
+    Ok((stripped, bound_calls))
 }
 
 /// Resolve one bound arg to its dispatch-time value.
