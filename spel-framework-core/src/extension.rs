@@ -226,8 +226,13 @@ impl PreparedProgram {
     pub fn layout_items(
         &self,
         consumer_source: &Path,
-        consumer_items: Vec<syn::Item>,
+        mut consumer_items: Vec<syn::Item>,
     ) -> Result<(Vec<syn::Item>, Vec<PathBuf>), String> {
+        // The connected walk screens cfg-excluded items; the consumer's
+        // items arrive raw from the macro input, so screen them here. A
+        // default build never compiles them, so they are not the
+        // program's layouts.
+        consumer_items.retain(|i| !crate::idl_gen::cfg_excluded_item(i));
         let (mut connected, files_read) = self.connected_groups();
         self.demote_embedded_state(&mut connected);
 
@@ -2530,6 +2535,43 @@ lib-no-meta = { path = "../lib-no-meta" }
             layout.iter().any(|i| matches!(i, syn::Item::Struct(s)
                     if s.ident == "ExtConfig" && has_account_type_attr(&s.attrs))),
             "the consumer's own layout keeps its annotation"
+        );
+    }
+
+    // A cfg-gated consumer item is never compiled into the program, so
+    // it is not a layout and cannot collide with one.
+    #[test]
+    fn cfg_gated_consumer_item_is_not_a_layout() {
+        let tmp = TempDir::new("cfg-gated-consumer");
+        tmp.write(
+            "ext/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u64 }",
+        );
+        let consumer_items =
+            syn::parse_file("#[cfg(test)]\n#[account_type]\npub struct Same { pub fixture: u8 }")
+                .unwrap()
+                .items;
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), consumer_items)
+            .expect("a test fixture cannot collide");
+        let same: Vec<&syn::ItemStruct> = layout
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) if s.ident == "Same" => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(same.len(), 1, "the gated fixture is screened out");
+        assert!(
+            same[0]
+                .fields
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|id| id == "v")),
+            "the connected crate's layout survives"
         );
     }
 

@@ -181,7 +181,7 @@ pub enum TokenHolding {
 }
 ```
 
-The annotation is honored in your own code: the program's crate, the local path dependencies it links, and the extensions its markers activate. A crate that merely appears somewhere in the dependency graph cannot put an account layout into your IDL, and two connected crates declaring layouts of one name refuse to build, naming both. An extension used in embedded mode contributes no layout for its config type either — the window lives inside your account, so your struct is the layout and the extension's type is described by reference.
+The annotation is honored in your own code: the program's crate, the local path dependencies it links, and the extensions its markers activate. A crate that merely appears somewhere in the dependency graph cannot put an account layout into your IDL, and two connected crates declaring layouts of one name refuse to build, naming both. An extension used in embedded mode contributes no layout for its config type either — the window lives inside your account, so your struct is the layout and the extension's type is described by reference. Code that a default build never compiles is screened out everywhere: a `#[cfg(test)]` item is not a layout, and it cannot answer a type reference.
 
 Types referenced by an `#[account_type]` (such as helper enums or nested structs) are collected automatically, wherever they live — they do not need their own annotation:
 

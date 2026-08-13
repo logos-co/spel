@@ -454,25 +454,7 @@ impl crate::account_types::TypeDefSource for UnownedTypeDefs {
                     let path = entry.path();
                     if path.is_dir() {
                         stack.push(path);
-                        continue;
-                    }
-                    if path.extension().is_none_or(|e| e != "rs") {
-                        continue;
-                    }
-                    let Ok(text) = std::fs::read_to_string(&path) else {
-                        continue;
-                    };
-                    // A declaration of `name` must contain it, so the
-                    // substring test can exclude but never miss.
-                    if !text.contains(name) || has_metavar_glued_literal(&text) {
-                        continue;
-                    }
-                    let Ok(file) = syn::parse_file(&text) else {
-                        continue;
-                    };
-                    self.files_read.push(path.clone());
-                    if let Some(def) = crate::account_types::type_def_from_items(&file.items, name)
-                    {
+                    } else if let Some(def) = probe_file(&path, name, &mut self.files_read) {
                         return Some(def);
                     }
                 }
@@ -480,6 +462,31 @@ impl crate::account_types::TypeDefSource for UnownedTypeDefs {
         }
         None
     }
+}
+
+/// The named def from one file: a cheap text filter first, the
+/// parse only when the file can declare the name. Records the file
+/// when it parses.
+fn probe_file(path: &Path, name: &str, files_read: &mut Vec<PathBuf>) -> Option<IdlTypeDef> {
+    if path.extension().is_none_or(|e| e != "rs") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    // A declaration of `name` must contain it, so the substring
+    // test can exclude but never miss.
+    if !text.contains(name) || has_metavar_glued_literal(&text) {
+        return None;
+    }
+    let file = syn::parse_file(&text).ok()?;
+    files_read.push(path.to_path_buf());
+    // Same screen as the walks: a def a default build
+    // never compiles must not answer a reference.
+    let items: Vec<syn::Item> = file
+        .items
+        .into_iter()
+        .filter(|i| !cfg_excluded_item(i))
+        .collect();
+    crate::account_types::type_def_from_items(&items, name)
 }
 
 /// Parse a source file and every module file it declares, returning the
@@ -626,20 +633,18 @@ fn collect_items_recursive<F: FnMut(String)>(
     on_warning: &mut F,
 ) {
     for item in items {
+        // A default build never compiles these, so the walk must not
+        // read them: test-only or feature-gated types are not the
+        // program's.
+        if cfg_excluded_item(item) {
+            continue;
+        }
         match item {
             syn::Item::Mod(m) => {
-                // Skip modules gated behind #[cfg(...)] that would not be
-                // compiled in a default build (e.g. #[cfg(test)],
-                // #[cfg(feature = "...")]).  This prevents test-only or
-                // feature-gated types from leaking into the on-chain IDL.
-                if is_cfg_excluded(&m.attrs) {
-                    continue;
-                }
-
                 if let Some((_, inner)) = &m.content {
-                    // Inline module — recurse into its body with an updated base_dir
-                    // so that any file-backed `mod` declarations inside it resolve
-                    // relative to `base_dir/<mod_name>/` rather than `base_dir/`.
+                    // Inline module — recurse with an updated base_dir so
+                    // file-backed `mod` declarations inside it resolve
+                    // relative to `base_dir/<mod_name>/`.
                     let inner_base = base_dir.map(|d| d.join(m.ident.to_string()));
                     collect_items_recursive(
                         inner,
@@ -656,28 +661,32 @@ fn collect_items_recursive<F: FnMut(String)>(
                     }
                 }
             },
-            // Non-module items (structs, enums, etc.) — also skip if cfg-gated.
-            other => {
-                let attrs: &[Attribute] = match other {
-                    syn::Item::Struct(s) => &s.attrs,
-                    syn::Item::Enum(e) => &e.attrs,
-                    syn::Item::Fn(f) => &f.attrs,
-                    syn::Item::Trait(t) => &t.attrs,
-                    syn::Item::Impl(i) => &i.attrs,
-                    syn::Item::Type(t) => &t.attrs,
-                    syn::Item::Static(s) => &s.attrs,
-                    syn::Item::Const(c) => &c.attrs,
-                    syn::Item::ExternCrate(e) => &e.attrs,
-                    syn::Item::Use(u) => &u.attrs,
-                    _ => &[],
-                };
-                if is_cfg_excluded(attrs) {
-                    continue;
-                }
-                out.push(other.clone());
-            },
+            other => out.push(other.clone()),
         }
     }
+}
+
+/// The item's outer attributes, for cfg screening.
+fn item_attrs(item: &syn::Item) -> &[Attribute] {
+    match item {
+        syn::Item::Struct(s) => &s.attrs,
+        syn::Item::Enum(e) => &e.attrs,
+        syn::Item::Fn(f) => &f.attrs,
+        syn::Item::Trait(t) => &t.attrs,
+        syn::Item::Impl(i) => &i.attrs,
+        syn::Item::Type(t) => &t.attrs,
+        syn::Item::Static(s) => &s.attrs,
+        syn::Item::Const(c) => &c.attrs,
+        syn::Item::ExternCrate(e) => &e.attrs,
+        syn::Item::Use(u) => &u.attrs,
+        syn::Item::Mod(m) => &m.attrs,
+        _ => &[],
+    }
+}
+
+/// True when a `#[cfg(...)]` excludes the item from a default build.
+pub(crate) fn cfg_excluded_item(item: &syn::Item) -> bool {
+    is_cfg_excluded(item_attrs(item))
 }
 
 /// Return `true` if the item's attributes contain a `#[cfg(...)]` that would
@@ -1245,6 +1254,24 @@ pub struct Hidden { pub x: u8 }
         assert!(warnings.is_empty(), "no skip, no warning: {warnings:?}");
         assert!(!items.is_empty(), "the file must be harvested");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // A def a default build never compiles must not answer a
+    // reference: the lookup screens cfg-gated items like the walks do.
+    #[test]
+    fn unowned_lookup_skips_cfg_gated_defs() {
+        let tmp = crate::test_utils::TempDir::new("unowned-cfg-gated");
+        tmp.write(
+            "un/src/lib.rs",
+            "#[cfg(test)]\npub struct Ghost { pub v: u64 }\npub struct Real { pub v: u64 }",
+        );
+        let mut defs = UnownedTypeDefs::new(vec![tmp.path().join("un")]);
+        use crate::account_types::TypeDefSource;
+        assert!(
+            defs.find("Ghost").is_none(),
+            "a test-gated def must not answer a reference"
+        );
+        assert!(defs.find("Real").is_some(), "the ungated def answers");
     }
 
     fn ok(src: &str) -> SpelIdl {
