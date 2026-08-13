@@ -340,10 +340,14 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     }
     // The binding scan set, built once: offset resolution and the
     // agreement asserts bind roles to carriers against the same items.
-    // Only a program with an embed or a derived bound value has a role
-    // to bind, and the scan reads the consumer's sources and every local
-    // path dependency, so a program with neither skips it.
+    // The binding scan reads the consumer's sources and every local path
+    // dependency, so a program that binds nothing skips it. Binding
+    // means an embed, a derived bound value, or a dormant anchor — the
+    // last binds no offset, but its check still reads the scan, and an
+    // empty scan would let a slot carrier with no anchored fn pass
+    // vacuously.
     let binds_a_carrier = !deps.extensions.embeds.is_empty()
+        || !deps.extensions.dormant_anchors.is_empty()
         || deps.extensions.bound_calls.values().flatten().any(|v| {
             matches!(
                 v,
