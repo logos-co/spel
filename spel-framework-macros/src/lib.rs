@@ -376,6 +376,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
                     let mut func = func.clone();
+                    replace_initialize_shorthand(&mut func, &program.embeds)?;
                     let injected = program
                         .gate(&mut func, None)
                         .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
@@ -611,6 +612,40 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
 
 fn has_instruction_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("instruction"))
+}
+
+/// Replace the #[initialize] shorthand with the anchor attr of every
+/// inferred embed, so each extension's initializer macro runs on the
+/// emitted handler. Insertion keeps the embeds' order, which is the
+/// marker order, so stacked bootstraps expand deterministically.
+fn replace_initialize_shorthand(
+    func: &mut ItemFn,
+    embeds: &[spel_framework_core::extension::Embed],
+) -> syn::Result<()> {
+    let Some(pos) = func
+        .attrs
+        .iter()
+        .position(|a| a.path().is_ident("initialize"))
+    else {
+        return Ok(());
+    };
+    let anchors: Vec<String> = embeds
+        .iter()
+        .filter_map(|e| e.decl.initializer.clone())
+        .collect();
+    if anchors.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &func.attrs[pos],
+            "#[initialize] but no activated extension declares an anchor; \
+            it is a shorthand for the extensions' initializer attributes",
+        ));
+    }
+    func.attrs.remove(pos);
+    for (i, name) in anchors.iter().enumerate() {
+        let ident = Ident::new(name, proc_macro2::Span::call_site());
+        func.attrs.insert(pos + i, syn::parse_quote!(#[#ident]));
+    }
+    Ok(())
 }
 
 fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
@@ -2477,6 +2512,76 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn shorthand_embed(source: &str, init: &str) -> spel_framework_core::extension::Embed {
+        use spel_framework_core::extension::{Embed, EmbedDecl, OffsetSpec};
+        Embed {
+            source: source.to_string(),
+            carrier: None,
+            state_type: format!("{source}::Cfg"),
+            decl: EmbedDecl {
+                role: format!("{source}_config"),
+                account: "config".to_string(),
+                offset: OffsetSpec::Derived,
+                initializer: Some(init.to_string()),
+            },
+        }
+    }
+
+    // The swap lands at the shorthand's position, embeds' order, which
+    // is the marker order, so stacked bootstraps expand
+    // deterministically.
+    #[test]
+    fn shorthand_swaps_into_the_anchor_attrs_in_embed_order() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[doc = "d"]
+            #[initialize]
+            #[instruction]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(
+            &mut func,
+            &[
+                shorthand_embed("admin", "admin_initialize"),
+                shorthand_embed("freeze", "freeze_initialize"),
+            ],
+        )
+        .expect("replaces");
+        let names: Vec<String> = func
+            .attrs
+            .iter()
+            .filter_map(|a| a.path().get_ident().map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "doc",
+                "admin_initialize",
+                "freeze_initialize",
+                "instruction"
+            ]
+        );
+    }
+
+    #[test]
+    fn shorthand_without_an_anchored_embed_refuses() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        let err = replace_initialize_shorthand(&mut func, &[]).expect_err("nothing to expand to");
+        assert!(err.to_string().contains("no activated extension"), "{err}");
+    }
+
+    #[test]
+    fn a_fn_without_the_shorthand_is_untouched() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[admin_initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(&mut func, &[]).expect("no shorthand, no work");
+        assert_eq!(func.attrs.len(), 1);
+    }
 
     /// Self-cleaning temporary directory.
     struct TempDir(std::path::PathBuf);

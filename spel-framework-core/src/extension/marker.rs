@@ -281,17 +281,23 @@ pub(super) fn infer_anchor_embed(
 ) -> Result<Option<EmbedDecl>, String> {
     let fail = |what: String| format!("extension `{crate_name}`: {what}");
 
-    let anchors: Vec<(&syn::ItemFn, &Attribute)> = mod_items
-        .iter()
-        .filter_map(|i| match i {
-            syn::Item::Fn(f) => f
-                .attrs
-                .iter()
-                .find(|a| attr_is(a, anchor_attr))
-                .map(|a| (f, a)),
-            _ => None,
-        })
-        .collect();
+    let mut anchors: Vec<(&syn::ItemFn, &Attribute)> = Vec::new();
+    for item in mod_items {
+        let syn::Item::Fn(f) = item else { continue };
+        let explicit = f.attrs.iter().find(|a| attr_is(a, anchor_attr));
+        let shorthand = f.attrs.iter().find(|a| attr_is(a, "initialize"));
+        match (explicit, shorthand) {
+            (Some(_), Some(_)) => {
+                return Err(fail(format!(
+                    "fn `{}` carries both #[{anchor_attr}] and #[initialize]; \
+                    one spelling per fn",
+                    f.sig.ident
+                )));
+            },
+            (Some(a), None) | (None, Some(a)) => anchors.push((f, a)),
+            (None, None) => {},
+        }
+    }
 
     let (func, attr) = match anchors.as_slice() {
         [] => return Ok(None),
@@ -307,13 +313,25 @@ pub(super) fn infer_anchor_embed(
         },
     };
 
+    let is_shorthand = attr_is(attr, "initialize");
+    if is_shorthand && !matches!(attr.meta, syn::Meta::Path(_)) {
+        return Err(fail(format!(
+            "#[initialize] takes no arguments; to name the embedding \
+            account use #[{anchor_attr}({role} = <param>)]"
+        )));
+    }
+
     let init_params: Vec<&syn::Ident> = super::inject::typed_params(func)
         .filter(|(_, pt)| super::inject::param_has_init(pt))
         .map(|(pi, _)| &pi.ident)
         .collect();
 
     let account = match (
-        anchor_kwarg(attr, anchor_attr, role)?,
+        if is_shorthand {
+            None
+        } else {
+            anchor_kwarg(attr, anchor_attr, role)?
+        },
         init_params.as_slice(),
     ) {
         (Some(name), inits) if inits.iter().any(|i| **i == name) => name,
@@ -662,5 +680,58 @@ mod tests {
         let items = mod_fns("pub fn plain(#[account(init)] cfg: A) -> R { todo!() }");
         let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext").unwrap();
         assert!(embed.is_none(), "no anchor means dedicated mode");
+    }
+
+    // #[initialize] counts as the anchor of every anchored extension,
+    // and the recorded initializer is the extension's real attr, so
+    // downstream errors and the coverage gate speak real names.
+    #[test]
+    fn initialize_shorthand_anchors_the_embed() {
+        let items = mod_fns(
+            "#[initialize]\npub fn initialize(#[account(init, pda = literal(\"cfg\"))] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("the shorthand anchors");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.initializer.as_deref(), Some("ext_init"));
+    }
+
+    #[test]
+    fn shorthand_beside_the_explicit_anchor_refuses() {
+        let items = mod_fns(
+            "#[ext_init]\n#[initialize]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("one spelling per fn");
+        assert!(err.contains("both"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_with_arguments_refuses() {
+        let items = mod_fns(
+            "#[initialize(ext_config = cfg)]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("the shorthand takes no arguments");
+        assert!(
+            err.contains("#[ext_init(ext_config = <param>)]"),
+            "the fix is the explicit form: {err}"
+        );
+    }
+
+    // Several init params under the shorthand fall into the existing
+    // ambiguity error, whose fix is the explicit anchor kwarg.
+    #[test]
+    fn shorthand_with_several_inits_names_the_explicit_form() {
+        let items = mod_fns(
+            "#[initialize]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("ambiguity must refuse");
+        assert!(
+            err.contains("ext_config = "),
+            "must show the explicit kwarg form: {err}"
+        );
     }
 }
