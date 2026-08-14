@@ -392,19 +392,23 @@ fn check_layout_collisions(groups: &[(PathBuf, Vec<syn::Item>)]) -> Result<(), S
     Ok(())
 }
 
-/// A slot field marker with no anchored fn ships born renounced: the
-/// struct declares embedded intent and nothing bootstraps the window.
-/// Refused rather than silently compiled as dedicated mode. Runs only
-/// with carriers in scope. The IDL producer skip it, the consumer's
-/// build is the gate.
+/// A slot field marker with no anchored fn is a silent mode
+/// disagreement: the struct declares embedded intent and the extension
+/// resolved dedicated. For a bootstrap anchor the window would ship
+/// born renounced, for a no-op anchor it is dead bytes. Refused rather
+/// than silently compiled as dedicated mode. Runs only with carriers
+/// in scope. The IDL producers skip it, the consumer's build is the
+/// gate.
 fn check_dormant_anchors(dormant: &[DormantAnchor], items: &[syn::Item]) -> Result<(), String> {
     for anchor in dormant {
         if let Some(carrier) = find_slot_carrier(items, &anchor.role)? {
             return Err(format!(
                 "struct `{}` carries a #[{}] field but no fn carries \
-                #[{}]; the embedded slot would ship born renounced. \
-                Anchor the account-creating instruction with #[{}], or \
-                remove the #[{}] marker for dedicated mode",
+                #[{}]; the marked field declares embedded mode and \
+                nothing anchors it, so the program would compile as \
+                dedicated mode with a dead slot window. Anchor the \
+                account-creating instruction with #[{}], or remove the \
+                #[{}] marker for dedicated mode",
                 carrier.struct_name, carrier.attr_name, anchor.attr, anchor.attr, carrier.attr_name
             ));
         }
@@ -552,8 +556,7 @@ pub struct Embed {
 
 /// An anchor-capable extension that resolved to dedicated mode: it
 /// declares `embedded.anchor_attr` and no fn carries the attr. Kept so
-/// the dispatcher can refuse a slot carrier with no anchor. The shape
-/// where the embedded slot would ship born renounced.
+/// the dispatcher can refuse a slot carrier with no anchor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DormantAnchor {
     /// Crate name of the declaring extension.
@@ -2661,7 +2664,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         assert!(deps.extensions.embeds.is_empty());
     }
 
-    // A slot field marker with no anchored fn would ship born renounced,
+    // A slot field marker with no anchored fn is a mode disagreement,
     // so prepare refuses it, naming the struct and both attrs.
     #[test]
     fn slot_carrier_without_anchor_refuses() {
@@ -2681,7 +2684,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         assert!(
             err.contains("ProgConfig")
                 && err.contains("#[ext_init]")
-                && err.contains("born renounced"),
+                && err.contains("dedicated mode with a dead slot window"),
             "got: {err}"
         );
     }
