@@ -622,11 +622,10 @@ fn replace_initialize_shorthand(
     func: &mut ItemFn,
     embeds: &[spel_framework_core::extension::Embed],
 ) -> syn::Result<()> {
-    let Some(pos) = func
-        .attrs
-        .iter()
-        .position(|a| a.path().is_ident("initialize"))
-    else {
+    let Some(pos) = func.attrs.iter().position(|a| {
+        a.path()
+            .is_ident(spel_framework_core::extension::INITIALIZE_SHORTHAND)
+    }) else {
         return Ok(());
     };
     let anchors: Vec<String> = embeds

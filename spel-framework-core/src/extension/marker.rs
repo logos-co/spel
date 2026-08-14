@@ -3,6 +3,11 @@
 
 use syn::{punctuated::Punctuated, Attribute};
 
+/// The consumer-facing shorthand for every activated extension's
+/// anchor attribute. Inference and the coverage gate accept it, the
+/// dispatcher swaps it for the extensions' real attrs.
+pub const INITIALIZE_SHORTHAND: &str = "initialize";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OffsetSpec {
     /// Explicit `offset = N` on the marker.
@@ -285,12 +290,12 @@ pub(super) fn infer_anchor_embed(
     for item in mod_items {
         let syn::Item::Fn(f) = item else { continue };
         let explicit = f.attrs.iter().find(|a| attr_is(a, anchor_attr));
-        let shorthand = f.attrs.iter().find(|a| attr_is(a, "initialize"));
+        let shorthand = f.attrs.iter().find(|a| attr_is(a, INITIALIZE_SHORTHAND));
         match (explicit, shorthand) {
             (Some(_), Some(_)) => {
                 return Err(fail(format!(
-                    "fn `{}` carries both #[{anchor_attr}] and #[initialize]; \
-                    one spelling per fn",
+                    "fn `{}` carries both #[{anchor_attr}] and \
+                    #[{INITIALIZE_SHORTHAND}]; one spelling per fn",
                     f.sig.ident
                 )));
             },
@@ -313,11 +318,11 @@ pub(super) fn infer_anchor_embed(
         },
     };
 
-    let is_shorthand = attr_is(attr, "initialize");
+    let is_shorthand = attr_is(attr, INITIALIZE_SHORTHAND);
     if is_shorthand && !matches!(attr.meta, syn::Meta::Path(_)) {
         return Err(fail(format!(
-            "#[initialize] takes no arguments; to name the embedding \
-            account use #[{anchor_attr}({role} = <param>)]"
+            "#[{INITIALIZE_SHORTHAND}] takes no arguments; to name the \
+            embedding account use #[{anchor_attr}({role} = <param>)]"
         )));
     }
 

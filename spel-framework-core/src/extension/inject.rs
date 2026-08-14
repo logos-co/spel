@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 use syn::{parse_quote, Attribute, FnArg, ItemFn};
 
-use super::{marker::attr_is, Embed, InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
+use super::marker::{attr_is, INITIALIZE_SHORTHAND};
+use super::{Embed, InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
 
 /// Filter `deps.extensions.wraps` down to the wraps whose extension
 /// marker carries no skip-word arg matching `WrapInstructions::skip`.
@@ -357,7 +358,10 @@ fn check_initializer_coverage(
     for func in consumer_fns {
         let creates = typed_params(func)
             .any(|(pi, pt)| pi.ident == embed.account.as_str() && param_has_init(pt));
-        let annotated = func.attrs.iter().any(|a| attr_is(a, init_attr));
+        let annotated = func
+            .attrs
+            .iter()
+            .any(|a| attr_is(a, init_attr) || attr_is(a, INITIALIZE_SHORTHAND));
 
         if !creates && !annotated {
             continue;
@@ -1028,6 +1032,23 @@ mod tests {
             }
         );
         rewrite_embedded_roles(&mut specs, &embeds, &[create]).expect("annotated creator passes");
+    }
+
+    // The #[initialize] shorthand satisfies the gate: inference already
+    // resolved it to this anchor, and the dispatcher swaps it for the
+    // real attr after the checks run.
+    #[test]
+    fn shorthand_creator_passes_the_coverage_check() {
+        let (mut specs, embeds) = initializer_fixture();
+        let create: ItemFn = syn::parse_quote!(
+            #[initialize]
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create]).expect("the shorthand covers");
     }
 
     #[test]

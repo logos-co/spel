@@ -77,7 +77,7 @@ pub use inject::{
 };
 pub use marker::{
     candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
-    EmbedDecl, MarkerArgs, OffsetSpec,
+    EmbedDecl, MarkerArgs, OffsetSpec, INITIALIZE_SHORTHAND,
 };
 pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_offset_const_name, SlotCarrier};
 
