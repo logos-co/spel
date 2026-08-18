@@ -101,7 +101,7 @@ ui/
     let lez_ref_ffi = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => "tag = \"v0.2.4\"".to_string(),
     };
     let spel_ref_ffi = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -692,7 +692,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => "tag = \"v0.2.4\"".to_string(),
     };
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),

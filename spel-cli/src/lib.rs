@@ -564,6 +564,7 @@ fn compute_pda_command(
     // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut npk_hex: Option<String> = None;
+    let mut vpk_hex: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
@@ -571,6 +572,11 @@ fn compute_pda_command(
                 let raw = &args[i + 1];
                 if key == "npk" {
                     npk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
+                if key == "vpk" {
+                    vpk_hex = Some(raw.clone());
                     i += 2;
                     continue;
                 }
@@ -637,21 +643,22 @@ fn compute_pda_command(
         process::exit(1);
     };
 
-    // For private PDAs, parse and require --npk
+    // For private PDAs, parse and require --npk and --vpk
+    use nssa_core::encryption::ViewingPublicKey;
     use nssa_core::NullifierPublicKey;
-    let npk: Option<NullifierPublicKey> = if pda_def.private {
-        match npk_hex {
+    let (npk, vpk): (Option<NullifierPublicKey>, Option<ViewingPublicKey>) = if pda_def.private {
+        let n = match npk_hex {
             Some(ref hex) => {
                 use crate::hex::decode_bytes_32;
                 let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
                     eprintln!("❌ Invalid --npk '{}': {}", hex, e);
                     process::exit(1);
                 });
-                Some(NullifierPublicKey(bytes))
+                NullifierPublicKey(bytes)
             },
             None => {
                 eprintln!(
-                    "❌ '{}' is a private PDA — pass --npk <64-char-hex>",
+                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
                     account_name
                 );
                 eprintln!(
@@ -659,9 +666,33 @@ fn compute_pda_command(
                 );
                 process::exit(1);
             },
-        }
+        };
+        let v = match vpk_hex {
+            Some(ref hex) => {
+                let bytes = ::hex::decode(hex).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --vpk hex: {}", e);
+                    process::exit(1);
+                });
+                ViewingPublicKey::from_bytes(bytes).unwrap_or_else(|e| {
+                    eprintln!(
+                        "❌ Invalid --vpk (expected {} bytes, ML-KEM-768 encapsulation key): {:?}",
+                        ViewingPublicKey::LEN,
+                        e
+                    );
+                    process::exit(1);
+                })
+            },
+            None => {
+                eprintln!(
+                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
+                    account_name
+                );
+                process::exit(1);
+            },
+        };
+        (Some(n), Some(v))
     } else {
-        None
+        (None, None)
     };
 
     // Build account_map: parse --<account-name> <base58-id> for IdlSeed::Account seeds.
@@ -699,6 +730,7 @@ fn compute_pda_command(
         &account_map,
         &seed_args,
         npk.as_ref(),
+        vpk.as_ref(),
     ) {
         Ok(account_id) => {
             println!("{}", account_id);
