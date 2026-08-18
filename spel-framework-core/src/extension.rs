@@ -256,7 +256,7 @@ pub fn resolve_program_deps<F: FnMut(String)>(
                 direct dependencies. A marker matches a direct dependency that \
                 declares extension_attr = \"<marker>\" in its spel metadata; \
                 check the marker for typos, and note that transitive \
-                dependencies aAre never discovered."
+                dependencies are never discovered."
             ));
         }
     }
