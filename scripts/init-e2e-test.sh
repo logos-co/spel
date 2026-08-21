@@ -126,6 +126,11 @@ log "  ✓ Built: $(basename "$GUEST_BIN") ($(stat -c%s "$GUEST_BIN") bytes)"
 # ─── Step 3: Generate and validate IDL ────────────────────────────────────
 
 log "Step 3: Generating IDL..."
+# The scanner resolves the guest's graph with an offline metadata call,
+# which needs every lockfile entry cached, platforms the build never
+# fetched included. The documented consumer prerequisite applies to the
+# scaffold too.
+cargo fetch --manifest-path methods/guest/Cargo.toml > "$WORK_DIR/fetch.log" 2>&1 || fail "cargo fetch failed (see $WORK_DIR/fetch.log)"
 make idl > "$WORK_DIR/idl.log" 2>&1 || fail "IDL generation failed (see $WORK_DIR/idl.log)"
 IDL_FILE=$(find . -name "*-idl.json" | head -1)
 [ -n "$IDL_FILE" ] || fail "No IDL file found"
