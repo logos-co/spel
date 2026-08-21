@@ -89,14 +89,20 @@ cd "$WORK_DIR"
 # ─── Step 1: spel init — default LEZ, optional SPEL override ─────────────
 # Always uses DEFAULT LEZ resolution (no --lez-tag) to test init.rs defaults.
 # On PRs, SPEL_TAG is set so the scaffolded project uses the PR's framework code.
-# On main pushes, SPEL_TAG is unset for true default testing.
+# On main pushes, SPEL_TAG is unset so the default refs are tested.
+# SPEL_GIT is always set in CI (the repo's own URL) so forks test their own
+# code; only local runs without SPEL_GIT exercise the built-in default URL.
 
-log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG})..."
+log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG}${SPEL_GIT:+, SPEL_GIT=$SPEL_GIT})..."
+SPEL_GIT_ARGS=()
+if [ -n "${SPEL_GIT:-}" ]; then
+    SPEL_GIT_ARGS=(--spel-git "$SPEL_GIT")
+fi
 if [ -n "${SPEL_TAG:-}" ]; then
-    "$SPEL_BIN" init --spel-rev "$SPEL_TAG" "$PROJECT_NAME" \
+    "$SPEL_BIN" init --spel-rev "$SPEL_TAG" "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
         > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
 else
-    "$SPEL_BIN" init "$PROJECT_NAME" \
+    "$SPEL_BIN" init "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
         > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
 fi
 cd "$PROJECT_NAME"

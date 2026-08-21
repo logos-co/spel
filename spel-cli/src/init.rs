@@ -9,7 +9,11 @@ pub fn init_project(
     spel_tag: Option<&str>,
     lez_rev: Option<&str>,
     spel_rev: Option<&str>,
+    spel_git: Option<&str>,
 ) {
+    // The git URL the scaffolded project pulls the framework from. CI on a
+    // fork passes the fork's own URL so refs like refs/pull/N/head resolve.
+    let spel_git = spel_git.unwrap_or("https://github.com/logos-co/spel.git");
     let root = Path::new(name);
     if root.exists() {
         eprintln!("❌ Directory '{}' already exists", name);
@@ -122,7 +126,7 @@ nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone
 common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
 sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
 wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-spel-framework-core = {{ git = "https://github.com/logos-co/spel.git", {spel_ref_ffi} }}
+spel-framework-core = {{ git = "{spel_git}", {spel_ref_ffi} }}
 serde_json  = "1"
 serde       = {{ version = "1", features = ["derive"] }}
 borsh       = "1.5"
@@ -712,7 +716,7 @@ name = "{snake_name}"
 path = "src/bin/{snake_name}.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+spel-framework = {{ git = "{spel_git}", {spel_ref} }}
 nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
@@ -803,9 +807,9 @@ name = "{snake_name}_cli"
 path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
-spel-framework = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+spel-framework = {{ git = "{spel_git}", {spel_ref} }}
 nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
-spel = {{ git = "https://github.com/logos-co/spel.git", {spel_ref} }}
+spel = {{ git = "{spel_git}", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"
 tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
