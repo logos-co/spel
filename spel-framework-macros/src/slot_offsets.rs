@@ -230,6 +230,7 @@ pub(crate) fn emit_agreement_asserts(
         let manifest = std::path::Path::new(&md).join("Cargo.toml");
         let (path_dep_items, _) = spel_framework_core::idl_gen::collect_items_from_crate_dirs(
             &spel_framework_core::dep_walk::path_dep_dirs(&manifest),
+            |w| eprintln!("warning: {w}"),
         );
         scan_items.extend(path_dep_items);
     }

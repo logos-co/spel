@@ -19,6 +19,9 @@ use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
 use crate::extension::{check_duplicate_instruction_names, instruction_source_label};
 
+mod unlexable;
+use unlexable::has_metavar_glued_literal;
+
 /// Error type returned by [`generate_idl_from_file`].
 #[derive(Debug)]
 pub enum IdlGenError {
@@ -67,8 +70,14 @@ impl From<syn::Error> for IdlGenError {
 ///
 /// The path is resolved relative to the current working directory,
 /// which is the natural behavior for a CLI tool.
+///
+/// # Errors
+///
+/// `Err` on an unreadable or unparsable source file, a source without
+/// a `#[lez_program]` module, or a program module with no
+/// `#[instruction]` functions.
 pub fn generate_idl_from_file(source_path: &Path) -> Result<SpelIdl, IdlGenError> {
-    generate_idl_from_file_with_deps(source_path, &[])
+    generate_idl_from_file_with_deps(source_path, &[], &mut |_| {})
 }
 
 /// Parse a SPEL program source file and return its [`SpelIdl`], also scanning
@@ -79,12 +88,22 @@ pub fn generate_idl_from_file(source_path: &Path) -> Result<SpelIdl, IdlGenError
 /// that contains `src/lib.rs`).  Only local path-dependencies should be passed
 /// here — third-party registry or git crates are intentionally excluded to
 /// avoid pulling in unrelated type definitions.
-pub fn generate_idl_from_file_with_deps(
+///
+/// `on_warning` receives non-fatal notes from the dependency scan, currently
+/// the skip of a source file the consumer's edition cannot re-lex.
+///
+/// # Errors
+///
+/// Same surface as [`generate_idl_from_file`]: IO, parse, missing
+/// program module or no instructions. Dependency-scan problems are
+/// never errors, they arrive as warnings.
+pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
     source_path: &Path,
     dep_source_dirs: &[PathBuf],
+    on_warning: &mut F,
 ) -> Result<SpelIdl, IdlGenError> {
     let content = std::fs::read_to_string(source_path)?;
-    let (extra_items, _) = collect_items_from_crate_dirs(dep_source_dirs);
+    let (extra_items, _) = collect_items_from_crate_dirs(dep_source_dirs, on_warning);
     generate_idl_inner(
         &content,
         &source_path.display().to_string(),
@@ -332,17 +351,31 @@ fn generate_idl_inner(
 /// avoid pulling in unrelated type definitions.
 ///
 /// Returns `(items, files_read)` where `files_read` lists every source file
-/// that was actually parsed.  Callers can use this list for change tracking
-/// (e.g. emitting `include_str!()` references so cargo rebuilds when
-/// path-dep sources change).
-pub fn collect_items_from_crate_dirs(dirs: &[PathBuf]) -> (Vec<syn::Item>, Vec<PathBuf>) {
+/// that was read.  A file skipped as unlexable stays in the list on purpose:
+/// change tracking must keep watching it so a fixed dependency retriggers
+/// the build.  Callers can use this list for change tracking (e.g. emitting
+/// `include_str!()` references so cargo rebuilds when path-dep sources
+/// change).
+///
+/// `on_warning` is called for non-fatal issues, currently the skip of a
+/// source file the consumer's edition cannot re-lex.
+pub fn collect_items_from_crate_dirs<F: FnMut(String)>(
+    dirs: &[PathBuf],
+    mut on_warning: F,
+) -> (Vec<syn::Item>, Vec<PathBuf>) {
     let mut items = Vec::new();
     let mut visited: HashSet<PathBuf> = HashSet::new();
     let mut files_read = Vec::new();
     for dir in dirs {
         let lib_rs = dir.join("src").join("lib.rs");
         if lib_rs.exists() {
-            collect_items_from_source_file(&lib_rs, &mut items, &mut visited, &mut files_read);
+            collect_items_from_source_file(
+                &lib_rs,
+                &mut items,
+                &mut visited,
+                &mut files_read,
+                &mut on_warning,
+            );
         }
     }
     (items, files_read)
@@ -355,7 +388,9 @@ pub fn collect_file_items_following_mods(path: &Path) -> Vec<syn::Item> {
     let mut items = Vec::new();
     let mut visited = HashSet::new();
     let mut files_read = Vec::new();
-    collect_items_from_source_file(path, &mut items, &mut visited, &mut files_read);
+    // The slot scan only needs carrier structs; a skipped landmine file
+    // already warns through the IDL path.
+    collect_items_from_source_file(path, &mut items, &mut visited, &mut files_read, &mut |_| {});
     items
 }
 
@@ -381,11 +416,16 @@ pub fn manifest_bin_paths(manifest_dir: &Path) -> Vec<PathBuf> {
 
 /// Parse a single Rust source file and append its items to `out`, following
 /// external `mod` declarations to their corresponding files.
-fn collect_items_from_source_file(
+///
+/// A file the consumer's edition cannot re-lex is reported through
+/// `on_warning` and skipped instead of parsed, but still recorded in
+/// `files_read` for change tracking.
+fn collect_items_from_source_file<F: FnMut(String)>(
     path: &Path,
     out: &mut Vec<syn::Item>,
     visited: &mut HashSet<PathBuf>,
     files_read: &mut Vec<PathBuf>,
+    on_warning: &mut F,
 ) {
     let canonical = match path.canonicalize() {
         Ok(p) => p,
@@ -401,6 +441,12 @@ fn collect_items_from_source_file(
     };
     files_read.push(path.to_path_buf());
     if has_metavar_glued_literal(&content) {
+        on_warning(format!(
+            "skipping {}: a macro metavariable glued to a string literal cannot \
+            be re-lexed under the consumer's edition; any #[account_type] items \
+            in this file are not harvested",
+            path.display()
+        ));
         return;
     }
     let file = match syn::parse_file(&content) {
@@ -418,7 +464,14 @@ fn collect_items_from_source_file(
         path.parent().map(|p| p.join(stem))
     };
 
-    collect_items_recursive(&file.items, sub_base.as_deref(), out, visited, files_read);
+    collect_items_recursive(
+        &file.items,
+        sub_base.as_deref(),
+        out,
+        visited,
+        files_read,
+        on_warning,
+    );
 }
 
 /// Resolve the on-disk path for an external `mod` declaration.
@@ -463,12 +516,13 @@ fn mod_file_path(m: &syn::ItemMod, base_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-fn collect_items_recursive(
+fn collect_items_recursive<F: FnMut(String)>(
     items: &[syn::Item],
     base_dir: Option<&Path>,
     out: &mut Vec<syn::Item>,
     visited: &mut HashSet<PathBuf>,
     files_read: &mut Vec<PathBuf>,
+    on_warning: &mut F,
 ) {
     for item in items {
         match item {
@@ -486,11 +540,18 @@ fn collect_items_recursive(
                     // so that any file-backed `mod` declarations inside it resolve
                     // relative to `base_dir/<mod_name>/` rather than `base_dir/`.
                     let inner_base = base_dir.map(|d| d.join(m.ident.to_string()));
-                    collect_items_recursive(inner, inner_base.as_deref(), out, visited, files_read);
+                    collect_items_recursive(
+                        inner,
+                        inner_base.as_deref(),
+                        out,
+                        visited,
+                        files_read,
+                        on_warning,
+                    );
                 } else if let Some(dir) = base_dir {
                     // External module file — locate and parse it.
                     if let Some(p) = mod_file_path(m, dir) {
-                        collect_items_from_source_file(&p, out, visited, files_read);
+                        collect_items_from_source_file(&p, out, visited, files_read, on_warning);
                     }
                 }
             },
@@ -912,31 +973,6 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
     }
 }
 
-/// True when the text contains a macro metavariable glued to a string
-/// literal (e.g. ark-ff's `$Fp"({})"`). Legal in the defining crate's own
-/// edition, but re-lexed as raw source under a 2021+ edition rustc's lexer
-/// queues a fatal "unknown prefix" error as a side effect even though the
-/// parse error itself is caught. Such files cannot carry usable
-/// `#[account_type]` items, so they are skipped instead of parsed.
-fn has_metavar_glued_literal(content: &str) -> bool {
-    let bytes = content.as_bytes();
-    let mut i = 0;
-
-    while let Some(off) = content[i..].find('$') {
-        let start = i + off + 1;
-        let mut j = start;
-        while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-            j += 1;
-        }
-        if j > start && j < bytes.len() && bytes[j] == b'"' && !bytes[start].is_ascii_digit() {
-            return true;
-        }
-        i = start;
-    }
-
-    false
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -1020,19 +1056,65 @@ mod tests {
 
     #[test]
     fn landmine_file_contributes_no_items_but_is_tracked() {
-        let dir = std::env::temp_dir().join("spel_idl_gen_landmine_fixture");
+        let dir = std::env::temp_dir().join("spel_idl_gen_landmine_fixture_up");
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(
             dir.join("src").join("lib.rs"),
             concat!(
-                "#[account_type]\npub struct Hidden { pub x: u8 }\n",
-                "macro_rules! m { () => { stringify!($Fp\"({})\") } }\n",
+                "#[account_type]
+pub struct Hidden { pub x: u8 }
+",
+                "macro_rules! m { () => { stringify!($Fp\"({})\") } }
+",
             ),
         )
         .unwrap();
-        let (items, files) = collect_items_from_crate_dirs(std::slice::from_ref(&dir));
+        let mut warnings = Vec::new();
+        let (items, files) =
+            collect_items_from_crate_dirs(std::slice::from_ref(&dir), &mut |w| warnings.push(w));
+        assert_eq!(warnings.len(), 1, "one skip, one warning: {warnings:?}");
+        assert!(warnings[0].contains("lib.rs") && warnings[0].contains("not harvested"));
         assert_eq!(files.len(), 1, "the file must still be change-tracked");
         assert!(items.is_empty(), "a landmine file must be skipped whole");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The warning fires only on the landmine shape: an ordinary crate
+    // harvests silently.
+    #[test]
+    fn clean_crate_emits_no_warnings() {
+        let dir = std::env::temp_dir().join("spel_idl_gen_clean_fixture_up");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "#[account_type]\npub struct Visible { pub x: u8 }\n",
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (items, files) =
+            collect_items_from_crate_dirs(std::slice::from_ref(&dir), &mut |w| warnings.push(w));
+        assert!(warnings.is_empty(), "no skip, no warning: {warnings:?}");
+        assert_eq!(files.len(), 1);
+        assert!(!items.is_empty(), "the clean file must be harvested");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // The scan is context-aware: a dollar-word quoted in a doc comment
+    // must not cost the file its account types.
+    #[test]
+    fn dollar_word_in_docs_does_not_drop_the_file() {
+        let dir = std::env::temp_dir().join("spel_idl_gen_dollarword_fixture_up");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(
+            dir.join("src").join("lib.rs"),
+            "/// Respects \"$PATH\" when resolving.\n#[account_type]\npub struct Visible { pub x: u8 }\n",
+        )
+        .unwrap();
+        let mut warnings = Vec::new();
+        let (items, _) =
+            collect_items_from_crate_dirs(std::slice::from_ref(&dir), &mut |w| warnings.push(w));
+        assert!(warnings.is_empty(), "no skip, no warning: {warnings:?}");
+        assert!(!items.is_empty(), "the file must be harvested");
         std::fs::remove_dir_all(&dir).ok();
     }
 

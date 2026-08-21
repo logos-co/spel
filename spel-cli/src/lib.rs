@@ -203,7 +203,7 @@ pub async fn run() {
                 if remaining_args.get(2) == Some(&"-h".to_string())
                     || remaining_args.get(2) == Some(&"--help".to_string())
                 {
-                    println!("Usage: spel init <project-name> [OPTIONS]");
+                    println!("Usage: spel init [OPTIONS] <project-name>");
                     println!();
                     println!("Create a new SPEL project");
                     println!();
@@ -219,7 +219,7 @@ pub async fn run() {
                     println!("Examples:");
                     println!("  spel init my-project");
                     println!(
-                        "  spel init my-project --lez-tag v0.1.2 --spel-rev refs/pull/122/head"
+                        "  spel init --lez-tag v0.1.2 --spel-rev refs/pull/122/head my-project"
                     );
                     return;
                 }
@@ -264,7 +264,7 @@ pub async fn run() {
                 }
 
                 let name = remaining_args.get(name_arg_idx).unwrap_or_else(|| {
-                    eprintln!("Usage: {} init <project-name> [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>] [--spel-git <url>]", args[0]);
+                    eprintln!("Usage: {} init [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>] [--spel-git <url>] <project-name>", args[0]);
                     process::exit(1);
                 });
                 init_project(
@@ -329,7 +329,11 @@ pub async fn run() {
                     for w in &dep_result.warnings {
                         eprintln!("{}", w);
                     }
-                    match generate_idl_from_file_with_deps(&sources[0], &dep_result.dirs) {
+                    match generate_idl_from_file_with_deps(
+                        &sources[0],
+                        &dep_result.dirs,
+                        &mut |w| eprintln!("{w}"),
+                    ) {
                         Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
                         Err(e) => {
                             eprintln!("Error: {}", e);
@@ -344,7 +348,9 @@ pub async fn run() {
                         for w in &dep_result.warnings {
                             eprintln!("{}", w);
                         }
-                        match generate_idl_from_file_with_deps(source, &dep_result.dirs) {
+                        match generate_idl_from_file_with_deps(source, &dep_result.dirs, &mut |w| {
+                            eprintln!("{w}")
+                        }) {
                             Ok(idl) => {
                                 let out_name = format!("{}-idl.json", idl.name);
                                 match fs::write(

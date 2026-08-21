@@ -359,7 +359,8 @@ pub fn discover_extensions<F: FnMut(String)>(
         let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
         let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
 
-        let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(dep_dir));
+        let (items, _) =
+            collect_items_from_crate_dirs(std::slice::from_ref(dep_dir), &mut *on_warning);
         let funcs = collect_instruction_fns(&items);
         let funcs: Vec<ItemFn> = if is_embedded {
             funcs
@@ -1995,6 +1996,7 @@ mod user_program {
         let err = crate::idl_gen::generate_idl_from_file_with_deps(
             &tmp.path().join("user/src/main.rs"),
             &[],
+            &mut |_| {},
         )
         .expect_err("colliding user and extension instruction must fail IDL generation");
         let msg = format!("{err:?}");

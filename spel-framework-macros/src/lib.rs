@@ -529,6 +529,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                             let (extra_items, _) =
                                 spel_framework_core::idl_gen::collect_items_from_crate_dirs(
                                     &deps.graph.transitive_dirs,
+                                    |w| eprintln!("warning: {w}"),
                                 );
                             all_items.extend(extra_items);
                             slot_assert.extend(slot_offsets::emit_agreement_asserts(
@@ -2385,7 +2386,10 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // in a shared core crate (e.g. my_program_core) and the program binary
     // depends on it via `path = "..."`.
     let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&deps.graph.transitive_dirs);
+        spel_framework_core::idl_gen::collect_items_from_crate_dirs(
+            &deps.graph.transitive_dirs,
+            |w| eprintln!("warning: {w}"),
+        );
     all_items.extend(extra_items);
 
     let (accounts, types) = account_types::collect_account_types(&all_items);

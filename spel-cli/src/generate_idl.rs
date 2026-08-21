@@ -820,7 +820,8 @@ pub mod token {
         );
         assert_eq!(dep_result.dirs.len(), 1);
 
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         assert_eq!(idl.name, "token");
         assert_eq!(idl.instructions.len(), 4);
@@ -903,7 +904,8 @@ pub mod token {
             "unexpected warnings: {:?}",
             dep_result.warnings
         );
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -961,7 +963,8 @@ pub mod token {
             "unexpected warnings: {:?}",
             dep_result.warnings
         );
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1011,7 +1014,8 @@ pub mod token {
             "unexpected warnings: {:?}",
             dep_result.warnings
         );
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1051,7 +1055,7 @@ pub mod token {
         );
 
         // Passing no dep dirs replicates the old single-file behaviour
-        let idl = generate_idl_from_file_with_deps(&program, &[]).unwrap();
+        let idl = generate_idl_from_file_with_deps(&program, &[], &mut |_| {}).unwrap();
         assert!(
             idl.accounts.is_empty(),
             "expected no accounts without dep scanning, got {:?}",
@@ -1107,7 +1111,8 @@ pub mod test_helpers {
             "unexpected warnings: {:?}",
             dep_result.warnings
         );
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1161,7 +1166,8 @@ pub mod experimental {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1215,7 +1221,8 @@ pub mod debug {
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1267,7 +1274,8 @@ pub struct TestOnlyStruct { pub fake: u64 }
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1319,7 +1327,8 @@ pub struct ProdOnlyStruct { pub secret: u64 }
         );
 
         let dep_result = find_path_dep_dirs(&program);
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(
@@ -1391,7 +1400,8 @@ pub struct CoreAccount { pub balance: u128 }
             dep_result.dirs
         );
 
-        let idl = generate_idl_from_file_with_deps(&program, &dep_result.dirs).unwrap();
+        let idl =
+            generate_idl_from_file_with_deps(&program, &dep_result.dirs, &mut |_| {}).unwrap();
 
         let account_names: Vec<&str> = idl.accounts.iter().map(|a| a.name.as_str()).collect();
         assert!(

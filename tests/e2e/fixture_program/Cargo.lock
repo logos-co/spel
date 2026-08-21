@@ -1789,7 +1789,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "spel-framework"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base58",
  "borsh",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",
