@@ -89,7 +89,9 @@ cd "$WORK_DIR"
 # ─── Step 1: spel init — default LEZ, optional SPEL override ─────────────
 # Always uses DEFAULT LEZ resolution (no --lez-tag) to test init.rs defaults.
 # On PRs, SPEL_TAG is set so the scaffolded project uses the PR's framework code.
-# On main pushes, SPEL_TAG is unset for true default testing.
+# On main pushes, SPEL_TAG is unset so the default refs are tested.
+# SPEL_GIT is always set in CI (the repo's own URL) so forks test their own
+# code; only local runs without SPEL_GIT exercise the built-in default URL.
 
 log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG}${SPEL_GIT:+, SPEL_GIT=$SPEL_GIT})..."
 SPEL_GIT_ARGS=()
