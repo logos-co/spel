@@ -2110,7 +2110,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
     let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
     let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs);
+        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs, |w| {
+            eprintln!("warning: {w}");
+        });
     all_items.extend(extra_items);
 
     let (accounts, types) = account_types::collect_account_types(&all_items);
