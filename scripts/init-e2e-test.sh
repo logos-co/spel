@@ -221,15 +221,27 @@ done
 log "Step 5: Updating wallet config for port ${SEQUENCER_PORT}..."
 WALLET_CONFIG="${NSSA_WALLET_HOME_DIR}/wallet_config.json"
 if [ -f "$WALLET_CONFIG" ]; then
-    python3 -c "
-import json
-with open('$WALLET_CONFIG', 'r') as f:
+    # LEZ v0.2.1+ moved the sequencer address into a `sequencers` array; older
+    # revisions used a flat `sequencer_addr`. Patch whichever schema this wallet
+    # build expects — writing the wrong one is silently ignored by serde and the
+    # wallet then talks to the default port (spel/co #256).
+    # Paths/URLs are passed as argv so special characters can't break the script.
+    python3 -c '
+import json, sys
+path, url = sys.argv[1], sys.argv[2]
+with open(path) as f:
     config = json.load(f)
-config['sequencer_addr'] = '$SEQUENCER_URL'
-with open('$WALLET_CONFIG', 'w') as f:
+if isinstance(config.get("sequencers"), list):
+    entry = config["sequencers"][0] if config["sequencers"] else {}
+    entry["sequencer_addr"] = url
+    config["sequencers"] = [entry]
+    config.pop("sequencer_addr", None)
+else:
+    config["sequencer_addr"] = url
+with open(path, "w") as f:
     json.dump(config, f, indent=4)
-print('  ✓ Updated wallet config to use $SEQUENCER_URL')
-" || warn "Failed to update wallet config"
+print("  \u2713 Updated wallet config to use " + url)
+' "$WALLET_CONFIG" "$SEQUENCER_URL" || warn "Failed to update wallet config"
 else
     warn "Wallet config not found at $WALLET_CONFIG — wallet may fail to connect"
 fi
