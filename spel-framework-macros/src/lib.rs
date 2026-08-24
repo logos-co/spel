@@ -184,10 +184,13 @@ struct AccountConstraints {
     owner: Option<syn::Expr>,
     signer: bool,
     pda_seeds: Vec<PdaSeedDef>,
-    /// True when `private_pda` keyword is present — address includes the caller's npk.
+    /// True when `private_pda` keyword is present — address includes the caller's
+    /// npk and vpk.
     private_pda: bool,
     /// Name of the instruction arg supplying the `NullifierPublicKey` for derivation.
     npk_arg: Option<String>,
+    /// Name of the instruction arg supplying the `ViewingPublicKey` for derivation.
+    vpk_arg: Option<String>,
 }
 
 /// A PDA seed definition from the `#[account(pda = ...)]` attribute.
@@ -650,6 +653,23 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                         }
                     }
                     Err(meta.error("npk must be npk = arg(\"arg_name\")"))
+                } else if meta.path.is_ident("vpk") {
+                    // vpk = arg("arg_name") — instruction arg supplying the ViewingPublicKey
+                    let value = meta.value()?;
+                    let expr: syn::Expr = value.parse()?;
+                    if let syn::Expr::Call(call) = &expr {
+                        if let syn::Expr::Path(path) = &*call.func {
+                            if path.path.is_ident("arg") {
+                                if let Some(syn::Expr::Lit(lit)) = call.args.first() {
+                                    if let syn::Lit::Str(s) = &lit.lit {
+                                        constraints.vpk_arg = Some(s.value());
+                                        return Ok(());
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    Err(meta.error("vpk must be vpk = arg(\"arg_name\")"))
                 } else {
                     Err(meta.error("unknown account constraint"))
                 }
@@ -679,10 +699,30 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                 format!("`npk` arg name `{npk_name}` is not a valid Rust identifier"),
             ));
         }
+        // lez v0.2.1 binds the viewing key into private-PDA derivation alongside the
+        // nullifier key, so `vpk` is required wherever `npk` is.
+        if constraints.vpk_arg.is_none() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                "`private_pda` requires `vpk = arg(\"arg_name\")`",
+            ));
+        }
+        let vpk_name = constraints.vpk_arg.as_deref().unwrap();
+        if syn::parse_str::<Ident>(vpk_name).is_err() {
+            return Err(syn::Error::new(
+                proc_macro2::Span::call_site(),
+                format!("`vpk` arg name `{vpk_name}` is not a valid Rust identifier"),
+            ));
+        }
     } else if constraints.npk_arg.is_some() {
         return Err(syn::Error::new(
             proc_macro2::Span::call_site(),
             "`npk` can only be used together with `private_pda`",
+        ));
+    } else if constraints.vpk_arg.is_some() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "`vpk` can only be used together with `private_pda`",
         ));
     }
 
@@ -905,8 +945,25 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                 }).collect()
             };
 
+            // Collect vpk arg values for private PDA accounts
+            let vpk_arg_values: Vec<TokenStream2> = {
+                let mut names = Vec::new();
+                for acc in &ix.accounts {
+                    if let Some(ref vpk) = acc.constraints.vpk_arg {
+                        if !names.contains(vpk) {
+                            names.push(vpk.clone());
+                        }
+                    }
+                }
+                names.iter().map(|name| {
+                    let arg_ident = format_ident!("{}", name);
+                    quote! { &#arg_ident }
+                }).collect()
+            };
+
             let all_extra_args: Vec<TokenStream2> = arg_seed_values.iter()
                 .chain(npk_arg_values.iter())
+                .chain(vpk_arg_values.iter())
                 .cloned()
                 .collect();
 
@@ -1450,6 +1507,23 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 params
             };
 
+            // Extra parameters for private PDA vpk args: __vpk_arg_<name>: &nssa_core::encryption::ViewingPublicKey
+            let vpk_params: Vec<TokenStream2> = {
+                let mut seen: Vec<String> = Vec::new();
+                let mut params = Vec::new();
+                for acc in &ix.accounts {
+                    if let Some(ref vpk) = acc.constraints.vpk_arg {
+                        if !seen.contains(vpk) {
+                            seen.push(vpk.clone());
+                            let ident = format_ident!("__vpk_arg_{}", vpk);
+                            params
+                                .push(quote! { #ident: &nssa_core::encryption::ViewingPublicKey });
+                        }
+                    }
+                }
+                params
+            };
+
             // Generate PDA checks for accounts with pda_seeds
             let pda_checks: Vec<TokenStream2> = ix
                 .accounts
@@ -1497,15 +1571,18 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         .collect();
 
                     if acc.constraints.private_pda {
-                        // Private PDA: address = for_private_pda(program_id, seed, npk)
+                        // Private PDA: address = for_private_pda(program_id, seed, npk, vpk)
                         let npk_name = acc.constraints.npk_arg.as_deref()
                             .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
                         let npk_param = format_ident!("__npk_arg_{}", npk_name);
+                        let vpk_name = acc.constraints.vpk_arg.as_deref()
+                            .expect("private_pda without vpk_arg — should have been caught in parse_account_constraints");
+                        let vpk_param = format_ident!("__vpk_arg_{}", vpk_name);
                         quote! {
                             {
                                 #(#seed_exprs)*
                                 let __expected_id = spel_framework::pda::compute_private_pda(
-                                    self_program_id, &[#(#seed_refs),*], #npk_param
+                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param
                                 );
                                 if accounts[#idx].account_id != __expected_id {
                                     return Err(spel_framework::error::SpelError::PdaMismatch {
@@ -1540,9 +1617,11 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 return quote! {};
             }
 
-            // Combine all extra params: arg seeds first, then npk params
+            // Combine all extra params: arg seeds first, then npk params, then vpk params.
+            // Order must match `all_extra_args` at the call site.
             let all_validate_params: Vec<TokenStream2> = arg_seed_params.into_iter()
                 .chain(npk_params)
+                .chain(vpk_params)
                 .collect();
 
             quote! {

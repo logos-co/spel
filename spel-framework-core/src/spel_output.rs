@@ -77,7 +77,7 @@ impl AutoClaim {
     ///
     /// Identical to [`pda_from_seeds`] in terms of the emitted claim — the circuit
     /// reuses `Claim::Pda(seed)` for private PDAs and derives the address via
-    /// `AccountId::for_private_pda` using the `npk` it receives separately through
+    /// `AccountId::for_private_pda` using the `npk`/`vpk` it receives separately through
     /// `PrivacyPreservingCircuitInput.private_account_keys`.
     ///
     /// The `npk` parameter is accepted for documentation clarity; it is not encoded

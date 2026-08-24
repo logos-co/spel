@@ -2,6 +2,7 @@
 
 use crate::parse::ParsedValue;
 use nssa::AccountId;
+use nssa_core::encryption::ViewingPublicKey;
 use nssa_core::program::{PdaSeed, ProgramId};
 use nssa_core::NullifierPublicKey;
 use spel_framework_core::idl::IdlSeed;
@@ -99,14 +100,15 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
 ///
 /// Supports all seed types: `const`, `account`, and `arg`.
 ///
-/// Pass `npk = Some(key)` for private PDAs; the address will be derived via
-/// `AccountId::for_private_pda`. For public PDAs pass `npk = None`.
+/// Pass `keys = Some((npk, vpk))` for private PDAs; the address will be derived via
+/// `AccountId::for_private_pda`, which binds both the nullifier and viewing public
+/// keys. For public PDAs pass `keys = None`.
 pub fn compute_pda_from_seeds(
     seeds: &[IdlSeed],
     program_id: &ProgramId,
     account_map: &HashMap<String, AccountId>,
     parsed_args: &HashMap<String, ParsedValue>,
-    npk: Option<&NullifierPublicKey>,
+    keys: Option<(&NullifierPublicKey, &ViewingPublicKey)>,
 ) -> Result<AccountId, String> {
     if seeds.is_empty() {
         return Err("PDA requires at least one seed".to_string());
@@ -127,11 +129,13 @@ pub fn compute_pda_from_seeds(
     };
 
     let pda_seed = PdaSeed::new(combined);
-    if let Some(npk) = npk {
+    if let Some((npk, vpk)) = keys {
         // The chain now derives private PDAs with a u128 `identifier`; spel has
         // no way to specify it yet, so default to 0 (the common case).
         // TODO: thread a `--identifier` flag through for non-zero identifiers.
-        Ok(AccountId::for_private_pda(program_id, &pda_seed, npk, 0))
+        Ok(AccountId::for_private_pda(
+            program_id, &pda_seed, npk, vpk, 0,
+        ))
     } else {
         Ok(AccountId::for_public_pda(program_id, &pda_seed))
     }
@@ -220,6 +224,12 @@ mod tests {
         assert_ne!(result, [0u8; 32], "identical seeds must not cancel out");
     }
 
+    /// Deterministic test viewing key. `from_seed` is available in guest and host
+    /// builds alike, unlike the host-only `from_bytes`.
+    fn test_vpk(byte: u8) -> ViewingPublicKey {
+        ViewingPublicKey::from_seed(&[byte; 32], &[byte ^ 0xFF; 32])
+    }
+
     #[test]
     fn test_private_pda_differs_from_public() {
         let seeds = vec![IdlSeed::Const {
@@ -227,13 +237,14 @@ mod tests {
         }];
         let program_id: ProgramId = [2u32; 8];
         let npk = NullifierPublicKey([0xABu8; 32]);
+        let vpk = test_vpk(0x11);
 
         let private = compute_pda_from_seeds(
             &seeds,
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
-            Some(&npk),
+            Some((&npk, &vpk)),
         )
         .unwrap();
         let public =
@@ -245,7 +256,8 @@ mod tests {
         // Verify it matches a direct for_private_pda call with the same inputs
         let mut combined = [0u8; 32];
         combined[.."vault".len()].copy_from_slice(b"vault");
-        let expected = AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk, 0);
+        let expected =
+            AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk, &vpk, 0);
         assert_eq!(private, expected, "private PDA must match for_private_pda");
     }
 
@@ -257,13 +269,14 @@ mod tests {
         let program_id: ProgramId = [2u32; 8];
         let npk1 = NullifierPublicKey([0x01u8; 32]);
         let npk2 = NullifierPublicKey([0x02u8; 32]);
+        let vpk = test_vpk(0x11);
 
         let addr1 = compute_pda_from_seeds(
             &seeds,
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
-            Some(&npk1),
+            Some((&npk1, &vpk)),
         )
         .unwrap();
         let addr2 = compute_pda_from_seeds(
@@ -271,13 +284,46 @@ mod tests {
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
-            Some(&npk2),
+            Some((&npk2, &vpk)),
         )
         .unwrap();
 
         assert_ne!(
             addr1, addr2,
             "different npks must yield different private PDAs"
+        );
+    }
+
+    #[test]
+    fn test_private_pda_differs_across_vpks() {
+        let seeds = vec![IdlSeed::Const {
+            value: "vault".to_string(),
+        }];
+        let program_id: ProgramId = [2u32; 8];
+        let npk = NullifierPublicKey([0x01u8; 32]);
+        let vpk1 = test_vpk(0x11);
+        let vpk2 = test_vpk(0x22);
+
+        let addr1 = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some((&npk, &vpk1)),
+        )
+        .unwrap();
+        let addr2 = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some((&npk, &vpk2)),
+        )
+        .unwrap();
+
+        assert_ne!(
+            addr1, addr2,
+            "different vpks must yield different private PDAs"
         );
     }
 

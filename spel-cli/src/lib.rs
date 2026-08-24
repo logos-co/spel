@@ -500,6 +500,64 @@ pub async fn run() {
     }
 }
 
+/// Parse a `ViewingPublicKey` from a `--vpk` value.
+///
+/// An ML-KEM-768 encapsulation key is 1184 bytes, which is unwieldy as a literal
+/// argument, so two forms are accepted:
+/// - `@<path>` — read from a file, either raw bytes or hex text
+/// - `<hex>`   — the key as a hex string
+fn parse_viewing_key(src: &str) -> Result<nssa_core::encryption::ViewingPublicKey, String> {
+    use nssa_core::encryption::ViewingPublicKey;
+
+    let bytes = if let Some(path) = src.strip_prefix('@') {
+        let raw = fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
+        if raw.len() == ViewingPublicKey::LEN {
+            raw
+        } else {
+            // Not raw key bytes — try to interpret the file as hex text.
+            let text = String::from_utf8(raw).map_err(|e| {
+                format!(
+                    "'{path}' is neither {} raw bytes nor hex text: {e}",
+                    ViewingPublicKey::LEN
+                )
+            })?;
+            decode_hex(text.trim())?
+        }
+    } else {
+        decode_hex(src)?
+    };
+
+    if bytes.len() != ViewingPublicKey::LEN {
+        return Err(format!(
+            "expected {} bytes, got {}",
+            ViewingPublicKey::LEN,
+            bytes.len()
+        ));
+    }
+    ViewingPublicKey::from_bytes(bytes).map_err(|e| format!("{e:?}"))
+}
+
+/// Decode a hex string (with optional `0x` prefix) into bytes.
+fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
+    let s = s
+        .strip_prefix("0x")
+        .or_else(|| s.strip_prefix("0X"))
+        .unwrap_or(s);
+    if !s.len().is_multiple_of(2) {
+        return Err("hex string has an odd number of characters".to_string());
+    }
+    s.as_bytes()
+        .chunks(2)
+        .enumerate()
+        .map(|(n, pair)| {
+            let pair = std::str::from_utf8(pair)
+                .map_err(|e| format!("invalid hex at offset {}: {e}", n * 2))?;
+            u8::from_str_radix(pair, 16)
+                .map_err(|e| format!("invalid hex at offset {}: {e}", n * 2))
+        })
+        .collect()
+}
+
 /// Compute and print a PDA from the IDL definition.
 ///
 /// Usage: <binary> --idl <IDL> pda <account-name> [--<seed-arg> <value> ...]
@@ -561,9 +619,10 @@ fn compute_pda_command(
         .collect();
 
     // Parse --key value pairs from remaining args, using IDL types when available.
-    // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
+    // --npk / --vpk are reserved for private PDA derivation and not treated as seed args.
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut npk_hex: Option<String> = None;
+    let mut vpk_src: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
@@ -571,6 +630,11 @@ fn compute_pda_command(
                 let raw = &args[i + 1];
                 if key == "npk" {
                     npk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
+                if key == "vpk" {
+                    vpk_src = Some(raw.clone());
                     i += 2;
                     continue;
                 }
@@ -637,17 +701,20 @@ fn compute_pda_command(
         process::exit(1);
     };
 
-    // For private PDAs, parse and require --npk
+    // For private PDAs, parse and require both --npk and --vpk. Since lez v0.2.1 the
+    // derivation binds the viewing key as well as the nullifier key, so an address is
+    // only reproducible with both.
+    use nssa_core::encryption::ViewingPublicKey;
     use nssa_core::NullifierPublicKey;
-    let npk: Option<NullifierPublicKey> = if pda_def.private {
-        match npk_hex {
+    let private_keys: Option<(NullifierPublicKey, ViewingPublicKey)> = if pda_def.private {
+        let npk = match npk_hex {
             Some(ref hex) => {
                 use crate::hex::decode_bytes_32;
                 let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
                     eprintln!("❌ Invalid --npk '{}': {}", hex, e);
                     process::exit(1);
                 });
-                Some(NullifierPublicKey(bytes))
+                NullifierPublicKey(bytes)
             },
             None => {
                 eprintln!(
@@ -659,7 +726,27 @@ fn compute_pda_command(
                 );
                 process::exit(1);
             },
-        }
+        };
+        let vpk = match vpk_src {
+            Some(ref src) => parse_viewing_key(src).unwrap_or_else(|e| {
+                eprintln!("❌ Invalid --vpk: {}", e);
+                process::exit(1);
+            }),
+            None => {
+                eprintln!(
+                    "❌ '{}' is a private PDA — pass --vpk <hex|@file>",
+                    account_name
+                );
+                eprintln!(
+                    "   The ViewingPublicKey is the recipient's {}-byte ML-KEM-768 key.",
+                    ViewingPublicKey::LEN
+                );
+                eprintln!("   Because it is large, `--vpk @path/to/key` reads it from a file");
+                eprintln!("   (raw bytes, or hex text).");
+                process::exit(1);
+            },
+        };
+        Some((npk, vpk))
     } else {
         None
     };
@@ -698,7 +785,7 @@ fn compute_pda_command(
         &program_id,
         &account_map,
         &seed_args,
-        npk.as_ref(),
+        private_keys.as_ref().map(|(n, v)| (n, v)),
     ) {
         Ok(account_id) => {
             println!("{}", account_id);

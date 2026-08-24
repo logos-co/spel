@@ -3,6 +3,10 @@
 use std::fs;
 use std::path::Path;
 
+/// LEZ tag scaffolded projects pin when `--lez-tag`/`--lez-rev` are not given.
+/// Keep in sync with the workspace's own pins (see `spel-cli/Cargo.toml`).
+const DEFAULT_LEZ_TAG: &str = "v0.2.1";
+
 pub fn init_project(
     name: &str,
     lez_tag: Option<&str>,
@@ -101,7 +105,7 @@ ui/
     let lez_ref_ffi = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => format!("tag = \"{}\"", DEFAULT_LEZ_TAG),
     };
     let spel_ref_ffi = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
@@ -692,7 +696,7 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
     let lez_ref = match (lez_tag, lez_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),
         (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.0\"".to_string(),
+        _ => format!("tag = \"{}\"", DEFAULT_LEZ_TAG),
     };
     let spel_ref = match (spel_tag, spel_rev) {
         (Some(t), _) => format!("tag = \"{}\"", t),

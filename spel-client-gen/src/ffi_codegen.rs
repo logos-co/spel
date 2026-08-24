@@ -295,7 +295,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     .unwrap();
     writeln!(
         out,
-        "    WalletCore::from_env().map_err(|e| format!(\"wallet init: {{}}\", e))"
+        "    get_runtime().block_on(WalletCore::from_env()).map_err(|e| format!(\"wallet init: {{}}\", e))"
     )
     .unwrap();
     writeln!(out, "}}").unwrap();
@@ -492,7 +492,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         writeln!(out, "    let tx_hash = rt.block_on(async {{").unwrap();
         writeln!(
             out,
-            "        let nonces = wallet.get_accounts_nonces(signer_ids.clone()).await"
+            "        let nonces = wallet.get_accounts_nonces(&signer_ids).await"
         )
         .unwrap();
         writeln!(
@@ -531,14 +531,14 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let raw = wallet.sequencer_client.send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
+        writeln!(out, "        let raw = wallet.helm_owned().send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"submit: {{}}\", e))?;"
         )
         .unwrap();
         writeln!(out, "        let tx_hash_hex = hex::encode(raw.0);").unwrap();
-        writeln!(out, "        let poller = wallet::poller::TxPoller::new(wallet.config(), wallet.sequencer_client.clone());").unwrap();
+        writeln!(out, "        let poller = wallet.poller_helm();").unwrap();
         writeln!(
             out,
             "        poller.poll_tx(raw).await.map_err(|e| format!(\"confirm: {{}}\", e))?;"
@@ -653,7 +653,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    rt.block_on(async {{").unwrap();
     writeln!(
         out,
-        "        wallet.get_accounts_nonces(vec![]).await.map_err(|e| format!(\"ping: {{}}\", e))"
+        "        wallet.get_accounts_nonces(&[]).await.map_err(|e| format!(\"ping: {{}}\", e))"
     )
     .unwrap();
     writeln!(out, "    }})?;").unwrap();
@@ -689,7 +689,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let account_id = parse_account_id(v[\"account_id\"].as_str().ok_or(\"missing account_id\")?)?;").unwrap();
     writeln!(out, "    let rt = get_runtime();").unwrap();
     writeln!(out, "    let account = rt.block_on(async {{").unwrap();
-    writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
+    writeln!(out, "        wallet.get_account_public(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
     writeln!(out, "    }})?;").unwrap();
     writeln!(
         out,
@@ -899,7 +899,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "            let status = if let (Some(wallet), Ok(aid)) = (&maybe_wallet, parse_account_id(raw_id)) {{").unwrap();
     writeln!(
         out,
-        "                match wallet.sequencer_client.get_account(aid).await {{"
+        "                match wallet.get_account_public(aid).await {{"
     )
     .unwrap();
     writeln!(out, "                    Ok(account) => {{").unwrap();
@@ -1057,7 +1057,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let account_id = parse_account_id(v[\"account_id\"].as_str().ok_or(\"missing account_id\")?)?;").unwrap();
     writeln!(out, "    let rt = get_runtime();").unwrap();
     writeln!(out, "    let account = rt.block_on(async {{").unwrap();
-    writeln!(out, "        wallet.sequencer_client.get_account(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
+    writeln!(out, "        wallet.get_account_public(account_id).await.map_err(|e| format!(\"get_account: {{}}\", e))").unwrap();
     writeln!(out, "    }})?;").unwrap();
     writeln!(out, "    if account.data.is_empty() {{").unwrap();
     writeln!(out, "        return Ok(json!({{\"success\": true, \"status\": \"uninitialized\", \"type\": null, \"fields\": null}}).to_string());").unwrap();
@@ -1532,7 +1532,7 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
             writeln!(out, "    ])?;").unwrap();
             writeln!(out, "    let rt = get_runtime();").unwrap();
             writeln!(out, "    let account = rt.block_on(async {{").unwrap();
-            writeln!(out, "        wallet.sequencer_client.get_account(pda).await.map_err(|e| format!(\"get_account: {{e}}\"))").unwrap();
+            writeln!(out, "        wallet.get_account_public(pda).await.map_err(|e| format!(\"get_account: {{e}}\"))").unwrap();
             writeln!(out, "    }})?;").unwrap();
             writeln!(out, "    let idl: spel_framework_core::idl::SpelIdl = serde_json::from_str(PROGRAM_IDL_JSON).map_err(|e| format!(\"IDL: {{e}}\"))?;").unwrap();
             writeln!(out, "    let state = match spel_framework_core::decode::decode_account_data_try_all(&account.data, &idl) {{").unwrap();

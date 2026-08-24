@@ -228,7 +228,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         writeln!(out, "        ];").unwrap();
         writeln!(
             out,
-            "        let nonces = self.wallet.get_accounts_nonces(signer_ids.clone()).await"
+            "        let nonces = self.wallet.get_accounts_nonces(&signer_ids).await"
         )
         .unwrap();
         writeln!(
@@ -263,7 +263,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
             "        let tx = PublicTransaction::new(message, witness_set);"
         )
         .unwrap();
-        writeln!(out, "        let response = self.wallet.sequencer_client.send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
+        writeln!(out, "        let response = self.wallet.helm_owned().send_transaction(common::transaction::LeeTransaction::Public(tx)).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"submit: {{}}\", e))?;"
@@ -302,8 +302,8 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
             write!(out, ", {pname}").unwrap();
         }
         writeln!(out, ");").unwrap();
-        writeln!(out, "        let account = self.wallet.sequencer_client").unwrap();
-        writeln!(out, "            .get_account(account_id).await").unwrap();
+        writeln!(out, "        let account = self.wallet").unwrap();
+        writeln!(out, "            .get_account_public(account_id).await").unwrap();
         writeln!(
             out,
             "            .map_err(|e| format!(\"fetch {}: {{}}\", e))?;",

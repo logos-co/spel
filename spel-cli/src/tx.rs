@@ -410,7 +410,7 @@ pub async fn execute_instruction(
     // ─── Transaction submission ─────────────────────────────────
     say!("📤 Submitting transaction...");
 
-    let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
+    let wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
@@ -498,10 +498,7 @@ pub async fn execute_instruction(
         say!("   tx_hash: {}", hex::encode(response.0));
         say!("   Waiting for confirmation...");
 
-        let poller = wallet::poller::TxPoller::new(
-            wallet_core.config(),
-            wallet_core.sequencer_client.clone(),
-        );
+        let poller = wallet_core.poller_helm();
 
         match poller.poll_tx(response).await {
             Ok(_) => say!("✅ Transaction confirmed — included in a block."),
@@ -542,7 +539,7 @@ pub async fn execute_instruction(
             vec![]
         } else {
             wallet_core
-                .get_accounts_nonces(signer_accounts.clone())
+                .get_accounts_nonces(&signer_accounts)
                 .await
                 .unwrap_or_else(|e| {
                     eprintln!("❌ Failed to fetch nonces: {:?}", e);
@@ -567,7 +564,7 @@ pub async fn execute_instruction(
         let tx = PublicTransaction::new(message, witness_set);
 
         let tx_hash = wallet_core
-            .sequencer_client
+            .helm_owned()
             .send_transaction(LeeTransaction::Public(tx))
             .await
             .unwrap_or_else(|e| {
@@ -579,10 +576,7 @@ pub async fn execute_instruction(
         say!("   tx_hash: {}", tx_hash);
         say!("   Waiting for confirmation...");
 
-        let poller = wallet::poller::TxPoller::new(
-            wallet_core.config(),
-            wallet_core.sequencer_client.clone(),
-        );
+        let poller = wallet_core.poller_helm();
 
         match poller.poll_tx(tx_hash).await {
             Ok(_) => say!("✅ Transaction confirmed — included in a block."),
@@ -603,8 +597,8 @@ async fn fetch_nonces_best_effort(signer_ids: Vec<AccountId>) -> Vec<Option<Nonc
     }
     let len = signer_ids.len();
     let result = async {
-        let wc = WalletCore::from_env().ok()?;
-        wc.get_accounts_nonces(signer_ids).await.ok()
+        let wc = WalletCore::from_env().await.ok()?;
+        wc.get_accounts_nonces(&signer_ids).await.ok()
     }
     .await;
     match result {

@@ -2,6 +2,7 @@
 
 use base58::FromBase58;
 use nssa_core::account::AccountId;
+use nssa_core::encryption::ViewingPublicKey;
 use nssa_core::program::{PdaSeed, ProgramId};
 use nssa_core::NullifierPublicKey;
 use sha2::{Digest, Sha256};
@@ -90,11 +91,12 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
 }
 
 /// Derive a **private** PDA `AccountId` from a program ID, one or more 32-byte seeds,
-/// and a `NullifierPublicKey`.
+/// a `NullifierPublicKey`, and a `ViewingPublicKey`.
 ///
 /// The seed combining logic mirrors [`compute_pda`]; the difference is the final
-/// derivation calls `AccountId::for_private_pda`, which includes the `npk` in the
-/// hash so each controller group gets a unique address for the same seed.
+/// derivation calls `AccountId::for_private_pda`, which includes both the `npk` and
+/// the `vpk` in the hash so each controller group gets a unique address for the same
+/// seed.
 ///
 /// # Panics
 ///
@@ -103,6 +105,7 @@ pub fn compute_private_pda(
     program_id: &ProgramId,
     seeds: &[&[u8; 32]],
     npk: &NullifierPublicKey,
+    vpk: &ViewingPublicKey,
 ) -> AccountId {
     assert!(!seeds.is_empty(), "PDA requires at least one seed");
 
@@ -119,7 +122,7 @@ pub fn compute_private_pda(
     let pda_seed = PdaSeed::new(combined);
     // lez-core-v0.2.0 added a u128 `identifier` to private-PDA derivation; default
     // to 0 (the common case) until callers need to pass a specific identifier.
-    AccountId::for_private_pda(program_id, &pda_seed, npk, 0)
+    AccountId::for_private_pda(program_id, &pda_seed, npk, vpk, 0)
 }
 
 /// Compute a PDA from a program ID and multiple [`ToSeed`] values.

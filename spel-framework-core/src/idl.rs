@@ -103,8 +103,9 @@ fn is_false(v: &bool) -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdlPda {
     pub seeds: Vec<IdlSeed>,
-    /// If true, this is a private PDA — address includes the caller's NullifierPublicKey.
-    /// Callers must supply `--npk <hex>` to derive the address.
+    /// If true, this is a private PDA — the address binds the caller's
+    /// NullifierPublicKey and ViewingPublicKey. Callers must supply both
+    /// `--npk <hex>` and `--vpk <hex|@file>` to derive the address.
     #[serde(default, skip_serializing_if = "is_false")]
     pub private: bool,
 }

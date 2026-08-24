@@ -1040,7 +1040,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=lez-core-v0.2.0#fb8cbac40e0bda4f152415ff4f181cdc6bca6d4a"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.1#15144ddb8437f48cdce32908e122dbb7eea68399"
 dependencies = [
  "base58",
  "borsh",
@@ -1789,7 +1789,7 @@ checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
 name = "spel-framework"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "borsh",
  "lee_core",
@@ -1800,7 +1800,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "base58",
  "borsh",
@@ -1816,7 +1816,7 @@ dependencies = [
 
 [[package]]
 name = "spel-framework-macros"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "proc-macro2",
  "quote",

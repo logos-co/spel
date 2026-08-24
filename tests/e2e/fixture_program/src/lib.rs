@@ -102,14 +102,21 @@ mod treasury {
         Ok(SpelOutput::execute(vec![record, owner], vec![]))
     }
 
-    /// Initialize a private PDA — address is unique per (seed, npk) pair.
+    /// Initialize a private PDA — address is unique per (seed, npk, vpk) triple.
     #[instruction]
     pub fn init_private_account(
-        #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"))]
+        #[account(
+            init,
+            private_pda,
+            pda = literal("private_vault"),
+            npk = arg("user_npk"),
+            vpk = arg("user_vpk")
+        )]
         account: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
         user_npk: nssa_core::NullifierPublicKey,
+        user_vpk: nssa_core::encryption::ViewingPublicKey,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![account, authority], vec![]))
     }
@@ -680,14 +687,22 @@ mod tests {
         nssa_core::NullifierPublicKey([byte; 32])
     }
 
+    /// Deterministic test viewing key. `from_seed` works in guest and host builds
+    /// alike, unlike the host-only `from_bytes`.
+    fn make_vpk(byte: u8) -> nssa_core::encryption::ViewingPublicKey {
+        nssa_core::encryption::ViewingPublicKey::from_seed(&[byte; 32], &[byte ^ 0xFF; 32])
+    }
+
     #[test]
     fn validate_init_private_account_accepts_correct_address() {
         let program_id = test_program_id();
         let npk = make_npk(0xAB);
+        let vpk = make_vpk(0x11);
         let correct_id = spel_framework::pda::compute_private_pda(
             &program_id,
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &npk,
+            &vpk,
         );
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // account — correct private PDA
@@ -698,6 +713,7 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &npk,
+            &vpk,
         );
         assert!(result.is_ok(), "correct private PDA should pass: {result:?}");
     }
@@ -707,10 +723,12 @@ mod tests {
         let program_id = test_program_id();
         let correct_npk = make_npk(0xAB);
         let wrong_npk = make_npk(0xCD);
+        let vpk = make_vpk(0x11);
         let correct_id = spel_framework::pda::compute_private_pda(
             &program_id,
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &correct_npk,
+            &vpk,
         );
         // Supply the address for correct_npk but validate with wrong_npk
         let accounts = vec![
@@ -722,8 +740,40 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &wrong_npk,
+            &vpk,
         );
         let err = result.expect_err("wrong npk should fail");
+        assert!(
+            matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
+            "expected PdaMismatch, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn validate_init_private_account_rejects_wrong_vpk() {
+        let program_id = test_program_id();
+        let npk = make_npk(0xAB);
+        let correct_vpk = make_vpk(0x11);
+        let wrong_vpk = make_vpk(0x22);
+        let correct_id = spel_framework::pda::compute_private_pda(
+            &program_id,
+            &[&spel_framework::pda::seed_from_str("private_vault")],
+            &npk,
+            &correct_vpk,
+        );
+        // Supply the address for correct_vpk but validate with wrong_vpk
+        let accounts = vec![
+            make_account_with_id(*correct_id.value(), false),
+            make_account_with_id([2u8; 32], true),
+        ];
+        let result = treasury::__validate_init_private_account(
+            &accounts,
+            &program_id,
+            &empty_ix_data(),
+            &npk,
+            &wrong_vpk,
+        );
+        let err = result.expect_err("wrong vpk should fail");
         assert!(
             matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
             "expected PdaMismatch, got: {err:?}"
@@ -734,6 +784,7 @@ mod tests {
     fn validate_init_private_account_rejects_public_pda_address() {
         let program_id = test_program_id();
         let npk = make_npk(0xAB);
+        let vpk = make_vpk(0x11);
         // Supply the PUBLIC PDA address — should be rejected
         let public_id = spel_framework::pda::compute_pda(
             &program_id,
@@ -748,6 +799,7 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &npk,
+            &vpk,
         );
         assert!(
             result.is_err(),
@@ -759,8 +811,8 @@ mod tests {
     fn claims_init_private_account_emits_pda_claim() {
         use spel_framework::spel_output::AutoClaim;
         use nssa_core::program::Claim;
-        // __claims_* takes no npk — Claim::Pda encodes only the seed; the circuit
-        // handles the (seed, npk) binding for private PDAs independently.
+        // __claims_* takes no npk/vpk — Claim::Pda encodes only the seed; the circuit
+        // handles the (seed, npk, vpk) binding for private PDAs independently.
         let claims = treasury::__claims_init_private_account();
         assert_eq!(claims.len(), 2);
         assert!(
