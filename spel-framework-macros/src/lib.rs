@@ -1237,6 +1237,16 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                 nssa_core::program::Claim::Authorized
             )
         }
+    } else if acc.constraints.signer {
+        // A signer is a plain user account: default-owned until some program claims
+        // it. LEZ rule 7 forbids returning a non-default account that is still
+        // default-owned, so claim it while it is still default — exactly what LEZ's
+        // own `hello_world_with_authorization` does via `new_claimed_if_default`.
+        quote! {
+            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(
+                nssa_core::program::Claim::Authorized
+            )
+        }
     } else {
         quote! { spel_framework::spel_output::AutoClaim::None }
     }

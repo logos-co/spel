@@ -568,10 +568,16 @@ mod tests {
             &claims[0]
         );
 
-        // owner (index 1): signer only, not init → no claim
+        // owner (index 1): signer → claimed only while still default-owned, so a
+        // used wallet account is never returned default-owned (LEZ rule 7).
         assert!(
-            matches!(&claims[1], spel_framework::spel_output::AutoClaim::None),
-            "owner claim should be None, got: {:?}",
+            matches!(
+                &claims[1],
+                spel_framework::spel_output::AutoClaim::ClaimedIfDefault(
+                    nssa_core::program::Claim::Authorized
+                )
+            ),
+            "owner claim should be ClaimedIfDefault(Authorized), got: {:?}",
             &claims[1]
         );
 
@@ -658,7 +664,11 @@ mod tests {
     fn claims_batch_update_rest_count() {
         let claims = treasury::__claims_batch_update(3);
         assert_eq!(claims.len(), 4); // 1 fixed (authority) + 3 rest (targets)
-        assert!(matches!(&claims[0], spel_framework::spel_output::AutoClaim::None)); // authority
+        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
+        assert!(matches!(
+            &claims[0],
+            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(_)
+        ));
         for claim in &claims[1..] {
             assert!(matches!(claim, spel_framework::spel_output::AutoClaim::None)); // targets
         }
@@ -767,7 +777,8 @@ mod tests {
             matches!(&claims[0], AutoClaim::Claimed(Claim::Pda(_))),
             "private PDA account must emit Claim::Pda"
         );
-        assert!(matches!(&claims[1], AutoClaim::None)); // authority
+        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
+        assert!(matches!(&claims[1], AutoClaim::ClaimedIfDefault(_)));
     }
 
     #[test]
