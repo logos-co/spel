@@ -423,7 +423,7 @@ pub async fn run() {
                     eprintln!("Usage: {} sign <blob-file>", args[0]);
                     process::exit(1);
                 });
-                exchange::sign_command(path);
+                exchange::sign_command(path).await;
                 return;
             },
             "submit" => {

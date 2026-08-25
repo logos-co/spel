@@ -31,7 +31,7 @@ fn detect_signable(
 
 /// Load a blob, verify it, show what it is, and append witnesses for
 /// every required signer whose key the local wallet holds.
-pub fn sign_command(path: &str) {
+pub async fn sign_command(path: &str) {
     let mut blob = TxBlob::load(path).unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
         process::exit(1);
@@ -100,7 +100,7 @@ pub fn sign_command(path: &str) {
     }
 
     // Keys this wallet holds for the still-missing signers.
-    let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
+    let wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
         process::exit(1);
@@ -203,13 +203,13 @@ pub async fn submit_command(path: &str) {
     });
     let tx = PublicTransaction::new(message, witness_set);
 
-    let wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
+    let wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set NSSA_WALLET_HOME_DIR environment variable");
         process::exit(1);
     });
     let tx_hash = wallet_core
-        .sequencer_client
+        .helm_owned()
         .send_transaction(LeeTransaction::Public(tx))
         .await
         .unwrap_or_else(|e| {
@@ -221,8 +221,7 @@ pub async fn submit_command(path: &str) {
     println!("   tx_hash: {}", tx_hash);
     println!("   Waiting for confirmation...");
 
-    let poller =
-        wallet::poller::TxPoller::new(wallet_core.config(), wallet_core.sequencer_client.clone());
+    let poller = wallet_core.poller_helm();
 
     match poller.poll_tx(tx_hash).await {
         Ok(_) => println!("✅ Transaction confirmed — included in a block."),
