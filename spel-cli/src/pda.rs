@@ -2,6 +2,7 @@
 
 use crate::parse::ParsedValue;
 use nssa::AccountId;
+use nssa_core::encryption::ViewingPublicKey;
 use nssa_core::program::{PdaSeed, ProgramId};
 use nssa_core::NullifierPublicKey;
 use spel_framework_core::idl::IdlSeed;
@@ -107,6 +108,7 @@ pub fn compute_pda_from_seeds(
     account_map: &HashMap<String, AccountId>,
     parsed_args: &HashMap<String, ParsedValue>,
     npk: Option<&NullifierPublicKey>,
+    vpk: Option<&ViewingPublicKey>,
 ) -> Result<AccountId, String> {
     if seeds.is_empty() {
         return Err("PDA requires at least one seed".to_string());
@@ -128,10 +130,13 @@ pub fn compute_pda_from_seeds(
 
     let pda_seed = PdaSeed::new(combined);
     if let Some(npk) = npk {
+        let vpk = vpk.ok_or_else(|| "Private PDA requires a ViewingPublicKey (vpk)".to_string())?;
         // The chain now derives private PDAs with a u128 `identifier`; spel has
         // no way to specify it yet, so default to 0 (the common case).
         // TODO: thread a `--identifier` flag through for non-zero identifiers.
-        Ok(AccountId::for_private_pda(program_id, &pda_seed, npk, 0))
+        Ok(AccountId::for_private_pda(
+            program_id, &pda_seed, npk, vpk, 0,
+        ))
     } else {
         Ok(AccountId::for_public_pda(program_id, &pda_seed))
     }
@@ -147,8 +152,14 @@ mod tests {
             value: "test_seed".to_string(),
         }];
         let program_id: ProgramId = [1u32; 8];
-        let result =
-            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None);
+        let result = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        );
         assert!(result.is_ok());
     }
 
@@ -168,7 +179,8 @@ mod tests {
             "create_key".to_string(),
             ParsedValue::ByteArray(vec![42u8; 32]),
         );
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None);
+        let result =
+            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None);
         assert!(result.is_ok());
     }
 
@@ -185,7 +197,8 @@ mod tests {
         let program_id: ProgramId = [1u32; 8];
         let mut args = HashMap::new();
         args.insert("index".to_string(), ParsedValue::U64(5));
-        let result = compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None);
+        let result =
+            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None);
         assert!(result.is_ok());
     }
 
@@ -195,8 +208,14 @@ mod tests {
             path: "missing".to_string(),
         }];
         let program_id: ProgramId = [1u32; 8];
-        let result =
-            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None);
+        let result = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing"));
     }
@@ -228,24 +247,33 @@ mod tests {
         let program_id: ProgramId = [2u32; 8];
         let npk = NullifierPublicKey([0xABu8; 32]);
 
+        let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
         let private = compute_pda_from_seeds(
             &seeds,
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
             Some(&npk),
+            Some(&vpk),
         )
         .unwrap();
-        let public =
-            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &HashMap::new(), None)
-                .unwrap();
+        let public = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            None,
+            None,
+        )
+        .unwrap();
 
         assert_ne!(private, public, "private PDA must differ from public PDA");
 
         // Verify it matches a direct for_private_pda call with the same inputs
         let mut combined = [0u8; 32];
         combined[.."vault".len()].copy_from_slice(b"vault");
-        let expected = AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk, 0);
+        let expected =
+            AccountId::for_private_pda(&program_id, &PdaSeed::new(combined), &npk, &vpk, 0);
         assert_eq!(private, expected, "private PDA must match for_private_pda");
     }
 
@@ -258,12 +286,14 @@ mod tests {
         let npk1 = NullifierPublicKey([0x01u8; 32]);
         let npk2 = NullifierPublicKey([0x02u8; 32]);
 
+        let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
         let addr1 = compute_pda_from_seeds(
             &seeds,
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
             Some(&npk1),
+            Some(&vpk),
         )
         .unwrap();
         let addr2 = compute_pda_from_seeds(
@@ -272,6 +302,7 @@ mod tests {
             &HashMap::new(),
             &HashMap::new(),
             Some(&npk2),
+            Some(&vpk),
         )
         .unwrap();
 
@@ -298,13 +329,21 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("key".to_string(), ParsedValue::ByteArray(vec![0u8; 32]));
 
-        let multi = compute_pda_from_seeds(&seeds_multi, &program_id, &HashMap::new(), &args, None)
-            .unwrap();
+        let multi = compute_pda_from_seeds(
+            &seeds_multi,
+            &program_id,
+            &HashMap::new(),
+            &args,
+            None,
+            None,
+        )
+        .unwrap();
         let single = compute_pda_from_seeds(
             &seeds_single,
             &program_id,
             &HashMap::new(),
             &HashMap::new(),
+            None,
             None,
         )
         .unwrap();

@@ -697,7 +697,7 @@ fn test_fetch_helpers() {
 
     // Fetch helper gets account from sequencer
     assert!(
-        code.contains("get_account(account_id)"),
+        code.contains("get_account_public(account_id)"),
         "fetch helper should fetch account data"
     );
 
@@ -1314,10 +1314,10 @@ fn test_ffi_fetch_decode_and_response() {
         ffi.contains("decode_account_data_try_all"),
         "fetch function must use decode_account_data_try_all: {ffi}"
     );
-    // Must call get_account
+    // Must call get_account_public
     assert!(
-        ffi.contains("get_account(pda)"),
-        "fetch function must call get_account(pda): {ffi}"
+        ffi.contains("get_account_public(pda)"),
+        "fetch function must call get_account_public(pda): {ffi}"
     );
     // Must return success JSON with state
     assert!(
