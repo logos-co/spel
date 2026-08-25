@@ -1,5 +1,6 @@
 //! Transaction building and submission.
 
+use crate::blob::{TxBlob, WitnessEntry};
 use crate::cli::{snake_to_kebab, to_pascal_case};
 use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
 use crate::parse::{parse_string_vec, parse_value, ParsedValue};
@@ -10,11 +11,13 @@ use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
+use nssa::{PublicKey, Signature};
 use nssa_core::account::Nonce;
 use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
 use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::process;
@@ -72,6 +75,8 @@ pub async fn execute_instruction(
     program_id_hex: Option<&str>,
     dry_run: Option<DryRunFormat>,
     extra_bins: &HashMap<String, String>,
+    co_signers: &[String],
+    export: Option<&str>,
 ) {
     // In JSON dry-run mode, suppress all human-readable preamble — only emit JSON to stdout.
     let json_mode = dry_run == Some(DryRunFormat::Json);
@@ -346,7 +351,12 @@ pub async fn execute_instruction(
         };
         match fmt {
             DryRunFormat::Json => print_dry_run_json(&summary),
-            DryRunFormat::Text => print_dry_run_text(&summary),
+            DryRunFormat::Text => {
+                println!("=== Dry Run ===");
+                print!("{}", render_dry_run_text(&summary));
+                println!("================");
+                println!("Dry run complete — not submitted.");
+            },
         }
         return;
     }
@@ -409,7 +419,11 @@ pub async fn execute_instruction(
     say!("");
 
     // ─── Transaction submission ─────────────────────────────────
-    say!("📤 Submitting transaction...");
+    if export.is_some() {
+        say!("📦 Building partial transaction for export...");
+    } else {
+        say!("📤 Submitting transaction...");
+    }
 
     let wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
@@ -529,12 +543,23 @@ pub async fn execute_instruction(
             }
         }
 
-        let signer_accounts: Vec<AccountId> = ix
+        let mut signer_accounts: Vec<AccountId> = ix
             .accounts
             .iter()
             .filter(|a| a.signer)
             .map(|a| *account_map.get(&a.name).unwrap())
             .collect();
+
+        for co_signer in co_signers {
+            let bytes = decode_bytes_32(co_signer).unwrap_or_else(|e| {
+                eprintln!("❌ --co-signer '{}': {}", co_signer, e);
+                process::exit(1);
+            });
+            let account_id = AccountId::new(bytes);
+            if !signer_accounts.contains(&account_id) {
+                signer_accounts.push(account_id);
+            }
+        }
 
         let nonces = if signer_accounts.is_empty() {
             vec![]
@@ -548,6 +573,100 @@ pub async fn execute_instruction(
                 })
         };
 
+        let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
+
+        if let Some(export_path) = export {
+            // (1) the exact bytes every signer signs
+            let message_bytes = borsh::to_vec(&message).unwrap_or_else(|e| {
+                eprintln!("❌ Failed to serialize message: {:?}", e);
+                process::exit(1);
+            });
+
+            // (2) render the summary from the built data, same renderer as --dry-run
+            let signer_names: Vec<&str> = ix
+                .accounts
+                .iter()
+                .filter(|a| a.signer)
+                .map(|a| a.name.as_str())
+                .collect();
+            let co_signer_labels: Vec<String> = signer_accounts[signer_names.len()..]
+                .iter()
+                .map(|id| format!("co-signer 0x{}", hex_encode(id.value())))
+                .collect();
+            let all_signer_names: Vec<&str> = signer_names
+                .iter()
+                .copied()
+                .chain(co_signer_labels.iter().map(|s| s.as_str()))
+                .collect();
+            let signer_nonces: Vec<Option<Nonce>> =
+                message.nonces.iter().copied().map(Some).collect();
+            let summary_data = DryRunSummary {
+                program_id_hex: &program_id_hex_str,
+                ix,
+                account_map: &account_map,
+                parsed_account_ids: &parsed_accounts
+                    .iter()
+                    .map(|(n, b, _)| (*n, b.as_slice()))
+                    .collect::<Vec<_>>(),
+                rest_account_ids: &rest_accounts
+                    .iter()
+                    .map(|(n, es)| (*n, es.iter().map(|(b, _)| b.as_slice()).collect::<Vec<_>>()))
+                    .collect::<Vec<_>>(),
+                parsed_args: &parsed_args,
+                instruction_data: &message.instruction_data,
+                signer_names: &all_signer_names,
+                signer_nonces: &signer_nonces,
+            };
+            let summary = render_dry_run_text(&summary_data);
+
+            // (3) sign with every required key this wallet holds, skip the rest.
+            // v0.2.0: witnesses sign the 32-byte message hash, matching
+            // WitnessSet::is_valid_for at submit.
+            let message_hash = message.hash();
+            let mut witnesses = BTreeMap::new();
+            for account_id in &signer_accounts {
+                if let Some(key) = wallet_core.get_account_public_signing_key(*account_id) {
+                    let signature = Signature::new(key, &message_hash);
+                    let pubkey = PublicKey::new_from_private_key(key);
+                    witnesses.insert(
+                        format!("0x{}", hex_encode(account_id.value())),
+                        WitnessEntry {
+                            pubkey,
+                            signature: signature.to_string(),
+                        },
+                    );
+                }
+            }
+
+            // (4) assemble and write
+            let tx_blob = TxBlob {
+                version: 1,
+                summary,
+                message_hex: hex_encode(&message_bytes),
+                signers: signer_accounts
+                    .iter()
+                    .map(|id| format!("0x{}", hex_encode(id.value())))
+                    .collect(),
+                witnesses,
+            };
+            tx_blob.save(export_path).unwrap_or_else(|e| {
+                eprintln!("❌ {}", e);
+                process::exit(1);
+            });
+
+            say!("📦 Partial transaction written to {}", export_path);
+            say!(
+                "   Signed {} of {} required signers.",
+                tx_blob.witnesses.len(),
+                tx_blob.signers.len()
+            );
+            for missing in tx_blob.missing_signers() {
+                say!("   Missing: {}", missing);
+            }
+            say!("   Send the file to the remaining signers to run: spel sign <file>");
+            return;
+        }
+
         let signing_keys: Vec<_> = signer_accounts
             .iter()
             .map(|id| {
@@ -560,7 +679,6 @@ pub async fn execute_instruction(
             })
             .collect();
 
-        let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
         let witness_set = WitnessSet::for_message(&message, &signing_keys);
         let tx = PublicTransaction::new(message, witness_set);
 
@@ -749,12 +867,13 @@ fn print_dry_run_json(s: &DryRunSummary<'_>) {
     println!("{}", serde_json::to_string_pretty(&summary).unwrap());
 }
 
-fn print_dry_run_text(s: &DryRunSummary<'_>) {
-    println!("=== Dry Run ===");
-    println!("Program ID: {}", s.program_id_hex);
-    println!("Instruction: {}", s.ix.name);
-    println!();
-    println!("Accounts:");
+fn render_dry_run_text(s: &DryRunSummary<'_>) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    writeln!(out, "Program ID: {}", s.program_id_hex).unwrap();
+    writeln!(out, "Instruction: {}", s.ix.name).unwrap();
+    writeln!(out).unwrap();
+    writeln!(out, "Accounts:").unwrap();
     for acc in &s.ix.accounts {
         let mut flags: Vec<&str> = Vec::new();
         if acc.signer {
@@ -778,53 +897,53 @@ fn print_dry_run_text(s: &DryRunSummary<'_>) {
                 .get(&acc.name)
                 .map(|a| format!("{}", a))
                 .unwrap_or_else(|| UNRESOLVED.to_string());
-            println!("  PDA {} → {}{}", acc.name, id, flags_str);
-            println!("    seeds: {}", format_pda_seeds(&pda.seeds));
+            writeln!(out, "  PDA {} → {}{}", acc.name, id, flags_str).unwrap();
+            writeln!(out, "    seeds: {}", format_pda_seeds(&pda.seeds)).unwrap();
         } else if acc.rest {
             if let Some((_, entries)) = s.rest_account_ids.iter().find(|(n, _)| *n == acc.name) {
                 if entries.is_empty() {
-                    println!("  {} → (none — variadic rest){}", acc.name, flags_str);
+                    writeln!(out, "  {} → (none — variadic rest){}", acc.name, flags_str).unwrap();
                 } else {
                     for bytes in entries {
-                        println!("  {} → 0x{}{}", acc.name, hex_encode(bytes), flags_str);
+                        writeln!(out, "  {} → 0x{}{}", acc.name, hex_encode(bytes), flags_str)
+                            .unwrap();
                     }
                 }
             }
         } else if let Some((_, b)) = s.parsed_account_ids.iter().find(|(n, _)| *n == acc.name) {
-            println!("  {} → 0x{}{}", acc.name, hex_encode(b), flags_str);
+            writeln!(out, "  {} → 0x{}{}", acc.name, hex_encode(b), flags_str).unwrap();
         } else {
             debug_assert!(
                 false,
                 "non-rest non-PDA account '{}' missing from parsed_account_ids",
                 acc.name
             );
-            println!("  {} → {}{}", acc.name, UNRESOLVED, flags_str);
+            writeln!(out, "  {} → {}{}", acc.name, UNRESOLVED, flags_str).unwrap();
         }
     }
-    println!();
-    println!("Arguments:");
+    writeln!(out).unwrap();
+    writeln!(out, "Arguments:").unwrap();
     for (name, _, val) in s.parsed_args {
-        println!("  --{} {}", snake_to_kebab(name), val);
+        writeln!(out, "  --{} {}", snake_to_kebab(name), val).unwrap();
     }
-    println!();
+    writeln!(out).unwrap();
     let ix_data_hex: String = s
         .instruction_data
         .iter()
         .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))
         .collect();
-    println!("Instruction data: 0x{}", ix_data_hex);
+    writeln!(out, "Instruction data: 0x{}", ix_data_hex).unwrap();
     if !s.signer_names.is_empty() {
-        println!();
-        println!("Signers:");
+        writeln!(out).unwrap();
+        writeln!(out, "Signers:").unwrap();
         for (i, name) in s.signer_names.iter().enumerate() {
             let nonce_str = match s.signer_nonces.get(i).and_then(|n| n.as_ref()) {
                 Some(n) => format!("nonce={}", n.0),
                 None => "nonce=(unknown)".to_string(),
             };
-            println!("  {}: {}", name, nonce_str);
+            writeln!(out, "  {}: {}", name, nonce_str).unwrap();
         }
     }
-    println!("================");
-    println!("Dry run complete — not submitted.");
+    out
 }
