@@ -28,6 +28,13 @@ use crate::types::{IntoPostState, SpelOutput};
 pub enum AutoClaim {
     /// The account should be claimed with the given [`Claim`] type.
     Claimed(Claim),
+    /// The account should be claimed only when it is still owned by the default
+    /// program — the shape LEZ's own reference programs use for an authorizing
+    /// account. A user account that no program has claimed yet is default-owned;
+    /// once it has transacted its pre-state is no longer `Account::default()`, and
+    /// LEZ rule 7 rejects any output that returns it still default-owned. Claiming
+    /// it the first time a program touches it keeps it valid from then on.
+    ClaimedIfDefault(Claim),
     /// The account is mutable or read-only — no claim is requested.
     None,
 }
@@ -36,7 +43,7 @@ impl AutoClaim {
     /// Returns `true` if this will result in `AccountPostState::new_claimed`.
     #[must_use]
     pub fn is_claimed(&self) -> bool {
-        matches!(self, AutoClaim::Claimed(_))
+        matches!(self, AutoClaim::Claimed(_) | AutoClaim::ClaimedIfDefault(_))
     }
 
     /// Convert an account and this auto-claim into an `AccountPostState`.
@@ -44,6 +51,9 @@ impl AutoClaim {
     pub fn to_post_state(&self, account: Account) -> AccountPostState {
         match self {
             AutoClaim::Claimed(claim) => AccountPostState::new_claimed(account, *claim),
+            AutoClaim::ClaimedIfDefault(claim) => {
+                AccountPostState::new_claimed_if_default(account, *claim)
+            },
             AutoClaim::None => AccountPostState::new(account),
         }
     }
