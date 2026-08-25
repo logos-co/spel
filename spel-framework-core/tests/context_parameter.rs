@@ -3,7 +3,7 @@
 //! This tests the contract: instruction handlers can declare a ProgramContext
 //! parameter and receive trusted execution metadata without polluting the IDL.
 
-use nssa_core::program::ProgramId;
+use lee_core::program::ProgramId;
 use spel_framework_core::context::ProgramContext;
 
 /// Verify ProgramContext can be constructed and accessed.

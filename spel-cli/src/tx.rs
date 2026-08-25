@@ -7,11 +7,11 @@ use crate::pda::compute_pda_from_seeds;
 use crate::serialize::serialize_to_risc0;
 use common::transaction::LeeTransaction;
 use hex;
-use nssa::program::Program;
-use nssa::public_transaction::{Message, WitnessSet};
-use nssa::{AccountId, PublicTransaction};
-use nssa_core::account::Nonce;
-use nssa_core::program::ProgramId;
+use lee::program::Program;
+use lee::public_transaction::{Message, WitnessSet};
+use lee::{AccountId, PublicTransaction};
+use lee_core::account::Nonce;
+use lee_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
 use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
@@ -424,7 +424,7 @@ pub async fn execute_instruction(
 
     if has_private {
         // ─── Privacy-preserving transaction ──────────────────
-        use nssa::privacy_preserving_transaction::circuit::ProgramWithDependencies;
+        use lee::privacy_preserving_transaction::circuit::ProgramWithDependencies;
         use wallet::AccountIdentity;
 
         let program = program_obj.unwrap_or_else(|| {

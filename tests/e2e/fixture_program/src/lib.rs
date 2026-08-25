@@ -115,8 +115,8 @@ mod treasury {
         account: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
-        user_npk: nssa_core::NullifierPublicKey,
-        user_vpk: nssa_core::encryption::ViewingPublicKey,
+        user_npk: lee_core::NullifierPublicKey,
+        user_vpk: lee_core::encryption::ViewingPublicKey,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![account, authority], vec![]))
     }
@@ -169,8 +169,8 @@ mod tests {
 
     fn make_account(authorized: bool) -> AccountWithMetadata {
         AccountWithMetadata {
-            account_id: nssa_core::account::AccountId::new([0u8; 32]),
-            account: nssa_core::account::Account::default(),
+            account_id: lee_core::account::AccountId::new([0u8; 32]),
+            account: lee_core::account::Account::default(),
             is_authorized: authorized,
         }
     }
@@ -289,13 +289,13 @@ mod tests {
 
     fn make_account_with_id(id: [u8; 32], authorized: bool) -> AccountWithMetadata {
         AccountWithMetadata {
-            account_id: nssa_core::account::AccountId::new(id),
-            account: nssa_core::account::Account::default(),
+            account_id: lee_core::account::AccountId::new(id),
+            account: lee_core::account::Account::default(),
             is_authorized: authorized,
         }
     }
 
-    fn test_program_id() -> nssa_core::program::ProgramId {
+    fn test_program_id() -> lee_core::program::ProgramId {
         [1u32; 8]
     }
 
@@ -314,7 +314,7 @@ mod tests {
         let correct_id = spel_framework::pda::compute_pda(&program_id, &[&owner_key]);
         let wrong_id = [0xFFu8; 32]; // definitely not the correct PDA
         assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
+            lee_core::account::AccountId::new(wrong_id),
             correct_id,
             "test precondition: wrong_id must differ from correct PDA"
         );
@@ -369,7 +369,7 @@ mod tests {
             spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
         let wrong_id = [0xAAu8; 32];
         assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
+            lee_core::account::AccountId::new(wrong_id),
             correct_id,
             "test precondition: wrong_id must differ from correct PDA"
         );
@@ -431,7 +431,7 @@ mod tests {
         );
         let wrong_id = [0xBBu8; 32];
         assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
+            lee_core::account::AccountId::new(wrong_id),
             correct_id,
         );
 
@@ -498,7 +498,7 @@ mod tests {
         );
         let wrong_id = [0xCCu8; 32];
         assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
+            lee_core::account::AccountId::new(wrong_id),
             correct_id,
         );
 
@@ -585,7 +585,7 @@ mod tests {
         // The encoded seed must be the owner_id bytes, not seed_from_str("owner").
         let wrong_seed = spel_framework::pda::seed_from_str("owner");
         let wrong_claim = spel_framework::spel_output::AutoClaim::Claimed(
-            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(wrong_seed))
+            lee_core::program::Claim::Pda(lee_core::program::PdaSeed::new(wrong_seed))
         );
         assert_ne!(
             claims[0], wrong_claim,
@@ -594,7 +594,7 @@ mod tests {
 
         // It must match the claim built from the actual owner_id bytes.
         let correct_claim = spel_framework::spel_output::AutoClaim::Claimed(
-            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(owner_id))
+            lee_core::program::Claim::Pda(lee_core::program::PdaSeed::new(owner_id))
         );
         assert_eq!(claims[0], correct_claim);
     }
@@ -683,14 +683,14 @@ mod tests {
 
     // ── init_private_account (private PDA) ──────────────────────────────────
 
-    fn make_npk(byte: u8) -> nssa_core::NullifierPublicKey {
-        nssa_core::NullifierPublicKey([byte; 32])
+    fn make_npk(byte: u8) -> lee_core::NullifierPublicKey {
+        lee_core::NullifierPublicKey([byte; 32])
     }
 
     /// Deterministic test viewing key. `from_seed` works in guest and host builds
     /// alike, unlike the host-only `from_bytes`.
-    fn make_vpk(byte: u8) -> nssa_core::encryption::ViewingPublicKey {
-        nssa_core::encryption::ViewingPublicKey::from_seed(&[byte; 32], &[byte ^ 0xFF; 32])
+    fn make_vpk(byte: u8) -> lee_core::encryption::ViewingPublicKey {
+        lee_core::encryption::ViewingPublicKey::from_seed(&[byte; 32], &[byte ^ 0xFF; 32])
     }
 
     #[test]
@@ -810,7 +810,7 @@ mod tests {
     #[test]
     fn claims_init_private_account_emits_pda_claim() {
         use spel_framework::spel_output::AutoClaim;
-        use nssa_core::program::Claim;
+        use lee_core::program::Claim;
         // __claims_* takes no npk/vpk — Claim::Pda encodes only the seed; the circuit
         // handles the (seed, npk, vpk) binding for private PDAs independently.
         let claims = treasury::__claims_init_private_account();
@@ -842,11 +842,11 @@ mod tests {
 
     // ── ProgramContext + owner constraint tests ──────────────────────────────
 
-    fn make_account_with_owner(id: [u8; 32], owner: nssa_core::program::ProgramId, authorized: bool) -> AccountWithMetadata {
-        let mut account = nssa_core::account::Account::default();
+    fn make_account_with_owner(id: [u8; 32], owner: lee_core::program::ProgramId, authorized: bool) -> AccountWithMetadata {
+        let mut account = lee_core::account::Account::default();
         account.program_owner = owner;
         AccountWithMetadata {
-            account_id: nssa_core::account::AccountId::new(id),
+            account_id: lee_core::account::AccountId::new(id),
             account,
             is_authorized: authorized,
         }
@@ -884,7 +884,7 @@ mod tests {
 
     #[test]
     fn handler_initialize_holding_callable_with_context() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let program_id: lee_core::program::ProgramId = [1u32; 8];
         let ctx = ProgramContext::new(program_id, [2u32; 8]);
         let definition = make_account_with_owner([3u8; 32], program_id, false);
         let holding = make_account(true); // init + signer
@@ -894,8 +894,8 @@ mod tests {
 
     #[test]
     fn validate_initialize_holding_rejects_wrong_owner() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
-        let other_program: nssa_core::program::ProgramId = [99u32; 8];
+        let program_id: lee_core::program::ProgramId = [1u32; 8];
+        let other_program: lee_core::program::ProgramId = [99u32; 8];
         let accounts = vec![
             make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
             make_account_with_id([4u8; 32], true),                     // holding: init + signer (empty)
@@ -912,14 +912,14 @@ mod tests {
     fn validate_initialize_holding_owner_check_runs_first() {
         // Owner check must fire before init/signer checks.
         // Even if holding is not empty and not authorized, owner error should surface first.
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
-        let other_program: nssa_core::program::ProgramId = [99u32; 8];
-        let mut bad_account = nssa_core::account::Account::default();
+        let program_id: lee_core::program::ProgramId = [1u32; 8];
+        let other_program: lee_core::program::ProgramId = [99u32; 8];
+        let mut bad_account = lee_core::account::Account::default();
         bad_account.data = vec![1u8; 32].try_into().unwrap(); // not empty → init violation
         let accounts = vec![
             make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
             AccountWithMetadata {
-                account_id: nssa_core::account::AccountId::new([4u8; 32]),
+                account_id: lee_core::account::AccountId::new([4u8; 32]),
                 account: bad_account,
                 is_authorized: false, // not authorized → signer violation
             },
@@ -935,7 +935,7 @@ mod tests {
 
     #[test]
     fn validate_initialize_holding_accepts_correct_owner() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let program_id: lee_core::program::ProgramId = [1u32; 8];
         let accounts = vec![
             make_account_with_owner([3u8; 32], program_id, false), // definition — correct owner
             make_account_with_id([4u8; 32], true),                 // holding: init + signer (empty)

@@ -101,7 +101,7 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
         // input (base58 or 0x-hex) to canonical base58 and carry it as a string.
         "account_id" => {
             let bytes = crate::hex::decode_bytes_32(raw)?;
-            Ok(ParsedValue::Str(nssa::AccountId::new(bytes).to_string()))
+            Ok(ParsedValue::Str(lee::AccountId::new(bytes).to_string()))
         },
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),

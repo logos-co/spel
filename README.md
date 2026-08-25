@@ -49,8 +49,8 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 ```rust
 #![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
+use lee_core::account::AccountWithMetadata;
+use lee_core::program::AccountPostState;
 use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
@@ -368,8 +368,8 @@ Then in your workspace `Cargo.toml`:
 
 ```toml
 [patch."https://github.com/logos-blockchain/logos-execution-zone.git"]
-nssa_core = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
-nssa = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
+lee_core = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
+lee = { git = "https://github.com/YOUR-USER/logos-execution-zone.git", branch = "fix-risc0-defaults" }
 ```
 
 Once the upstream fix is merged, remove the `[patch]` section and update your LEZ dependency tag.

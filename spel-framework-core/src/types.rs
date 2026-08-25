@@ -3,7 +3,7 @@
 //! These are thin wrappers/adapters that bridge framework ergonomics
 //! with real SPEL core types.
 
-use nssa_core::program::{
+use lee_core::program::{
     AccountPostState, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow,
     ValidityWindow,
 };

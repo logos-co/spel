@@ -66,7 +66,7 @@ jobs:
         id: lez-ref
         run: |
           # Support both tag = "..." and rev = "..." formats
-          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -oE '(tag|rev) = "[^"]*"' | cut -d'"' -f2)
+          LEZ_REV=$(grep 'lee_core' spel-framework/Cargo.toml | grep -oE '(tag|rev) = "[^"]*"' | cut -d'"' -f2)
           if [ -z "$LEZ_REV" ]; then
             echo "ERROR: Could not extract LEZ revision from spel-framework/Cargo.toml"
             exit 1

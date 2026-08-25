@@ -1,10 +1,10 @@
 //! PDA (Program Derived Address) computation from IDL seed definitions.
 
 use crate::parse::ParsedValue;
-use nssa::AccountId;
-use nssa_core::encryption::ViewingPublicKey;
-use nssa_core::program::{PdaSeed, ProgramId};
-use nssa_core::NullifierPublicKey;
+use lee::AccountId;
+use lee_core::encryption::ViewingPublicKey;
+use lee_core::program::{PdaSeed, ProgramId};
+use lee_core::NullifierPublicKey;
 use spel_framework_core::idl::IdlSeed;
 use std::collections::HashMap;
 
@@ -79,7 +79,7 @@ fn resolve_seed(
 /// Hash multiple 32-byte seeds via SHA-256(seed1 || seed2 || ...).
 ///
 /// Uses concatenation + SHA-256 (not XOR) to avoid commutativity and
-/// self-cancellation issues. Matches the on-chain nssa derivation pattern.
+/// self-cancellation issues. Matches the on-chain lee derivation pattern.
 fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
     use risc0_zkvm::sha::{Impl, Sha256};
     let mut bytes = Vec::with_capacity(seeds.len() * 32);

@@ -23,25 +23,25 @@ pub mod prelude {
     pub use crate::spel_output::AutoClaim;
     pub use crate::types::{AccountConstraint, IntoPostState, SpelOutput, SpelOutputParts};
 
-    // nssa_core::account
-    pub use nssa_core::account::{Account, AccountId, AccountWithMetadata};
+    // lee_core::account
+    pub use lee_core::account::{Account, AccountId, AccountWithMetadata};
 
-    // nssa_core::program
-    pub use nssa_core::program::{
+    // lee_core::program
+    pub use lee_core::program::{
         AccountPostState, BlockValidityWindow, ChainedCall, Claim, InvalidWindow, PdaSeed,
         ProgramId, TimestampValidityWindow, ValidityWindow,
     };
 
-    // nssa_core extras
-    pub use nssa_core::{BlockId, Timestamp};
+    // lee_core extras
+    pub use lee_core::{BlockId, Timestamp};
 
     // spel-framework additional re-exports
-    pub use nssa_core::program::{read_lee_inputs, InstructionData, ProgramInput, ProgramOutput};
+    pub use lee_core::program::{read_lee_inputs, InstructionData, ProgramInput, ProgramOutput};
 
     // Execution context for instruction handlers (issue #172)
     pub use crate::context::ProgramContext;
 
-    // nssa::public_transaction (host-only)
+    // lee::public_transaction (host-only)
     #[cfg(feature = "host")]
-    pub use nssa::public_transaction::{Message, WitnessSet};
+    pub use lee::public_transaction::{Message, WitnessSet};
 }

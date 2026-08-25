@@ -20,7 +20,7 @@ pub async fn inspect_account(
         eprintln!("Invalid account ID '{}': {}", account_id_str, e);
         process::exit(1);
     });
-    let account_id = nssa::AccountId::new(account_bytes);
+    let account_id = lee::AccountId::new(account_bytes);
 
     // Get raw account data: from --data flag or from sequencer
     let data = if let Some(hex) = data_hex {
@@ -62,7 +62,7 @@ pub async fn inspect_account(
     }
 }
 
-async fn fetch_account_data(account_id: nssa::AccountId) -> Vec<u8> {
+async fn fetch_account_data(account_id: lee::AccountId) -> Vec<u8> {
     let wallet_core = wallet::WalletCore::from_env().await.unwrap_or_else(|e| {
         eprintln!("Failed to initialize wallet: {:?}", e);
         eprintln!("Set LEE_WALLET_HOME_DIR or use --data <hex>");

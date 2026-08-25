@@ -297,7 +297,7 @@ mod tests {
     }
 
     /// Verifies spel CLI's serialization is compatible with the guest-side
-    /// Deserializer from risc0_zkvm (used by nssa_core::program::read_nssa_inputs).
+    /// Deserializer from risc0_zkvm (used by lee_core::program::read_lee_inputs).
     /// This is the contract between the CLI (transaction sender) and the
     /// on-chain program (transaction executor) at LEZ v0.1.2.
     #[test]

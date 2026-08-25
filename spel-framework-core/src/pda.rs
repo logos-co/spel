@@ -1,10 +1,10 @@
 //! Generic PDA (Program Derived Address) computation utilities.
 
 use base58::FromBase58;
-use nssa_core::account::AccountId;
-use nssa_core::encryption::ViewingPublicKey;
-use nssa_core::program::{PdaSeed, ProgramId};
-use nssa_core::NullifierPublicKey;
+use lee_core::account::AccountId;
+use lee_core::encryption::ViewingPublicKey;
+use lee_core::program::{PdaSeed, ProgramId};
+use lee_core::NullifierPublicKey;
 use sha2::{Digest, Sha256};
 
 /// Trait for converting a value into a 32-byte PDA seed.

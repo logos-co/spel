@@ -173,8 +173,8 @@ cargo generate-lockfile > "$LOG_DIR/root-lockfile.log" 2>&1 \
     || warn "enum-ordinalize pin failed (guest build may hit rustc 1.89)"
 
 # Print the actual LEZ version resolved
-log "  LEZ nssa_core resolved:"
-grep -A2 'name = "nssa_core"' methods/guest/Cargo.lock 2>/dev/null | head -5 || true
+log "  LEZ lee_core resolved:"
+grep -A2 'name = "lee_core"' methods/guest/Cargo.lock 2>/dev/null | head -5 || true
 
 # ─── Step 2: Modify guest program for privacy test ────────────────────────
 
@@ -184,7 +184,7 @@ log "Step 2: Setting up test program..."
 cat > "methods/guest/src/bin/${PROJECT_NAME}.rs" << 'RUSTEOF'
 #![no_main]
 use spel_framework::prelude::*;
-use nssa_core::account::Data;
+use lee_core::account::Data;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -203,7 +203,7 @@ mod privacy_test {
     ) -> SpelResult {
         let acc = account.account.clone();
 
-        let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
+        let post = if acc.program_owner == lee_core::program::DEFAULT_PROGRAM_ID {
             // Unclaimed account: claim it and write greeting
             let mut acc = acc;
             let mut data: Vec<u8> = acc.data.into();

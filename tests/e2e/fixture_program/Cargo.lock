@@ -1040,7 +1040,7 @@ checksum = "09edd9e8b54e49e587e4f6295a7d29c3ea94d469cb40ab8ca70b288248a81db2"
 [[package]]
 name = "lee_core"
 version = "0.1.0"
-source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.1#15144ddb8437f48cdce32908e122dbb7eea68399"
+source = "git+https://github.com/logos-blockchain/logos-execution-zone.git?tag=v0.2.2#d6e4ae694e7419f5906b340c232704466a1917b7"
 dependencies = [
  "base58",
  "borsh",

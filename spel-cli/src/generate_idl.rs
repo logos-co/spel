@@ -386,7 +386,7 @@ mod tests {
              [dependencies]\n\
              token_core = { path = \"../../core\" }\n\
              serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+             lee_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
@@ -396,7 +396,7 @@ mod tests {
             "unexpected warnings: {:?}",
             result.warnings
         );
-        // Only the path dep (core) should be returned, not serde or nssa_core
+        // Only the path dep (core) should be returned, not serde or lee_core
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("core"));
     }
@@ -732,7 +732,7 @@ mod tests {
         tmp.write(
             "core/src/lib.rs",
             r#"
-use nssa_core::account::AccountId;
+use lee_core::account::AccountId;
 
 #[account_type]
 pub enum TokenDefinition {
@@ -864,7 +864,7 @@ pub mod token {
         tmp.write(
             "core/src/types.rs",
             r#"
-use nssa_core::account::AccountId;
+use lee_core::account::AccountId;
 
 #[account_type]
 pub enum TokenHolding {

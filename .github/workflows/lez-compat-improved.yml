@@ -42,7 +42,7 @@ jobs:
           cargo generate-lockfile 2>/dev/null || true
 
           # Extract current LEZ commit from Cargo.lock
-          CURRENT=$(grep -A 5 'name = "nssa_core"' Cargo.lock 2>/dev/null | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+          CURRENT=$(grep -A 5 'name = "lee_core"' Cargo.lock 2>/dev/null | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
           if [ -z "$CURRENT" ]; then
             # Fallback: extract tag/rev from Cargo.toml files
             CURRENT=$(grep -rh 'logos-execution-zone' */Cargo.toml 2>/dev/null | head -1 | grep -oE '(tag|rev) = "[^"]*"' | head -1 | cut -d'"' -f2 || echo "")

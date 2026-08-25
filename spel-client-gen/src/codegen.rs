@@ -28,7 +28,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
 
     // Imports
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
-    writeln!(out, "use nssa::{{").unwrap();
+    writeln!(out, "use lee::{{").unwrap();
     writeln!(out, "    AccountId, ProgramId, PublicTransaction,").unwrap();
     writeln!(out, "    public_transaction::{{Message, WitnessSet}},").unwrap();
     writeln!(out, "}};").unwrap();

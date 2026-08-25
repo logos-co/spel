@@ -2,7 +2,7 @@
 //!
 //! When an `#[instruction]` handler declares a parameter of type
 //! [`ProgramContext`], the macro-generated dispatcher injects the trusted
-//! values from [`nssa_core::program::ProgramInput`] at call time.
+//! values from [`lee_core::program::ProgramInput`] at call time.
 //! The context parameter is **never** part of the instruction ABI or IDL.
 
 use crate::prelude::ProgramId;
@@ -29,7 +29,7 @@ pub struct ProgramContext {
     pub self_program_id: ProgramId,
     /// The program ID of the caller (the program that invoked this one).
     /// If there is no explicit caller (e.g. top-level transaction),
-    /// this is set to [`nssa_core::program::DEFAULT_PROGRAM_ID`] (all zeros).
+    /// this is set to [`lee_core::program::DEFAULT_PROGRAM_ID`] (all zeros).
     pub caller_program_id: ProgramId,
 }
 

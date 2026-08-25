@@ -1,18 +1,18 @@
 //! Auto-claim logic for `SpelOutput::execute()`.
 //!
-//! [`AutoClaim`] wraps `nssa_core::program::Claim` with a `None` variant for
+//! [`AutoClaim`] wraps `lee_core::program::Claim` with a `None` variant for
 //! accounts that don't need claiming. [`SpelOutput::execute`] turns
 //! `(Account, AutoClaim)` pairs into the correct `AccountPostState` values.
 
-use nssa_core::account::Account;
-use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
-use nssa_core::NullifierPublicKey;
+use lee_core::account::Account;
+use lee_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
+use lee_core::NullifierPublicKey;
 
 use crate::types::{IntoPostState, SpelOutput};
 
 /// Describes the claim disposition for an account in a post-state.
 ///
-/// Wraps `nssa_core::program::Claim` with an additional `None` variant for
+/// Wraps `lee_core::program::Claim` with an additional `None` variant for
 /// accounts that are mutable or read-only (no ownership claim).
 ///
 /// # Auto-claim rules (from `#[account(...)]` constraints)

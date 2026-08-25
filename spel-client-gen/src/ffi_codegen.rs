@@ -57,17 +57,9 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "use std::ffi::{{CStr, CString}};").unwrap();
     writeln!(out, "use std::os::raw::c_char;").unwrap();
     writeln!(out, "use serde_json::{{Value, json}};").unwrap();
-    writeln!(
-        out,
-        "use nssa::{{AccountId, ProgramId, PublicTransaction}};"
-    )
-    .unwrap();
-    writeln!(
-        out,
-        "use nssa::public_transaction::{{Message, WitnessSet}};"
-    )
-    .unwrap();
-    writeln!(out, "use nssa::program::Program;").unwrap();
+    writeln!(out, "use lee::{{AccountId, ProgramId, PublicTransaction}};").unwrap();
+    writeln!(out, "use lee::public_transaction::{{Message, WitnessSet}};").unwrap();
+    writeln!(out, "use lee::program::Program;").unwrap();
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use wallet::WalletCore;").unwrap();
 
@@ -579,7 +571,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    // program_id: locate the guest binary and compute its ProgramId via nssa::program::Program.
+    // program_id: locate the guest binary and compute its ProgramId via lee::program::Program.
     // Tries the standard project-relative path first, then walks up ancestor directories
     // so it works whether the process cwd is the project root or a build subdirectory.
     writeln!(out, "#[no_mangle]").unwrap();
@@ -1217,7 +1209,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     }
                     writeln!(
                         out,
-                        "    let pda_seed = nssa_core::program::PdaSeed::new(seed_bytes);"
+                        "    let pda_seed = lee_core::program::PdaSeed::new(seed_bytes);"
                     )
                     .unwrap();
                     writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();
@@ -1266,7 +1258,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                     .unwrap();
                     writeln!(
                         out,
-                        "    let pda_seed = nssa_core::program::PdaSeed::new(combined);"
+                        "    let pda_seed = lee_core::program::PdaSeed::new(combined);"
                     )
                     .unwrap();
                     writeln!(out, "    AccountId::for_public_pda(program_id, &pda_seed)").unwrap();

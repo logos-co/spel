@@ -506,8 +506,8 @@ pub async fn run() {
 /// argument, so two forms are accepted:
 /// - `@<path>` — read from a file, either raw bytes or hex text
 /// - `<hex>`   — the key as a hex string
-fn parse_viewing_key(src: &str) -> Result<nssa_core::encryption::ViewingPublicKey, String> {
-    use nssa_core::encryption::ViewingPublicKey;
+fn parse_viewing_key(src: &str) -> Result<lee_core::encryption::ViewingPublicKey, String> {
+    use lee_core::encryption::ViewingPublicKey;
 
     let bytes = if let Some(path) = src.strip_prefix('@') {
         let raw = fs::read(path).map_err(|e| format!("cannot read '{path}': {e}"))?;
@@ -665,9 +665,9 @@ fn compute_pda_command(
 
     // Get program_id: from global --program-id flag, or by loading the binary
     use crate::hex::decode_bytes_32;
-    use nssa::program::Program;
+    use lee::program::Program;
 
-    let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
+    let program_id: lee_core::program::ProgramId = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
             eprintln!("❌ Invalid program ID '{}': {}", hex, e);
             process::exit(1);
@@ -704,8 +704,8 @@ fn compute_pda_command(
     // For private PDAs, parse and require both --npk and --vpk. Since lez v0.2.1 the
     // derivation binds the viewing key as well as the nullifier key, so an address is
     // only reproducible with both.
-    use nssa_core::encryption::ViewingPublicKey;
-    use nssa_core::NullifierPublicKey;
+    use lee_core::encryption::ViewingPublicKey;
+    use lee_core::NullifierPublicKey;
     let private_keys: Option<(NullifierPublicKey, ViewingPublicKey)> = if pda_def.private {
         let npk = match npk_hex {
             Some(ref hex) => {
@@ -752,7 +752,7 @@ fn compute_pda_command(
     };
 
     // Build account_map: parse --<account-name> <base58-id> for IdlSeed::Account seeds.
-    let mut account_map: HashMap<String, nssa::AccountId> = HashMap::new();
+    let mut account_map: HashMap<String, lee::AccountId> = HashMap::new();
     for seed in &pda_def.seeds {
         if let IdlSeed::Account { path } = seed {
             let kebab_key = format!("--{}", path.replace('_', "-"));
@@ -762,7 +762,7 @@ fn compute_pda_command(
                 if args[j] == kebab_key || args[j] == snake_key {
                     if j + 1 < args.len() {
                         let raw = &args[j + 1];
-                        match raw.parse::<nssa::AccountId>() {
+                        match raw.parse::<lee::AccountId>() {
                             Ok(id) => {
                                 account_map.insert(path.clone(), id);
                             },
@@ -823,8 +823,8 @@ fn compute_pda_command(
 ///   multisig --program-id abc123... pda multisig_vault__ <create_key_hex>
 fn compute_pda_raw(args: &[String]) {
     use crate::hex::decode_bytes_32;
-    use nssa::AccountId;
-    use nssa_core::program::{PdaSeed, ProgramId};
+    use lee::AccountId;
+    use lee_core::program::{PdaSeed, ProgramId};
 
     // Parse --program-id
     let pid_hex = match args.windows(2).find(|w| w[0] == "--program-id") {

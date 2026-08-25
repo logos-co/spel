@@ -279,8 +279,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let main_fn = quote! {
         pub fn main() {
             // Read inputs from zkVM host
-            let (nssa_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
-                = nssa_core::program::read_lee_inputs::<Instruction>();
+            let (lee_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
+                = lee_core::program::read_lee_inputs::<Instruction>();
             let pre_states_clone = pre_states.clone();
 
             // Dispatch to instruction handler
@@ -316,23 +316,23 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             //   - pre.account != Account::default() (has non-trivial state), AND
             //   - post has no claim (init accounts are fine since their pre == default)
             let (filtered_pre, filtered_post): (
-                Vec<nssa_core::account::AccountWithMetadata>,
-                Vec<nssa_core::program::AccountPostState>,
+                Vec<lee_core::account::AccountWithMetadata>,
+                Vec<lee_core::program::AccountPostState>,
             ) = pre_states_clone
                 .into_iter()
                 .zip(post_states.into_iter())
                 .filter(|(pre, post)| {
                     let is_default_owner =
-                        pre.account.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID;
+                        pre.account.program_owner == lee_core::program::DEFAULT_PROGRAM_ID;
                     let pre_is_default =
-                        pre.account == nssa_core::account::Account::default();
+                        pre.account == lee_core::account::Account::default();
                     let has_claim = post.required_claim().is_some();
                     !is_default_owner || pre_is_default || has_claim
                 })
                 .unzip();
 
             // Write outputs to zkVM host
-            nssa_core::program::ProgramOutput::new(
+            lee_core::program::ProgramOutput::new(
                 self_program_id,
                 caller_program_id,
                 instruction_words,
@@ -869,7 +869,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                             "Account count mismatch: expected {}, got {}",
                             #num_fixed, v.len()
                         ));
-                    let #rest_name: Vec<nssa_core::account::AccountWithMetadata> = rest_accounts.to_vec();
+                    let #rest_name: Vec<lee_core::account::AccountWithMetadata> = rest_accounts.to_vec();
                 }
             } else {
                 let account_names: Vec<&Ident> = ix.accounts.iter().map(|a| &a.name).collect();
@@ -896,7 +896,7 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                     args.push(quote! {
                         spel_framework::context::ProgramContext::new(
                             self_program_id,
-                            caller_program_id.unwrap_or(nssa_core::program::DEFAULT_PROGRAM_ID)
+                            caller_program_id.unwrap_or(lee_core::program::DEFAULT_PROGRAM_ID)
                         )
                     });
                 }
@@ -1276,8 +1276,8 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
             let seed = &seed_bytes[0];
             quote! {
                 spel_framework::spel_output::AutoClaim::Claimed(
-                    nssa_core::program::Claim::Pda(
-                        nssa_core::program::PdaSeed::new(*#seed)
+                    lee_core::program::Claim::Pda(
+                        lee_core::program::PdaSeed::new(*#seed)
                     )
                 )
             }
@@ -1291,7 +1291,7 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
     } else if acc.constraints.init {
         quote! {
             spel_framework::spel_output::AutoClaim::Claimed(
-                nssa_core::program::Claim::Authorized
+                lee_core::program::Claim::Authorized
             )
         }
     } else {
@@ -1458,7 +1458,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .map(|(i, _acc)| {
                     let idx = i;
                     quote! {
-                        if accounts[#idx].account != nssa_core::account::Account::default() {
+                        if accounts[#idx].account != lee_core::account::Account::default() {
                             return Err(spel_framework::error::SpelError::AccountAlreadyInitialized {
                                 account_index: #idx,
                             });
@@ -1491,7 +1491,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             // Extra parameters for arg PDA seeds
             let arg_seed_params = pda_arg_params(ix);
 
-            // Extra parameters for private PDA npk args: __npk_arg_<name>: &nssa_core::NullifierPublicKey
+            // Extra parameters for private PDA npk args: __npk_arg_<name>: &lee_core::NullifierPublicKey
             let npk_params: Vec<TokenStream2> = {
                 let mut seen: Vec<String> = Vec::new();
                 let mut params = Vec::new();
@@ -1500,14 +1500,14 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         if !seen.contains(npk) {
                             seen.push(npk.clone());
                             let ident = format_ident!("__npk_arg_{}", npk);
-                            params.push(quote! { #ident: &nssa_core::NullifierPublicKey });
+                            params.push(quote! { #ident: &lee_core::NullifierPublicKey });
                         }
                     }
                 }
                 params
             };
 
-            // Extra parameters for private PDA vpk args: __vpk_arg_<name>: &nssa_core::encryption::ViewingPublicKey
+            // Extra parameters for private PDA vpk args: __vpk_arg_<name>: &lee_core::encryption::ViewingPublicKey
             let vpk_params: Vec<TokenStream2> = {
                 let mut seen: Vec<String> = Vec::new();
                 let mut params = Vec::new();
@@ -1517,7 +1517,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                             seen.push(vpk.clone());
                             let ident = format_ident!("__vpk_arg_{}", vpk);
                             params
-                                .push(quote! { #ident: &nssa_core::encryption::ViewingPublicKey });
+                                .push(quote! { #ident: &lee_core::encryption::ViewingPublicKey });
                         }
                     }
                 }
@@ -1627,11 +1627,11 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             quote! {
                 #[allow(dead_code)]
                 pub fn #fn_name(
-                    accounts: &[nssa_core::account::AccountWithMetadata],
-                    self_program_id: &nssa_core::program::ProgramId,
+                    accounts: &[lee_core::account::AccountWithMetadata],
+                    self_program_id: &lee_core::program::ProgramId,
                     // Retained for future use (e.g. instruction-level replay protection or
                     // content-based dispatch). Not used in validation logic today.
-                    _instruction_words: &nssa_core::program::InstructionData,
+                    _instruction_words: &lee_core::program::InstructionData,
                     #(#all_validate_params),*
                 ) -> Result<(), spel_framework::error::SpelError> {
                     // Owner checks first — fail fast if account isn't owned by this program.
@@ -2362,7 +2362,7 @@ mod tests {
              [dependencies]\n\
              token_core = { path = \"../../core\" }\n\
              serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+             lee_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 

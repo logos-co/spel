@@ -5,7 +5,7 @@ use std::path::Path;
 
 /// LEZ tag scaffolded projects pin when `--lez-tag`/`--lez-rev` are not given.
 /// Keep in sync with the workspace's own pins (see `spel-cli/Cargo.toml`).
-const DEFAULT_LEZ_TAG: &str = "v0.2.1";
+const DEFAULT_LEZ_TAG: &str = "v0.2.2";
 
 pub fn init_project(
     name: &str,
@@ -125,8 +125,8 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-nssa        = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee" }}
-nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee_core" }}
+lee        = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee" }}
+lee_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee_core" }}
 common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
 sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
 wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
@@ -721,7 +721,7 @@ path = "src/bin/{snake_name}.rs"
 
 [dependencies]
 spel-framework = {{ git = "{spel_git}", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
+lee_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
 risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 {snake_name}_core = {{ path = "../../{snake_name}_core" }}
 serde = {{ version = "1.0", features = ["derive"] }}
@@ -740,7 +740,7 @@ ruint = "=1.17.0"
             r#"#![no_main]
 
 use spel_framework::prelude::*;
-use nssa_core::account::Data;
+use lee_core::account::Data;
 
 risc0_zkvm::guest::entry!(main);
 
@@ -812,7 +812,7 @@ path = "src/bin/{snake_name}_cli.rs"
 
 [dependencies]
 spel-framework = {{ git = "{spel_git}", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
+lee_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
 spel = {{ git = "{spel_git}", {spel_ref} }}
 {snake_name}_core = {{ path = "../{snake_name}_core" }}
 serde_json = "1.0"

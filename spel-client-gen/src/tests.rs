@@ -1334,7 +1334,7 @@ fn test_ffi_fetch_decode_and_response() {
 //
 // Parse the generated FFI code as a syn::File to catch syntax errors
 // (trailing commas, malformed expressions, bad types) without needing
-// the full nssa/wallet/tokio dependency tree available at test time.
+// the full lee/wallet/tokio dependency tree available at test time.
 //
 // This catches bugs like:
 //   - `compute_pda(&program_id, )` — trailing comma (Bug 3 from PR #147)

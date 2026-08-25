@@ -3,8 +3,8 @@
 //! This is an expansion test — we simulate the validation functions that the macro
 //! would generate for owner constraints.
 
-use nssa_core::account::{Account, AccountId, AccountWithMetadata};
-use nssa_core::program::ProgramId;
+use lee_core::account::{Account, AccountId, AccountWithMetadata};
+use lee_core::program::ProgramId;
 use spel_framework_core::error::SpelError;
 
 /// Simulate the validation function that the macro would generate for:

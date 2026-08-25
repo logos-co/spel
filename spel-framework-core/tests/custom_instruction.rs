@@ -3,7 +3,7 @@
 //! This tests the contract: programs can bring their own Instruction enum
 //! and the framework will use it instead of generating one.
 
-use nssa_core::program::AccountPostState;
+use lee_core::program::AccountPostState;
 use spel_framework_core::error::SpelError;
 use spel_framework_core::types::SpelOutput;
 

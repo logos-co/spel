@@ -3,7 +3,7 @@
 //! This is an expansion test — we cannot run the macro in a unit test directly,
 //! so we test the validation functions that would be generated.
 
-use nssa_core::account::{Account, AccountId, AccountWithMetadata};
+use lee_core::account::{Account, AccountId, AccountWithMetadata};
 use spel_framework_core::error::SpelError;
 
 /// Simulate the validation function that the macro would generate for:

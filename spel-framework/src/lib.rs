@@ -23,7 +23,7 @@ pub mod prelude {
     pub use spel_framework_core::spel_output::AutoClaim;
     pub use spel_framework_core::types::SpelOutput;
 
-    // nssa::public_transaction (host-only)
+    // lee::public_transaction (host-only)
     #[cfg(feature = "host")]
     pub use spel_framework_core::prelude::{Message, WitnessSet};
 }

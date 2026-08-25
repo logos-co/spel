@@ -110,7 +110,7 @@ log "  ✓ Project scaffolded"
 
 # Show what was resolved — this helps diagnose dependency issues
 log "  Resolved dependencies in methods/guest/Cargo.toml:"
-grep -E '(spel-framework|nssa_core) = ' methods/guest/Cargo.toml || true
+grep -E '(spel-framework|lee_core) = ' methods/guest/Cargo.toml || true
 
 # ─── Step 2: Build guest binary ───────────────────────────────────────────
 # This is where init bugs surface — if the default spel_ref or lez_ref point
