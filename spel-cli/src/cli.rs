@@ -135,6 +135,10 @@ pub fn print_instruction_help(ix: &IdlInstruction) {
 /// only legal for boolean args (per the IDL) or the universal `--help`/
 /// `-h`; for anything else we exit with a `missing value` error so a
 /// missing CLI value can't be silently stored as the literal "true".
+///
+/// Keys outside the instruction's vocabulary exit with an error before
+/// any transaction is built: a global flag like `--export` misplaced
+/// after the `--` separator must not fall through to a live submission.
 pub fn parse_instruction_args(
     args: &[String],
     ix: &IdlInstruction,
@@ -171,6 +175,10 @@ pub fn parse_instruction_args(
     if map.contains_key("help") || map.contains_key("h") {
         print_instruction_help(ix);
         std::process::exit(0);
+    }
+    if let Err(msg) = reject_unknown_keys(&map, ix) {
+        eprintln!("{msg}");
+        std::process::exit(1);
     }
 
     map
@@ -225,5 +233,89 @@ pub fn idl_type_hint(ty: &IdlType) -> String {
             IdlType::Primitive(p) if p == "u8" => format!("HEX{}|STR≤{}", array.1 * 2, array.1),
             _ => format!("[_; {}]", array.1),
         },
+    }
+}
+
+/// Rejects any `--key` outside this instruction's vocabulary: its IDL
+/// args and its non-pda accounts, kebab-case. A miss is a typo or a
+/// misplaced global flag, and either must stop the run before a
+/// transaction is built.
+fn reject_unknown_keys(
+    map: &HashMap<String, Vec<String>>,
+    ix: &IdlInstruction,
+) -> Result<(), String> {
+    let known: std::collections::HashSet<String> = ix
+        .args
+        .iter()
+        .map(|a| snake_to_kebab(&a.name))
+        .chain(
+            ix.accounts
+                .iter()
+                .filter(|a| a.pda.is_none())
+                .map(|a| snake_to_kebab(&a.name)),
+        )
+        .collect();
+    match map.keys().find(|k| !known.contains(*k)) {
+        Some(key) => Err(format!(
+            "❌ --{key}: unknown argument for this instruction\n   \
+            Flow flags like --export and --co-signer are global: put them before the '--' separator."
+        )),
+        None => Ok(()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One arg, one plain signer account, one PDA account: the smallest
+    /// instruction exercising every vocabulary rule.
+    fn fixture_ix() -> IdlInstruction {
+        serde_json::from_value(serde_json::json!({
+            "name": "do_thing",
+            "accounts": [
+                {
+                    "name": "config",
+                    "pda": { "seeds": [ { "kind": "const", "value": "config" } ] }
+                },
+                { "name": "caller", "signer": true }
+            ],
+            "args": [ { "name": "new_value", "type": "u64" } ]
+        }))
+        .expect("fixture deserializes")
+    }
+
+    fn map_of(keys: &[&str]) -> std::collections::HashMap<String, Vec<String>> {
+        keys.iter()
+            .map(|k| ((*k).to_string(), vec!["x".to_string()]))
+            .collect()
+    }
+
+    #[test]
+    fn full_legal_vocabulary_is_accepted() {
+        let ix = fixture_ix();
+        assert!(reject_unknown_keys(&map_of(&["new-value", "caller"]), &ix).is_ok());
+    }
+
+    // Live-round regression (2026-08-09): --export placed after the '--'
+    // separator was silently dropped and the transaction submitted
+    // instead of exporting.
+    #[test]
+    fn misplaced_global_flag_is_rejected() {
+        let ix = fixture_ix();
+        let err = reject_unknown_keys(&map_of(&["caller", "export"]), &ix).unwrap_err();
+        assert!(err.contains("--export"), "error names the key: {err}");
+        assert!(
+            err.contains("before the '--' separator"),
+            "error points at the fix: {err}"
+        );
+    }
+
+    // PDA accounts are derived, never passed as flags, so their names are
+    // not part of the vocabulary either.
+    #[test]
+    fn pda_account_name_is_not_a_flag() {
+        let ix = fixture_ix();
+        assert!(reject_unknown_keys(&map_of(&["config"]), &ix).is_err());
     }
 }

@@ -10,8 +10,10 @@
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
 pub mod account_inspect;
+pub mod blob;
 pub mod cli;
 pub mod config;
+pub mod exchange;
 pub mod generate_idl;
 pub mod hex;
 pub mod init;
@@ -50,6 +52,8 @@ pub async fn run() {
     let mut data_hex: Option<String> = None;
     let mut inspect_format: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
+    let mut co_signers: Vec<String> = Vec::new();
+    let mut export_path: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut used_separator = false;
     let mut i = 1;
@@ -132,9 +136,34 @@ pub async fn run() {
                     extra_bins.insert(format!("{}-program-id", name), args[i].clone());
                 }
             },
+            "--co-signer" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --co-signer requires an account id");
+                    process::exit(1);
+                }
+                co_signers.push(args[i].clone());
+            },
+            "--export" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --export requires a file path");
+                    process::exit(1);
+                }
+                if export_path.is_some() {
+                    eprintln!("❌ --export given twice");
+                    process::exit(1);
+                }
+                export_path = Some(args[i].clone());
+            },
             _ => remaining_args.push(args[i].clone()),
         }
         i += 1;
+    }
+
+    if export_path.is_some() && dry_run.is_some() {
+        eprintln!("❌ --export and --dry-run cannot be combined");
+        process::exit(1);
     }
 
     // Load spel.toml config
@@ -389,6 +418,22 @@ pub async fn run() {
                 compute_pda_raw(&raw_args);
                 return;
             },
+            "sign" => {
+                let path = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("Usage: {} sign <blob-file>", args[0]);
+                    process::exit(1);
+                });
+                exchange::sign_command(path).await;
+                return;
+            },
+            "submit" => {
+                let path = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("Usage: {} submit <blob-file>", args[0]);
+                    process::exit(1);
+                });
+                exchange::submit_command(path).await;
+                return;
+            },
             _ => {},
         }
     }
@@ -487,6 +532,8 @@ pub async fn run() {
                         program_id_hex.as_deref(),
                         dry_run,
                         &extra_bins,
+                        &co_signers,
+                        export_path.as_deref(),
                     )
                     .await;
                 },
@@ -525,7 +572,7 @@ fn compute_pda_command(
                     }
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
@@ -549,7 +596,7 @@ fn compute_pda_command(
                     }
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
@@ -564,6 +611,7 @@ fn compute_pda_command(
     // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut npk_hex: Option<String> = None;
+    let mut vpk_hex: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
@@ -571,6 +619,11 @@ fn compute_pda_command(
                 let raw = &args[i + 1];
                 if key == "npk" {
                     npk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
+                if key == "vpk" {
+                    vpk_hex = Some(raw.clone());
                     i += 2;
                     continue;
                 }
@@ -592,7 +645,7 @@ fn compute_pda_command(
                 i += 2;
             } else {
                 eprintln!("❌ Missing value for --{}", key);
-                std::process::exit(1);
+                process::exit(1);
             }
         } else {
             i += 1;
@@ -606,7 +659,7 @@ fn compute_pda_command(
     let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
         let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
             eprintln!("❌ Invalid program ID '{}': {}", hex, e);
-            std::process::exit(1);
+            process::exit(1);
         });
         let mut pid = [0u32; 8];
         for (i, chunk) in bytes.chunks(4).enumerate() {
@@ -615,53 +668,78 @@ fn compute_pda_command(
         pid
     } else if let Some(path) = program_path {
         if std::path::Path::new(path).exists() {
-            let program_bytes = std::fs::read(path).unwrap_or_else(|e| {
+            let program_bytes = fs::read(path).unwrap_or_else(|e| {
                 eprintln!("❌ Cannot read program binary '{}': {}", path, e);
-                std::process::exit(1);
+                process::exit(1);
             });
             Program::new(program_bytes.into())
                 .unwrap_or_else(|e| {
                     eprintln!("❌ Invalid program binary: {:?}", e);
-                    std::process::exit(1);
+                    process::exit(1);
                 })
                 .id()
         } else {
             eprintln!("❌ Program binary not found: {}", path);
-            std::process::exit(1);
+            process::exit(1);
         }
     } else {
         eprintln!("❌ Program ID required to compute PDA.");
         eprintln!("   Pass --program <name>           (from spel.toml)");
         eprintln!("   Or   --program <64-char-hex>    (program ID)");
         eprintln!("   Or   --program <path-to-binary>");
-        std::process::exit(1);
+        process::exit(1);
     };
 
-    // For private PDAs, parse and require --npk
+    // For private PDAs, parse and require --npk and --vpk
+    use nssa_core::encryption::ViewingPublicKey;
     use nssa_core::NullifierPublicKey;
-    let npk: Option<NullifierPublicKey> = if pda_def.private {
-        match npk_hex {
+    let (npk, vpk): (Option<NullifierPublicKey>, Option<ViewingPublicKey>) = if pda_def.private {
+        let n = match npk_hex {
             Some(ref hex) => {
                 use crate::hex::decode_bytes_32;
                 let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
                     eprintln!("❌ Invalid --npk '{}': {}", hex, e);
-                    std::process::exit(1);
+                    process::exit(1);
                 });
-                Some(NullifierPublicKey(bytes))
+                NullifierPublicKey(bytes)
             },
             None => {
                 eprintln!(
-                    "❌ '{}' is a private PDA — pass --npk <64-char-hex>",
+                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
                     account_name
                 );
                 eprintln!(
                     "   The NullifierPublicKey is the recipient's npk from their wallet key."
                 );
-                std::process::exit(1);
+                process::exit(1);
             },
-        }
+        };
+        let v = match vpk_hex {
+            Some(ref hex) => {
+                let bytes = ::hex::decode(hex).unwrap_or_else(|e| {
+                    eprintln!("❌ Invalid --vpk hex: {}", e);
+                    process::exit(1);
+                });
+                ViewingPublicKey::from_bytes(bytes).unwrap_or_else(|e| {
+                    eprintln!(
+                        "❌ Invalid --vpk (expected {} bytes, ML-KEM-768 encapsulation key): {:?}",
+                        ViewingPublicKey::LEN,
+                        e
+                    );
+                    process::exit(1);
+                })
+            },
+            None => {
+                eprintln!(
+                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
+                    account_name
+                );
+                process::exit(1);
+            },
+        };
+        (Some(n), Some(v))
     } else {
-        None
+        (None, None)
     };
 
     // Build account_map: parse --<account-name> <base58-id> for IdlSeed::Account seeds.
@@ -681,7 +759,7 @@ fn compute_pda_command(
                             },
                             Err(_) => {
                                 eprintln!("❌ '{}' is not a valid base58 account ID", raw);
-                                std::process::exit(1);
+                                process::exit(1);
                             },
                         }
                     }
@@ -699,6 +777,7 @@ fn compute_pda_command(
         &account_map,
         &seed_args,
         npk.as_ref(),
+        vpk.as_ref(),
     ) {
         Ok(account_id) => {
             println!("{}", account_id);
@@ -717,7 +796,7 @@ fn compute_pda_command(
                     ),
                 }
             }
-            std::process::exit(1);
+            process::exit(1);
         },
     }
 }
@@ -744,13 +823,13 @@ fn compute_pda_raw(args: &[String]) {
         Some(w) => &w[1],
         None => {
             eprintln!("Usage: pda --program-id <64-char-hex> <seed1> [seed2] ...");
-            std::process::exit(1);
+            process::exit(1);
         },
     };
 
     let pid_bytes = decode_bytes_32(pid_hex).unwrap_or_else(|e| {
         eprintln!("❌ Invalid --program-id '{}': {}", pid_hex, e);
-        std::process::exit(1);
+        process::exit(1);
     });
     let mut program_id: ProgramId = [0u32; 8];
     for (i, chunk) in pid_bytes.chunks(4).enumerate() {
@@ -778,14 +857,14 @@ fn compute_pda_raw(args: &[String]) {
         {
             decode_bytes_32(arg).unwrap_or_else(|e| {
                 eprintln!("❌ Invalid hex seed '{}': {}", arg, e);
-                std::process::exit(1);
+                process::exit(1);
             })
         } else {
             let mut bytes = [0u8; 32];
             let src = arg.as_bytes();
             if src.len() > 32 {
                 eprintln!("❌ Seed '{}' is {} bytes, max 32", arg, src.len());
-                std::process::exit(1);
+                process::exit(1);
             }
             bytes[..src.len()].copy_from_slice(src);
             bytes
@@ -796,7 +875,7 @@ fn compute_pda_raw(args: &[String]) {
     if seeds.is_empty() {
         eprintln!("❌ At least one seed required");
         eprintln!("Usage: pda --program-id <hex> <seed1> [seed2] ...");
-        std::process::exit(1);
+        process::exit(1);
     }
 
     // Combine seeds via SHA-256(seed1 || seed2 || ...)

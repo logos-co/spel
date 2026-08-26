@@ -38,6 +38,8 @@ jobs:
         with:
           toolchain: 1.88.0
           components: clippy
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
       - uses: Swatinem/rust-cache@v2
       - name: cargo clippy
         # spel and spel-ffi-compile-test have transitive deps (logos-blockchain-poq,
@@ -55,6 +57,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: 1.88.0
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
       - uses: Swatinem/rust-cache@v2
       - name: cargo test
         # spel and spel-ffi-compile-test excluded for same transitive dep reason as clippy job above.

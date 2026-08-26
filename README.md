@@ -425,6 +425,63 @@ spel inspect 0000...0000 \
   --data 00<32-byte-definition-id-hex>00000000000000000000000000000064
 ```
 
+### Multi-Signature Transactions (Witness Exchange)
+
+Some instructions need signatures from accounts whose keys live on
+different machines. A transaction's authorization is checked against its
+witness set, so all signers must sign the same message bytes, and those
+bytes contain every signer's nonce. The CLI coordinates this through a
+partial-transaction file that travels between signers.
+
+```bash
+# Machine A: build the full transaction, sign with local keys, and write
+# the partial transaction to a file instead of submitting. Repeat
+# --co-signer for each additional required signer. Needs a node
+# connection to fetch nonces for all signers.
+spel --idl program-idl.json -p program.bin \
+  --co-signer <account-id> --export handover.json -- \
+  admin-transfer --caller <current-admin> --evidence <new-admin> ...
+
+# --export and --co-signer are global flags and belong before the "--"
+# separator. Misplaced after it they are rejected with an error, the CLI
+# never falls through to a live submission.
+
+# The file travels to the co-signer over any channel.
+
+# Machine B: inspect and sign. Shows the summary embedded by machine A
+# next to fields decoded locally from the message bytes, asks for
+# confirmation, then signs for every required signer whose key this
+# wallet holds. Works offline.
+spel sign handover.json
+
+# Anyone: submit once all witnesses are collected. Needs a node.
+spel submit handover.json
+```
+
+The file is JSON: the borsh-serialized message in hex, the ordered list
+of required signers, and the collected witnesses. The signers order
+matches the nonce order inside the message. The full format is
+documented in `spel-cli/src/blob.rs`.
+
+A signature authorizes exactly the message bytes in the file being
+signed, and every already-collected witness is verified against those
+same bytes before signing, so nobody can swap the message under
+existing signatures. What the prompt cannot do is read intent into raw
+instruction data. To verify a blob independently, rebuild the claimed
+transaction on your own machine with the same arguments and `--export`,
+and compare the decoded fields, instruction data included, against
+what the prompt shows. The two exports differ only in nonces fetched
+at different times.
+
+A partial transaction goes stale when any listed signer's on-chain
+nonce changes. Signing is a local operation and cannot detect this,
+staleness surfaces at submission, which fails with a clear error, and
+the flow restarts with a fresh export.
+
+`--export` works without `--co-signer` too, for preparing a transaction
+on one machine and submitting it from another. It only supports public
+transactions and cannot be combined with `--dry-run`.
+
 ## Crates
 
 | Crate | Description |

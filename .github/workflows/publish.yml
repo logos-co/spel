@@ -25,21 +25,38 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Extracted version: $VERSION"
 
+      - name: Build release notes from CHANGELOG
+        id: notes
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          # Extract this version's section: from "## vX.Y.Z ..." up to (but not
+          # including) the next "## v..." heading.
+          awk -v ver="v${VERSION}" '
+            $0 ~ ("^## " ver "( |$)") { f=1; print; next }
+            f && /^## v[0-9]/        { exit }
+            f                        { print }
+          ' CHANGELOG.md > release-notes.md
+          # Fallback if the section is missing/empty (e.g. changelog not updated).
+          if [ ! -s release-notes.md ]; then
+            printf '## v%s\n\nSee [CHANGELOG.md](https://github.com/logos-co/spel/blob/main/CHANGELOG.md) for details.\n' "$VERSION" > release-notes.md
+          fi
+          # Append the install snippet (single-quoted echoes keep the ``` fences literal).
+          {
+            echo ""
+            echo "---"
+            echo ""
+            echo "**Installation** (Cargo.toml):"
+            echo '```toml'
+            echo "spel-framework = { git = \"https://github.com/logos-co/spel.git\", tag = \"v${VERSION}\" }"
+            echo '```'
+          } >> release-notes.md
+          echo "Release notes:"; cat release-notes.md
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
-          body: |
-            ## v${{ steps.version.outputs.version }}
-
-            See [CHANGELOG.md](https://github.com/logos-co/spel/blob/main/CHANGELOG.md) for full details.
-
-            ---
-
-            **Installation** (Cargo.toml):
-            ```toml
-            spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v${{ steps.version.outputs.version }}" }
-            ```
+          body_path: release-notes.md
           draft: false
           prerelease: false

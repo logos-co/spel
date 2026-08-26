@@ -102,14 +102,15 @@ mod treasury {
         Ok(SpelOutput::execute(vec![record, owner], vec![]))
     }
 
-    /// Initialize a private PDA — address is unique per (seed, npk) pair.
+    /// Initialize a private PDA — address is unique per (seed, npk, vpk) tuple.
     #[instruction]
     pub fn init_private_account(
-        #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"))]
+        #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"), vpk = arg("user_vpk"))]
         account: AccountWithMetadata,
         #[account(signer)]
         authority: AccountWithMetadata,
         user_npk: nssa_core::NullifierPublicKey,
+        user_vpk: nssa_core::encryption::ViewingPublicKey,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![account, authority], vec![]))
     }
@@ -568,10 +569,16 @@ mod tests {
             &claims[0]
         );
 
-        // owner (index 1): signer only, not init → no claim
+        // owner (index 1): signer → claimed only while still default-owned, so a
+        // used wallet account is never returned default-owned (LEZ rule 7).
         assert!(
-            matches!(&claims[1], spel_framework::spel_output::AutoClaim::None),
-            "owner claim should be None, got: {:?}",
+            matches!(
+                &claims[1],
+                spel_framework::spel_output::AutoClaim::ClaimedIfDefault(
+                    nssa_core::program::Claim::Authorized
+                )
+            ),
+            "owner claim should be ClaimedIfDefault(Authorized), got: {:?}",
             &claims[1]
         );
 
@@ -658,7 +665,11 @@ mod tests {
     fn claims_batch_update_rest_count() {
         let claims = treasury::__claims_batch_update(3);
         assert_eq!(claims.len(), 4); // 1 fixed (authority) + 3 rest (targets)
-        assert!(matches!(&claims[0], spel_framework::spel_output::AutoClaim::None)); // authority
+        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
+        assert!(matches!(
+            &claims[0],
+            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(_)
+        ));
         for claim in &claims[1..] {
             assert!(matches!(claim, spel_framework::spel_output::AutoClaim::None)); // targets
         }
@@ -680,14 +691,20 @@ mod tests {
         nssa_core::NullifierPublicKey([byte; 32])
     }
 
+    fn make_vpk(d: u8, z: u8) -> nssa_core::encryption::ViewingPublicKey {
+        nssa_core::encryption::ViewingPublicKey::from_seed(&[d; 32], &[z; 32])
+    }
+
     #[test]
     fn validate_init_private_account_accepts_correct_address() {
         let program_id = test_program_id();
         let npk = make_npk(0xAB);
+        let vpk = make_vpk(0x01, 0x02);
         let correct_id = spel_framework::pda::compute_private_pda(
             &program_id,
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &npk,
+            &vpk,
         );
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // account — correct private PDA
@@ -698,6 +715,7 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &npk,
+            &vpk,
         );
         assert!(result.is_ok(), "correct private PDA should pass: {result:?}");
     }
@@ -707,10 +725,12 @@ mod tests {
         let program_id = test_program_id();
         let correct_npk = make_npk(0xAB);
         let wrong_npk = make_npk(0xCD);
+        let vpk = make_vpk(0x01, 0x02);
         let correct_id = spel_framework::pda::compute_private_pda(
             &program_id,
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &correct_npk,
+            &vpk,
         );
         // Supply the address for correct_npk but validate with wrong_npk
         let accounts = vec![
@@ -722,6 +742,7 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &wrong_npk,
+            &vpk,
         );
         let err = result.expect_err("wrong npk should fail");
         assert!(
@@ -734,6 +755,7 @@ mod tests {
     fn validate_init_private_account_rejects_public_pda_address() {
         let program_id = test_program_id();
         let npk = make_npk(0xAB);
+        let vpk = make_vpk(0x01, 0x02);
         // Supply the PUBLIC PDA address — should be rejected
         let public_id = spel_framework::pda::compute_pda(
             &program_id,
@@ -748,6 +770,7 @@ mod tests {
             &program_id,
             &empty_ix_data(),
             &npk,
+            &vpk,
         );
         assert!(
             result.is_err(),
@@ -767,7 +790,8 @@ mod tests {
             matches!(&claims[0], AutoClaim::Claimed(Claim::Pda(_))),
             "private PDA account must emit Claim::Pda"
         );
-        assert!(matches!(&claims[1], AutoClaim::None)); // authority
+        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
+        assert!(matches!(&claims[1], AutoClaim::ClaimedIfDefault(_)));
     }
 
     #[test]
