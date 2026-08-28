@@ -104,6 +104,13 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
                 vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
             ))
         },
+        (IdlType::Vec { vec: elem_ty }, ParsedValue::Seq(items)) => {
+            let elements: Result<Vec<_>, _> = items
+                .iter()
+                .map(|item| to_dynamic_value(elem_ty, item))
+                .collect();
+            Ok(DynamicValue::Seq(elements?))
+        },
         (IdlType::Option { option: _ }, ParsedValue::None) => Ok(DynamicValue::None),
         (IdlType::Option { option }, ParsedValue::Some(inner)) => Ok(DynamicValue::Some(Box::new(
             to_dynamic_value(option, inner)?,
@@ -674,5 +681,83 @@ mod tests {
 
         let result = serialize_to_risc0(0, &[(&ty, &val)]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn to_dynamic_value_vec_u128_seq_has_length_prefix_and_four_words_per_element() {
+        let ty = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("u128".to_string())),
+        };
+        let val = parse_value("300,700", &ty).unwrap();
+
+        let dv = to_dynamic_value(&ty, &val).unwrap();
+        let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
+        // length prefix, then each u128 as four little-endian u32 words
+        assert_eq!(words, vec![2, 300, 0, 0, 0, 700, 0, 0, 0]);
+    }
+
+    #[test]
+    fn to_dynamic_value_empty_vec_u128_is_zero_length_seq() {
+        let ty = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("u128".to_string())),
+        };
+        let val = parse_value("", &ty).unwrap();
+
+        let dv = to_dynamic_value(&ty, &val).unwrap();
+        let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
+        assert_eq!(words, vec![0]);
+    }
+
+    #[test]
+    fn serde_roundtrip_vec_u64_u128_bool() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        enum TestInstruction {
+            Vecs {
+                a: Vec<u64>,
+                b: Vec<u128>,
+                c: Vec<bool>,
+                d: Vec<u128>,
+            },
+        }
+
+        let vec_u64 = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("u64".into())),
+        };
+        let vec_u128 = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("u128".into())),
+        };
+        let vec_bool = IdlType::Vec {
+            vec: Box::new(IdlType::Primitive("bool".into())),
+        };
+
+        let a = parse_value("1,18446744073709551615", &vec_u64).unwrap();
+        let b = parse_value("300,700,340282366920938463463374607431768211455", &vec_u128).unwrap();
+        let c = parse_value("true,false", &vec_bool).unwrap();
+        let d = parse_value("", &vec_u128).unwrap();
+
+        let words = serialize_to_risc0(
+            0,
+            &[
+                (&vec_u64, &a),
+                (&vec_u128, &b),
+                (&vec_bool, &c),
+                (&vec_u128, &d),
+            ],
+        )
+        .unwrap();
+
+        let instruction: TestInstruction =
+            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
+                .expect("deserialization must succeed");
+
+        assert_eq!(
+            instruction,
+            TestInstruction::Vecs {
+                a: vec![1, u64::MAX],
+                b: vec![300, 700, u128::MAX],
+                c: vec![true, false],
+                d: vec![],
+            }
+        );
     }
 }
