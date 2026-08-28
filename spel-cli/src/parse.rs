@@ -16,6 +16,7 @@ pub enum ParsedValue {
     U32Array(Vec<u32>),         // [u32; N] / ProgramId
     ByteArrayVec(Vec<Vec<u8>>), // Vec<[u8; 32]>
     StringVec(Vec<String>),     // Vec<String>
+    Seq(Vec<ParsedValue>),      // Vec<T> for any other primitive T (u64, u128, bool)
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
     Raw(String),                // fallback
@@ -53,6 +54,10 @@ impl std::fmt::Display for ParsedValue {
             ParsedValue::StringVec(strs) => {
                 let quoted: Vec<String> = strs.iter().map(|s| format!("\"{}\"", s)).collect();
                 write!(f, "[{}]", quoted.join(", "))
+            },
+            ParsedValue::Seq(items) => {
+                let strs: Vec<String> = items.iter().map(|v| v.to_string()).collect();
+                write!(f, "[{}]", strs.join(", "))
             },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
@@ -296,6 +301,23 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
                 Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
             }
         },
+        // Vec<u64> / Vec<u128> / Vec<bool> — comma-separated values, parsed element by
+        // element with the primitive parser; an empty (or whitespace-only) string is an
+        // empty list.
+        IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" => {
+            let mut items = Vec::new();
+            for (i, part) in raw
+                .split(',')
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .enumerate()
+            {
+                let item =
+                    parse_primitive(part, p).map_err(|e| format!("Element [{}]: {}", i, e))?;
+                items.push(item);
+            }
+            Ok(ParsedValue::Seq(items))
+        },
         _ => Ok(ParsedValue::Raw(raw.to_string())),
     }
 }
@@ -433,5 +455,82 @@ mod tests {
         // Fail-closed for junk that doesn't decode to a 32-byte ImageID.
         assert!(parse_program_id("not-a-program-id").is_err());
         assert!(parse_program_id("deadbeef").is_err());
+    }
+
+    fn vec_of(prim: &str) -> IdlType {
+        IdlType::Vec {
+            vec: Box::new(IdlType::Primitive(prim.to_string())),
+        }
+    }
+
+    #[test]
+    fn parse_vec_u128_from_csv() {
+        let parsed = parse_value(
+            "300, 700,340282366920938463463374607431768211455",
+            &vec_of("u128"),
+        )
+        .expect("Vec<u128> parses from a comma-separated list");
+        match parsed {
+            ParsedValue::Seq(items) => {
+                assert_eq!(items.len(), 3);
+                assert!(matches!(items[0], ParsedValue::U128(300)));
+                assert!(matches!(items[1], ParsedValue::U128(700)));
+                assert!(matches!(items[2], ParsedValue::U128(u128::MAX)));
+            },
+            other => panic!("expected ParsedValue::Seq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_vec_u64_and_bool_from_csv() {
+        match parse_value("1,2,18446744073709551615", &vec_of("u64")).unwrap() {
+            ParsedValue::Seq(items) => {
+                assert!(matches!(items[2], ParsedValue::U64(u64::MAX)));
+            },
+            other => panic!("expected ParsedValue::Seq, got {other:?}"),
+        }
+        match parse_value("true,false, true", &vec_of("bool")).unwrap() {
+            ParsedValue::Seq(items) => {
+                assert!(matches!(items[0], ParsedValue::Bool(true)));
+                assert!(matches!(items[1], ParsedValue::Bool(false)));
+                assert!(matches!(items[2], ParsedValue::Bool(true)));
+            },
+            other => panic!("expected ParsedValue::Seq, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_vec_u128_empty_string_is_empty_list() {
+        for raw in ["", "  "] {
+            match parse_value(raw, &vec_of("u128")).unwrap() {
+                ParsedValue::Seq(items) => assert!(items.is_empty(), "{raw:?} must be empty"),
+                other => panic!("expected ParsedValue::Seq, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_vec_u128_reports_the_offending_element() {
+        let err = parse_value("300,seven,700", &vec_of("u128")).unwrap_err();
+        assert!(err.starts_with("Element [1]:"), "got: {err}");
+        assert!(err.contains("seven"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_vec_u128_display_is_bracketed_list() {
+        let parsed = parse_value("300,700", &vec_of("u128")).unwrap();
+        assert_eq!(parsed.to_string(), "[300, 700]");
+    }
+
+    #[test]
+    fn parse_vec_u8_and_u32_keep_their_existing_representation() {
+        assert!(matches!(
+            parse_value("1,2", &vec_of("u8")).unwrap(),
+            ParsedValue::ByteArray(_)
+        ));
+        assert!(matches!(
+            parse_value("1,2", &vec_of("u32")).unwrap(),
+            ParsedValue::U32Array(_)
+        ));
     }
 }

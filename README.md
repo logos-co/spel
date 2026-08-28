@@ -277,6 +277,7 @@ spel --idl program-idl.json create-vault --help
 | `[u32; 8]` / `program_id` | Comma-separated u32s: `"0,0,0,0,0,0,0,0"` |
 | `Vec<u8>` | Comma-separated decimal bytes: `"0,1,2"` |
 | `Vec<u32>` | Comma-separated decimal u32s: `"0,200,0,0,0"` |
+| `Vec<u64>` / `Vec<u128>` / `Vec<bool>` | Comma-separated values: `"300,700"`, `"true,false"`; `""` is an empty list |
 | `Vec<[u8; 32]>` | Comma-separated hex or base58: `"addr1,addr2"` |
 | `rest` accounts | Comma-separated base58/hex: `--foo-account "addr1,addr2"` |
 | `Option<T>` | Value or `"none"` |
