@@ -248,6 +248,7 @@ fn generate_idl_inner(
         spec: None,
         metadata: None,
         instruction_type: external_instruction,
+        events: vec![],
     })
 }
 

@@ -135,6 +135,27 @@ pub fn account_type(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
 
+/// Mark a struct as an event payload for IDL generation.
+///
+/// The `discriminant` argument must match the value passed to `emit_event()`.
+///
+/// # Example
+/// ```rust,ignore
+/// #[event(discriminant = 1)]
+/// pub struct InsufficientFunds {
+///     pub requested: u128,
+///     pub available: u128,
+/// }
+/// ```
+///
+/// This attribute is a no-op at compile time; it is consumed solely by the
+/// IDL generator alongside `#[account_type]`.
+#[proc_macro_attribute]
+pub fn event(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    // Marker only — detected by generate_idl! and #[lez_program] at compile time.
+    item
+}
+
 /// Generate IDL from a program source file.
 ///
 /// Parses the given Rust source file, finds the `#[lez_program]` module,
