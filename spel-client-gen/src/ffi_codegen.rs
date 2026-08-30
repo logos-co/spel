@@ -450,7 +450,9 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
         }
         writeln!(out).unwrap();
 
-        // Build account_ids vec (non-rest accounts first, then rest)
+        // Build account_ids vec (non-rest accounts first, then rest).
+        // When the instruction uses ClockContext, prepend the LEZ clock account so it
+        // lands at pre_states[0] as the dispatcher expects.
         let has_rest = ix.accounts.iter().any(|a| a.rest);
         let account_ids_binding = if has_rest { "let mut" } else { "let" };
         writeln!(
@@ -458,6 +460,13 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
             "    {account_ids_binding} account_ids: Vec<AccountId> = vec!["
         )
         .unwrap();
+        if ix.has_clock_context {
+            writeln!(
+                out,
+                "        AccountId::new(*b\"/LEZ/ClockProgramAccount/0000001\"),"
+            )
+            .unwrap();
+        }
         for acc in ix.accounts.iter().filter(|a| !a.rest) {
             writeln!(out, "        {},", rust_ident(&acc.name)).unwrap();
         }

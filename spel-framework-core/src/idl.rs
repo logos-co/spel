@@ -71,6 +71,12 @@ pub struct IdlInstruction {
     /// Variant name in PascalCase (lssa-lang compat).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<String>,
+    /// True when the handler declares a `ClockContext` parameter.
+    /// The dispatcher reads the LEZ clock account (`/LEZ/ClockProgramAccount/0000001`)
+    /// from `pre_states[0]` and injects it; transaction builders must prepend that
+    /// account to the account list. Never appears in the instruction ABI or IDL args.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_clock_context: bool,
 }
 
 /// An account expected by an instruction.
