@@ -102,6 +102,39 @@ mod treasury {
         Ok(SpelOutput::execute(vec![record, owner], vec![]))
     }
 
+    /// Delegate a mutation to another program instead of performing it directly.
+    ///
+    /// This is the shape a program must use for accounts it does not own — LEZ
+    /// rule 5 only lets the *owning* program decrease a balance, and a chained
+    /// call runs with the callee as `executing_program_id`. The caller returns
+    /// the target unchanged and hands the mutation on, flagging the account
+    /// authorized so the callee inherits the authority.
+    #[instruction]
+    pub fn delegate_to_program(
+        #[account(mut, pda = literal("treasury_state"))]
+        state: AccountWithMetadata,
+        #[account(signer)]
+        authority: AccountWithMetadata,
+        target: AccountWithMetadata,
+        target_program_id: nssa_core::program::ProgramId,
+    ) -> SpelResult {
+        let mut authorized_target = target.clone();
+        authorized_target.is_authorized = true;
+
+        let call = nssa_core::program::ChainedCall {
+            program_id: target_program_id,
+            instruction_data: vec![],
+            pre_states: vec![authorized_target],
+            pda_seeds: vec![],
+        };
+
+        // `target` is returned untouched: this program never mutates it.
+        Ok(SpelOutput::execute(
+            vec![state, authority, target],
+            vec![call],
+        ))
+    }
+
     /// Initialize a private PDA — address is unique per (seed, npk, vpk) tuple.
     #[instruction]
     pub fn init_private_account(
@@ -161,6 +194,86 @@ mod treasury {
 mod tests {
     use super::*;
 
+    /// The chained-call path through the macro: a program that delegates a
+    /// mutation instead of performing it. Nothing else in the repo exercises a
+    /// non-empty `calls` vec, so this covers the `ExecuteTransformer` rewrite
+    /// and `SpelOutputParts` plumbing for that shape.
+    #[test]
+    fn delegate_emits_chained_call_to_the_target_program() {
+        let target_program: nssa_core::program::ProgramId = [42u32; 8];
+        let out = treasury::delegate_to_program(
+            make_account(false),
+            make_account(true),
+            make_account(false),
+            target_program,
+        )
+        .expect("handler should succeed");
+
+        assert_eq!(out.chained_calls.len(), 1, "one chained call expected");
+        assert_eq!(
+            out.chained_calls[0].program_id, target_program,
+            "the call must target the program the caller named"
+        );
+    }
+
+    #[test]
+    fn delegate_authorizes_the_target_for_the_callee() {
+        // LEZ derives the callee's authority from accounts flagged authorized in
+        // the caller's output; without this the callee cannot touch the account.
+        let out = treasury::delegate_to_program(
+            make_account(false),
+            make_account(true),
+            make_account(false),
+            [42u32; 8],
+        )
+        .unwrap();
+        assert!(
+            out.chained_calls[0].pre_states[0].is_authorized,
+            "target must reach the callee authorized"
+        );
+    }
+
+    #[test]
+    fn delegate_returns_the_target_unmodified() {
+        // The whole point of delegating: the caller must not mutate an account
+        // it does not own, or LEZ rejects the transaction (rules 5 and 6).
+        let target = make_account(false);
+        let out = treasury::delegate_to_program(
+            make_account(false),
+            make_account(true),
+            target.clone(),
+            [42u32; 8],
+        )
+        .unwrap();
+        assert_eq!(out.post_states.len(), 3);
+        assert_eq!(
+            out.post_states[2].account(),
+            &target.account,
+            "target must come back byte-identical"
+        );
+    }
+
+    #[test]
+    fn claims_delegate_to_program_does_not_claim_the_plain_target() {
+        // state: mut, not init  -> None
+        // authority: signer     -> ClaimedIfDefault (see LEZ rule 7)
+        // target: plain account -> None; claiming it would steal ownership
+        let claims = treasury::__claims_delegate_to_program();
+        assert_eq!(claims.len(), 3);
+        assert!(matches!(
+            &claims[0],
+            spel_framework::spel_output::AutoClaim::None
+        ));
+        assert!(matches!(
+            &claims[1],
+            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(_)
+        ));
+        assert!(matches!(
+            &claims[2],
+            spel_framework::spel_output::AutoClaim::None
+        ));
+    }
+
     fn make_account(authorized: bool) -> AccountWithMetadata {
         AccountWithMetadata {
             account_id: nssa_core::account::AccountId::new([0u8; 32]),
@@ -174,7 +287,7 @@ mod tests {
         let idl = __program_idl();
         assert_eq!(idl.name, "treasury");
         assert_eq!(idl.version, "0.1.0");
-        assert_eq!(idl.instructions.len(), 11);
+        assert_eq!(idl.instructions.len(), 12);
         assert_eq!(idl.instructions[0].name, "initialize");
     }
 
@@ -183,7 +296,7 @@ mod tests {
         let idl: spel_framework::idl::SpelIdl =
             serde_json::from_str(PROGRAM_IDL_JSON).expect("PROGRAM_IDL_JSON should parse");
         assert_eq!(idl.name, "treasury");
-        assert_eq!(idl.instructions.len(), 11);
+        assert_eq!(idl.instructions.len(), 12);
     }
 
     #[test]
