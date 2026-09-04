@@ -131,12 +131,87 @@ Applied via `#[account(...)]` on account parameters:
 
 | Constraint | Syntax | Description |
 |------------|--------|-------------|
-| `signer` | `#[account(signer)]` | Requires `is_authorized == true`. Generates a runtime check before the handler runs. |
+| `signer` | `#[account(signer)]` | Requires `is_authorized == true`. Generates a runtime check before the handler runs. Also emits an `AutoClaim::ClaimedIfDefault(Claim::Authorized)`, so the account is claimed while it is still default-owned — see [Claims](#claims) below. |
 | `init` | `#[account(init)]` | Account must be uninitialized (`== Account::default()`). **Implies `mut`**. The macro emits an `AutoClaim::Claimed(…)` for the account automatically when you return via `SpelOutput::execute(…)`. |
 | `mut` | `#[account(mut)]` | Account is writable. Sets `writable: true` in the IDL. |
 | `owner` | `#[account(owner = EXPR)]` | Account must be owned by the given program ID. The expression should resolve to `[u8; 32]`. |
 | `pda` | `#[account(pda = SEED)]` | Account address is a PDA derived from the program ID and seed(s). See [PDA Seeds](#pda-seeds) below. Sets the `pda` field in the IDL. |
 | `rest` | _(implicit)_ | Not an explicit attribute. When the type is `Vec<AccountWithMetadata>`, the account is treated as variable-length (`rest: true` in the IDL). |
+
+### Private PDAs
+
+`#[account(private_pda, …)]` derives an address that includes the caller's key
+material, so each controller group gets a distinct address for the same seed. It
+requires **both** key arguments:
+
+```rust
+#[account(init, private_pda, pda = literal("vault"),
+          npk = arg("user_npk"), vpk = arg("user_vpk"))]
+vault: AccountWithMetadata,
+```
+
+`npk` names the instruction argument carrying the `NullifierPublicKey`, `vpk` the
+one carrying the `ViewingPublicKey`. Since LEZ v0.2.1 the derivation is
+`SHA256(prefix || program_id || seed || npk || vpk || identifier)`; omitting `vpk`
+is a compile error.
+
+---
+
+### Chained calls
+
+A program may only decrease the balance of, or modify data in, an account **it
+owns**. To act on an account owned by another program, return the account
+unchanged and emit a chained call — the callee runs as the executing program, so
+its own ownership applies:
+
+```rust
+let mut target = target.clone();
+target.is_authorized = true;               // grants the callee authority
+
+Ok(SpelOutput::execute(
+    vec![state, authority, target],        // returned untouched
+    vec![ChainedCall { program_id, instruction_data, pre_states: vec![target], pda_seeds: vec![] }],
+))
+```
+
+Authorization propagates down the chain: once an account is authorized at any
+point it stays authorized for subsequent calls. Do **not** work around a
+`UnauthorizedBalanceDecrease` by editing the account directly — delegate instead.
+
+---
+
+### Claims
+
+LEZ rule 7 rejects any program output that returns a **non-default** account still
+owned by `DEFAULT_PROGRAM_ID`. A user's wallet account is default-owned until some
+program claims it, and once it has transacted its pre-state is no longer
+`Account::default()` — so an unclaimed signer would make every transaction after
+the account's first one fail.
+
+The macro therefore emits a claim for you:
+
+| attribute | emitted claim |
+|-----------|---------------|
+| `#[account(init, pda = ...)]` | `AutoClaim::Claimed(Claim::Pda(seeds))` |
+| `#[account(init)]` | `AutoClaim::Claimed(Claim::Authorized)` |
+| `#[account(signer)]` | `AutoClaim::ClaimedIfDefault(Claim::Authorized)` |
+| everything else | `AutoClaim::None` |
+
+`ClaimedIfDefault` claims only when the account is still owned by
+`DEFAULT_PROGRAM_ID`, so claiming is a one-time event: the first program a user
+transacts with takes ownership, and later programs return the account unchanged.
+
+Two failures worth recognising, both raised by LEZ at execution rather than
+compile time:
+
+- **`ClaimedNonDefaultAccount`** — you claimed an account that is already
+  initialised. A `mut` instruction operating on an account the program already
+  owns must emit `AutoClaim::None`.
+- **`AccountAlreadyInitialized`** — `#[account(init, …)]` on an instruction that
+  runs more than once. Only the creating instruction should carry `init`.
+
+This rewriting happens inside `#[lez_program]`. Code outside it — an extension
+crate, say — must build `(Account, AutoClaim)` tuples by hand.
 
 Constraints can be combined:
 

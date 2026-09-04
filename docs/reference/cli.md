@@ -83,10 +83,18 @@ When only one `[programs.<name>]` entry exists it is auto-selected; with multipl
 Scaffold a new SPEL project. This is the command that creates everything described below — "scaffolding" and `init` refer to the same operation.
 
 ```bash
-spel init <project-name> [--lez-tag <TAG>] [--spel-tag <TAG>] [--lez-rev <REV>] [--spel-rev <REV>]
+spel init [OPTIONS] <project-name>
 ```
 
 **Does not require `--idl`.**
+
+> Options must come **before** the project name — the argument loop stops at the
+> first non-flag token, so anything after the name is ignored.
+
+Available options: `--lez-tag <TAG>`, `--lez-rev <REV>`, `--spel-tag <TAG>`,
+`--spel-rev <REV>`, and `--spel-git <URL>` (the git URL the scaffolded project
+pulls the framework from; defaults to `https://github.com/logos-co/spel.git`).
+A fork's CI passes its own URL so the scaffolded project tests the fork's code.
 
 Creates a complete project structure with:
 - Workspace `Cargo.toml`
@@ -102,7 +110,7 @@ Creates a complete project structure with:
 
 | Flag | Purpose |
 |------|---------|
-| `--lez-tag <TAG>` | LEZ version tag to pin (e.g. `v0.2.0-rc1`). |
+| `--lez-tag <TAG>` | LEZ version tag to pin (e.g. `v0.2.4`). |
 | `--spel-tag <TAG>` | SPEL version tag to pin. |
 | `--lez-rev <REV>` | LEZ git revision (alternative to `--lez-tag`). |
 | `--spel-rev <REV>` | SPEL git revision (alternative to `--spel-tag`). |
@@ -211,6 +219,23 @@ Looks up the named account across all instructions in the IDL, finds its PDA see
 - `const` seeds: resolved from the IDL definition
 - `arg` seeds: must be provided via `--<arg-name> <value>` (parsed through the IDL type of the owning instruction's argument)
 - `account` seeds: must be provided via `--<account-name> <hex|base58>`
+
+**Private PDAs.** An account declared `#[account(private_pda, …)]` derives its
+address from the caller's key material as well as the seeds, so computing it needs
+two extra flags:
+
+```bash
+spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex>
+```
+
+`--npk` is the `NullifierPublicKey` (32 bytes) and `--vpk` the `ViewingPublicKey`
+(an ML-KEM-768 encapsulation key, 1184 bytes). Both are printed by
+`wallet account show-keys` for a private account. Omitting either is an error —
+the address cannot be derived without them.
+
+Since LEZ v0.2.1 the derivation is
+`SHA256(prefix || program_id || seed || npk || vpk || identifier)`, with
+`identifier` currently fixed at 0.
 
 **ProgramId resolution** (in priority order):
 1. `--program <64-char-hex>`
@@ -336,6 +361,46 @@ spel create \
 
 ---
 
+## Multi-signature: `--export`, `--co-signer`, `sign`, `submit`
+
+When an instruction needs signatures from keys held in different wallets, build the
+transaction once and pass it around as a blob instead of trying to gather every key
+in one place.
+
+```bash
+# wallet A: build a partial transaction naming the other required signer
+spel --export tx.json --co-signer <SIGNER_B> transfer --owner <SIGNER_A> --amount 10
+
+# wallet B: add its witness (prompts, showing the decoded instruction)
+spel sign tx.json
+
+# anyone: submit once every witness is present
+spel submit tx.json
+```
+
+`--export <PATH>` writes the partial transaction rather than submitting it, and
+cannot be combined with `--dry-run`. `--co-signer <ACCOUNT_ID>` may be repeated to
+name several additional signers.
+
+`spel sign <PATH>` appends a witness for any required signer whose key this wallet
+holds, and reports when the blob is complete. `spel submit <PATH>` assembles the
+witness set and broadcasts. Submit refuses a blob with a missing witness, and
+refuses one whose message no longer matches what the witnesses signed.
+
+---
+
+## `program-id`
+
+```bash
+spel program-id <BINARY> [--format text|hex|json]
+```
+
+Prints the `ProgramId` derived from a compiled guest binary. This is the current
+name for what `inspect <FILE>` did; `inspect` still works and additionally decodes
+account data (see above).
+
+---
+
 ## Dry Run
 
 `--dry-run` resolves the entire transaction — PDAs, non-PDA account IDs, signer nonces, serialized instruction bytes — and prints it without submitting. Useful for CI golden tests, for previewing a TX before signing, and for scripting.
@@ -413,6 +478,7 @@ How to pass values for each IDL type on the command line:
 | `Vec<[u8; 32]>` | Comma-separated hex strings | `"aabb...00,ccdd...00"` |
 | `Vec<u8>` | Comma-separated decimal bytes | `1,2,3,4,5` |
 | `Vec<u32>` | Comma-separated u32 values | `100,200,300` |
+| `Vec<String>` | Repeat the flag once per element | `--tag a --tag b` |
 | `Option<T>` | `none`/`null`/empty for None; otherwise same as inner type | `none` or `42` |
 | Account IDs | Base58 string **or** 64 hex chars (with optional `0x` prefix) | `EjR7...` or `0xaabb...00` |
 

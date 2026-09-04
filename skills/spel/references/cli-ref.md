@@ -152,6 +152,36 @@ spel <INSTRUCTION> --help
 
 ---
 
+### Multi-signature — export, sign, submit
+
+```bash
+spel --export tx.json --co-signer <SIGNER_B> transfer --owner <SIGNER_A> --amount 10
+spel sign tx.json      # a second wallet adds its witness
+spel submit tx.json    # broadcast once complete
+```
+
+`--export` writes the partial transaction instead of submitting (cannot combine
+with `--dry-run`); `--co-signer` may repeat. `submit` refuses a blob with a
+missing witness, or one whose message was altered after signing.
+
+### program-id — Print ProgramId
+
+```bash
+spel program-id <BINARY> [--format text|hex|json]
+```
+
+Current name for `inspect <FILE>`; `inspect` still works and also decodes account
+data.
+
+### Private PDAs
+
+```bash
+spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex>
+```
+
+Required for `#[account(private_pda, …)]`. Both keys come from
+`wallet account show-keys`.
+
 ## Type Format Table
 
 | IDL Type | CLI Format | Example |
@@ -167,6 +197,7 @@ spel <INSTRUCTION> --help
 | `Vec<[u8; 32]>` | Comma-separated hex strings | `"aa...00,bb...00"` |
 | `Vec<u8>` | Comma-separated decimal bytes | `1,2,3,4,5` |
 | `Vec<u32>` | Comma-separated u32 values | `100,200,300` |
+| `Vec<String>` | Repeat the flag | `--tag a --tag b` |
 | `Option<T>` | `none`/`null` for None; otherwise inner type | `none` or `42` |
 | Account IDs | Base58 or 64-char hex (optional `0x`) | `EjR7...` or `0xaa...00` |
 

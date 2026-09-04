@@ -31,7 +31,37 @@ The legacy `SpelOutput::states_only(…)` / `SpelOutput::with_chained_calls(…)
 
 ### Account ownership rules
 
-Only the program that owns an account can **decrease** its balance. This is enforced by the NSSA runtime, not by SPEL. Any program can increase a balance. Violating this causes a runtime rejection.
+Only the program that owns an account can **decrease** its balance or modify its
+data. This is enforced by LEZ, not by SPEL. Any program can increase a balance.
+Violating it is a runtime rejection — `UnauthorizedBalanceDecrease` or
+`UnauthorizedDataModification` — and the transaction is dropped at block
+creation, so the CLI just reports "not confirmed".
+
+**To act on an account you do not own, delegate.** Return the account unchanged,
+mark it `is_authorized = true`, and emit a `ChainedCall` to the owning program.
+The callee executes as the executing program, so its ownership applies. Do not
+work around a rejection by editing the account directly.
+
+### Rule 7: a returned account must not be default-owned once it has state
+
+LEZ rejects any output returning a **non-default** account still owned by
+`DEFAULT_PROGRAM_ID` (`NonDefaultAccountWithDefaultOwner`). This is why
+`#[account(signer)]` emits `AutoClaim::ClaimedIfDefault` — the first program a
+user transacts with claims their account while it is still default, and every
+later transaction is then fine.
+
+Two related rejections, both raised at execution rather than compile time:
+
+- `ClaimedNonDefaultAccount` — you claimed an already-initialised account. A
+  `mut` instruction on an account the program owns must emit `AutoClaim::None`.
+- `AccountAlreadyInitialized` — `#[account(init, …)]` on an instruction that runs
+  more than once. Only the creating instruction carries `init`.
+
+### When a transaction is "not confirmed", read the sequencer log
+
+The CLI can only report that a transaction never landed. The reason lives in the
+sequencer's log as a `failed execution check` line naming the exact rule. Without
+it you are guessing.
 
 ### init implies mut
 
