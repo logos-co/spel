@@ -1,0 +1,22 @@
+[package]
+name = "pause-ext"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata.spel]
+extension_attr = "pause_ext"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_not_paused"
+
+  [[package.metadata.spel.inject.account]]
+  name = "pause_config"
+  seed = { const = "pause_config" }
+
+[dependencies]
+pause-ext-macros = { path = "../pause_ext_macros" }
+spel-framework = { git = "https://github.com/logos-co/spel.git", branch = "main" }
+nssa_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.4", features = ["host"], package = "lee_core" }
+borsh = { version = "1.0", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
