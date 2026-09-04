@@ -4,7 +4,6 @@ use std::io::Write;
 use std::{io, process};
 
 use common::transaction::LeeTransaction;
-use nssa::public_transaction::WitnessSet;
 use nssa::{AccountId, PublicKey, PublicTransaction, Signature};
 use sequencer_service_rpc::RpcClient as _;
 use wallet::WalletCore;

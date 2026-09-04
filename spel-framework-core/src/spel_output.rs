@@ -205,6 +205,77 @@ mod tests {
         assert!(!AutoClaim::None.is_claimed());
     }
 
+    /// A chained call to `program_id`, carrying one pre-state marked authorized.
+    ///
+    /// Mirrors how a real caller delegates: the account is returned unchanged in
+    /// the caller's own post-states while the mutation is handed to the callee,
+    /// which executes as `executing_program_id` and so may act on accounts it owns.
+    fn call_to(program_id: u32, authorized: bool) -> ChainedCall {
+        let mut pre = nssa_core::account::AccountWithMetadata {
+            account: Account::default(),
+            account_id: nssa_core::account::AccountId::new([program_id as u8; 32]),
+            is_authorized: false,
+        };
+        pre.is_authorized = authorized;
+        ChainedCall {
+            program_id: [program_id; 8],
+            instruction_data: vec![],
+            pre_states: vec![pre],
+            pda_seeds: vec![],
+        }
+    }
+
+    #[test]
+    fn execute_carries_chained_calls() {
+        let output = SpelOutput::execute(vec![Account::default()], vec![call_to(7, false)]);
+        assert_eq!(output.post_states.len(), 1);
+        assert_eq!(
+            output.chained_calls.len(),
+            1,
+            "the call must reach the output"
+        );
+        assert_eq!(output.chained_calls[0].program_id, [7; 8]);
+    }
+
+    #[test]
+    fn execute_preserves_chained_call_order() {
+        // Order is the execution order downstream, so it must not be reshuffled.
+        let output = SpelOutput::execute(
+            vec![Account::default()],
+            vec![call_to(1, false), call_to(2, false), call_to(3, false)],
+        );
+        let ids: Vec<u32> = output
+            .chained_calls
+            .iter()
+            .map(|c| c.program_id[0])
+            .collect();
+        assert_eq!(ids, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn execute_with_claims_carries_chained_calls() {
+        let output = SpelOutput::execute_with_claims(
+            &[Account::default()],
+            &[AutoClaim::Claimed(Claim::Authorized)],
+            vec![call_to(9, false)],
+        );
+        assert_eq!(output.post_states.len(), 1);
+        assert!(output.post_states[0].required_claim().is_some());
+        assert_eq!(output.chained_calls.len(), 1);
+        assert_eq!(output.chained_calls[0].program_id, [9; 8]);
+    }
+
+    #[test]
+    fn chained_call_pre_state_authorization_is_preserved() {
+        // LEZ grants the callee authority over accounts flagged `is_authorized`
+        // in the caller's output, so the flag must survive untouched.
+        let output = SpelOutput::execute(vec![Account::default()], vec![call_to(4, true)]);
+        assert!(
+            output.chained_calls[0].pre_states[0].is_authorized,
+            "authorization must reach the callee"
+        );
+    }
+
     /// Convenience helper: returns a `SpelOutput` with no accounts or calls.
     /// Reduces boilerplate in validity-window tests below.
     fn empty_output() -> SpelOutput {
