@@ -31,6 +31,8 @@ enum DynamicValue {
     Str(String),
     Tuple(Vec<DynamicValue>),
     Seq(Vec<DynamicValue>),
+    UnitVariant(u32),
+    StructVariant(u32, Vec<DynamicValue>),
     None,
     Some(Box<DynamicValue>),
 }
@@ -59,6 +61,15 @@ impl serde::Serialize for DynamicValue {
                     seq.serialize_element(elem)?;
                 }
                 seq.end()
+            },
+            DynamicValue::UnitVariant(idx) => serializer.serialize_unit_variant("", *idx, ""),
+            DynamicValue::StructVariant(idx, fields) => {
+                use serde::ser::SerializeStructVariant;
+                let mut sv = serializer.serialize_struct_variant("", *idx, "", fields.len())?;
+                for f in fields {
+                    sv.serialize_field("", f)?;
+                }
+                sv.end()
             },
             DynamicValue::None => serializer.serialize_none(),
             DynamicValue::Some(inner) => serializer.serialize_some(inner.as_ref()),
@@ -111,6 +122,17 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
         (IdlType::Option { option }, _) => {
             // Non-None, non-Some value with Option type -> wrap as Some
             Ok(DynamicValue::Some(Box::new(to_dynamic_value(option, val)?)))
+        },
+        (IdlType::Defined { .. }, ParsedValue::EnumVariant { index, fields, .. }) => {
+            if fields.is_empty() {
+                Ok(DynamicValue::UnitVariant(*index))
+            } else {
+                let converted: Result<Vec<_>, _> = fields
+                    .iter()
+                    .map(|(_, fty, fval)| to_dynamic_value(fty, fval))
+                    .collect();
+                Ok(DynamicValue::StructVariant(*index, converted?))
+            }
         },
         _ => Err(SerializeError::TypeMismatch {
             expected: format!("{:?}", ty),
@@ -196,6 +218,7 @@ mod tests {
         let parsed = parse_value(
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             &idl_type,
+            &[],
         )
         .unwrap();
 
@@ -320,9 +343,9 @@ mod tests {
 
         // 2. Parse CLI values exactly as spel would
         let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let parsed_seed = parse_value(seed_hex, &seed_type).unwrap();
-        let parsed_class = parse_value("2", &class_type).unwrap();
-        let parsed_strength = parse_value("42", &strength_type).unwrap();
+        let parsed_seed = parse_value(seed_hex, &seed_type, &[]).unwrap();
+        let parsed_class = parse_value("2", &class_type, &[]).unwrap();
+        let parsed_strength = parse_value("42", &strength_type, &[]).unwrap();
 
         // 3. Serialize to u32 words (variant_index=0 for CommitRun)
         let words = serialize_to_risc0(
@@ -356,6 +379,86 @@ mod tests {
         );
     }
 
+    /// Verifies the CLI's dynamic enum-arg serialization is word-identical to
+    /// what a guest program's derived serde produces. This is the contract for
+    /// IDL `defined`-type arguments (e.g. admin-authority's AdminCandidate).
+    #[test]
+    fn enum_arg_roundtrip_matches_derived_serde() {
+        use spel_framework_core::idl::IdlTypeDef;
+
+        // The guest-side shape, exactly as a program would declare it.
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        enum TestInstruction {
+            AdminTransfer { new_admin: TestCandidate },
+        }
+        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
+        enum TestCandidate {
+            Signer,
+            Pda {
+                program_id: [u32; 8],
+                seed: [u8; 32],
+            },
+        }
+
+        // The IDL-side description, in the exact JSON shape generate-idl emits.
+        let def: IdlTypeDef = serde_json::from_str(
+            r#"{
+                "name": "TestCandidate",
+                "kind": "enum",
+                "variants": [
+                    {"name": "Signer"},
+                    {"name": "Pda", "fields": [
+                        {"name": "program_id", "type": "program_id"},
+                        {"name": "seed", "type": {"array": ["u8", 32]}}
+                    ]}
+                ]
+            }"#,
+        )
+        .unwrap();
+        let types = std::slice::from_ref(&def);
+        let arg_ty = IdlType::Defined {
+            defined: "TestCandidate".into(),
+        };
+
+        // Unit variant: CLI words must equal derived-serde words.
+        let parsed = parse_value("Signer", &arg_ty, types).unwrap();
+        let words = serialize_to_risc0(0, &[(&arg_ty, &parsed)]).unwrap();
+        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::AdminTransfer {
+            new_admin: TestCandidate::Signer,
+        })
+        .unwrap();
+        assert_eq!(
+            words, reference,
+            "Signer wire format diverges from derived serde"
+        );
+
+        // Payload variant, patterned bytes so an endianness slip would show.
+        let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let raw = format!(
+            r#"{{"Pda": {{"program_id": "{}", "seed": "{}"}}}}"#,
+            "cd".repeat(32),
+            seed_hex,
+        );
+        let parsed = parse_value(&raw, &arg_ty, types).unwrap();
+        let words = serialize_to_risc0(0, &[(&arg_ty, &parsed)]).unwrap();
+
+        let mut seed = [0u8; 32];
+        for (i, b) in seed.iter_mut().enumerate() {
+            *b = i as u8 + 1;
+        }
+        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::AdminTransfer {
+            new_admin: TestCandidate::Pda {
+                program_id: [0xcdcdcdcd; 8],
+                seed,
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            words, reference,
+            "Pda wire format diverges from derived serde"
+        );
+    }
+
     #[test]
     fn dynamic_value_u32_smoke() {
         let val = DynamicValue::U32(42);
@@ -385,7 +488,7 @@ mod tests {
             array: (Box::new(IdlType::Primitive("u8".to_string())), 32),
         };
         let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let parsed = parse_value(hex, &ty).unwrap();
+        let parsed = parse_value(hex, &ty, &[]).unwrap();
 
         let dv = to_dynamic_value(&ty, &parsed).unwrap();
         let serde_words = risc0_zkvm::serde::to_vec(&dv).unwrap();
@@ -490,10 +593,11 @@ mod tests {
         let parsed_seed = parse_value(
             "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
             &seed_type,
+            &[],
         )
         .unwrap();
-        let parsed_class = parse_value("2", &class_type).unwrap();
-        let parsed_strength = parse_value("42", &strength_type).unwrap();
+        let parsed_class = parse_value("2", &class_type, &[]).unwrap();
+        let parsed_strength = parse_value("42", &strength_type, &[]).unwrap();
 
         let words = serialize_to_risc0(
             0,
