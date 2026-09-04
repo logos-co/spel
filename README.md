@@ -1,10 +1,16 @@
-# spel-framework
+# SPEL — Smart Program Execution Layer
 
 [![CI](https://github.com/logos-co/spel/actions/workflows/ci.yml/badge.svg)](https://github.com/logos-co/spel/actions/workflows/ci.yml)
 
-Developer framework for building SPEL programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
+Developer framework for building [LEZ](https://github.com/logos-blockchain/lssa) programs — inspired by [Anchor](https://www.anchor-lang.com/) for Solana.
 
 Write your program logic with proc macros. Get IDL generation, a full CLI with TX submission, and project scaffolding for free.
+
+## Documentation
+
+- **[Tutorial: Build Your First LEZ Program](docs/tutorial.md)** — step-by-step guide from zero to deployed program
+- **[Reference Docs](docs/reference/)** — macros, types, CLI, IDL, and client generation
+- **[Multi-Seed PDA Guide](docs/multi-seed-pda.md)** — advanced PDA derivation patterns
 
 ## Quick Start
 
@@ -16,7 +22,7 @@ spel init my-program
 cd my-program
 ```
 
-This generates a complete project:
+This generates a complete project with a `Cargo.lock` for reproducible builds:
 
 ```
 my-program/
@@ -27,6 +33,7 @@ my-program/
 │   └── src/lib.rs
 ├── methods/
 │   └── guest/                 # RISC Zero guest (runs on-chain)
+│       ├── Cargo.lock         # Pinned deps for reproducible Docker builds
 │       └── src/bin/my_program.rs
 └── examples/
     └── src/bin/
@@ -41,7 +48,7 @@ make build        # Build the guest binary (risc0)
 make idl          # Generate IDL from #[lez_program] annotations
 make deploy       # Deploy to sequencer
 make cli ARGS="--help"   # See auto-generated commands
-make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
+make cli ARGS="-p <binary> -- initialize --owner <BASE58>"
 ```
 
 ## Writing Programs
@@ -49,8 +56,6 @@ make cli ARGS="-p <binary> initialize --owner-account <BASE58>"
 ```rust
 #![no_main]
 
-use nssa_core::account::AccountWithMetadata;
-use nssa_core::program::AccountPostState;
 use spel_framework::prelude::*;
 
 risc0_zkvm::guest::entry!(main);
@@ -67,11 +72,8 @@ mod my_program {
         #[account(signer)]
         owner: AccountWithMetadata,
     ) -> SpelResult {
-        // Your logic here
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
-            AccountPostState::new(owner.account.clone()),
-        ]))
+        // Your logic here — mutate state.account.data if you need to write state.
+        Ok(SpelOutput::execute(vec![state, owner], vec![]))
     }
 
     #[instruction]
@@ -84,21 +86,21 @@ mod my_program {
         amount: u128,
     ) -> SpelResult {
         // Your logic here
-        Ok(SpelOutput::states_only(vec![
-            AccountPostState::new(state.account.clone()),
-            AccountPostState::new(recipient.account.clone()),
-            AccountPostState::new(sender.account.clone()),
-        ]))
+        Ok(SpelOutput::execute(vec![state, recipient, sender], vec![]))
     }
 }
 ```
+
+> **Note:** Import everything from `spel_framework::prelude::*` — this provides `AccountWithMetadata`, `SpelOutput`, `SpelResult`, `SpelError`, `AccountPostState`, `Claim`, `AutoClaim`, `BorshSerialize`, `BorshDeserialize`, and more. Do not import from `nssa_core` directly to avoid version conflicts.
+>
+> The `#[lez_program]` macro reads each handler's `#[account(…)]` attributes and generates the correct claim metadata for every entry in the `vec![…]` passed to `SpelOutput::execute(…)` — you never write `AccountPostState::new_claimed(…, Claim::Authorized)` by hand. (That legacy API is still available via the `#[deprecated]` `SpelOutput::states_only` / `with_chained_calls` constructors.)
 
 ### Account Attributes
 
 | Attribute | Description |
 |-----------|-------------|
 | `#[account(mut)]` | Account is writable |
-| `#[account(init)]` | Account is being created (use `new_claimed`) |
+| `#[account(init)]` | Account is being created; the macro emits the correct `AutoClaim::Claimed(…)` automatically when you return `SpelOutput::execute(…)` |
 | `#[account(signer)]` | Account must sign the transaction |
 | `#[account(pda = literal("seed"))]` | PDA derived from a constant string |
 | `#[account(pda = account("other"))]` | PDA derived from another account's ID |
@@ -145,7 +147,7 @@ Every program gets a full CLI for free. The wrapper is just:
 ```rust
 #[tokio::main]
 async fn main() {
-    spel_cli::run().await;
+    spel::run().await;
 }
 ```
 
@@ -156,7 +158,7 @@ This provides:
 - risc0-compatible serialization
 - Transaction building and submission with wallet integration
 - `--dry-run` mode for testing
-- `inspect` subcommand to extract ProgramId from binaries
+- `inspect` subcommand to extract ProgramId from binaries and decode account data
 
 ### Account Types
 
@@ -205,15 +207,15 @@ It reads the `#[lez_program]` annotations at compile time and generates a comple
 
 The generated IDL is a superset of the lssa-lang IDL spec. In addition to our core fields, each instruction includes:
 
-- **discriminator** -- SHA256 of global:name, first 8 bytes, matching lssa-lang convention
-- **execution** -- public/private_owned flags (default: public execution)
-- **variant** -- PascalCase variant name
+- **discriminator** — SHA256 of global:name, first 8 bytes, matching lssa-lang convention
+- **execution** — public/private_owned flags (default: public execution)
+- **variant** — PascalCase variant name
 
 Each account field includes:
 
-- **visibility** -- list of visibility tags (default: public)
+- **visibility** — list of visibility tags (default: public)
 
-These fields are optional and backward-compatible -- existing IDL consumers that do not know about them will simply ignore them.
+These fields are optional and backward-compatible — existing IDL consumers that do not know about them will simply ignore them.
 
 ## CLI Usage
 
@@ -232,6 +234,9 @@ spel inspect <account-id> --idl my_program-idl.json --type VaultState
 
 # Same, but supply raw borsh bytes directly instead of fetching from the network
 spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
+
+# Inspect with raw data (offline, no sequencer needed)
+lez-cli inspect --data <hex-encoded-borsh> --idl program-idl.json
 
 # Show available commands
 spel --idl program-idl.json --help
@@ -433,4 +438,4 @@ Once the upstream fix is merged, remove the `[patch]` section and update your LE
 
 ## License
 
-MIT
+Dual-licensed under [MIT](LICENSE-MIT) and [Apache-2.0](LICENSE-APACHE-v2).
