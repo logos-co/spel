@@ -133,13 +133,19 @@ When using `#[lez_program(instruction = "my_core::Instruction")]`, the external 
 
 ## CLI Usage
 
-### Empty string arguments are dropped by logoscore
+### Instruction names accept either snake_case or kebab-case
 
-If you pass an empty string `""` as an instruction argument, logoscore may silently drop it. Always pass non-empty strings or use `Option<String>` with explicit `none`.
+`create_proposal` in Rust can be invoked as either `create-proposal` or
+`create_proposal` — the CLI matches on both forms.
 
-### Instruction names transform: snake_case → kebab-case
+### Account flags are just `--{name}`
 
-`create_proposal` in Rust becomes `create-proposal` in the CLI. Account flags use `--{name}-account` suffix.
+An account parameter named `owner` is passed as `--owner <ACCOUNT_ID>`. There is
+no `-account` suffix.
+
+```bash
+spel initialize --owner Public/5ig8kHkv...
+```
 
 ### `--program` accepts name, hex, or file path
 

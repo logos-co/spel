@@ -23,9 +23,8 @@ pub struct SpelOutput {
 |--------|-----------|-------------|
 | `execute` | `fn execute<I: IntoIterator<Item = impl IntoPostState>>(accounts: I, calls: Vec<ChainedCall>) -> Self` | **Idiomatic.** Accepts the handler's `AccountWithMetadata` idents directly; the `#[lez_program]` macro rewrites the call to `execute_with_claims(…)` with the correct `AutoClaim` per account derived from its `#[account(…)]` constraints. |
 | `empty` | `fn empty() -> Self` | Empty output (no states, no calls). |
-| `into_parts` | `fn into_parts(self) -> (Vec<AccountPostState>, Vec<ChainedCall>)` | Destructure into the tuple form expected by `write_nssa_outputs_with_chained_call`. Used by generated code. |
-| `states_only` *(deprecated)* | `fn states_only(post_states: Vec<AccountPostState>) -> Self` | Legacy constructor — marked `#[deprecated]` in favor of `execute`. Use only when building `AccountPostState` values that `execute` can't express. |
-| `with_chained_calls` *(deprecated)* | `fn with_chained_calls(post_states: Vec<AccountPostState>, chained_calls: Vec<ChainedCall>) -> Self` | Legacy constructor — marked `#[deprecated]` in favor of `execute`. |
+| `into_parts` | `fn into_parts(self) -> SpelOutputParts` | Destructure into the parts the generated dispatcher writes out (post states, chained calls, validity windows). Used by generated code. |
+| `execute_with_claims` | `fn execute_with_claims(accounts: &[Account], claims: &[AutoClaim], calls: Vec<ChainedCall>) -> Self` | What `execute` rewrites to. Call it directly when writing code outside `#[lez_program]` — an extension crate, say — where the rewrite does not run. Panics if the two slices differ in length. |
 
 ### Example
 
