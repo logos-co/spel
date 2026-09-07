@@ -138,6 +138,34 @@ Applied via `#[account(...)]` on account parameters:
 | `pda` | `#[account(pda = SEED)]` | Account address is a PDA derived from the program ID and seed(s). See [PDA Seeds](#pda-seeds) below. Sets the `pda` field in the IDL. |
 | `rest` | _(implicit)_ | Not an explicit attribute. When the type is `Vec<AccountWithMetadata>`, the account is treated as variable-length (`rest: true` in the IDL). |
 
+### `ProgramContext`
+
+An instruction may take a `ProgramContext` as its **first** parameter. The
+dispatcher injects it — it is not part of the ABI and never appears in the IDL:
+
+```rust
+#[instruction]
+pub fn initialize(
+    _ctx: ProgramContext,
+    #[account(init, pda = literal("state"))] mut state: AccountWithMetadata,
+    #[account(signer)] owner: AccountWithMetadata,
+) -> SpelResult { /* ... */ }
+```
+
+It carries two fields:
+
+| field | meaning |
+|-------|---------|
+| `self_program_id` | the currently executing program's id |
+| `caller_program_id` | the program that invoked this one, or `DEFAULT_PROGRAM_ID` (all zeros) for a top-level transaction |
+
+Use it when a handler needs its own program id — deriving a PDA by hand, say — or
+to tell a direct call from a chained one. It is optional: omit the parameter and
+nothing changes. `spel init` includes it in the generated `initialize`, which is
+why you will see it in a fresh project.
+
+---
+
 ### Private PDAs
 
 `#[account(private_pda, …)]` derives an address that includes the caller's key
