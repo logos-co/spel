@@ -16,6 +16,9 @@ spel-client-gen --idl <PATH> --out-dir <DIR>
 |--------|----------|-------------|
 | `--idl <path>` | Yes | Path to the IDL JSON file. |
 | `--out-dir <dir>` | Yes | Output directory for generated files. Created if it doesn't exist. |
+| `--target <target>` | | `rust+ffi` (default) or `logos-module`. |
+| `--module-name <name>` | | Override the class/file name. `logos-module` target only. |
+| `--ffi-lib-path <path>` | | Path to the compiled FFI `.so`, relative to `--out-dir`. `logos-module` target only; wires up `CMakeLists.txt` automatically. |
 | `--help`, `-h` | | Print help. |
 
 **Output files** (named after the program):
