@@ -16,7 +16,7 @@ pub enum ParsedValue {
     U32Array(Vec<u32>),         // [u32; N] / ProgramId
     ByteArrayVec(Vec<Vec<u8>>), // Vec<[u8; 32]>
     StringVec(Vec<String>),     // Vec<String>
-    Seq(Vec<ParsedValue>),      // Vec<T> for any other primitive T (u64, u128, bool)
+    Seq(Vec<ParsedValue>),      // Vec<u64> / Vec<u128> / Vec<bool>, one element per entry
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
     Raw(String),                // fallback
@@ -302,16 +302,18 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
             }
         },
         // Vec<u64> / Vec<u128> / Vec<bool> — comma-separated values, parsed element by
-        // element with the primitive parser; an empty (or whitespace-only) string is an
-        // empty list.
+        // element with the primitive parser. An empty (or whitespace-only) string is an
+        // empty list; an empty element inside a non-empty list (`"1,,2"`, `","`) is an
+        // error rather than being silently dropped.
         IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" => {
+            if raw.trim().is_empty() {
+                return Ok(ParsedValue::Seq(Vec::new()));
+            }
             let mut items = Vec::new();
-            for (i, part) in raw
-                .split(',')
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .enumerate()
-            {
+            for (i, part) in raw.split(',').map(str::trim).enumerate() {
+                if part.is_empty() {
+                    return Err(format!("Element [{}]: empty element in Vec<{}>", i, p));
+                }
                 let item =
                     parse_primitive(part, p).map_err(|e| format!("Element [{}]: {}", i, e))?;
                 items.push(item);
@@ -507,6 +509,20 @@ mod tests {
                 other => panic!("expected ParsedValue::Seq, got {other:?}"),
             }
         }
+    }
+
+    #[test]
+    fn parse_vec_rejects_empty_elements() {
+        for (raw, idx) in [(",", 0), ("1,,2", 1), ("1, ,2", 1), ("1,2,", 2), (",1", 0)] {
+            let err = parse_value(raw, &vec_of("u64")).unwrap_err();
+            assert!(
+                err.starts_with(&format!("Element [{idx}]:")),
+                "{raw:?} -> {err}"
+            );
+            assert!(err.contains("empty element"), "{raw:?} -> {err}");
+        }
+        let err = parse_value("true,,false", &vec_of("bool")).unwrap_err();
+        assert!(err.starts_with("Element [1]:"), "got: {err}");
     }
 
     #[test]
