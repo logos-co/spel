@@ -14,7 +14,7 @@
 # Required Environment Variables:
 #   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
 # Optional Environment Variables:
-#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/head). If unset,
+#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/merge). If unset,
 #                 spel init uses its hardcoded default (branch = "main").
 
 set -euo pipefail
@@ -88,7 +88,9 @@ cd "$WORK_DIR"
 
 # ─── Step 1: spel init — default LEZ, optional SPEL override ─────────────
 # Always uses DEFAULT LEZ resolution (no --lez-tag) to test init.rs defaults.
-# On PRs, SPEL_TAG is set so the scaffolded project uses the PR's framework code.
+# On PRs, SPEL_TAG is set to the PR's *merge* ref, so the scaffolded project
+# uses the PR's framework code as it would land: the PR merged into current
+# main, matching what the runner has checked out.
 # On main pushes, SPEL_TAG is unset so the default refs are tested.
 # SPEL_GIT is always set in CI (the repo's own URL) so forks test their own
 # code; only local runs without SPEL_GIT exercise the built-in default URL.
