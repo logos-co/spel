@@ -61,6 +61,37 @@ Two mistakes made while writing this example, both caught by LEZ at execution:
   A `mut` instruction on an account the program already owns must emit
   `AutoClaim::None`.
 
+## A fourth one that fails quietly
+
+The three above stop the build. This one does not, which makes it worse.
+
+**Mark the extension's state struct `#[account_type]`.** It is what puts the
+type's shape into the *consumer's* IDL, and that IDL is embedded into the
+generated FFI and read back by `decode_account` at runtime.
+
+Leave it off and everything still works: the instructions are contributed, the
+injected account is wired into the gated instruction, `spel-client-gen` emits
+the FFI entry points and PDA helpers, and the generated QML is **byte-identical**
+— 1548 lines either way. The only difference is the IDL string inside
+`<program>_ffi.rs`. So the account viewer in the generated UI can fetch the
+injected account but cannot decode its contents, and it shows up as raw bytes
+at runtime rather than as a build error.
+
+Verified by generating both ways from the same consumer:
+
+```
+# without #[account_type]
+IDL account types: ['Counter']
+# with
+IDL account types: ['Counter', 'PauseConfig']
+    PauseConfig fields: [('paused', 'bool')]
+```
+
+The framework finds it on its own once the attribute is there — dependency
+crates are scanned for `#[account_type]` items, which is what
+`spel-framework-core/src/{dep_walk,account_types}.rs` are for. Nothing else is
+needed on the consumer side.
+
 ## Layout note
 
 The guest build is docker-hermetic, so a path-dependency extension must live

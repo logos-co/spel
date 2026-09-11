@@ -8,7 +8,12 @@ pub use pause_ext_macros::{instruction, pause_ext, require_not_paused};
 // Required for the absolute self-paths the framework copies into consumer codegen.
 extern crate self as pause_ext;
 
-#[derive(BorshSerialize, BorshDeserialize, Default)]
+/// `#[account_type]` is what puts this struct's shape into the consumer's IDL,
+/// and the IDL is what the generated FFI embeds and `decode_account` reads at
+/// runtime. Without the attribute everything still builds and the UI still
+/// renders — it just cannot decode this account's contents. See the README.
+#[account_type]
+#[derive(Debug, Clone, BorshSerialize, BorshDeserialize, Default)]
 pub struct PauseConfig {
     pub paused: bool,
 }
