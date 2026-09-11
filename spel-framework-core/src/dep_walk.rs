@@ -24,6 +24,7 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 /// Everything the framework needs to know about a crate's dependency
 /// graph, resolved in one pass with one `cargo metadata` invocation.
@@ -415,30 +416,49 @@ pub fn path_dep_dirs(manifest: &Path) -> Vec<PathBuf> {
 /// `None` after warning when cargo is unavailable, fails, or emits
 /// unparseable output.
 ///
-/// Runs `--offline`: this executes inside macro expansion, which must
-/// never hit the network. By the time rustc expands the consumer crate,
-/// cargo has already fetched its dependencies, so offline resolution
-/// succeeds; where it cannot, callers degrade to path-only results.
+/// Tries `--offline` first: this executes inside macro expansion, and a
+/// normal host build has already fetched everything, so offline
+/// resolution succeeds without touching the network. That assumption
+/// breaks inside the risc0 docker builder, whose Dockerfile fetches with
+/// `--target riscv32im-risc0-zkvm-elf`: metadata resolves the full graph
+/// and needs manifests of host-only crates the filtered fetch skipped.
+/// On offline failure, retry with `--locked` and downloads allowed; the
+/// lockfile keeps the retry deterministic, cargo only fills in missing
+/// manifests. Where both fail (no network either), callers degrade to
+/// path-only results as before.
 fn cargo_metadata_json<F: FnMut(String)>(
     manifest: &Path,
     on_warning: &mut F,
 ) -> Option<serde_json::Value> {
-    let output = match std::process::Command::new("cargo")
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--offline",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            on_warning(format!("could not run `cargo metadata`: {e}"));
-            return None;
-        },
+    let run = |on_warning: &mut F, mode_flag: &str| -> Option<Output> {
+        let result = std::process::Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                mode_flag,
+                "--manifest-path",
+            ])
+            .arg(manifest)
+            .output();
+        match result {
+            Ok(o) => Some(o),
+            Err(e) => {
+                on_warning(format!("could not run `cargo metadata`: {e}"));
+                None
+            },
+        }
+    };
+    let output = run(on_warning, "--offline")?;
+
+    let output = if output.status.success() {
+        output
+    } else {
+        on_warning(format!(
+            "`cargo metadata --offline` failed ({}); retrying with `--locked`",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+        run(on_warning, "--locked")?
     };
 
     if !output.status.success() {
@@ -726,11 +746,11 @@ token_core = { path = "../../core" }
 
     #[test]
     fn resolve_dep_graph_falls_back_to_path_only_when_metadata_fails() {
-        // The fake `https://example.com/repo.git` URL makes `cargo metadata`
-        // fail (cannot resolve the git dep). The registry version dep on
-        // `serde` also fails because the temporary workspace has no
-        // Cargo.lock. `resolve_dep_graph` should degrade gracefully and
-        // still return the path-dep, proving the fallback path works.
+        // The git dep's URL is one cargo rejects while parsing the manifest,
+        // so `cargo metadata` fails in both the offline and the locked
+        // attempt without touching the network. `resolve_dep_graph` should
+        // degrade gracefully and still return the path dep, proving the
+        // fallback path works.
         let tmp = TempDir::new("find-path-deps-filter");
 
         tmp.write(
@@ -755,7 +775,7 @@ edition = "2021"
 [dependencies]
 token_core = { path = "../../core" }
 serde = { version = "1.0" }
-nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
+nssa_core = { git = "not-a-url", tag = "v1.0" }
 "#,
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");

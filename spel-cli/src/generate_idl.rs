@@ -364,10 +364,11 @@ mod tests {
 
     #[test]
     fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
-        // The unfetchable git dep makes `cargo metadata --offline` fail, so
-        // the walk warns and degrades to path-only results. Registry and git
-        // deps are then absent not because they are ignored, but because the
-        // metadata source for them is unavailable.
+        // The git dep's URL is one cargo rejects while parsing the manifest,
+        // so `cargo metadata` fails in both attempts without touching the
+        // network. The walk warns and degrades to path-only results.
+        // Registry and git deps are then absent not because they are ignored,
+        // but because the metadata source for them is unavailable.
         let tmp = TempDir::new("find-path-deps-filter");
 
         tmp.write(
@@ -382,7 +383,7 @@ mod tests {
              [dependencies]\n\
              token_core = { path = \"../../core\" }\n\
              serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+             nssa_core = { git = \"not-a-url\", tag = \"v1.0\" }\n",
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
