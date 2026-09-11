@@ -215,6 +215,99 @@ Each account field includes:
 
 These fields are optional and backward-compatible -- existing IDL consumers that do not know about them will simply ignore them.
 
+### Extension Libraries
+
+Third-party libraries can ship `#[instruction]` fns that are auto-discovered by the framework and merged into a consuming program's dispatcher and IDL. Discovery is driven by metadata in the library's `Cargo.toml`:
+
+```toml
+[package.metadata.spel]
+extension_attr = "admin_authority"
+```
+
+When a consumer's `#[lez_program]` module carries the declared `extension_attr` (e.g. `#[admin_authority]`), the framework scans the library's `src/lib.rs` for `#[instruction]` fns and merges them with cross-crate dispatcher calls. Per-instruction attrs the library owns (e.g. `#[require_admin]`) stay on the emitted handlers and expand there as the library's own proc-macros.
+
+Trust model: activating an extension takes two explicit consumer actions, the dependency in the consumer's own `Cargo.toml` and the marker attr on the module. Discovery covers direct dependencies only, so a transitive crate can never contribute instructions by claiming a matching `extension_attr`. Generated call paths derive from the dependency's `[package].name`, never its directory name. Malformed `[package.metadata.spel]` fails the build rather than silently deactivating the extension. Duplicate instruction names across user fns and extensions are a compile error naming both sources.
+
+Contracts an extension author must hold:
+
+1. **Instruction fns are re-exported at the crate root.** The generated dispatcher calls `::your_crate::your_instruction(...)`; a fn nested in a private module does not resolve.
+2. **Signature types resolve at the consumer's expansion site.** Extension instruction signatures are copied verbatim into consumer-side codegen, so reference your own types by absolute path (`::your_crate::YourType`) rather than relying on imports.
+3. **Gate and marker attrs are self-consuming proc-macros.** Attrs on items inside a module expand once, after the outer `#[lez_program]` rewrite, on the emitted handlers. Ship every instruction-level attr as a real proc-macro that handles that expansion: a gate rewrites the handler body, a marker expands to nothing. The framework strips nothing.
+
+An extension whose gate needs specific accounts can additionally declare an inject block:
+
+```toml
+[[package.metadata.spel.inject]]
+wrapper = "require_admin"
+
+  [[package.metadata.spel.inject.account]]
+  name = "admin_config"
+  seed = { const = "admin_config" }
+
+  [[package.metadata.spel.inject.account]]
+  name = "caller"
+  signer = true
+```
+
+Any consumer instruction carrying the named wrapper attribute (bare, without arguments) gets the listed account params synthesized at expansion time unless it already declares them (skip-if-declared). A seed can also be a compound list, `seed = [{ const = "frozen" }, { account = "caller" }]`, emitted as a compound PDA constraint. Injection runs identically in the compile-time expansion and in `spel generate-idl`, so the IDL producers cannot diverge. Injected params are prepended after a leading `ProgramContext`, in the block's declaration order, and are part of the instruction's ABI as shown in the IDL. When multiple extensions inject on one instruction, the order of their marker attrs on the module decides which extension's params come first.
+
+The framework holds no library-specific knowledge. Multiple extensions stack on one program without coordination. First consumer of this mechanism is [`admin-authority`](https://github.com/mmlado/spel-admin-authority).
+
+#### Auto-Wrap (Optional)
+
+Extensions can additionally request that the framework automatically prepend a per-instruction attribute (e.g. a freeze gate) to every dispatched instruction the consumer ships. Activated by a second metadata table:
+
+```toml
+[package.metadata.spel.wrap_instructions]
+wrapper = "freeze_authority::require_not_frozen"
+skip = "manual"
+self_exempt_marker = "freeze_exempt"
+exempt = [
+  "admin_authority::admin_initialize",
+  "admin_authority::admin_transfer",
+  "admin_authority::admin_renounce",
+]
+```
+
+When the extension declares a `skip` word and the consumer's marker carries it as an arg (e.g. `#[freeze_authority(manual)]`), wrap is disabled and the consumer falls back to per-instruction opt-in. Omitting `skip` means the extension offers no opt-out word, and wrap is active for every consumer carrying the marker. Otherwise the framework walks every dispatched instruction and prepends `wrapper`, except those carrying the `self_exempt_marker` attribute or named in `exempt` (cross-crate carve-outs from other extensions).
+
+First consumer of this mechanism is [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority).
+
+#### Embedded Mode (Optional)
+
+An extension's config state can live inside one of the consumer's own accounts instead of a dedicated PDA. The consumer declares it program-wide on the module marker, role kwarg plus byte offset:
+
+```rust
+#[lez_program]
+#[admin_authority(admin_config = config, offset = 32)]
+mod my_program { ... }
+```
+
+The framework then rewrites the named role end to end. The role's inject entry retargets to the consumer account with the constraint copied from the consumer's account-creating declaration, the `#[account(init, pda = ...)]` one, minus `init` and `mut`. Gated instructions that declare the account use it, ones that do not get it injected PDA-verified. Every gate is stamped with the location kwargs and the offset by the framework itself, after the injection decision, so authored args keep disabling injection and a consumer-written location kwarg is a compile error, the marker is the only writer. Discovered instructions get the role param substituted to the consumer account, and instructions the extension names in its embedded metadata are not emitted at all, typically the initializer, because the slot is born initialized by the consumer's own account-creating instruction.
+
+Two more metadata tables drive the extension side:
+
+```toml
+[package.metadata.spel.embedded]
+skip = ["admin_initialize"]
+state_type = "admin_authority::AdminConfig"
+
+[[package.metadata.spel.bound_args]]
+arg = "offset"
+from = "offset"
+default = 0
+```
+
+`embedded.skip` names discovered instructions dropped in embedded mode. `embedded.state_type` names the type occupying the embedded window and is mandatory in embedded mode: the program macro emits a window collision assert per embed pair sharing an account, each window's length read through `<state_type as FixedBorshSize>::SIZE`, so two extensions claiming overlapping byte ranges refuse to compile. Touching windows are legal. Discovery itself rejects identical offsets in every producer, the CLI included, and defers the range check to rustc, the only party that knows sizes. `bound_args` declares a trailing fn param the framework strips at discovery and fills at the dispatch call site as a compile-time literal, resolved from the marker kwarg or the default. Trailing is enforced in block order, any other position is a hard error at discovery, the dispatcher appends the values after the transaction args. The value never appears in the IDL or the transaction, a caller-supplied offset would be a caller-controlled write location. Dedicated mode is the degenerate case offset zero over the extension's own PDA, one code path.
+
+`from` accepts two shapes. `"offset"` reads the extension's own marker. `"<marker>::offset"` reads a peer marker on the same module, so an extension can depend on where a peer embedded its state without depending on the peer's crate. `default` is optional. When the referenced marker or kwarg is absent the default applies, and a bound arg without a default makes both hard errors at the consumer's build, never a silent zero.
+
+When two embedded roles resolve to the same consumer account, the framework merges them into one transaction account: listed once in the IDL, enum, and validation with the union of their `mut` and `signer` constraints, and cloned into every duplicated position of the precompiled call. Two embeds naming the same account at the same offset are a compile error.
+
+One amendment to the wrapper-kwarg contract above: `offset` is the single non-role kwarg a stamped gate attr may carry, and framework-stamped args do not count as consumer-authored, only the authored form disables injection.
+
+Embedded mode ships in [`admin-authority`](https://github.com/mmlado/spel-admin-authority) and [`freeze-authority`](https://github.com/mmlado/spel-freeze-authority), including both extensions sharing one consumer account.
+
 ## CLI Usage
 
 ```bash

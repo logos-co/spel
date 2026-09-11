@@ -1,7 +1,7 @@
 //! IDL type-aware value parsing from CLI strings.
 
 use crate::hex::{hex_decode, hex_encode};
-use spel_framework_core::idl::IdlType;
+use spel_framework_core::idl::{IdlType, IdlTypeDef};
 
 /// A parsed CLI value with type information preserved.
 #[derive(Debug, Clone)]
@@ -19,7 +19,12 @@ pub enum ParsedValue {
     Seq(Vec<ParsedValue>),      // Vec<u64> / Vec<u128> / Vec<bool>, one element per entry
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
-    Raw(String),                // fallback
+    EnumVariant {
+        name: String,
+        index: u32,
+        fields: Vec<(String, IdlType, ParsedValue)>,
+    },
+    Raw(String), // fallback
 }
 
 impl std::fmt::Display for ParsedValue {
@@ -61,13 +66,24 @@ impl std::fmt::Display for ParsedValue {
             },
             ParsedValue::None => write!(f, "None"),
             ParsedValue::Some(inner) => write!(f, "Some({})", inner),
+            ParsedValue::EnumVariant { name, fields, .. } => {
+                if fields.is_empty() {
+                    write!(f, "{}", name)
+                } else {
+                    let parts: Vec<String> = fields
+                        .iter()
+                        .map(|(n, _, v)| format!("{}: {}", n, v))
+                        .collect();
+                    write!(f, "{} {{ {} }}", name, parts.join(", "))
+                }
+            },
             ParsedValue::Raw(s) => write!(f, "{}", s),
         }
     }
 }
 
 /// Parse a CLI string value according to its IDL type.
-pub fn parse_value(raw: &str, ty: &IdlType) -> Result<ParsedValue, String> {
+pub fn parse_value(raw: &str, ty: &IdlType, types: &[IdlTypeDef]) -> Result<ParsedValue, String> {
     match ty {
         IdlType::Primitive(p) => parse_primitive(raw, p),
         IdlType::Array { array } => parse_array(raw, &array.0, array.1),
@@ -76,11 +92,91 @@ pub fn parse_value(raw: &str, ty: &IdlType) -> Result<ParsedValue, String> {
             if raw == "none" || raw == "null" || raw.is_empty() {
                 Ok(ParsedValue::None)
             } else {
-                Ok(ParsedValue::Some(Box::new(parse_value(raw, option)?)))
+                Ok(ParsedValue::Some(Box::new(parse_value(
+                    raw, option, types,
+                )?)))
             }
         },
-        IdlType::Defined { defined } => Ok(ParsedValue::Raw(format!("{}({})", defined, raw))),
+        IdlType::Defined { defined } => parse_defined(raw, defined, types),
     }
+}
+
+/// Parse a user-defined type by looking its definition up in the IDL.
+///
+/// Accepted syntax:
+/// - a bare variant name for unit variants
+/// - a one-key JSON object for payload variants
+fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedValue, String> {
+    let def = types
+        .iter()
+        .find(|t| t.name == name)
+        .ok_or_else(|| format!("type '{name}' not found in the IDL's type section"))?;
+    if def.kind != "enum" {
+        return Err(format!(
+            "'{name}' is {}; only enum arguments are supported for now",
+            def.kind,
+        ));
+    }
+
+    // Bare word
+    if let Some((index, variant)) = def.variants.iter().enumerate().find(|(_, v)| v.name == raw) {
+        if !variant.fields.is_empty() {
+            return Err(format!(
+                "variant '{raw}' of '{name}' has fields; pass JSON: {{\"{raw}\": {{ ... }} }}"
+            ));
+        }
+        return Ok(ParsedValue::EnumVariant {
+            name: variant.name.clone(),
+            index: index as u32,
+            fields: vec![],
+        });
+    }
+
+    // JSON object
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+        let names: Vec<&str> = def.variants.iter().map(|v| v.name.as_str()).collect();
+        format!(
+            "expected one of [{}] or a JSON object for '{name}'",
+            names.join(", ")
+        )
+    })?;
+    let obj = json.as_object().filter(|o| o.len() == 1).ok_or_else(|| {
+        "expected a JSON object with exactly one key (the variant name)".to_string()
+    })?;
+    let (variant_name, payload) = obj.iter().next().expect("len checked above");
+
+    let (index, variant) = def
+        .variants
+        .iter()
+        .enumerate()
+        .find(|(_, v)| &v.name == variant_name)
+        .ok_or_else(|| format!("'{variant_name}' is not a variant of '{name}'"))?;
+
+    // Fields in the IDL's declaration order, values pulled from the JSON by name.
+    let mut fields = Vec::new();
+    for field in &variant.fields {
+        let field_json = payload.get(&field.name).ok_or_else(|| {
+            format!(
+                "missing field '{}' for variant '{variant_name}'",
+                field.name
+            )
+        })?;
+        // parse_value expects the CLI's raw-string form: strings drop their
+        // JSON quotes (hex stays hex), everything else keeps its JSON text.
+        let field_raw = match field_json {
+            serde_json::Value::String(s) => s.clone(),
+            other => other.to_string(),
+        };
+        let value = parse_value(&field_raw, &field.type_, types)
+            .map_err(|e| format!("field '{}': {e}", field.name))?;
+        fields.push((field.name.clone(), field.type_.clone(), value));
+    }
+
+    Ok(ParsedValue::EnumVariant {
+        name: variant.name.clone(),
+        index: index as u32,
+        fields,
+    })
 }
 
 fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
@@ -350,7 +446,8 @@ mod tests {
         };
 
         let hex_input = "4343434343434343434343434343434343434343434343434343434343434343";
-        let parsed = parse_value(hex_input, &idl_type).expect("should parse [u8; 32] from hex");
+        let parsed =
+            parse_value(hex_input, &idl_type, &[]).expect("should parse [u8; 32] from hex");
 
         // Must be ByteArray, not Raw — Raw causes PDA computation to fail
         match &parsed {
@@ -407,7 +504,7 @@ mod tests {
         let buggy_type = IdlType::Primitive("[u8; 32]".to_string());
 
         let hex_input = "4343434343434343434343434343434343434343434343434343434343434343";
-        let parsed = parse_value(hex_input, &buggy_type).expect("should not error");
+        let parsed = parse_value(hex_input, &buggy_type, &[]).expect("should not error");
 
         // With Primitive("[u8; 32]"), parse_primitive doesn't recognize it → Raw
         assert!(
@@ -470,6 +567,7 @@ mod tests {
         let parsed = parse_value(
             "300, 700,340282366920938463463374607431768211455",
             &vec_of("u128"),
+            &[],
         )
         .expect("Vec<u128> parses from a comma-separated list");
         match parsed {
@@ -485,13 +583,13 @@ mod tests {
 
     #[test]
     fn parse_vec_u64_and_bool_from_csv() {
-        match parse_value("1,2,18446744073709551615", &vec_of("u64")).unwrap() {
+        match parse_value("1,2,18446744073709551615", &vec_of("u64"), &[]).unwrap() {
             ParsedValue::Seq(items) => {
                 assert!(matches!(items[2], ParsedValue::U64(u64::MAX)));
             },
             other => panic!("expected ParsedValue::Seq, got {other:?}"),
         }
-        match parse_value("true,false, true", &vec_of("bool")).unwrap() {
+        match parse_value("true,false, true", &vec_of("bool"), &[]).unwrap() {
             ParsedValue::Seq(items) => {
                 assert!(matches!(items[0], ParsedValue::Bool(true)));
                 assert!(matches!(items[1], ParsedValue::Bool(false)));
@@ -504,7 +602,7 @@ mod tests {
     #[test]
     fn parse_vec_u128_empty_string_is_empty_list() {
         for raw in ["", "  "] {
-            match parse_value(raw, &vec_of("u128")).unwrap() {
+            match parse_value(raw, &vec_of("u128"), &[]).unwrap() {
                 ParsedValue::Seq(items) => assert!(items.is_empty(), "{raw:?} must be empty"),
                 other => panic!("expected ParsedValue::Seq, got {other:?}"),
             }
@@ -514,38 +612,38 @@ mod tests {
     #[test]
     fn parse_vec_rejects_empty_elements() {
         for (raw, idx) in [(",", 0), ("1,,2", 1), ("1, ,2", 1), ("1,2,", 2), (",1", 0)] {
-            let err = parse_value(raw, &vec_of("u64")).unwrap_err();
+            let err = parse_value(raw, &vec_of("u64"), &[]).unwrap_err();
             assert!(
                 err.starts_with(&format!("Element [{idx}]:")),
                 "{raw:?} -> {err}"
             );
             assert!(err.contains("empty element"), "{raw:?} -> {err}");
         }
-        let err = parse_value("true,,false", &vec_of("bool")).unwrap_err();
+        let err = parse_value("true,,false", &vec_of("bool"), &[]).unwrap_err();
         assert!(err.starts_with("Element [1]:"), "got: {err}");
     }
 
     #[test]
     fn parse_vec_u128_reports_the_offending_element() {
-        let err = parse_value("300,seven,700", &vec_of("u128")).unwrap_err();
+        let err = parse_value("300,seven,700", &vec_of("u128"), &[]).unwrap_err();
         assert!(err.starts_with("Element [1]:"), "got: {err}");
         assert!(err.contains("seven"), "got: {err}");
     }
 
     #[test]
     fn parse_vec_u128_display_is_bracketed_list() {
-        let parsed = parse_value("300,700", &vec_of("u128")).unwrap();
+        let parsed = parse_value("300,700", &vec_of("u128"), &[]).unwrap();
         assert_eq!(parsed.to_string(), "[300, 700]");
     }
 
     #[test]
     fn parse_vec_u8_and_u32_keep_their_existing_representation() {
         assert!(matches!(
-            parse_value("1,2", &vec_of("u8")).unwrap(),
+            parse_value("1,2", &vec_of("u8"), &[]).unwrap(),
             ParsedValue::ByteArray(_)
         ));
         assert!(matches!(
-            parse_value("1,2", &vec_of("u32")).unwrap(),
+            parse_value("1,2", &vec_of("u32"), &[]).unwrap(),
             ParsedValue::U32Array(_)
         ));
     }

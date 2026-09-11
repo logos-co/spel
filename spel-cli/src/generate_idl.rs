@@ -25,15 +25,6 @@ pub struct PathDepResult {
     pub warnings: Vec<String>,
 }
 
-impl PathDepResult {
-    pub fn new() -> Self {
-        Self {
-            dirs: Vec::new(),
-            warnings: Vec::new(),
-        }
-    }
-}
-
 /// Resolve the list of SPEL program source files for IDL generation.
 ///
 /// `arg` is the optional positional argument passed to `generate-idl`:
@@ -102,9 +93,10 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
 /// containing `[dependencies]`.
 pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
     let mut warnings = Vec::new();
-    let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(source_path, |w| {
+    let dirs = spel_framework_core::dep_walk::resolve_dep_graph(source_path, true, &mut |w| {
         warnings.push(w);
-    });
+    })
+    .transitive_dirs;
     PathDepResult { dirs, warnings }
 }
 
@@ -371,7 +363,11 @@ mod tests {
     }
 
     #[test]
-    fn find_path_dep_dirs_ignores_registry_and_git_deps() {
+    fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
+        // The unfetchable git dep makes `cargo metadata --offline` fail, so
+        // the walk warns and degrades to path-only results. Registry and git
+        // deps are then absent not because they are ignored, but because the
+        // metadata source for them is unavailable.
         let tmp = TempDir::new("find-path-deps-filter");
 
         tmp.write(
@@ -392,11 +388,11 @@ mod tests {
 
         let result = find_path_dep_dirs(&program);
         assert!(
-            result.warnings.is_empty(),
-            "unexpected warnings: {:?}",
+            result.warnings.iter().any(|w| w.contains("cargo metadata")),
+            "expected a `cargo metadata` warning, got: {:?}",
             result.warnings
         );
-        // Only the path dep (core) should be returned, not serde or nssa_core
+        // The path dep (core) is still returned via the manifest walk.
         assert_eq!(result.dirs.len(), 1);
         assert!(result.dirs[0].ends_with("core"));
     }
@@ -603,6 +599,7 @@ mod tests {
             "[package]\nname = \"myprog\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
              [dependencies]\ncommon = { path = \"../../libs/common\" }\n",
         );
+        tmp.write("programs/myprog/src/lib.rs", "");
         // Source file is in a deeply nested dir with no intermediate Cargo.toml.
         let program = tmp.write("programs/myprog/src/deep/nested/token.rs", "");
 

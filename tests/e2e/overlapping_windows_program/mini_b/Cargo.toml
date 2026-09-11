@@ -1,0 +1,22 @@
+[package]
+name = "mini-b"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[package.metadata.spel]
+extension_attr = "mini_b"
+
+[[package.metadata.spel.inject]]
+wrapper = "require_b"
+
+  [[package.metadata.spel.inject.account]]
+  name = "b_config"
+  seed = [{ const = "b_config" }]
+
+[package.metadata.spel.embedded]
+state_type = "mini_b::BConfig"
+
+[dependencies]
+mini-macros = { path = "../mini_macros" }
+spel-framework = { path = "../../../../spel-framework" }
