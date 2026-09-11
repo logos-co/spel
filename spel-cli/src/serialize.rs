@@ -792,7 +792,7 @@ mod tests {
         let ty = IdlType::Vec {
             vec: Box::new(IdlType::Primitive("u128".to_string())),
         };
-        let val = parse_value("300,700", &ty).unwrap();
+        let val = parse_value("300,700", &ty, &[]).unwrap();
 
         let dv = to_dynamic_value(&ty, &val).unwrap();
         let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
@@ -805,7 +805,7 @@ mod tests {
         let ty = IdlType::Vec {
             vec: Box::new(IdlType::Primitive("u128".to_string())),
         };
-        let val = parse_value("", &ty).unwrap();
+        let val = parse_value("", &ty, &[]).unwrap();
 
         let dv = to_dynamic_value(&ty, &val).unwrap();
         let words = risc0_zkvm::serde::to_vec(&dv).unwrap();
@@ -834,10 +834,15 @@ mod tests {
             vec: Box::new(IdlType::Primitive("bool".into())),
         };
 
-        let a = parse_value("1,18446744073709551615", &vec_u64).unwrap();
-        let b = parse_value("300,700,340282366920938463463374607431768211455", &vec_u128).unwrap();
-        let c = parse_value("true,false", &vec_bool).unwrap();
-        let d = parse_value("", &vec_u128).unwrap();
+        let a = parse_value("1,18446744073709551615", &vec_u64, &[]).unwrap();
+        let b = parse_value(
+            "300,700,340282366920938463463374607431768211455",
+            &vec_u128,
+            &[],
+        )
+        .unwrap();
+        let c = parse_value("true,false", &vec_bool, &[]).unwrap();
+        let d = parse_value("", &vec_u128, &[]).unwrap();
 
         let words = serialize_to_risc0(
             0,

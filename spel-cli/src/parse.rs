@@ -567,6 +567,7 @@ mod tests {
         let parsed = parse_value(
             "300, 700,340282366920938463463374607431768211455",
             &vec_of("u128"),
+            &[],
         )
         .expect("Vec<u128> parses from a comma-separated list");
         match parsed {
@@ -582,13 +583,13 @@ mod tests {
 
     #[test]
     fn parse_vec_u64_and_bool_from_csv() {
-        match parse_value("1,2,18446744073709551615", &vec_of("u64")).unwrap() {
+        match parse_value("1,2,18446744073709551615", &vec_of("u64"), &[]).unwrap() {
             ParsedValue::Seq(items) => {
                 assert!(matches!(items[2], ParsedValue::U64(u64::MAX)));
             },
             other => panic!("expected ParsedValue::Seq, got {other:?}"),
         }
-        match parse_value("true,false, true", &vec_of("bool")).unwrap() {
+        match parse_value("true,false, true", &vec_of("bool"), &[]).unwrap() {
             ParsedValue::Seq(items) => {
                 assert!(matches!(items[0], ParsedValue::Bool(true)));
                 assert!(matches!(items[1], ParsedValue::Bool(false)));
@@ -601,7 +602,7 @@ mod tests {
     #[test]
     fn parse_vec_u128_empty_string_is_empty_list() {
         for raw in ["", "  "] {
-            match parse_value(raw, &vec_of("u128")).unwrap() {
+            match parse_value(raw, &vec_of("u128"), &[]).unwrap() {
                 ParsedValue::Seq(items) => assert!(items.is_empty(), "{raw:?} must be empty"),
                 other => panic!("expected ParsedValue::Seq, got {other:?}"),
             }
@@ -611,38 +612,38 @@ mod tests {
     #[test]
     fn parse_vec_rejects_empty_elements() {
         for (raw, idx) in [(",", 0), ("1,,2", 1), ("1, ,2", 1), ("1,2,", 2), (",1", 0)] {
-            let err = parse_value(raw, &vec_of("u64")).unwrap_err();
+            let err = parse_value(raw, &vec_of("u64"), &[]).unwrap_err();
             assert!(
                 err.starts_with(&format!("Element [{idx}]:")),
                 "{raw:?} -> {err}"
             );
             assert!(err.contains("empty element"), "{raw:?} -> {err}");
         }
-        let err = parse_value("true,,false", &vec_of("bool")).unwrap_err();
+        let err = parse_value("true,,false", &vec_of("bool"), &[]).unwrap_err();
         assert!(err.starts_with("Element [1]:"), "got: {err}");
     }
 
     #[test]
     fn parse_vec_u128_reports_the_offending_element() {
-        let err = parse_value("300,seven,700", &vec_of("u128")).unwrap_err();
+        let err = parse_value("300,seven,700", &vec_of("u128"), &[]).unwrap_err();
         assert!(err.starts_with("Element [1]:"), "got: {err}");
         assert!(err.contains("seven"), "got: {err}");
     }
 
     #[test]
     fn parse_vec_u128_display_is_bracketed_list() {
-        let parsed = parse_value("300,700", &vec_of("u128")).unwrap();
+        let parsed = parse_value("300,700", &vec_of("u128"), &[]).unwrap();
         assert_eq!(parsed.to_string(), "[300, 700]");
     }
 
     #[test]
     fn parse_vec_u8_and_u32_keep_their_existing_representation() {
         assert!(matches!(
-            parse_value("1,2", &vec_of("u8")).unwrap(),
+            parse_value("1,2", &vec_of("u8"), &[]).unwrap(),
             ParsedValue::ByteArray(_)
         ));
         assert!(matches!(
-            parse_value("1,2", &vec_of("u32")).unwrap(),
+            parse_value("1,2", &vec_of("u32"), &[]).unwrap(),
             ParsedValue::U32Array(_)
         ));
     }
