@@ -59,8 +59,6 @@ jobs:
       lez-rev: ${{ steps.lez-ref.outputs.LEZ_REV }}
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
@@ -169,8 +167,6 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
@@ -217,7 +213,7 @@ jobs:
         id: spel-ref
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
           else
             SPEL_REF="${{ github.sha }}"
           fi
@@ -256,8 +252,6 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
@@ -304,7 +298,7 @@ jobs:
         id: spel-ref
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
           else
             SPEL_REF="${{ github.sha }}"
           fi
@@ -343,8 +337,6 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
@@ -385,7 +377,7 @@ jobs:
         id: spel-ref
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
           else
             SPEL_REF="${{ github.sha }}"
           fi
@@ -418,8 +410,6 @@ jobs:
       RISC0_VERSION: "3.0.5"
     steps:
       - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
@@ -460,7 +450,7 @@ jobs:
         id: spel-ref
         run: |
           if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/head"
+            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
           else
             SPEL_REF=""
           fi
