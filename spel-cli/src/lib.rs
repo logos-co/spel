@@ -406,11 +406,14 @@ pub async fn run() {
                 return;
             },
             "pda"
-                if program_id_hex.is_some()
+                if idl_path.is_empty()
+                    && program_id_hex.is_some()
                     && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) =>
             {
-                // Raw PDA mode: no IDL needed
-                // Triggered when --program <hex> resolves to a program ID + pda command
+                // Raw PDA mode: no IDL given, --program <hex> resolves to a program ID.
+                // With --idl present, `pda <account-name>` is the IDL-defined derivation
+                // below (the documented `--idl ... --program <hex> pda vault` form), so
+                // raw mode must not shadow it.
                 // Usage: <bin> --program <hex> pda <seed1> [seed2] ...
                 let mut raw_args =
                     vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
