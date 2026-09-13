@@ -343,11 +343,16 @@ spel --idl program-idl.json --dry-run=json -p program.bin -- \
 spel --idl program-idl.json -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
-# Use --program-id instead of binary (skips loading the file)
-spel --idl program-idl.json --program-id <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
+# Use the program ID instead of the binary (skips loading the file)
+spel --idl program-idl.json --program <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Compute a PDA from the IDL
-spel --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+spel --idl program-idl.json --program <64-char-hex> pda vault --create-key my-multisig
+
+# Compute a private PDA: pass the controller's keys, and the u128 identifier if the
+# program derives it with a non-zero one (decimal or 0x-hex; defaults to 0)
+spel --idl program-idl.json --program <64-char-hex> pda private_vault \
+  --npk <64-char-hex> --vpk <2368-char-hex> --identifier 7
 
 # PDA derivation output shows seed inputs:
 #   PDA vault → 4Lp3gkH...

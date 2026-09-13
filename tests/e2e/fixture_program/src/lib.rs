@@ -818,6 +818,7 @@ mod tests {
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &npk,
             &vpk,
+            spel_framework::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER,
         );
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // account — correct private PDA
@@ -844,6 +845,7 @@ mod tests {
             &[&spel_framework::pda::seed_from_str("private_vault")],
             &correct_npk,
             &vpk,
+            spel_framework::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER,
         );
         // Supply the address for correct_npk but validate with wrong_npk
         let accounts = vec![

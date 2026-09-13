@@ -1787,7 +1787,9 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         .collect();
 
                     if acc.constraints.private_pda {
-                        // Private PDA: address = for_private_pda(program_id, seed, npk, vpk)
+                        // Private PDA: address = for_private_pda(program_id, seed, npk, vpk, identifier).
+                        // The attribute has no `identifier` constraint yet, so validation uses the
+                        // framework default (0); non-zero identifiers need hand-written validation.
                         let npk_name = acc.constraints.npk_arg.as_deref()
                             .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
                         let npk_param = format_ident!("__npk_arg_{}", npk_name);
@@ -1798,7 +1800,8 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                             {
                                 #(#seed_exprs)*
                                 let __expected_id = spel_framework::pda::compute_private_pda(
-                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param
+                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param,
+                                    spel_framework::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER,
                                 );
                                 if accounts[#idx].account_id != __expected_id {
                                     return Err(spel_framework::error::SpelError::PdaMismatch {
