@@ -277,6 +277,48 @@ pub fn candidate_marker_names(mod_attrs: &[Attribute]) -> Vec<String> {
 ///
 /// `Err` when two fns carry the anchor, when the kwarg names anything
 /// but an init param, or when several init params exist and no kwarg
+/// Replace the `#[initialize]` shorthand with the anchor attr of every
+/// activated embed. Everything downstream matches the extensions' real
+/// attribute names, so the swap has to happen before any of it, for
+/// every producer rather than only the dispatcher: an IDL built from
+/// the shorthand would otherwise describe an instruction without the
+/// accounts the dispatcher injects. Insertion keeps embed order, which
+/// is marker order, so stacked bootstraps expand deterministically.
+///
+/// # Errors
+///
+/// `Err` when the shorthand is present and no activated extension
+/// declares an anchor. It stands for their attributes, and there are
+/// none to stand for.
+pub(super) fn replace_initialize_shorthand(
+    func: &mut syn::ItemFn,
+    embeds: &[super::Embed],
+) -> Result<(), String> {
+    let Some(pos) = func
+        .attrs
+        .iter()
+        .position(|a| attr_is(a, INITIALIZE_SHORTHAND))
+    else {
+        return Ok(());
+    };
+    let anchors: Vec<String> = embeds
+        .iter()
+        .filter_map(|e| e.decl.initializer.clone())
+        .collect();
+    if anchors.is_empty() {
+        return Err(format!(
+            "#[{INITIALIZE_SHORTHAND}] but no activated extension declares an \
+             anchor; it is a shorthand for the extensions' initializer attributes"
+        ));
+    }
+    func.attrs.remove(pos);
+    for (i, name) in anchors.iter().enumerate() {
+        let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+        func.attrs.insert(pos + i, syn::parse_quote!(#[#ident]));
+    }
+    Ok(())
+}
+
 /// picks one. Callers surface it as a compile error.
 pub(super) fn infer_anchor_embed(
     mod_items: &[syn::Item],
@@ -738,5 +780,74 @@ mod tests {
             err.contains("ext_config = "),
             "must show the explicit kwarg form: {err}"
         );
+    }
+
+    fn shorthand_embed(source: &str, init: &str) -> super::super::Embed {
+        use super::super::Embed;
+        Embed {
+            source: source.to_string(),
+            carrier: None,
+            state_type: format!("{source}::Cfg"),
+            decl: EmbedDecl {
+                role: format!("{source}_config"),
+                account: "config".to_string(),
+                offset: OffsetSpec::Derived,
+                initializer: Some(init.to_string()),
+            },
+        }
+    }
+
+    // The swap lands at the shorthand's position, in embed order, which
+    // is marker order, so stacked bootstraps expand deterministically.
+    #[test]
+    fn shorthand_swaps_into_the_anchor_attrs_in_embed_order() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[doc = "d"]
+            #[initialize]
+            #[instruction]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(
+            &mut func,
+            &[
+                shorthand_embed("admin", "admin_initialize"),
+                shorthand_embed("freeze", "freeze_initialize"),
+            ],
+        )
+        .expect("replaces");
+        let names: Vec<String> = func
+            .attrs
+            .iter()
+            .filter_map(|a| a.path().get_ident().map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "doc",
+                "admin_initialize",
+                "freeze_initialize",
+                "instruction"
+            ]
+        );
+    }
+
+    #[test]
+    fn shorthand_without_an_anchored_embed_refuses() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        let err = replace_initialize_shorthand(&mut func, &[]).expect_err("nothing to expand to");
+        assert!(err.contains("no activated extension"), "{err}");
+    }
+
+    #[test]
+    fn a_fn_without_the_shorthand_is_untouched() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[admin_initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(&mut func, &[]).expect("no shorthand, no work");
+        assert_eq!(func.attrs.len(), 1);
     }
 }

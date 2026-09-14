@@ -202,6 +202,7 @@ impl PreparedProgram {
     ///
     /// Propagates [`apply_wrap_and_inject`].
     pub fn gate(&self, func: &mut ItemFn, qualified: Option<&str>) -> Result<Vec<String>, String> {
+        marker::replace_initialize_shorthand(func, &self.embeds)?;
         apply_wrap_and_inject(
             func,
             &self.active_wraps,
@@ -3144,5 +3145,76 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             "the skip filter must fire on an inferred embed: {names:?}"
         );
         assert!(names.contains(&"ext_action".to_string()), "{names:?}");
+    }
+
+    // The shorthand was swapped only inside the dispatcher macro, so an
+    // IDL built from #[initialize] described an instruction without the
+    // accounts the dispatcher injects, and a client generated from it
+    // sent the wrong accounts. Both spellings must gate alike.
+    #[test]
+    fn the_shorthand_gates_exactly_as_the_explicit_anchor() {
+        let program = || PreparedProgram {
+            inject_specs: vec![InjectSpec {
+                wrapper: "admin_initialize".to_string(),
+                accounts: vec![InjectAccount {
+                    name: "caller".to_string(),
+                    role: "caller".to_string(),
+                    seeds: Vec::new(),
+                    signer: true,
+                    embedded: false,
+                }],
+                source: "admin".to_string(),
+                embedded_offset: None,
+            }],
+            embeds: vec![Embed {
+                source: "admin".to_string(),
+                carrier: None,
+                state_type: "admin::Cfg".to_string(),
+                decl: EmbedDecl {
+                    role: "admin_config".to_string(),
+                    account: "config".to_string(),
+                    offset: OffsetSpec::Literal(32),
+                    initializer: Some("admin_initialize".to_string()),
+                },
+            }],
+            ..Default::default()
+        };
+        let params = |f: &ItemFn| -> Vec<String> {
+            f.sig
+                .inputs
+                .iter()
+                .filter_map(|a| match a {
+                    syn::FnArg::Typed(pt) => match &*pt.pat {
+                        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut shorthand: ItemFn = syn::parse_quote! {
+            #[initialize]
+            pub fn initialize(config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        let mut explicit: ItemFn = syn::parse_quote! {
+            #[admin_initialize]
+            pub fn initialize(config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        program()
+            .gate(&mut shorthand, None)
+            .expect("the shorthand gates");
+        program()
+            .gate(&mut explicit, None)
+            .expect("the explicit anchor gates");
+        assert_eq!(
+            params(&shorthand),
+            params(&explicit),
+            "the shorthand must inject what the explicit anchor injects"
+        );
+        assert!(
+            params(&shorthand).iter().any(|p| p == "caller"),
+            "the bootstrap's injected caller must reach every producer: {:?}",
+            params(&shorthand)
+        );
     }
 }
