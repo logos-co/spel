@@ -196,15 +196,75 @@ its own ownership applies:
 let mut target = target.clone();
 target.is_authorized = true;               // grants the callee authority
 
+let instruction = callee_core::Instruction::Record { amount };
+
 Ok(SpelOutput::execute(
     vec![state, authority, target],        // returned untouched
-    vec![ChainedCall { program_id, instruction_data, pre_states: vec![target], pda_seeds: vec![] }],
+    vec![ChainedCall::new(callee_program_id, vec![target], &instruction)],
 ))
 ```
 
 Authorization propagates down the chain: once an account is authorized at any
 point it stays authorized for subsequent calls. Do **not** work around a
 `UnauthorizedBalanceDecrease` by editing the account directly — delegate instead.
+
+#### Building the call
+
+```rust
+ChainedCall::new<I: Serialize>(program_id: ProgramId, pre_states: Vec<AccountWithMetadata>, instruction: &I) -> Self
+```
+
+Prefer the constructor over a struct literal. `instruction_data` is a
+`Vec<u32>` in risc0 serde format (see
+[CLI → Serialization](cli.md#serialization-spel-cli-internals)); `new` runs
+`risc0_zkvm::serde::to_vec` for you, producing exactly what the callee's
+generated dispatcher expects. Add PDA seeds with the builder when the call
+needs them:
+
+```rust
+ChainedCall::new(program_id, pre_states, &instruction)
+    .with_pda_seeds(vec![PdaSeed::new(seed_bytes)])
+```
+
+Because serialization is structural — variant index, then fields — the
+`instruction` value only has to *match the shape* of the callee's instruction
+enum. It does not have to be the callee's own type. That is what makes the next
+section necessary.
+
+#### Sharing the callee's instruction enum
+
+The caller needs a value shaped like the callee's `Instruction`. Defining that
+enum in the callee's own `*_core` crate and depending on it is the clean way —
+see [External Instruction Enums](../tutorial.md#external-instruction-enums).
+
+Within one project a path dependency works. **Across two projects it does
+not.** Guest binaries build inside Docker with the *project directory* as the
+build context, so a path dependency containing `..` escapes the context:
+
+```toml
+# caller/methods/guest/Cargo.toml
+callee_core = { path = "../../../callee/callee_core" }
+```
+
+```text
+error: failed to load manifest for dependency `callee_core`
+Caused by: failed to read `/callee/callee_core/Cargo.toml`
+```
+
+Note where `../../../callee/…` resolved to. A host-side `cargo check` passes,
+so this only appears once the Docker build runs.
+
+Git dependencies are unaffected — that is how the guest already pulls
+`spel-framework` and `nssa_core` — so publish the callee's core crate and
+depend on it by git rev:
+
+```toml
+callee_core = { git = "https://github.com/org/callee.git", rev = "..." }
+```
+
+Vendoring a byte-identical copy of the enum also works, but nothing enforces
+that it stays in sync: reordering variants upstream changes the serialized
+discriminant while the copy still compiles.
 
 ---
 

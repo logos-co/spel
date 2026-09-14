@@ -12,4 +12,5 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md).
 - [**Types**](types.md) — Framework types: `SpelOutput`, `SpelError`, `AccountConstraint`, `ChainedCall`, `PdaSeed`, and the prelude
 - [**CLI**](cli.md) — All `spel` commands (`init`, `inspect`, `idl`, `pda`, instruction execution) with flags, examples, and type format table
 - [**IDL Format**](idl.md) — IDL JSON schema, instruction/account/arg definitions, discriminators, and lssa-lang compatibility fields
+- [**Extensions**](extensions.md) — activating an extension, `[package.metadata.spel]`, writing one, and what the consumer's IDL gets
 - [**Client Code Generation**](client-gen.md) — `spel-client-gen` CLI, library API, generated Rust client, C FFI wrappers, C header, and C++/Qt integration example

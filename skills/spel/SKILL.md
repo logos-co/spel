@@ -16,6 +16,7 @@ Read these files as needed:
 - **[references/quickstart.md](references/quickstart.md)** — Full scaffold-to-deploy workflow with real commands. Read when building a new program or recalling the build/deploy/call sequence.
 - **[references/gotchas.md](references/gotchas.md)** — Hard-won lessons and common mistakes. Read before writing or debugging any SPEL program.
 - **[references/cli-ref.md](references/cli-ref.md)** — CLI cheatsheet for `spel` and `spel-client-gen`. Read when constructing CLI commands or checking flag names.
+- **[references/extensions.md](references/extensions.md)** — Extension libraries: activating one, declaring one, and the four authoring requirements. Read when a program uses an extension or you are writing one.
 
 ## Core Workflow
 

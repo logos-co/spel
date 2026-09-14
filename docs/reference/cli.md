@@ -478,6 +478,7 @@ How to pass values for each IDL type on the command line:
 | `Vec<[u8; 32]>` | Comma-separated hex strings | `"aabb...00,ccdd...00"` |
 | `Vec<u8>` | Comma-separated decimal bytes | `1,2,3,4,5` |
 | `Vec<u32>` | Comma-separated u32 values | `100,200,300` |
+| `Vec<u64>` / `Vec<u128>` / `Vec<bool>` | Comma-separated values | `300,700` or `true,false` |
 | `Vec<String>` | Repeat the flag once per element | `--tag a --tag b` |
 | `Option<T>` | `none`/`null`/empty for None; otherwise same as inner type | `none` or `42` |
 | Account IDs | Base58 string **or** 64 hex chars (with optional `0x` prefix) | `EjR7...` or `0xaabb...00` |
@@ -486,6 +487,11 @@ How to pass values for each IDL type on the command line:
 - `[u8; N]` accepts both hex and string formats. Hex is detected by length (exactly `2*N` chars, all hex digits). Otherwise treated as UTF-8 and zero-padded.
 - `0x` prefix is accepted and stripped for hex values.
 - `program_id` values can also use `0x`-prefixed hex for individual u32 components.
+- For `Vec<u64>`, `Vec<u128>` and `Vec<bool>`, an empty string is an empty list.
+  An empty element inside a non-empty list is an error rather than being
+  dropped, reported with its index: `"1,,2"` gives
+  `Element [1]: empty element in Vec<u64>`. A malformed element is reported the
+  same way — `Element [1]: Invalid u128 'seven'`.
 
 ---
 
