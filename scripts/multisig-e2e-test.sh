@@ -20,7 +20,7 @@
 #   LEZ_TAG     - LEZ revision/tag to test against
 #   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
 # Optional Environment Variables:
-#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/head)
+#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/merge)
 #   SPEL_GIT    - SPEL git URL for init (fork testing)
 #   SPEL_BIN    - Path to the spel binary (default /tmp/lssa/target/release/spel)
 

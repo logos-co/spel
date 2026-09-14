@@ -41,6 +41,7 @@ use syn::{
 };
 
 mod account_types;
+mod slot_offsets;
 
 /// Main entry point: `#[lez_program]` on a module.
 ///
@@ -128,11 +129,13 @@ pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// }
 /// ```
 ///
-/// This attribute is a no-op at compile time; it is consumed solely by the
-/// IDL generator.
+/// For the IDL the attribute is a pass-through, consumed by the
+/// generator. Structs with a `*_slot` field attribute (e.g.
+/// `#[admin_slot]`) additionally gain a derived `<NAME>_OFFSET` const
+/// and an emitted layout test. See `slot_offsets`.
 #[proc_macro_attribute]
 pub fn account_type(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+    slot_offsets::expand(item)
 }
 
 /// Generate IDL from a program source file.
@@ -166,8 +169,14 @@ struct InstructionInfo {
     /// True if this instruction has a ProgramContext parameter.
     /// The context is injected by the dispatcher and never appears in IDL/ABI.
     has_context: bool,
+    external_call_path: Option<syn::Path>,
     /// The original function item (with #[instruction] stripped)
     func: ItemFn,
+    injected: Vec<String>,
+    /// Account param ident in original signature order, duplicates kept.
+    /// The dispatch call site needs every position; `accounts` below is
+    /// the transaction view, deduped by ident.
+    pub call_accounts: Vec<Ident>,
 }
 
 struct AccountParam {
@@ -217,6 +226,33 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(&input, "lez_program module must have a body"))?;
 
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
+        .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
+    let manifest_dir = std::path::PathBuf::from(manifest_dir);
+    let mut deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
+        &input.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let mut slot_assert = proc_macro2::TokenStream::new();
+    let bound_calls = deps.extensions.bound_calls.clone();
+    let consumer_fns: Vec<ItemFn> = items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+            _ => None,
+        })
+        .collect();
+    spel_framework_core::extension::rewrite_embedded_roles(
+        &mut deps.extensions.inject_specs,
+        &deps.extensions.embeds,
+        &consumer_fns,
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+
+    let active_wraps: Vec<_> = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
+
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     let mut other_items: Vec<TokenStream2> = Vec::new();
@@ -225,7 +261,18 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         match item {
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
-                    instructions.push(parse_instruction(func.clone())?);
+                    let mut func = func.clone();
+                    let injected = spel_framework_core::extension::apply_wrap_and_inject(
+                        &mut func,
+                        &active_wraps,
+                        &deps.extensions.inject_specs,
+                        &deps.extensions.embeds,
+                        None,
+                    )
+                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                    let mut info = parse_instruction(func)?;
+                    info.injected = injected;
+                    instructions.push(info);
                 } else {
                     other_items.push(quote! { #func });
                 }
@@ -242,6 +289,42 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             "lez_program must contain at least one #[instruction] function",
         ));
     }
+
+    for (func, crate_path) in deps.extensions.instructions {
+        let mut func = func;
+        let qualified = format!(
+            "{}::{}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        spel_framework_core::extension::apply_wrap_and_inject(
+            &mut func,
+            &active_wraps,
+            &deps.extensions.inject_specs,
+            &deps.extensions.embeds,
+            Some(&qualified),
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+        let mut info = parse_instruction(func)?;
+        let name = &info.fn_name;
+        info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
+        instructions.push(info);
+    }
+    spel_framework_core::extension::check_duplicate_instruction_names(instructions.iter().map(
+        |i| {
+            (
+                i.fn_name.to_string(),
+                spel_framework_core::extension::instruction_source_label(
+                    i.external_call_path.as_ref(),
+                ),
+            )
+        },
+    ))
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Generate the Instruction enum (or use external one)
     let enum_def = if config.external_instruction.is_none() {
@@ -261,7 +344,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     };
 
     // Generate match arms for dispatch
-    let match_arms = generate_match_arms(mod_name, &instructions);
+    let match_arms = generate_match_arms(mod_name, &instructions, &bound_calls);
 
     // Generate the handler functions (with #[instruction] stripped, account attrs stripped)
     let handler_fns = generate_handler_fns(&instructions);
@@ -415,10 +498,21 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                 }
             }
 
+            // Manifest 'declared bin paths: entry files outside src/
+            // (custom [[bin]] path, test harnesses) must not be missed,
+            // a missed entry file silently skips the slot assert.
+            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+                if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
+                    candidate_paths.push(bin_path);
+                }
+            }
+
+            let mut module_source_found = false;
             for guest_path in &candidate_paths {
                 if let Ok(content_str) = std::fs::read_to_string(guest_path) {
                     if let Ok(parsed_file) = syn::parse_file(&content_str) {
                         if file_matches_module(&parsed_file) {
+                            module_source_found = true;
                             // Collect from top-level items AND from inside the
                             // #[lez_program] module body (account types are often
                             // defined inside the module).
@@ -432,11 +526,36 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                                     }
                                 }
                             }
+                            // Also include items from path-dependency crates, so types defined in
+                            // extension libraries (account types, instruction-arg types) reach the IDL.
+                            let (extra_items, _) =
+                                spel_framework_core::idl_gen::collect_items_from_crate_dirs(
+                                    &deps.graph.transitive_dirs,
+                                    |w| eprintln!("warning: {w}"),
+                                );
+                            all_items.extend(extra_items);
+                            slot_assert.extend(slot_offsets::emit_agreement_asserts(
+                                guest_path,
+                                &deps.extensions.embeds,
+                            )?);
+                            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
+                                &deps.extensions.embeds,
+                                &deps.extensions.embed_state_types,
+                            )?);
                             result = account_types::collect_account_types(&all_items);
                             break;
                         }
                     }
                 }
+            }
+            if !module_source_found && !deps.extensions.embeds.is_empty() {
+                return Err(syn::Error::new(
+                    proc_macro2::Span::call_site(),
+                    "embedded markers are declared but the module's source \
+                    file could not be located, so the slot agreement checks \
+                    cannot be emitted; refusing to compile rather than skip \
+                    them silently",
+                ));
             }
         }
         result
@@ -469,6 +588,8 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         // validation helpers (__validate_*), and claims helpers (__claims_*) directly.
         pub mod #mod_name {
             use super::*;
+
+            #slot_assert
 
             #(#other_items)*
 
@@ -551,12 +672,28 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
         }
     }
 
+    let call_accounts: Vec<Ident> = accounts.iter().map(|a| a.name.clone()).collect();
+    let mut deduped: Vec<AccountParam> = Vec::new();
+    for a in accounts {
+        match deduped.iter_mut().find(|d| d.name == a.name) {
+            Some(kept) => {
+                kept.constraints.mutable |= a.constraints.mutable;
+                kept.constraints.signer |= a.constraints.signer;
+            },
+            None => deduped.push(a),
+        }
+    }
+    let accounts = deduped;
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
         args,
         has_context,
+        external_call_path: None,
         func,
+        injected: vec![],
+        call_accounts,
     })
 }
 
@@ -830,7 +967,11 @@ fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2>
         .collect()
 }
 
-fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
+fn generate_match_arms(
+    mod_name: &Ident,
+    instructions: &[InstructionInfo],
+    bound_calls: &std::collections::HashMap<String, Vec<usize>>,
+) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
@@ -898,14 +1039,24 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
                         )
                     });
                 }
-                args.extend(ix.accounts.iter().map(|a| {
-                    let name = &a.name;
-                    quote! { #name }
+                args.extend(ix.call_accounts.iter().enumerate().map(|(i, name)| {
+                    let repeats_later = ix.call_accounts[i + 1..].iter().any(|n| n == name);
+                    if repeats_later {
+                        quote! { #name.clone() }
+                    } else {
+                        quote! { #name }
+                    }
                 }));
                 args.extend(ix.args.iter().map(|a| {
                     let name = &a.name;
                     quote! { #name }
                 }));
+                if let Some(values) = bound_calls.get(&ix.fn_name.to_string()) {
+                    args.extend(values.iter().map(|v| {
+                        let lit = proc_macro2::Literal::usize_unsuffixed(*v);
+                        quote! { #lit }
+                    }));
+                }
                 args
             };
 
@@ -1004,12 +1155,15 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
             } else {
                 quote! {}
             };
-
+            let call_target = match &ix.external_call_path {
+                Some(path) => quote! { #path },
+                None => quote! { #mod_name::#fn_name },
+            };
             quote! {
                 #pattern => {
                     #account_destructure
                     #validation_call
-                    #mod_name::#fn_name(#(#call_args),*)
+                    #call_target(#(#call_args),*)
                         .map(|output| output.into_parts())
                 }
             }
@@ -1030,6 +1184,9 @@ fn generate_match_arms(mod_name: &Ident, instructions: &[InstructionInfo]) -> Ve
 struct ExecuteTransformer<'a> {
     accounts: &'a [AccountParam],
     fn_name: &'a Ident,
+    /// Injected param names: their post-states are prepended to the
+    /// execute output since the handler body does not know them.
+    injected: &'a [String],
 }
 
 impl<'a> ExecuteTransformer<'a> {
@@ -1076,6 +1233,9 @@ impl<'a> ExecuteTransformer<'a> {
                         seen.push(name.clone());
                         if let Some(ident) = account_idents.iter().find(|i| i.to_string() == name) {
                             result.push(quote! { &*#ident.account_id.value() });
+                        } else if self.injected.iter().any(|n| n == &name) {
+                            let ident = format_ident!("{}", name);
+                            result.push(quote! { &*#ident.account_id.value() });
                         }
                     }
                 }
@@ -1108,6 +1268,20 @@ impl<'a> ExecuteTransformer<'a> {
         }
         result
     }
+
+    /// Post-state clones for the injected params, in accounts order.
+    /// Injected params never appear in a consumer-authored accounts
+    /// expression, the consumer does not know they exist.
+    fn injected_clones(&self) -> Vec<TokenStream2> {
+        self.accounts
+            .iter()
+            .filter(|a| self.injected.iter().any(|n| a.name == *n))
+            .map(|a| {
+                let ident = &a.name;
+                quote! { #ident.account.clone() }
+            })
+            .collect()
+    }
 }
 
 impl<'a> VisitMut for ExecuteTransformer<'a> {
@@ -1135,6 +1309,17 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
         if let Some(account_idents) = extract_vec_macro_idents(&accounts_arg) {
             // Verify all account names are known before transforming
             let mut account_clones: Vec<TokenStream2> = Vec::new();
+            // Injected params the body does not know about: pass their
+            // post-state through unchanged, in declaration order (they sit
+            // at the front of self.accounts, keeping claims alignment).
+            for acc in self.accounts {
+                if self.injected.iter().any(|n| acc.name == *n)
+                    && !account_idents.iter().any(|i| *i == acc.name)
+                {
+                    let ident = &acc.name;
+                    account_clones.push(quote! { #ident.account.clone() });
+                }
+            }
             for ident in &account_idents {
                 if !self.accounts.iter().any(|a| a.name == *ident) {
                     return; // unknown account — don't transform
@@ -1156,10 +1341,14 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             return;
         }
 
+        let injected_clones: Vec<TokenStream2> = self.injected_clones();
         // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
         // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
         if self.has_rest() {
-            let num_fixed = self.num_fixed();
+            // ix.accounts counts injected params as fixed, but the
+            // consumer's vec does not contain them: subtract so the claims
+            // fn sees only the declared fixed params.
+            let num_fixed = self.num_fixed() - injected_clones.len();
             let accs = quote! { __accs };
             let account_seed_args = self.account_seed_args_for_rest(&accs);
             let all_seed_args: Vec<TokenStream2> =
@@ -1167,10 +1356,10 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             *expr = syn::parse_quote! {
                 {
                     let __accs: ::std::vec::Vec<_> = #accounts_arg;
-                    let __extracted: ::std::vec::Vec<_> =
-                        __accs.iter().map(|__a| __a.account.clone()).collect();
+                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
+                    __all.extend(__accs.iter().map(|__a| __a.account.clone()));
                     SpelOutput::execute_with_claims(
-                        &__extracted,
+                        &__all,
                         &#claims_fn(__accs.len() - #num_fixed #(, #all_seed_args)*),
                         #chained_arg
                     )
@@ -1183,14 +1372,32 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
         // variable built by the handler). The vec![name, ...] pattern above handles the common
         // case; this catches anything else. Note: account(...) PDA seeds cannot be resolved here
         // because AccountWithMetadata is not available — use vec![...] for those instructions.
+        //
+        // Injected params never appear in a consumer-authored expression, the
+        // consumer does not know they exist. Prepend their post-states here,
+        // same as the rest-accounts branch, so the claims stay aligned.
         let all_seed_args: Vec<TokenStream2> = arg_seed_args;
-        if let syn::Expr::Call(call) = expr {
-            call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
-            call.args.clear();
-            call.args.push(syn::parse_quote! { &#accounts_arg });
-            call.args
-                .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
-            call.args.push(syn::parse_quote! { #chained_arg });
+        if injected_clones.is_empty() {
+            if let syn::Expr::Call(call) = expr {
+                call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
+                call.args.clear();
+                call.args.push(syn::parse_quote! { &#accounts_arg });
+                call.args
+                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
+                call.args.push(syn::parse_quote! { #chained_arg });
+            }
+        } else {
+            *expr = syn::parse_quote! {
+                {
+                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
+                    __all.extend(#accounts_arg);
+                    SpelOutput::execute_with_claims(
+                        &__all,
+                        &#claims_fn(#(#all_seed_args),*),
+                        #chained_arg
+                    )
+                }
+            };
         }
     }
 }
@@ -1220,6 +1427,7 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
+        .filter(|ix| ix.external_call_path.is_none())
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
@@ -1232,6 +1440,7 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             let mut transformer = ExecuteTransformer {
                 accounts: &ix.accounts,
                 fn_name: &ix.fn_name,
+                injected: &ix.injected,
             };
             transformer.visit_item_fn_mut(&mut func);
             quote! { #func }
@@ -2144,12 +2353,45 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
+    let manifest_dir = std::path::PathBuf::from(&resolved_path);
+    let mut deps = spel_framework_core::extension::resolve_program_deps(
+        &manifest_dir,
+        &program_mod.attrs,
+        &mut |_| {},
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let consumer_fns: Vec<ItemFn> = items
+        .iter()
+        .filter_map(|i| match i {
+            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+            _ => None,
+        })
+        .collect();
+    spel_framework_core::extension::rewrite_embedded_roles(
+        &mut deps.extensions.inject_specs,
+        &deps.extensions.embeds,
+        &consumer_fns,
+    )
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let active_wraps = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
+
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     for item in items {
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
-                instructions.push(parse_instruction(func.clone())?);
+                let mut func = func.clone();
+                let injected = spel_framework_core::extension::apply_wrap_and_inject(
+                    &mut func,
+                    &active_wraps,
+                    &deps.extensions.inject_specs,
+                    &deps.extensions.embeds,
+                    None,
+                )
+                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                let mut info = parse_instruction(func)?;
+                info.injected = injected;
+                instructions.push(info);
             }
         }
     }
@@ -2160,6 +2402,42 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
             "No #[instruction] functions found in the program module",
         ));
     }
+
+    for (func, crate_path) in deps.extensions.instructions {
+        let mut func = func.clone();
+        let qualified = format!(
+            "{}::{}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        spel_framework_core::extension::apply_wrap_and_inject(
+            &mut func,
+            &active_wraps,
+            &deps.extensions.inject_specs,
+            &deps.extensions.embeds,
+            Some(&qualified),
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+        let mut info = parse_instruction(func)?;
+        let name = &info.fn_name;
+        info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
+        instructions.push(info);
+    }
+    spel_framework_core::extension::check_duplicate_instruction_names(instructions.iter().map(
+        |i| {
+            (
+                i.fn_name.to_string(),
+                spel_framework_core::extension::instruction_source_label(
+                    i.external_call_path.as_ref(),
+                ),
+            )
+        },
+    ))
+    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Detect external instruction type from the #[lez_program(...)] attr
     let external_instruction_str: Option<String> = program_mod
@@ -2192,12 +2470,11 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     // This handles the common project structure where account types are defined
     // in a shared core crate (e.g. my_program_core) and the program binary
     // depends on it via `path = "..."`.
-    let resolved_path_buf = std::path::Path::new(&resolved_path).to_path_buf();
-    let dep_dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&resolved_path_buf, |_| {});
     let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(&dep_dirs, |w| {
-            eprintln!("warning: {w}");
-        });
+        spel_framework_core::idl_gen::collect_items_from_crate_dirs(
+            &deps.graph.transitive_dirs,
+            |w| eprintln!("warning: {w}"),
+        );
     all_items.extend(extra_items);
 
     let (accounts, types) = account_types::collect_account_types(&all_items);
@@ -2324,124 +2601,6 @@ mod tests {
         }
     }
 
-    // ── find_path_dep_dirs (via spel-framework-core) ───────────────────────
-
-    #[test]
-    fn find_path_dep_dirs_returns_local_path_deps() {
-        let tmp = TempDir::new("find-path-deps-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1);
-        assert!(
-            dirs[0].ends_with("core"),
-            "expected core dir, got {:?}",
-            dirs[0]
-        );
-    }
-
-    #[test]
-    fn find_path_dep_dirs_ignores_registry_and_git_deps() {
-        let tmp = TempDir::new("find-path-deps-filter-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\n\
-             token_core = { path = \"../../core\" }\n\
-             serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1);
-        assert!(dirs[0].ends_with("core"));
-    }
-
-    #[test]
-    fn find_path_dep_dirs_ignores_dev_and_build_deps() {
-        let tmp = TempDir::new("find-path-deps-dev-build-macro");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-        tmp.write(
-            "test_helpers/Cargo.toml",
-            "[package]\nname = \"test_helpers\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("test_helpers/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\n\
-             token_core = { path = \"../../core\" }\n\n\
-             [dev-dependencies]\n\
-             test_helpers = { path = \"../../test_helpers\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 1, "expected only core, got: {dirs:?}");
-        assert!(dirs[0].ends_with("core"));
-    }
-
-    #[test]
-    fn find_path_dep_dirs_resolves_transitive_deps() {
-        let tmp = TempDir::new("transitive-deps-macro");
-
-        // shared_types -> core -> guest
-        tmp.write(
-            "shared/Cargo.toml",
-            "[package]\nname = \"shared_types\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
-        );
-        tmp.write("shared/src/lib.rs", "");
-
-        tmp.write(
-            "core/Cargo.toml",
-            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\nshared_types = { path = \"../shared\" }\n",
-        );
-        tmp.write("core/src/lib.rs", "");
-
-        tmp.write(
-            "methods/guest/Cargo.toml",
-            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
-             [dependencies]\ntoken_core = { path = \"../../core\" }\n",
-        );
-        let program = tmp.write("methods/guest/src/bin/token.rs", "");
-
-        let dirs = spel_framework_core::idl_gen::find_path_dep_dirs(&program, |_| {});
-        assert_eq!(dirs.len(), 2, "expected core and shared, got: {dirs:?}");
-        let names: Vec<&str> = dirs
-            .iter()
-            .map(|d| d.file_name().unwrap().to_str().unwrap())
-            .collect();
-        assert!(names.contains(&"core"));
-        assert!(names.contains(&"shared"));
-    }
-
     // ── expand_generate_idl with path deps ─────────────────────────────────
 
     /// End-to-end test: generate_idl! macro collects #[account_type] types from
@@ -2558,6 +2717,122 @@ pub mod token {
         assert!(
             output.contains("VaultConfig"),
             "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
+        );
+    }
+
+    /// A compound-seed account whose seed source is an auto-injected param
+    /// (not present in the user's `vec![...]`) must still produce the
+    /// `&*<name>.account_id.value()` seed arg — the injected param is in
+    /// scope in the fn body just like a user-listed account.
+    #[test]
+    fn account_seed_args_from_idents_falls_back_to_injected_accounts() {
+        let accounts = vec![AccountParam {
+            name: format_ident!("freeze_account"),
+            constraints: AccountConstraints {
+                pda_seeds: vec![
+                    PdaSeedDef::Const("frozen".into()),
+                    PdaSeedDef::Account("caller".into()),
+                ],
+                ..Default::default()
+            },
+            is_rest: false,
+        }];
+        let fn_name = format_ident!("update_value");
+        let injected = vec![
+            "freeze_config".to_string(),
+            "freeze_account".to_string(),
+            "caller".to_string(),
+        ];
+        let transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+
+        let result = transformer.account_seed_args_from_idents(&[]);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].to_string(),
+            quote! { &*caller.account_id.value() }.to_string()
+        );
+    }
+
+    // The claims fn counts every account param, injected ones included,
+    // so the fallback branch must prepend injected post-states to any
+    // consumer-authored accounts expression (e.g. vec![config.account]).
+    // Without the prepend the guest panics at execution with
+    // execute_with_claims: accounts.len() != claims.len().
+    #[test]
+    fn fallback_prepends_injected_post_states() {
+        let accounts = vec![
+            AccountParam {
+                name: format_ident!("caller"),
+                constraints: AccountConstraints {
+                    signer: true,
+                    ..Default::default()
+                },
+                is_rest: false,
+            },
+            AccountParam {
+                name: format_ident!("config"),
+                constraints: AccountConstraints::default(),
+                is_rest: false,
+            },
+        ];
+        let fn_name = format_ident!("update_value");
+        let injected = vec!["caller".to_string()];
+        let mut transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            pub fn update_value(
+                caller: AccountWithMetadata,
+                mut config: AccountWithMetadata,
+            ) -> SpelResult {
+                Ok(SpelOutput::execute(vec![config.account], vec![]))
+            }
+        };
+
+        transformer.visit_item_fn_mut(&mut func);
+
+        let out = quote! { #func }.to_string();
+        assert!(out.contains("execute_with_claims"), "{out}");
+        assert!(
+            out.contains("caller . account . clone ()"),
+            "the injected caller's post-state must be prepended: {out}"
+        );
+    }
+
+    #[test]
+    fn fallback_without_injection_passes_the_expression_through() {
+        let accounts = vec![AccountParam {
+            name: format_ident!("config"),
+            constraints: AccountConstraints::default(),
+            is_rest: false,
+        }];
+        let fn_name = format_ident!("update_value");
+        let injected: Vec<String> = Vec::new();
+        let mut transformer = ExecuteTransformer {
+            accounts: &accounts,
+            fn_name: &fn_name,
+            injected: &injected,
+        };
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
+                Ok(SpelOutput::execute(vec![config.account], vec![]))
+            }
+        };
+
+        transformer.visit_item_fn_mut(&mut func);
+
+        let out = quote! { #func }.to_string();
+        assert!(out.contains("execute_with_claims"), "{out}");
+        assert!(
+            !out.contains("__all"),
+            "no injected params, the expression must pass through unwrapped: {out}"
         );
     }
 }

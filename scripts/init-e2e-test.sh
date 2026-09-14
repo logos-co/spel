@@ -14,7 +14,7 @@
 # Required Environment Variables:
 #   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
 # Optional Environment Variables:
-#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/head). If unset,
+#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/merge). If unset,
 #                 spel init uses its hardcoded default (branch = "main").
 
 set -euo pipefail
@@ -88,7 +88,9 @@ cd "$WORK_DIR"
 
 # ─── Step 1: spel init — default LEZ, optional SPEL override ─────────────
 # Always uses DEFAULT LEZ resolution (no --lez-tag) to test init.rs defaults.
-# On PRs, SPEL_TAG is set so the scaffolded project uses the PR's framework code.
+# On PRs, SPEL_TAG is set to the PR's *merge* ref, so the scaffolded project
+# uses the PR's framework code as it would land: the PR merged into current
+# main, matching what the runner has checked out.
 # On main pushes, SPEL_TAG is unset so the default refs are tested.
 # SPEL_GIT is always set in CI (the repo's own URL) so forks test their own
 # code; only local runs without SPEL_GIT exercise the built-in default URL.
@@ -126,6 +128,11 @@ log "  ✓ Built: $(basename "$GUEST_BIN") ($(stat -c%s "$GUEST_BIN") bytes)"
 # ─── Step 3: Generate and validate IDL ────────────────────────────────────
 
 log "Step 3: Generating IDL..."
+# The scanner resolves the guest's graph with an offline metadata call,
+# which needs every lockfile entry cached, platforms the build never
+# fetched included. The documented consumer prerequisite applies to the
+# scaffold too.
+cargo fetch --manifest-path methods/guest/Cargo.toml > "$WORK_DIR/fetch.log" 2>&1 || fail "cargo fetch failed (see $WORK_DIR/fetch.log)"
 make idl > "$WORK_DIR/idl.log" 2>&1 || fail "IDL generation failed (see $WORK_DIR/idl.log)"
 IDL_FILE=$(find . -name "*-idl.json" | head -1)
 [ -n "$IDL_FILE" ] || fail "No IDL file found"

@@ -8,6 +8,7 @@ pub mod decode;
 pub mod error;
 pub mod idl;
 pub mod pda;
+pub mod slot_layout;
 pub mod spel_output;
 pub mod types;
 pub mod validation;
@@ -15,7 +16,17 @@ pub mod validation;
 #[cfg(feature = "idl-gen")]
 pub mod account_types;
 #[cfg(feature = "idl-gen")]
+pub mod extension;
+#[cfg(feature = "idl-gen")]
 pub mod idl_gen;
+
+#[cfg(feature = "idl-gen")]
+pub mod dep_walk;
+
+#[cfg(test)]
+mod test_utils;
+
+pub use slot_layout::{FixedBorshSize, SlotLayoutProbe};
 
 pub mod prelude {
     pub use crate::error::{SpelError, SpelResult};
@@ -40,6 +51,8 @@ pub mod prelude {
 
     // Execution context for instruction handlers (issue #172)
     pub use crate::context::ProgramContext;
+
+    pub use crate::slot_layout::{FixedBorshSize, SlotLayoutProbe};
 
     // nssa::public_transaction (host-only)
     #[cfg(feature = "host")]

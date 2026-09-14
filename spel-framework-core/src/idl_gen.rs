@@ -17,6 +17,8 @@ use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelId
 
 use crate::account_types::{collect_account_types, syn_type_to_idl_type};
 
+use crate::extension::{check_duplicate_instruction_names, instruction_source_label};
+
 mod unlexable;
 use unlexable::has_metavar_glued_literal;
 
@@ -27,6 +29,8 @@ pub enum IdlGenError {
     Parse(syn::Error),
     NoProgram(String),
     NoInstructions(String),
+    MalformedExtensionMetadata(String),
+    DuplicateInstruction(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -39,6 +43,12 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::NoInstructions(path) => {
                 write!(f, "No #[instruction] functions found in '{path}'")
+            },
+            IdlGenError::MalformedExtensionMetadata(e) => {
+                write!(f, "Malformed extension metadata: '{e}'")
+            },
+            IdlGenError::DuplicateInstruction(e) => {
+                write!(f, "Duplicate instruction: '{e}'")
             },
         }
     }
@@ -94,7 +104,12 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 ) -> Result<SpelIdl, IdlGenError> {
     let content = std::fs::read_to_string(source_path)?;
     let (extra_items, _) = collect_items_from_crate_dirs(dep_source_dirs, on_warning);
-    generate_idl_inner(&content, &source_path.display().to_string(), &extra_items)
+    generate_idl_inner(
+        &content,
+        &source_path.display().to_string(),
+        &extra_items,
+        Some(source_path),
+    )
 }
 
 /// Parse a SPEL program from source text and return its [`SpelIdl`].
@@ -103,7 +118,7 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 /// production code goes through `generate_idl_from_file_with_deps`.
 #[cfg(test)]
 fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, IdlGenError> {
-    generate_idl_inner(content, source_label, &[])
+    generate_idl_inner(content, source_label, &[], None)
 }
 
 /// Core IDL generation logic. `extra_items` are synthetic items collected from
@@ -113,6 +128,7 @@ fn generate_idl_inner(
     content: &str,
     source_label: &str,
     extra_items: &[syn::Item],
+    manifest_dir: Option<&Path>,
 ) -> Result<SpelIdl, IdlGenError> {
     let path_str = source_label.to_string();
 
@@ -139,12 +155,53 @@ fn generate_idl_inner(
         .as_ref()
         .ok_or_else(|| IdlGenError::NoProgram(path_str.clone()))?;
 
+    // Resolve the dependency side first: inject specs apply to the
+    // consumer's own instructions below.
+    let mut warn = |w: String| eprintln!("⚠️  {w}");
+    let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
+        Some(manifest_dir) => {
+            let mut deps =
+                crate::extension::resolve_program_deps(manifest_dir, &program_mod.attrs, &mut warn)
+                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            let consumer_fns: Vec<ItemFn> = items
+                .iter()
+                .filter_map(|i| match i {
+                    syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
+                    _ => None,
+                })
+                .collect();
+            crate::extension::rewrite_embedded_roles(
+                &mut deps.extensions.inject_specs,
+                &deps.extensions.embeds,
+                &consumer_fns,
+            )
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
+            let active_wraps = crate::extension::active_wraps(&deps.extensions.wraps);
+            (
+                deps.extensions.instructions,
+                deps.extensions.inject_specs,
+                active_wraps,
+                deps.extensions.embeds,
+            )
+        },
+        None => (vec![], vec![], vec![], vec![]),
+    };
+
     // Collect instruction functions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
     for item in items {
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
-                instructions.push(parse_instruction(func.clone())?);
+                let mut func = func.clone();
+                crate::extension::apply_wrap_and_inject(
+                    &mut func,
+                    &active_wraps,
+                    &inject_specs,
+                    &embeds,
+                    None,
+                )
+                .map_err(IdlGenError::MalformedExtensionMetadata)?;
+                instructions.push(parse_instruction(func)?);
             }
         }
     }
@@ -152,6 +209,38 @@ fn generate_idl_inner(
     if instructions.is_empty() {
         return Err(IdlGenError::NoInstructions(path_str));
     }
+
+    for (func, crate_path) in ext_instructions {
+        let mut func = func;
+        let qualified = format!(
+            "{}::{}",
+            crate_path
+                .segments
+                .first()
+                .map(|s| s.ident.to_string())
+                .unwrap_or_default(),
+            func.sig.ident
+        );
+        crate::extension::apply_wrap_and_inject(
+            &mut func,
+            &active_wraps,
+            &inject_specs,
+            &embeds,
+            Some(&qualified),
+        )
+        .map_err(IdlGenError::MalformedExtensionMetadata)?;
+        let mut info = parse_instruction(func)?;
+        let name = &info.fn_name;
+        info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
+        instructions.push(info);
+    }
+    check_duplicate_instruction_names(instructions.iter().map(|i| {
+        (
+            i.fn_name.to_string(),
+            instruction_source_label(i.external_call_path.as_ref()),
+        )
+    }))
+    .map_err(IdlGenError::DuplicateInstruction)?;
 
     // Detect external instruction type from #[lez_program(instruction = "...")]
     let external_instruction = program_mod
@@ -292,6 +381,39 @@ pub fn collect_items_from_crate_dirs<F: FnMut(String)>(
     (items, files_read)
 }
 
+/// Parse a source file and every module file it declares, returning the
+/// flattened items. The slot-attribute scan uses this so a slot-bearing
+/// struct may live in a `mod` file instead of the entry file.
+pub fn collect_file_items_following_mods(path: &Path) -> Vec<syn::Item> {
+    let mut items = Vec::new();
+    let mut visited = HashSet::new();
+    let mut files_read = Vec::new();
+    // The slot scan only needs carrier structs; a skipped landmine file
+    // already warns through the IDL path.
+    collect_items_from_source_file(path, &mut items, &mut visited, &mut files_read, &mut |_| {});
+    items
+}
+
+/// Bin entry files declared in the manifest (`[[bin]] path = ...`).
+/// Module-source discovery adds these to its candidates: consumers and
+/// test harnesses may put the entry file outside `src/`, and a missed
+/// entry file would silently skip source-derived checks.
+pub fn manifest_bin_paths(manifest_dir: &Path) -> Vec<PathBuf> {
+    let Ok(content) = std::fs::read_to_string(manifest_dir.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Ok(value) = content.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(bins) = value.get("bin").and_then(|b| b.as_array()) else {
+        return Vec::new();
+    };
+    bins.iter()
+        .filter_map(|bin| bin.get("path").and_then(|p| p.as_str()))
+        .map(|p| manifest_dir.join(p))
+        .collect()
+}
+
 /// Parse a single Rust source file and append its items to `out`, following
 /// external `mod` declarations to their corresponding files.
 ///
@@ -335,7 +457,7 @@ fn collect_items_from_source_file<F: FnMut(String)>(
     // Sub-module files for `lib.rs` / `mod.rs` live alongside the file;
     // for `foo.rs` they live in a `foo/` directory next to the file.
     let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-    let sub_base = if file_name == "lib.rs" || file_name == "mod.rs" {
+    let sub_base = if file_name == "lib.rs" || file_name == "mod.rs" || file_name == "main.rs" {
         path.parent().map(|p| p.to_path_buf())
     } else {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
@@ -608,6 +730,7 @@ struct InstructionInfo {
     fn_name: Ident,
     accounts: Vec<AccountParam>,
     args: Vec<ArgParam>,
+    external_call_path: Option<syn::Path>,
 }
 
 struct AccountParam {
@@ -636,7 +759,7 @@ struct ArgParam {
     ty: Type,
 }
 
-fn has_instruction_attr(attrs: &[Attribute]) -> bool {
+pub(crate) fn has_instruction_attr(attrs: &[Attribute]) -> bool {
     attrs.iter().any(|a| a.path().is_ident("instruction"))
 }
 
@@ -683,10 +806,23 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         }
     }
 
+    let mut deduped: Vec<AccountParam> = Vec::new();
+    for a in accounts {
+        match deduped.iter_mut().find(|d| d.name == a.name) {
+            Some(kept) => {
+                kept.constraints.mutable |= a.constraints.mutable;
+                kept.constraints.signer |= a.constraints.signer;
+            },
+            None => deduped.push(a),
+        }
+    }
+    let accounts = deduped;
+
     Ok(InstructionInfo {
         fn_name,
         accounts,
         args,
+        external_call_path: None,
     })
 }
 
@@ -837,296 +973,86 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> Result<PdaSeedDef, syn::Error>
     }
 }
 
-// ─── Path-dependency scanning (shared by CLI and proc-macro) ─────────────
-
-/// Return the crate-root directories of all `path = "..."` entries in the
-/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
-///
-/// Only runtime dependencies are considered.  `[dev-dependencies]` and
-/// `[build-dependencies]` are deliberately excluded: types defined in those
-/// crates are not part of the program's on-chain interface and must not appear
-/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
-/// are also excluded so that only project-local crates are scanned.
-///
-/// **Transitive path-dependencies** are resolved: if a discovered dependency
-/// itself declares path-based dependencies, those are included as well (with
-/// cycle detection).
-///
-/// In workspace projects the function detects when the nearest `Cargo.toml` is
-/// a workspace root manifest and searches for the actual crate manifest
-/// containing `[dependencies]`.
-///
-/// `on_warning` is called for non-fatal issues (missing dep directories,
-/// unparseable manifests, etc.).  Pass `|_| {}` to ignore warnings.
-pub fn find_path_dep_dirs<F: FnMut(String)>(source_path: &Path, mut on_warning: F) -> Vec<PathBuf> {
-    let manifest = match _find_crate_manifest(source_path, &mut on_warning) {
-        Some(m) => m,
-        None => return vec![],
-    };
-
-    let content = match std::fs::read_to_string(&manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
-        },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return vec![];
-        },
-    };
-
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return vec![],
-    };
-
-    // Check if this is a workspace root — if so, it has no [dependencies] of its
-    // own.  We need to find the actual crate manifest for the program binary.
-    let is_workspace = value.get("workspace").is_some() && value.get("package").is_none();
-
-    if is_workspace {
-        // Workspace root: search member directories for the crate that contains
-        // the source file.
-        let mut dirs = Vec::new();
-        let mut visited = HashSet::new();
-        if let Some(member_manifest) =
-            _find_member_manifest(&manifest_dir, &value, source_path, &mut on_warning)
-        {
-            _resolve_path_deps_recursive(
-                &member_manifest,
-                &mut dirs,
-                &mut visited,
-                &mut on_warning,
-            );
-        }
-        dirs
-    } else {
-        // Regular crate manifest — extract path deps directly.
-        let mut dirs = Vec::new();
-        let mut visited = HashSet::new();
-        _resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, &mut on_warning);
-        dirs
-    }
-}
-
-/// Recursively extract path-based dependencies from a manifest, following
-/// transitive path deps.  `visited` tracks canonicalised directories to avoid
-/// infinite loops.
-fn _resolve_path_deps_recursive<F: FnMut(String)>(
-    manifest: &Path,
-    dirs: &mut Vec<PathBuf>,
-    visited: &mut HashSet<PathBuf>,
-    on_warning: &mut F,
-) {
-    let manifest_dir = match manifest.parent() {
-        Some(d) => d.to_path_buf(),
-        None => return,
-    };
-
-    // Deduplicate by canonical path.
-    let canonical = match &manifest_dir.canonicalize() {
-        Ok(c) => c.clone(),
-        Err(_) => manifest_dir.clone(),
-    };
-    if !visited.insert(canonical) {
-        return; // already processed — cycle or duplicate
-    }
-
-    let content = match std::fs::read_to_string(manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
-    };
-
-    // Skip workspace roots — they have no [dependencies].
-    if value.get("workspace").is_some() && value.get("package").is_none() {
-        return;
-    }
-
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dep_dir = manifest_dir.join(rel);
-                if !dep_dir.is_dir() {
-                    on_warning(format!(
-                        "⚠️  path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dep_dir.display()
-                    ));
-                    continue;
-                }
-                dirs.push(dep_dir.clone());
-
-                // Recurse into the dependency's own Cargo.toml for transitive deps.
-                let dep_manifest = dep_dir.join("Cargo.toml");
-                if dep_manifest.exists() {
-                    _resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
-                }
-            }
-        }
-    }
-}
-
-/// Given a workspace root directory, try to locate the member crate manifest
-/// that contains `source_path`.
-fn _find_member_manifest<F: FnMut(String)>(
-    workspace_root: &Path,
-    workspace_value: &toml::Value,
-    source_path: &Path,
-    on_warning: &mut F,
-) -> Option<PathBuf> {
-    // Try to get the explicit member list from [workspace.members].
-    let members: Vec<String> = workspace_value
-        .get("workspace")
-        .and_then(|w| w.get("members"))
-        .and_then(|m| m.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|s| s.to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-
-    // Expand glob patterns (e.g. "crates/*") into concrete directories.
-    let concrete_members: Vec<String> = if members.iter().any(|m| m.contains('*')) {
-        let mut expanded = Vec::new();
-        for pattern in &members {
-            if pattern.contains('*') {
-                // Simple glob expansion: replace * with readdir.
-                let prefix = pattern.split_once('*').map(|(p, _)| p).unwrap_or("");
-                let dir = workspace_root.join(prefix);
-                if let Ok(entries) = std::fs::read_dir(&dir) {
-                    for entry in entries.flatten() {
-                        if entry.file_type().map_or(true, |ft| ft.is_dir()) {
-                            expanded.push(format!(
-                                "{}/{}",
-                                prefix,
-                                entry.file_name().to_string_lossy()
-                            ));
-                        }
-                    }
-                }
-            } else {
-                expanded.push(pattern.clone());
-            }
-        }
-        expanded
-    } else {
-        members.clone()
-    };
-
-    // Find the member whose directory contains source_path.
-    let source_dir = source_path.parent().unwrap_or(source_path);
-    for member in &concrete_members {
-        let member_dir = workspace_root.join(member.as_str());
-        if member_dir.is_dir() && source_dir.starts_with(&member_dir) {
-            let manifest = member_dir.join("Cargo.toml");
-            if manifest.exists() {
-                return Some(manifest);
-            }
-        }
-    }
-
-    // Fallback: recursively search all subdirectories for a Cargo.toml that
-    // contains source_path.  This handles nested workspace members (e.g.
-    // `methods/guest`) when the explicit `members` list is absent/mismatched.
-    on_warning(format!(
-        "⚠️  workspace at '{}' has no matching member for '{}'; searching all subdirectories",
-        workspace_root.display(),
-        source_path.display()
-    ));
-
-    fn _search_recursive(dir: &Path, target_dir: &Path) -> Option<PathBuf> {
-        // Search children FIRST (depth-first), then check current dir.
-        // This ensures we find the deepest matching member manifest rather
-        // than returning the workspace root immediately.
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            for entry in entries.flatten() {
-                if entry.file_type().is_ok_and(|ft| ft.is_dir()) {
-                    if let Some(found) = _search_recursive(&entry.path(), target_dir) {
-                        return Some(found);
-                    }
-                }
-            }
-        }
-        // Check current dir — but skip virtual workspace manifests (no [package]).
-        let manifest = dir.join("Cargo.toml");
-        if manifest.exists() && target_dir.starts_with(dir) {
-            // Skip virtual workspace manifests that have [workspace] but no [package].
-            let is_virtual_workspace = std::fs::read_to_string(&manifest)
-                .ok()
-                .and_then(|content| content.parse::<toml::Value>().ok())
-                .map(|v| v.get("workspace").is_some() && v.get("package").is_none())
-                .unwrap_or(false);
-            if !is_virtual_workspace {
-                return Some(manifest);
-            }
-        }
-        None
-    }
-
-    _search_recursive(workspace_root, source_dir)
-}
-
-/// Walk up from `start` to find the nearest `Cargo.toml`.
-fn _find_crate_manifest<F: FnMut(String)>(start: &Path, on_warning: &mut F) -> Option<PathBuf> {
-    let mut dir: &Path = if start.is_file() {
-        start.parent()?
-    } else {
-        start
-    };
-    loop {
-        let candidate = dir.join("Cargo.toml");
-        if candidate.exists() {
-            return Some(candidate);
-        }
-        dir = match dir.parent() {
-            Some(p) => p,
-            None => {
-                on_warning(format!(
-                    "⚠️  no Cargo.toml found walking up from '{}'",
-                    start.display()
-                ));
-                return None;
-            },
-        };
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn manifest_bin_paths_reads_declared_bins() {
+        let dir = std::env::temp_dir().join("spel_manifest_bin_paths_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Cargo.toml"),
+            concat!(
+                "[package]\nname = \"x\"\nversion = \"0.1.0\"\n",
+                "[[bin]]\nname = \"x\"\npath = \"main.rs\"\n",
+                "[[bin]]\nname = \"y\"\npath = \"tools/y.rs\"\n",
+            ),
+        )
+        .unwrap();
+        let paths = manifest_bin_paths(&dir);
+        assert_eq!(paths.len(), 2, "{paths:?}");
+        assert!(paths[0].ends_with("main.rs"));
+        assert!(paths[1].ends_with("tools/y.rs"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn following_mods_reads_module_files_beside_lib() {
+        let dir = std::env::temp_dir().join("spel_follow_mods_lib_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lib.rs"), "mod types;\npub struct Top;\n").unwrap();
+        std::fs::write(dir.join("types.rs"), "pub struct Inner;\n").unwrap();
+        let items = collect_file_items_following_mods(&dir.join("lib.rs"));
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(names.contains(&"Top".to_string()), "{names:?}");
+        assert!(names.contains(&"Inner".to_string()), "{names:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn following_mods_reads_module_files_beside_main() {
+        let dir = std::env::temp_dir().join("spel_follow_mods_main_fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.rs"), "mod types;\npub struct Top;\n").unwrap();
+        std::fs::write(dir.join("types.rs"), "pub struct Inner;\n").unwrap();
+        let items = collect_file_items_following_mods(&dir.join("main.rs"));
+        let names: Vec<String> = items
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) => Some(s.ident.to_string()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            names.contains(&"Inner".to_string()),
+            "a bin entry file's `mod` must resolve beside it, found {names:?}"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     use super::*;
     use crate::idl::{IdlSeed, IdlType, SpelIdl};
+
+    #[test]
+    fn metavar_glued_literal_is_detected() {
+        // The exact shape from ark-ff-0.3.0 src/fields/macros.rs:615.
+        assert!(has_metavar_glued_literal(
+            r#"write!(f, stringify!($Fp"({})"), self.into_repr())"#
+        ));
+        // A metavariable not glued to a quote is fine.
+        assert!(!has_metavar_glued_literal(
+            "macro_rules! m { ($x:ident) => { $x } }"
+        ));
+        // A bare dollar, a digit after the dollar, and plain code are fine.
+        assert!(!has_metavar_glued_literal("let price = \"$\";"));
+        assert!(!has_metavar_glued_literal(r#"let s = "$5\"quoted\"";"#));
+        assert!(!has_metavar_glued_literal("fn account_type_free() {}"));
+    }
 
     #[test]
     fn landmine_file_contributes_no_items_but_is_tracked() {

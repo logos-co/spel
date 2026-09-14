@@ -135,7 +135,11 @@ pub async fn execute_instruction(
         let result = if is_vec_string(&arg.type_) {
             Ok(parse_string_vec(values))
         } else {
-            parse_value(values.last().map(|s| s.as_str()).unwrap_or(""), &arg.type_)
+            parse_value(
+                values.last().map(|s| s.as_str()).unwrap_or(""),
+                &arg.type_,
+                &idl.types,
+            )
         };
         match result {
             Ok(val) => parsed_args.push((&arg.name, &arg.type_, val)),
