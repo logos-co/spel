@@ -107,11 +107,22 @@ pub fn lez_program(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Marker attribute for instruction functions within an `#[lez_program]` module.
-/// Processed by `#[lez_program]`, not standalone.
+/// Marker attribute for instruction functions.
+///
+/// Inside an `#[lez_program]` module this never expands. The module macro
+/// consumes the whole module first and emits the handler functions itself.
+///
+/// Standalone it does expand, which is the case an extension library hits:
+/// its instruction functions live outside `#[lez_program]`. Here the macro
+/// strips the `#[account(...)]` helper attributes off the parameters, so
+/// rustc accepts a function the framework has not rewritten. Extension
+/// discovery is unaffected, because the scanner parses the library source
+/// rather than this expansion and still sees the attributes.
 #[proc_macro_attribute]
 pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+    let mut func = parse_macro_input!(item as ItemFn);
+    strip_account_attrs(&mut func);
+    quote!(#func).into()
 }
 
 /// Marker attribute for account data types.
@@ -1424,6 +1435,20 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     None
 }
 
+/// Drop the `#[account(...)]` helper attributes from a function's parameters.
+///
+/// The attribute is inert syntax that only the framework reads, so whoever
+/// emits the function has to remove it before rustc sees it. Both emitters
+/// go through here: `#[lez_program]` when it generates handlers, and the
+/// standalone `#[instruction]` expansion.
+fn strip_account_attrs(func: &mut ItemFn) {
+    for input in &mut func.sig.inputs {
+        if let FnArg::Typed(pat_type) = input {
+            pat_type.attrs.retain(|a| !a.path().is_ident("account"));
+        }
+    }
+}
+
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -1431,11 +1456,7 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
-            for input in &mut func.sig.inputs {
-                if let FnArg::Typed(pat_type) = input {
-                    pat_type.attrs.retain(|a| !a.path().is_ident("account"));
-                }
-            }
+            strip_account_attrs(&mut func);
             // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
             let mut transformer = ExecuteTransformer {
                 accounts: &ix.accounts,
@@ -2550,6 +2571,75 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    // ── strip_account_attrs ────────────────────────────────────────────────
+
+    fn param_attr_paths(func: &ItemFn) -> Vec<Vec<String>> {
+        func.sig
+            .inputs
+            .iter()
+            .map(|input| match input {
+                FnArg::Typed(pat_type) => pat_type
+                    .attrs
+                    .iter()
+                    .map(|a| quote!(#a).to_string())
+                    .collect(),
+                FnArg::Receiver(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn strip_account_attrs_clears_every_account_attr() {
+        let mut func: ItemFn = syn::parse_quote! {
+            pub fn set_paused(
+                #[account(mut, pda = const("pause"))] state: u32,
+                #[account(signer)] admin: u32,
+                paused: bool,
+            ) -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(
+            param_attr_paths(&func),
+            vec![Vec::<String>::new(), Vec::new(), Vec::new()],
+            "every #[account(...)] must be gone, on every parameter"
+        );
+    }
+
+    #[test]
+    fn strip_account_attrs_keeps_attrs_it_does_not_own() {
+        // The framework owns `account` and nothing else. A parameter attr
+        // belonging to an extension library has to survive to expand there.
+        let mut func: ItemFn = syn::parse_quote! {
+            pub fn gated(#[other] #[account(signer)] caller: u32) -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(param_attr_paths(&func), vec![vec!["# [other]".to_string()]]);
+    }
+
+    #[test]
+    fn strip_account_attrs_leaves_function_attrs_alone() {
+        // `#[instruction]` sits on the function, not a parameter. Removing it
+        // is `generate_handler_fns`' job, and standalone it is self-consuming.
+        let mut func: ItemFn = syn::parse_quote! {
+            #[instruction]
+            #[inline]
+            pub fn noop() -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(
+            func.attrs.len(),
+            2,
+            "function attrs are not this fn's business"
+        );
+    }
+
+    #[test]
+    fn strip_account_attrs_accepts_a_parameterless_fn() {
+        let mut func: ItemFn = syn::parse_quote! { pub fn noop() {} };
+        strip_account_attrs(&mut func);
+        assert!(func.sig.inputs.is_empty());
     }
 
     // ── has_account_type_attr (qualified form) ─────────────────────────────

@@ -233,6 +233,7 @@ Contracts an extension author must hold:
 1. **Instruction fns are re-exported at the crate root.** The generated dispatcher calls `::your_crate::your_instruction(...)`; a fn nested in a private module does not resolve.
 2. **Signature types resolve at the consumer's expansion site.** Extension instruction signatures are copied verbatim into consumer-side codegen, so reference your own types by absolute path (`::your_crate::YourType`) rather than relying on imports.
 3. **Gate and marker attrs are self-consuming proc-macros.** Attrs on items inside a module expand once, after the outer `#[lez_program]` rewrite, on the emitted handlers. Ship every instruction-level attr as a real proc-macro that handles that expansion: a gate rewrites the handler body, a marker expands to nothing. The framework strips nothing.
+4. **`#[instruction]` comes from the framework, not from your own macro crate.** A library's instruction fns sit outside `#[lez_program]`, so the attribute expands where they are written rather than being consumed by the module macro. The framework's `#[instruction]` handles that case: it drops the `#[account(...)]` attrs off the parameters, which is the only rewrite a library needs to compile on its own. Re-export it next to your marker, `pub use spel_framework::instruction;`, instead of hand-writing a stripping shim. Discovery still sees the attrs, because the scanner parses your source file and not the expansion.
 
 An extension whose gate needs specific accounts can additionally declare an inject block:
 
