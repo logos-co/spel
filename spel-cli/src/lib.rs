@@ -447,7 +447,9 @@ pub async fn run() {
         eprintln!();
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new SPEL project");
-        eprintln!("  program-id <FILE> [FILE...]  Extract ProgramId from ELF binary(ies)");
+        eprintln!(
+            "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
+        );
         eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data");
         eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
         eprintln!();
