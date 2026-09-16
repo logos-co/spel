@@ -97,7 +97,7 @@ pub enum Instruction {
 
 **Crate:** `spel-framework-macros` (re-exported by `spel-framework`)
 
-Marker attribute for functions inside an `#[lez_program]` module. This attribute is processed by `#[lez_program]` — it is a no-op when used standalone.
+Marker attribute for functions inside an `#[lez_program]` module, where `#[lez_program]` processes it and it never expands on its own. Outside one — an [extension library](extensions.md), say — it does expand, and strips the `#[account(…)]` attributes from the function's parameters so the crate compiles. It changes nothing else.
 
 ### Function Signature Requirements
 
@@ -182,6 +182,11 @@ vault: AccountWithMetadata,
 one carrying the `ViewingPublicKey`. Since LEZ v0.2.1 the derivation is
 `SHA256(prefix || program_id || seed || npk || vpk || identifier)`; omitting `vpk`
 is a compile error.
+
+The attribute has no `identifier` constraint: the generated validation derives
+with identifier 0. A program that uses a non-zero identifier has to validate the
+address by hand. Off-chain, `spel pda --identifier` derives it — see
+[CLI → PDA](cli.md).
 
 ---
 

@@ -50,10 +50,11 @@ state_type = "mini_ext::MiniConfig"
 
 Four requirements. The first three stop the build:
 
-1. **A `proc-macro = true` sub-crate** exporting the marker (pass-through), any
-   gate attributes, and an `#[instruction]` shim that strips `#[account(…)]`
-   param attrs. The framework's own `#[instruction]` is a bare pass-through, so
-   re-exporting it gives `error: cannot find attribute 'account' in this scope`.
+1. **A `proc-macro = true` sub-crate** exporting the marker (pass-through) and
+   any gate attributes — plus `pub use spel_framework::instruction;` in the
+   library for instruction functions. Since #276 the framework's `#[instruction]`
+   strips `#[account(…)]` param attrs outside `#[lez_program]`; against an older
+   framework this fails with `cannot find attribute 'account' in this scope`.
 2. **`extern crate self as <crate>;`** — the framework emits cross-crate calls
    using absolute `::<crate>::Type` paths.
 3. **Explicit `(Account, AutoClaim)` tuples** — `execute`'s rewrite only runs

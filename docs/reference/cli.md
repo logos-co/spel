@@ -225,7 +225,7 @@ address from the caller's key material as well as the seeds, so computing it nee
 two extra flags:
 
 ```bash
-spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex>
+spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]
 ```
 
 `--npk` is the `NullifierPublicKey` (32 bytes) and `--vpk` the `ViewingPublicKey`
@@ -234,8 +234,14 @@ spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex>
 the address cannot be derived without them.
 
 Since LEZ v0.2.1 the derivation is
-`SHA256(prefix || program_id || seed || npk || vpk || identifier)`, with
-`identifier` currently fixed at 0.
+`SHA256(prefix || program_id || seed || npk || vpk || identifier)`. Pass
+`--identifier` (decimal or `0x`-hex `u128`) when the program derives the PDA with
+a non-zero one; it defaults to 0.
+
+- On a **public** PDA, `--identifier` is an error — it only applies to private PDAs.
+- If the owning instruction has a **seed argument named `identifier`**,
+  `--identifier` fills that seed instead, and the private-PDA identifier stays 0
+  (a warning says so).
 
 **ProgramId resolution** (in priority order):
 1. `--program <64-char-hex>`
@@ -398,6 +404,16 @@ spel program-id <BINARY> [--format text|hex|json]
 Prints the `ProgramId` derived from a compiled guest binary. This is the current
 name for what `inspect <FILE>` did; `inspect` still works and additionally decodes
 account data (see above).
+
+`<BINARY>` is the **R0BF `.bin`** the guest build writes to
+`methods/guest/target/riscv32im-risc0-zkvm-elf/docker/<name>.bin`, not the raw
+ELF beside it. Given a raw ELF, the command says so rather than failing
+opaquely:
+
+```text
+this is a raw RISC-V ELF; spel program-id expects the R0BF ProgramBinary wrapper —
+point it at the .bin artefact the guest build emits beside the ELF
+```
 
 ---
 

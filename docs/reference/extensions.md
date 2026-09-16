@@ -92,27 +92,30 @@ Malformed metadata is a compile error, not a skipped extension.
 Four requirements. The first three stop the build; the fourth does not, which
 makes it the one to watch.
 
-### 1. A proc-macro sub-crate
+### 1. A proc-macro sub-crate, and the framework's `#[instruction]`
 
 Proc-macro attributes must live in a `proc-macro = true` crate, which cannot
 export anything else, so an extension is normally two crates: the runtime
 library and its macros. The library re-exports the macros so consumers declare
 one dependency.
 
-The macros crate must export the marker attribute (pass-through — the framework
-matches it by name and never expands it) and any gate attributes. It must also
-export an `#[instruction]` shim that strips `#[account(…)]` parameter
-attributes, because the framework's own `#[instruction]` is a bare pass-through
-that leaves them for rustc:
+The macros crate exports the marker attribute (pass-through — the framework
+matches it by name and never expands it) and any gate attributes.
 
-```text
-error: cannot find attribute `account` in this scope
+Instruction functions use the framework's own `#[instruction]`, re-exported from
+the library:
+
+```rust
+pub use my_extension_macros::{my_extension, require_my_gate};
+pub use spel_framework::instruction;
 ```
 
-The framework reads those attributes out of the source file during the
-dependency scan, so they have to survive in the text while being removed from
-what rustc sees. See [issue #271](https://github.com/logos-co/spel/issues/271)
-for the proposal to remove this boilerplate.
+Outside `#[lez_program]` that attribute strips the `#[account(…)]` parameter
+attributes, so the crate compiles, while the framework still reads them out of
+the source file during the dependency scan. (Before
+[#276](https://github.com/logos-co/spel/pull/276) it was a bare pass-through
+and every extension shipped its own stripping macro; builds against an older
+framework fail with `cannot find attribute 'account' in this scope`.)
 
 ### 2. `extern crate self as <crate>;`
 
