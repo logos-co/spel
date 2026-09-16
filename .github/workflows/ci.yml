@@ -79,6 +79,10 @@ jobs:
           echo "LEZ_TAG=$LEZ_REV" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API. Unauthenticated, that is
+          # 60 requests/hour shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH
@@ -220,6 +224,10 @@ jobs:
           echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API. Unauthenticated, that is
+          # 60 requests/hour shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH
@@ -305,6 +313,10 @@ jobs:
           echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API. Unauthenticated, that is
+          # 60 requests/hour shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH
@@ -384,6 +396,10 @@ jobs:
           echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API. Unauthenticated, that is
+          # 60 requests/hour shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH
@@ -457,6 +473,10 @@ jobs:
           echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
 
       - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API. Unauthenticated, that is
+          # 60 requests/hour shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
           echo "$HOME/.risc0/bin" >> $GITHUB_PATH

@@ -41,11 +41,19 @@ jobs:
           # Generate Cargo.lock first so we can extract exact commit SHAs
           cargo generate-lockfile 2>/dev/null || true
 
-          # Extract current LEZ commit from Cargo.lock
-          CURRENT=$(grep -A 5 'name = "nssa_core"' Cargo.lock 2>/dev/null | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
+          # Extract current LEZ commit from Cargo.lock. The package is `lee_core`
+          # since LEZ v0.2.0 (the `nssa_core` name survives only as the dependency
+          # alias in our Cargo.toml files), so looking up `nssa_core` here found
+          # nothing, every week.
+          CURRENT=$(grep -A 5 'name = "lee_core"' Cargo.lock 2>/dev/null | grep 'source = "git' | head -1 | grep -oE '[a-f0-9]{40}' || echo "")
           if [ -z "$CURRENT" ]; then
-            # Fallback: extract tag/rev from Cargo.toml files
-            CURRENT=$(grep -rh 'logos-execution-zone' */Cargo.toml 2>/dev/null | head -1 | grep -oE '(tag|rev) = "[^"]*"' | head -1 | cut -d'"' -f2 || echo "")
+            # Fallback: read the tag/rev from Cargo.toml and resolve it to a
+            # commit. Comparing a tag like `v0.2.4` to a SHA can never match, and
+            # a permanent mismatch means a bump branch is rebuilt, and its push
+            # rejected, on every run.
+            REF=$(grep -rh 'logos-execution-zone' */Cargo.toml 2>/dev/null | head -1 | grep -oE '(tag|rev) = "[^"]*"' | head -1 | cut -d'"' -f2 || echo "")
+            CURRENT=$(git ls-remote https://github.com/logos-blockchain/logos-execution-zone.git "refs/tags/${REF}^{}" "refs/tags/${REF}" 2>/dev/null | head -1 | cut -f1)
+            CURRENT="${CURRENT:-$REF}"
           fi
           echo "commit=$CURRENT" >> "$GITHUB_OUTPUT"
           echo "Current LEZ: $CURRENT"
@@ -251,7 +259,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y pkg-config libssl-dev cmake
+          sudo apt-get install -y pkg-config libssl-dev cmake libpcsclite-dev
 
       - name: Install logos-blockchain-circuits
         run: |
