@@ -30,6 +30,7 @@ use inspect::inspect_binaries;
 use parse::ParsedValue;
 use pda::compute_pda_from_seeds;
 use spel_framework_core::idl::{IdlSeed, SpelIdl};
+use spel_framework_core::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER;
 use std::collections::HashMap;
 use std::{env, fs, process};
 use tx::execute_instruction;
@@ -406,11 +407,14 @@ pub async fn run() {
                 return;
             },
             "pda"
-                if program_id_hex.is_some()
+                if idl_path.is_empty()
+                    && program_id_hex.is_some()
                     && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) =>
             {
-                // Raw PDA mode: no IDL needed
-                // Triggered when --program <hex> resolves to a program ID + pda command
+                // Raw PDA mode: no IDL given, --program <hex> resolves to a program ID.
+                // With --idl present, `pda <account-name>` is the IDL-defined derivation
+                // below (the documented `--idl ... --program <hex> pda vault` form), so
+                // raw mode must not shadow it.
                 // Usage: <bin> --program <hex> pda <seed1> [seed2] ...
                 let mut raw_args =
                     vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
@@ -447,11 +451,14 @@ pub async fn run() {
         eprintln!();
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new SPEL project");
-        eprintln!("  program-id <FILE> [FILE...]  Extract ProgramId from ELF binary(ies)");
+        eprintln!(
+            "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
+        );
         eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data");
         eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
         eprintln!();
         eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
+        eprintln!("      [--npk HEX --vpk HEX [--identifier U128]]  (private PDAs; identifier defaults to 0)");
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
         eprintln!("For all other commands, provide an IDL file via --idl or spel.toml.");
         process::exit(1);
@@ -550,9 +557,12 @@ pub async fn run() {
 /// Compute and print a PDA from the IDL definition.
 ///
 /// Usage: <binary> --idl <IDL> pda <account-name> [--<seed-arg> <value> ...]
+///        [--npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]]
 ///
 /// Looks up the named account across all instructions, finds its PDA seeds,
 /// resolves them using provided args, and prints the base58 AccountId.
+/// Private PDAs additionally take the controller's `--npk` and `--vpk`, plus an
+/// optional `--identifier` (decimal or `0x`-hex `u128`, default 0).
 fn compute_pda_command(
     idl: &SpelIdl,
     program_path: Option<&str>,
@@ -563,6 +573,7 @@ fn compute_pda_command(
         Some(n) => n.as_str(),
         None => {
             eprintln!("Usage: pda <account-name> [--<seed-arg> <value> ...]");
+            eprintln!("       [--npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]]");
             eprintln!();
             eprintln!("Available PDA accounts:");
             for ix in &idl.instructions {
@@ -588,6 +599,9 @@ fn compute_pda_command(
         Some(pair) => pair,
         None => {
             eprintln!("❌ No PDA account named '{}' found in IDL", account_name);
+            if program_id_hex.is_some() {
+                eprintln!("   To derive from raw seeds instead of the IDL, omit --idl.");
+            }
             eprintln!("   Available PDAs:");
             for ix in &idl.instructions {
                 for acc in &ix.accounts {
@@ -608,13 +622,26 @@ fn compute_pda_command(
         .collect();
 
     // Parse --key value pairs from remaining args, using IDL types when available.
-    // --npk <64-char-hex> is reserved for private PDA derivation and not treated as a seed arg.
+    // --npk and --vpk are reserved for private PDA derivation and not treated as
+    // seed args. --identifier is reserved the same way unless the owning instruction
+    // declares an arg by that name, in which case it stays the seed arg it was before
+    // the flag existed and the private identifier falls back to the default.
+    let identifier_is_seed_arg = arg_types.contains_key("identifier");
     let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
     let mut npk_hex: Option<String> = None;
     let mut vpk_hex: Option<String> = None;
+    let mut identifier_raw: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         if let Some(key) = args[i].strip_prefix("--") {
+            if key.contains('=') {
+                eprintln!(
+                    "❌ --{}: the --key=value form is not supported here, use --{} <value>",
+                    key,
+                    key.split('=').next().unwrap_or(key)
+                );
+                process::exit(1);
+            }
             if i + 1 < args.len() {
                 let raw = &args[i + 1];
                 if key == "npk" {
@@ -624,6 +651,11 @@ fn compute_pda_command(
                 }
                 if key == "vpk" {
                     vpk_hex = Some(raw.clone());
+                    i += 2;
+                    continue;
+                }
+                if key == "identifier" && !identifier_is_seed_arg {
+                    identifier_raw = Some(raw.clone());
                     i += 2;
                     continue;
                 }
@@ -690,6 +722,13 @@ fn compute_pda_command(
         process::exit(1);
     };
 
+    let identifier = resolve_private_pda_identifier(
+        account_name,
+        pda_def.private,
+        identifier_is_seed_arg,
+        identifier_raw.as_deref(),
+    );
+
     // For private PDAs, parse and require --npk and --vpk
     use nssa_core::encryption::ViewingPublicKey;
     use nssa_core::NullifierPublicKey;
@@ -704,14 +743,7 @@ fn compute_pda_command(
                 NullifierPublicKey(bytes)
             },
             None => {
-                eprintln!(
-                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
-                    account_name
-                );
-                eprintln!(
-                    "   The NullifierPublicKey is the recipient's npk from their wallet key."
-                );
-                process::exit(1);
+                exit_missing_private_pda_keys(account_name);
             },
         };
         let v = match vpk_hex {
@@ -730,11 +762,7 @@ fn compute_pda_command(
                 })
             },
             None => {
-                eprintln!(
-                    "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
-                    account_name
-                );
-                process::exit(1);
+                exit_missing_private_pda_keys(account_name);
             },
         };
         (Some(n), Some(v))
@@ -778,6 +806,7 @@ fn compute_pda_command(
         &seed_args,
         npk.as_ref(),
         vpk.as_ref(),
+        identifier,
     ) {
         Ok(account_id) => {
             println!("{}", account_id);
@@ -799,6 +828,70 @@ fn compute_pda_command(
             process::exit(1);
         },
     }
+}
+
+/// Parse a private-PDA `identifier` from the CLI: decimal digits, or `0x`-prefixed hex.
+///
+/// Exactly those two forms: no sign, no surrounding whitespace, no separators.
+fn parse_private_pda_identifier(raw: &str) -> Result<u128, String> {
+    const EXPECTED: &str = "expected a u128 as decimal digits or 0x-prefixed hex";
+    let (digits, radix) = match raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
+        Some(hex) => (hex, 16),
+        None => (raw, 10),
+    };
+    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+        return Err(EXPECTED.to_string());
+    }
+    u128::from_str_radix(digits, radix).map_err(|e| format!("{e}; {EXPECTED}"))
+}
+
+/// Resolve the identifier `spel pda` derives a private PDA with.
+///
+/// Public PDAs refuse `--identifier` outright rather than silently ignoring a value
+/// the caller expected to matter. When the owning instruction has a seed arg named
+/// `identifier`, the flag is that seed arg and the private identifier cannot be set
+/// from the CLI, so the default is used and the caller is told so.
+fn resolve_private_pda_identifier(
+    account_name: &str,
+    is_private: bool,
+    identifier_is_seed_arg: bool,
+    raw: Option<&str>,
+) -> u128 {
+    if !is_private {
+        if raw.is_some() {
+            eprintln!(
+                "❌ '{}' is a public PDA — --identifier only applies to private PDAs",
+                account_name
+            );
+            process::exit(1);
+        }
+        return DEFAULT_PRIVATE_PDA_IDENTIFIER;
+    }
+    if identifier_is_seed_arg {
+        eprintln!(
+            "⚠️  '{}': the instruction declares a seed arg named 'identifier', so --identifier is that seed; deriving with private-PDA identifier {}",
+            account_name, DEFAULT_PRIVATE_PDA_IDENTIFIER
+        );
+        return DEFAULT_PRIVATE_PDA_IDENTIFIER;
+    }
+    match raw {
+        Some(raw) => parse_private_pda_identifier(raw).unwrap_or_else(|e| {
+            eprintln!("❌ Invalid --identifier '{}': {}", raw, e);
+            process::exit(1);
+        }),
+        None => DEFAULT_PRIVATE_PDA_IDENTIFIER,
+    }
+}
+
+/// Exit with the usage message for a private PDA missing `--npk` / `--vpk`.
+fn exit_missing_private_pda_keys(account_name: &str) -> ! {
+    eprintln!(
+        "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
+        account_name
+    );
+    eprintln!("   The NullifierPublicKey is the recipient's npk from their wallet key.");
+    eprintln!("   Add --identifier <u128> if the program derives it with a non-zero identifier.");
+    process::exit(1);
 }
 
 /// Compute an arbitrary PDA from a program ID and raw seeds — no IDL required.

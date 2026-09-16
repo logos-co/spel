@@ -235,6 +235,7 @@ Contracts an extension author must hold:
 1. **Instruction fns are re-exported at the crate root.** The generated dispatcher calls `::your_crate::your_instruction(...)`; a fn nested in a private module does not resolve.
 2. **Signature types resolve at the consumer's expansion site.** Extension instruction signatures are copied verbatim into consumer-side codegen, so reference your own types by absolute path (`::your_crate::YourType`) rather than relying on imports.
 3. **Gate and marker attrs are self-consuming proc-macros.** Attrs on items inside a module expand once, after the outer `#[lez_program]` rewrite, on the emitted handlers. Ship every instruction-level attr as a real proc-macro that handles that expansion: a gate rewrites the handler body, a marker expands to nothing. The framework strips nothing.
+4. **`#[instruction]` comes from the framework, not from your own macro crate.** A library's instruction fns sit outside `#[lez_program]`, so the attribute expands where they are written rather than being consumed by the module macro. The framework's `#[instruction]` handles that case: it drops the `#[account(...)]` attrs off the parameters, which is the only rewrite a library needs to compile on its own. Re-export it next to your marker, `pub use spel_framework::instruction;`, instead of hand-writing a stripping shim. Discovery still sees the attrs, because the scanner parses your source file and not the expansion.
 
 An extension whose gate needs specific accounts can additionally declare an inject block:
 
@@ -348,11 +349,16 @@ spel --idl program-idl.json --dry-run=json -p program.bin -- \
 spel --idl program-idl.json -p program.bin -- \
   create-vault --token-name "MYTKN" --initial-supply 1000000
 
-# Use --program-id instead of binary (skips loading the file)
-spel --idl program-idl.json --program-id <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
+# Use the program ID instead of the binary (skips loading the file)
+spel --idl program-idl.json --program <64-char-hex>   create-vault --token-name "MYTKN" --initial-supply 1000000
 
 # Compute a PDA from the IDL
-spel --idl program-idl.json --program-id <64-char-hex> pda vault --create-key my-multisig
+spel --idl program-idl.json --program <64-char-hex> pda vault --create-key my-multisig
+
+# Compute a private PDA: pass the controller's keys, and the u128 identifier if the
+# program derives it with a non-zero one (decimal or 0x-hex; defaults to 0)
+spel --idl program-idl.json --program <64-char-hex> pda private_vault \
+  --npk <64-char-hex> --vpk <2368-char-hex> --identifier 7
 
 # PDA derivation output shows seed inputs:
 #   PDA vault → 4Lp3gkH...
