@@ -3,7 +3,9 @@
 use spel_framework::prelude::*;
 use nssa_core::account::Data;
 
-pub use pause_ext_macros::{instruction, pause_ext, require_not_paused};
+pub use pause_ext_macros::{pause_ext, require_not_paused};
+// spel#276: the framework's #[instruction] strips #[account(...)] itself.
+pub use spel_framework::instruction;
 
 // Required for the absolute self-paths the framework copies into consumer codegen.
 extern crate self as pause_ext;

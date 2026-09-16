@@ -37,15 +37,14 @@ mod my_program {
 }
 ```
 
-## Three things that are easy to miss
+## Things that are easy to miss
 
-These are load-bearing. Without them the extension crate does not compile, and
-none of them are currently in the README:
+These are load-bearing. Without them the extension crate does not compile:
 
-1. **Ship your own `#[instruction]` proc-macro** that strips `#[account(...)]`
-   param attrs (see `pause_ext_macros`). The framework's source scanner reads the
-   raw file and still sees the attrs; the attribute only exists so the extension
-   crate itself compiles.
+1. **Re-export the framework's `#[instruction]`** — `pub use spel_framework::instruction;`.
+   Since spel#276 it strips `#[account(...)]` param attrs itself; before that,
+   every extension shipped its own proc-macro to do it. The framework's source
+   scanner reads the raw file, so discovery still sees the attrs.
 2. **`extern crate self as pause_ext;`** — required for the absolute self-paths
    (`::pause_ext::PauseConfig`) that get copied into consumer-side codegen.
 3. **Write `(Account, AutoClaim)` tuples explicitly.** The `ExecuteTransformer`
@@ -63,7 +62,7 @@ Two mistakes made while writing this example, both caught by LEZ at execution:
 
 ## A fourth one that fails quietly
 
-The three above stop the build. This one does not, which makes it worse.
+Those stop the build. This one does not, which makes it worse.
 
 **Mark the extension's state struct `#[account_type]`.** It is what puts the
 type's shape into the *consumer's* IDL, and that IDL is embedded into the
