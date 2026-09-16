@@ -1,3 +1,26 @@
+## v0.7.0 (2026-09-16)
+
+### ✨ Features
+thread the private-PDA identifier through core and `spel pda` (#274) (4313743)
+witness exchange for multi-signature transactions (#246) (1ef0500)
+migrate SPEL to LEZ v0.2.4 (#256) (7f13e71)
+teach init and CI the scaffold's framework git URL (#255) (d83f5e6)
+
+### 🐛 Fixes
+the standalone #[instruction] strips #[account] attrs (#276) (d0bb659)
+diagnose raw guest ELFs in program-id (#273) (480f255)
+parse Vec<u64>, Vec<u128> and Vec<bool> arguments from comma-separated lists (#266) (bd70faf)
+claim signer accounts while they are still default-owned (#262) (5375ac7)
+patch the wallet config schema LEZ v0.2.1+ actually reads (#260) (748dd74)
+embed the CHANGELOG entry in the GitHub Release body (#252) (55b73b0)
+skip path-dep source files the consumer edition cannot re-lex (#253) (1a209bf)
+
+### 📦 Other
+-  feat(framework): the SPEL extension mechanism (#257) (8183b01)
+- test(cli): end-to-end coverage for witness exchange (#267) (5126b7e)
+- test: cover chained calls (CPI) end to end through the macro (#268) (5ab28a8)
+- chore: satisfy the workspace lint table (#254) (4964304)
+
 ## v0.6.0 (2026-07-15)
 
 ### 💥 Breaking Changes
