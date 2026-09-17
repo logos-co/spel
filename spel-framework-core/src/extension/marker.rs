@@ -3,18 +3,110 @@
 
 use syn::{punctuated::Punctuated, Attribute};
 
+/// The consumer-facing shorthand for every activated extension's
+/// anchor attribute. Inference and the coverage gate accept it, the
+/// dispatcher swaps it for the extensions' real attrs.
+pub const INITIALIZE_SHORTHAND: &str = "initialize";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OffsetSpec {
+    /// Explicit `offset = N` on the marker.
+    Literal(usize),
+    /// No offset kwarg: derived from the role's `*_slot` field marker.
+    Derived,
+    /// A resolved derivation: the carrier struct's offset const as a
+    /// path, e.g. `ProgConfig::MY_SLOT_OFFSET`. Written only by
+    /// `resolve_derived_offsets`, parsed back to tokens at emission.
+    Path(String),
+}
+
+/// A bound-arg value resolved at discovery time: either a concrete
+/// number from an explicit offset kwarg or the declared default, or a
+/// derivation the dispatcher lowers to the carrier struct's
+/// `<ROLE>_SLOT_OFFSET` const path at emission.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundValue {
+    Literal(usize),
+    Derived { role: String },
+    Path(String),
+}
+
+impl OffsetSpec {
+    /// The offset as an expression: the declared literal, or the
+    /// carrier's const path once a derivation is resolved. `subject`
+    /// names the role or extension for the unresolved-offset message.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the spec is still `Derived`, which means the
+    /// resolution pass never ran, or when a resolved path does not
+    /// parse as an expression.
+    pub fn to_expr(&self, subject: &str) -> Result<syn::Expr, String> {
+        match self {
+            OffsetSpec::Literal(n) => Ok(literal_offset_expr(*n)),
+            OffsetSpec::Path(p) => const_path_expr(p),
+            OffsetSpec::Derived => Err(unresolved_offset(subject)),
+        }
+    }
+}
+
+impl BoundValue {
+    /// The bound value as an expression, by the same lowering embedded
+    /// offsets take: the dispatcher's call argument and the marker's
+    /// gate kwarg can never render one derivation two ways.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when the value is still `Derived`, which means the
+    /// resolution pass never ran, or when a resolved path does not
+    /// parse as an expression.
+    pub fn to_expr(&self) -> Result<syn::Expr, String> {
+        match self {
+            BoundValue::Literal(n) => Ok(literal_offset_expr(*n)),
+            BoundValue::Path(p) => const_path_expr(p),
+            BoundValue::Derived { role } => Err(unresolved_offset(role)),
+        }
+    }
+}
+
+/// A byte count as an unsuffixed integer expression.
+fn literal_offset_expr(n: usize) -> syn::Expr {
+    let lit = syn::LitInt::new(&n.to_string(), proc_macro2::Span::call_site());
+    syn::parse_quote!(#lit)
+}
+
+/// A resolved carrier path (`Cfg::MY_SLOT_OFFSET`) as an expression.
+fn const_path_expr(path: &str) -> Result<syn::Expr, String> {
+    syn::parse_str(path)
+        .map_err(|e| format!("resolved carrier path {path:?} is not an expression: {e}"))
+}
+
+fn unresolved_offset(subject: &str) -> String {
+    format!(
+        "`{subject}` reached emission with an unresolved derived \
+        offset; `resolve_derived_offsets` must run after discovery"
+    )
+}
+
 /// Embedded-mode declaration parsed from a module marker's kwargs,
 /// `#[admin_authority(admin_config = prog_config, offset = 32)]`:
 /// the inject role `admin_config` lives inside the consumer account
-/// `prog_config` at byte offset 32.
+/// `prog_config` at byte offset 32. The offset is `Derived` when the
+/// marker omits the kwarg, resolved later from the account struct's
+/// `*_slot` field marker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EmbedDecl {
     /// Inject-spec account name being relocated (the role).
     pub role: String,
     /// Consumer account the role's slot lives in.
     pub account: String,
-    /// Byte offset of the slot window inside the account's data.
-    pub offset: usize,
+    pub offset: OffsetSpec,
+    /// The extension's declared initializer attr, `embedded.anchor_attr`.
+    /// `Some` only for anchored extensions; the declaration is what
+    /// makes the initializer coverage gate mandatory. `None` on the
+    /// marker-kwarg path: an anchorless extension declares no
+    /// initializer and gets no gate.
+    pub initializer: Option<String>,
 }
 
 /// Everything a module marker's argument list can carry: an optional
@@ -33,15 +125,15 @@ pub struct MarkerArgs {
 /// Grammar: zero or more comma-separated items, each either a bare
 /// ident (mode word) or `key = value`. `offset = <int>` is reserved;
 /// exactly one other `role = account` pair may accompany it. A role
-/// without `offset`, an `offset` without a role, a second role pair,
-/// or a non-ident account value are hard errors.
+/// without `offset` derives the offset from the account struct's
+/// `*_slot` field marker. An `offset` without a role, a second role
+/// pair, or a non-ident account value are hard errors.
 ///
 /// # Errors
 ///
-/// `Err` on malformed arguments: two mode words, a role without an
-/// offset or an offset without a role, duplicate kwargs, a non-ident
-/// account value, or a non-integer offset. Callers surface it as a
-/// compile error.
+/// `Err` on malformed arguments: two mode words, an offset without a
+/// role, duplicate kwargs, a non-ident account value, or a
+/// non-integer offset. Callers surface it as a compile error.
 pub fn parse_marker_args(attr: &Attribute, ext_attr: &str) -> Result<Option<MarkerArgs>, String> {
     if !attr.path().is_ident(ext_attr) {
         return Ok(None);
@@ -131,19 +223,21 @@ pub fn parse_marker_args(attr: &Attribute, ext_attr: &str) -> Result<Option<Mark
         (Some((role, account)), Some(offset)) => Some(EmbedDecl {
             role,
             account,
-            offset,
+            offset: OffsetSpec::Literal(offset),
+            initializer: None,
         }),
-        (None, None) => None,
-        (Some((role, _)), None) => {
-            return Err(format!(
-                "`#[{ext_attr}]`: `{role} = ...` requires an `offset = <bytes>` kwarg"
-            ));
-        },
+        (Some((role, account)), None) => Some(EmbedDecl {
+            role,
+            account,
+            offset: OffsetSpec::Derived,
+            initializer: None,
+        }),
         (None, Some(_)) => {
             return Err(format!(
                 "`#[{ext_attr}]`: `offset` requires a `<role> = <account>` kwarg"
             ));
         },
+        (None, None) => None,
     };
     Ok(Some(args))
 }
@@ -171,6 +265,159 @@ pub fn candidate_marker_names(mod_attrs: &[Attribute]) -> Vec<String> {
         .collect()
 }
 
+/// Infer an anchored extension's embedded declaration from the module.
+///
+/// The anchor attr marks the consumer fn that creates the embedding
+/// account. Its optional `<role> = <param>` kwarg names the account
+/// among several `#[account(init)]` params; with exactly one init
+/// param the kwarg may be omitted. No fn carrying the attr means
+/// dedicated mode.
+///
+/// # Errors
+///
+/// `Err` when two fns carry the anchor, when the kwarg names anything
+/// but an init param, or when several init params exist and no kwarg
+/// Replace the `#[initialize]` shorthand with the anchor attr of every
+/// activated embed. Everything downstream matches the extensions' real
+/// attribute names, so the swap has to happen before any of it, for
+/// every producer rather than only the dispatcher: an IDL built from
+/// the shorthand would otherwise describe an instruction without the
+/// accounts the dispatcher injects. Insertion keeps embed order, which
+/// is marker order, so stacked bootstraps expand deterministically.
+///
+/// # Errors
+///
+/// `Err` when the shorthand is present and no activated extension
+/// declares an anchor. It stands for their attributes, and there are
+/// none to stand for.
+pub(super) fn replace_initialize_shorthand(
+    func: &mut syn::ItemFn,
+    embeds: &[super::Embed],
+) -> Result<(), String> {
+    let Some(pos) = func
+        .attrs
+        .iter()
+        .position(|a| attr_is(a, INITIALIZE_SHORTHAND))
+    else {
+        return Ok(());
+    };
+    let anchors: Vec<String> = embeds
+        .iter()
+        .filter_map(|e| e.decl.initializer.clone())
+        .collect();
+    if anchors.is_empty() {
+        return Err(format!(
+            "#[{INITIALIZE_SHORTHAND}] but no activated extension declares an \
+             anchor; it is a shorthand for the extensions' initializer attributes"
+        ));
+    }
+    func.attrs.remove(pos);
+    for (i, name) in anchors.iter().enumerate() {
+        let ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+        func.attrs.insert(pos + i, syn::parse_quote!(#[#ident]));
+    }
+    Ok(())
+}
+
+/// picks one. Callers surface it as a compile error.
+pub(super) fn infer_anchor_embed(
+    mod_items: &[syn::Item],
+    anchor_attr: &str,
+    role: &str,
+    crate_name: &str,
+) -> Result<Option<EmbedDecl>, String> {
+    let fail = |what: String| format!("extension `{crate_name}`: {what}");
+
+    let mut anchors: Vec<(&syn::ItemFn, &Attribute)> = Vec::new();
+    for item in mod_items {
+        let syn::Item::Fn(f) = item else { continue };
+        let explicit = f.attrs.iter().find(|a| attr_is(a, anchor_attr));
+        let shorthand = f.attrs.iter().find(|a| attr_is(a, INITIALIZE_SHORTHAND));
+        match (explicit, shorthand) {
+            (Some(_), Some(_)) => {
+                return Err(fail(format!(
+                    "fn `{}` carries both #[{anchor_attr}] and \
+                    #[{INITIALIZE_SHORTHAND}]; one spelling per fn",
+                    f.sig.ident
+                )));
+            },
+            (Some(a), None) | (None, Some(a)) => anchors.push((f, a)),
+            (None, None) => {},
+        }
+    }
+
+    let (func, attr) = match anchors.as_slice() {
+        [] => return Ok(None),
+        [one] => *one,
+        many => {
+            let names: Vec<String> = many.iter().map(|(f, _)| f.sig.ident.to_string()).collect();
+            return Err(fail(format!(
+                "#[{anchor_attr}] appears on {} fns ({}); exactly one fn may \
+                anchor the embed",
+                many.len(),
+                names.join(", ")
+            )));
+        },
+    };
+
+    let is_shorthand = attr_is(attr, INITIALIZE_SHORTHAND);
+    if is_shorthand && !matches!(attr.meta, syn::Meta::Path(_)) {
+        return Err(fail(format!(
+            "#[{INITIALIZE_SHORTHAND}] takes no arguments; to name the \
+            embedding account use #[{anchor_attr}({role} = <param>)]"
+        )));
+    }
+
+    let init_params: Vec<&syn::Ident> = super::inject::typed_params(func)
+        .filter(|(_, pt)| super::inject::param_has_init(pt))
+        .map(|(pi, _)| &pi.ident)
+        .collect();
+
+    let account = match (
+        if is_shorthand {
+            None
+        } else {
+            anchor_kwarg(attr, anchor_attr, role)?
+        },
+        init_params.as_slice(),
+    ) {
+        (Some(name), inits) if inits.iter().any(|i| **i == name) => name,
+        (Some(name), _) => {
+            return Err(fail(format!(
+                "#[{anchor_attr}({role} = {name})] on fn `{}` names no \
+                #[account(init)] param; the embedding account must be created \
+                by this fn",
+                func.sig.ident
+            )));
+        },
+        (None, [one]) => one.to_string(),
+        (None, []) => {
+            return Err(fail(format!(
+                "#[{anchor_attr}] on fn `{}` has no #[account(init)] param; \
+                the anchor fn creates the embedding account",
+                func.sig.ident
+            )));
+        },
+        (None, several) => {
+            let names: Vec<String> = several.iter().map(ToString::to_string).collect();
+            return Err(fail(format!(
+                "#[{anchor_attr}] on fn `{}` has several #[account(init)] \
+                params ({}); name the embedding account with \
+                #[{anchor_attr}({role} = <param>)]",
+                func.sig.ident,
+                names.join(", ")
+            )));
+        },
+    };
+
+    Ok(Some(EmbedDecl {
+        role: role.to_string(),
+        account,
+        offset: OffsetSpec::Derived,
+        initializer: Some(anchor_attr.to_string()),
+    }))
+}
+
 fn is_marker_candidate(ident: &str) -> bool {
     !matches!(
         ident,
@@ -185,6 +432,43 @@ fn is_marker_candidate(ident: &str) -> bool {
             | "forbid"
             | "deprecated"
     )
+}
+
+/// The attr's last path segment equals `name`, matching the bare
+/// re-export form and qualified `admin_authority::admin_initialize`.
+pub(super) fn attr_is(attr: &Attribute, name: &str) -> bool {
+    attr.path().segments.last().is_some_and(|s| s.ident == name)
+}
+
+/// The located anchor attr's optional `<role> = <param>` kwarg. Other
+/// kwargs pass through untouched, the gate machinery owns them.
+fn anchor_kwarg(attr: &Attribute, anchor_attr: &str, role: &str) -> Result<Option<String>, String> {
+    if matches!(attr.meta, syn::Meta::Path(_)) {
+        return Ok(None);
+    }
+    let metas = attr
+        .parse_args_with(Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .map_err(|e| format!("`#[{anchor_attr}]`: unparsable arguments: {e}"))?;
+    for m in &metas {
+        let syn::Meta::NameValue(nv) = m else {
+            continue;
+        };
+        if !nv.path.is_ident(role) {
+            continue;
+        }
+        let ident = match &nv.value {
+            syn::Expr::Path(p) => p.path.get_ident(),
+            _ => None,
+        };
+        return match ident {
+            Some(id) => Ok(Some(id.to_string())),
+            None => Err(format!(
+                "#[{anchor_attr}({role} = ...)]: the value must be a \
+                plain param name"
+            )),
+        };
+    }
+    Ok(None)
 }
 
 #[cfg(test)]
@@ -236,7 +520,8 @@ mod tests {
             Some(EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
+                initializer: None,
             })
         );
     }
@@ -250,7 +535,8 @@ mod tests {
             Some(EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "cfg".to_string(),
-                offset: 8,
+                offset: OffsetSpec::Literal(8),
+                initializer: None,
             })
         );
     }
@@ -264,9 +550,17 @@ mod tests {
     }
 
     #[test]
-    fn marker_args_role_without_offset_is_error() {
-        let err = parse_err("#[my_gate(gate_config = prog_config)]");
-        assert!(err.contains("requires an `offset"), "got: {err}");
+    fn marker_args_role_without_offset_derives() {
+        let args = parsed("#[my_gate(gate_config = prog_config)]");
+        assert_eq!(
+            args.embed,
+            Some(EmbedDecl {
+                role: "gate_config".into(),
+                account: "prog_config".into(),
+                offset: OffsetSpec::Derived,
+                initializer: None,
+            })
+        );
     }
 
     #[test]
@@ -355,5 +649,205 @@ mod tests {
             candidate_marker_names(&m.attrs),
             vec!["my_ext".to_string(), "freeze_authority".to_string()]
         );
+    }
+
+    fn mod_fns(src: &str) -> Vec<syn::Item> {
+        syn::parse_file(src).expect("fixture parses").items
+    }
+
+    #[test]
+    fn anchor_with_single_init_infers_the_account() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn initialize(#[account(init, pda = literal(\"cfg\"))] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("one init param infers");
+        assert_eq!(embed.role, "ext_config");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.offset, OffsetSpec::Derived);
+    }
+
+    #[test]
+    fn anchor_kwarg_picks_among_several_inits() {
+        let items = mod_fns(
+            "#[ext_init(ext_config = vault)]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("the kwarg picks");
+        assert_eq!(embed.account, "vault");
+    }
+
+    #[test]
+    fn anchor_kwarg_naming_non_init_param_refuses() {
+        let items = mod_fns(
+            "#[ext_init(ext_config = s)]\npub fn initialize(#[account(init)] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("a non-init kwarg target must refuse");
+        assert!(err.contains("names no #[account(init)]"), "{err}");
+    }
+
+    #[test]
+    fn several_inits_without_kwarg_refuse_listing_candidates() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("ambiguity must refuse");
+        assert!(err.contains("cfg") && err.contains("vault"), "{err}");
+        assert!(
+            err.contains("ext_config = "),
+            "must show the kwarg form: {err}"
+        );
+    }
+
+    #[test]
+    fn anchor_without_init_param_refuses() {
+        let items =
+            mod_fns("#[ext_init]\npub fn initialize(#[account(signer)] s: A) -> R { todo!() }");
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("an anchor that creates nothing must refuse");
+        assert!(err.contains("no #[account(init)] param"), "{err}");
+    }
+
+    #[test]
+    fn two_anchor_fns_refuse_naming_both() {
+        let items = mod_fns(
+            "#[ext_init]\npub fn a(#[account(init)] cfg: A) -> R { todo!() }\n#[ext_init]\npub fn b(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("two anchors must refuse");
+        assert!(err.contains('a') && err.contains('b'), "{err}");
+    }
+
+    #[test]
+    fn no_anchor_fn_is_dedicated() {
+        let items = mod_fns("pub fn plain(#[account(init)] cfg: A) -> R { todo!() }");
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext").unwrap();
+        assert!(embed.is_none(), "no anchor means dedicated mode");
+    }
+
+    // #[initialize] counts as the anchor of every anchored extension,
+    // and the recorded initializer is the extension's real attr, so
+    // downstream errors and the coverage gate speak real names.
+    #[test]
+    fn initialize_shorthand_anchors_the_embed() {
+        let items = mod_fns(
+            "#[initialize]\npub fn initialize(#[account(init, pda = literal(\"cfg\"))] cfg: A, #[account(signer)] s: A) -> R { todo!() }",
+        );
+        let embed = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .unwrap()
+            .expect("the shorthand anchors");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.initializer.as_deref(), Some("ext_init"));
+    }
+
+    #[test]
+    fn shorthand_beside_the_explicit_anchor_refuses() {
+        let items = mod_fns(
+            "#[ext_init]\n#[initialize]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("one spelling per fn");
+        assert!(err.contains("both"), "{err}");
+    }
+
+    #[test]
+    fn shorthand_with_arguments_refuses() {
+        let items = mod_fns(
+            "#[initialize(ext_config = cfg)]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("the shorthand takes no arguments");
+        assert!(
+            err.contains("#[ext_init(ext_config = <param>)]"),
+            "the fix is the explicit form: {err}"
+        );
+    }
+
+    // Several init params under the shorthand fall into the existing
+    // ambiguity error, whose fix is the explicit anchor kwarg.
+    #[test]
+    fn shorthand_with_several_inits_names_the_explicit_form() {
+        let items = mod_fns(
+            "#[initialize]\npub fn initialize(#[account(init)] cfg: A, #[account(init)] vault: A) -> R { todo!() }",
+        );
+        let err = infer_anchor_embed(&items, "ext_init", "ext_config", "my-ext")
+            .expect_err("ambiguity must refuse");
+        assert!(
+            err.contains("ext_config = "),
+            "must show the explicit kwarg form: {err}"
+        );
+    }
+
+    fn shorthand_embed(source: &str, init: &str) -> super::super::Embed {
+        use super::super::Embed;
+        Embed {
+            source: source.to_string(),
+            carrier: None,
+            state_type: format!("{source}::Cfg"),
+            decl: EmbedDecl {
+                role: format!("{source}_config"),
+                account: "config".to_string(),
+                offset: OffsetSpec::Derived,
+                initializer: Some(init.to_string()),
+            },
+        }
+    }
+
+    // The swap lands at the shorthand's position, in embed order, which
+    // is marker order, so stacked bootstraps expand deterministically.
+    #[test]
+    fn shorthand_swaps_into_the_anchor_attrs_in_embed_order() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[doc = "d"]
+            #[initialize]
+            #[instruction]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(
+            &mut func,
+            &[
+                shorthand_embed("admin", "admin_initialize"),
+                shorthand_embed("freeze", "freeze_initialize"),
+            ],
+        )
+        .expect("replaces");
+        let names: Vec<String> = func
+            .attrs
+            .iter()
+            .filter_map(|a| a.path().get_ident().map(ToString::to_string))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "doc",
+                "admin_initialize",
+                "freeze_initialize",
+                "instruction"
+            ]
+        );
+    }
+
+    #[test]
+    fn shorthand_without_an_anchored_embed_refuses() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        let err = replace_initialize_shorthand(&mut func, &[]).expect_err("nothing to expand to");
+        assert!(err.contains("no activated extension"), "{err}");
+    }
+
+    #[test]
+    fn a_fn_without_the_shorthand_is_untouched() {
+        let mut func: syn::ItemFn = syn::parse_quote! {
+            #[admin_initialize]
+            pub fn initialize() -> SpelResult { todo!() }
+        };
+        replace_initialize_shorthand(&mut func, &[]).expect("no shorthand, no work");
+        assert_eq!(func.attrs.len(), 1);
     }
 }

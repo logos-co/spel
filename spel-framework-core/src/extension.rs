@@ -5,7 +5,7 @@
 //! `[package.metadata.spel]` in their `Cargo.toml`. Each qualifying
 //! crate contributes through one entry point:
 //!
-//! - [`discover_extensions`] returns an [`ExtensionDiscoveries`]: the
+//! - `discover_extensions` returns an [`ExtensionDiscoveries`]: the
 //!   cross-crate `#[instruction]` fns to be merged into the consumer's
 //!   dispatcher and IDL, the gate param inject specs applied by
 //!   [`apply_wrap_and_inject`], the wrap configs, and any embedded-mode
@@ -55,35 +55,36 @@
 //! Feature-gated identically to [`crate::idl_gen`]
 //! (`#[cfg(feature = "idl-gen")]`) since it depends on `syn` and `toml`.
 //! Internal helpers (`read_spel_extension_attr`,
-//! `read_spel_inject_specs`, `collect_instruction_fns`) are
-//! module-private; producers go through [`resolve_program_deps`],
-//! and [`discover_extensions`] stays public for callers that already
-//! hold a resolved graph.
+//! `read_spel_inject_specs`, `collect_instruction_fns`,
+//! `discover_extensions`) are module-private; producers go through
+//! [`resolve_program_deps`].
 
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-};
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use syn::{Attribute, ItemFn};
 
+use crate::account_types::has_account_type_attr;
 use crate::idl_gen::{collect_items_from_crate_dirs, has_instruction_attr};
 
 mod inject;
 mod marker;
 mod metadata;
+mod slots;
 
 pub use inject::{
-    active_wraps, apply_wrap_and_inject, resolve_canonical_constraint, rewrite_embedded_roles,
+    active_wraps, apply_wrap_and_inject, rewrite_embedded_roles, ActiveWrap, GateLocations,
 };
 pub use marker::{
-    candidate_marker_names, has_extension_marker_candidates, parse_marker_args, EmbedDecl,
-    MarkerArgs,
+    candidate_marker_names, has_extension_marker_candidates, parse_marker_args, BoundValue,
+    EmbedDecl, MarkerArgs, OffsetSpec, INITIALIZE_SHORTHAND,
 };
+pub use slots::{find_slot_carrier, resolve_derived_offsets, slot_offset_const_name, SlotCarrier};
 
 use metadata::{
     read_manifest_value, read_package_ident, read_spel_bound_args, read_spel_embedded,
     read_spel_extension_attr, read_spel_inject_specs, read_spel_wrap_instructions, BoundArg,
+    EmbeddedMeta,
 };
 
 /// What the consumer's direct dependencies contribute to its program:
@@ -103,24 +104,25 @@ pub struct ExtensionDiscoveries {
     /// Active wrap configs, paired with the consumer marker attr's arg
     /// (`""` for a bare marker) so callers can honor `skip`.
     pub wraps: Vec<(String, WrapInstructions)>,
-    /// Embedded-mode declarations from the module markers, paired with
-    /// the declaring extension's crate name so a role only ever
-    /// rewrites its own extensions' inject entries.
-    pub embeds: Vec<(String, EmbedDecl)>,
-    /// Embedded window state types per declaring extension, from
-    /// `embedded.state_type` metadata. The program macro emits window
-    /// collision asserts through `<state_type as FixedBorshSize>::SIZE`.
-    /// Populated only for extensions in embedded mode, which require it.
-    pub embed_state_types: HashMap<String, String>,
+    /// Embedded-mode declarations from the module markers, each naming
+    /// the declaring extension so a role only ever rewrites its own
+    /// extensions' inject entries.
+    pub embeds: Vec<Embed>,
     /// Dispatch-only trailing args per discovered fn, resolved from
     /// `bound_args` metadata and the marker's kwargs. The dispatcher
-    /// appends these literals at the call site; the params were
+    /// appends each value at the call site as a literal or, for a
+    /// derived offset, as the carrier's const path; the params were
     /// stripped at discovery so no IDL or validation path sees them.
-    pub bound_calls: HashMap<String, Vec<usize>>,
+    pub bound_calls: HashMap<String, Vec<BoundValue>>,
     /// Marker names that matched a discovered extension, in marker
     /// order. Lets producers tell an unmatched candidate attr from a
     /// matched one when dependency resolution degrades.
     pub matched_markers: Vec<String>,
+    /// Crate dir of each activated extension, in marker order. Their
+    /// instructions ship in the consumer's binary, so the accounts those
+    /// instructions write are the program's own.
+    pub activated_dirs: Vec<PathBuf>,
+    pub dormant_anchors: Vec<DormantAnchor>,
 }
 
 #[derive(Debug, Default)]
@@ -131,6 +133,321 @@ pub struct ProgramDeps {
     pub graph: crate::dep_walk::DepGraph,
     /// What matched extensions contribute to the program.
     pub extensions: ExtensionDiscoveries,
+}
+
+/// Whether a producer resolves derived offsets, and against what.
+///
+/// The two halves of that question always had one answer and were
+/// asked separately: a producer that resolves carriers is the one that
+/// writes location kwargs, and a producer that does not resolve must
+/// not write them. Passing this to [`ProgramDeps::prepare`] settles
+/// both at once.
+pub enum Carriers<'a> {
+    /// Resolve every derivation against these items, then write
+    /// locations onto the gate attrs. The dispatcher's answer.
+    Resolve(&'a [syn::Item]),
+    /// Leave derivations unresolved and write no locations. The IDL
+    /// producers' answer: the IDL has no offset field, so a resolved
+    /// one could not reach their output.
+    Skip,
+}
+
+/// An extension-provided instruction fn, ready for the gate pass.
+pub struct PreparedInstruction {
+    pub func: ItemFn,
+    /// Absolute path to the declaring crate, e.g. `::admin_authority`.
+    pub crate_path: syn::Path,
+    /// `crate::fn_name`, the form a wrap's `exempt` list matches.
+    pub qualified: String,
+}
+
+/// The dependency side of a program, in the state the gate pass wants.
+///
+/// [`ProgramDeps::prepare`] is the only way to build one, so the passes
+/// that must precede the gate pass cannot be run out of order, skipped,
+/// or applied with mismatched arguments: [`PreparedProgram::gate`]
+/// supplies the specs, embeds, wraps, and location mode together.
+#[derive(Default)]
+pub struct PreparedProgram {
+    /// The dependency graph, for callers that scan dependency sources.
+    pub graph: crate::dep_walk::DepGraph,
+    /// Gate param inject specs, embedded roles already rewritten.
+    pub inject_specs: Vec<InjectSpec>,
+    /// Embedded-mode declarations, offsets resolved under
+    /// [`Carriers::Resolve`].
+    pub embeds: Vec<Embed>,
+    /// Wrap configs the consumer's marker args did not skip.
+    pub active_wraps: Vec<ActiveWrap>,
+    /// Dispatch-only trailing args per discovered fn.
+    pub bound_calls: HashMap<String, Vec<BoundValue>>,
+    /// Instruction fns the extensions contribute.
+    pub instructions: Vec<PreparedInstruction>,
+    /// Whether the gate pass writes location kwargs, decided with the
+    /// carriers rather than separately at each call site.
+    pub locations: GateLocations,
+    /// Crates whose `#[account_type]` declares one of this program's
+    /// account layouts: owned sources plus activated extensions, deduped
+    /// by canonical path. Captured at prepare time, when both inputs
+    /// still exist.
+    pub connected_dirs: Vec<PathBuf>,
+}
+
+impl PreparedProgram {
+    /// Run the gate pass over one instruction fn.
+    ///
+    /// `qualified = None` for a consumer-authored fn, `Some` for an
+    /// extension-provided one (see [`apply_wrap_and_inject`]).
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`apply_wrap_and_inject`].
+    pub fn gate(&self, func: &mut ItemFn, qualified: Option<&str>) -> Result<Vec<String>, String> {
+        marker::replace_initialize_shorthand(func, &self.embeds)?;
+        apply_wrap_and_inject(
+            func,
+            &self.active_wraps,
+            &self.inject_specs,
+            self.locations,
+            qualified,
+        )
+    }
+
+    /// The item set whose `#[account_type]` declares this program's
+    /// account layouts: the consumer's own items, then each connected
+    /// crate's, checked for colliding names while the declaring crate
+    /// is still known.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when two connected crates declare an account layout of the
+    /// same name, naming the type and both paths. Two layouts of one
+    /// name make the IDL ambiguous, and both declarations are code the
+    /// author owns or activated, so it is theirs to resolve. Callers
+    /// surface it as a compile error.
+    pub fn layout_items(
+        &self,
+        consumer_source: &Path,
+        mut consumer_items: Vec<syn::Item>,
+    ) -> Result<(Vec<syn::Item>, Vec<PathBuf>), String> {
+        // The connected walk screens cfg-excluded items; the consumer's
+        // items arrive raw from the macro input, so screen them here. A
+        // default build never compiles them, so they are not the
+        // program's layouts.
+        consumer_items.retain(|i| !crate::idl_gen::cfg_excluded_item(i));
+        let (mut connected, files_read) = self.connected_groups();
+        self.demote_embedded_state(&mut connected);
+
+        let mut groups = vec![(consumer_source.to_path_buf(), consumer_items)];
+        groups.extend(connected);
+        check_layout_collisions(&groups)?;
+
+        // Consumer first: its declarations shadow same-named dependency
+        // items in the flattened set.
+        Ok((
+            groups.into_iter().flat_map(|(_, items)| items).collect(),
+            files_read,
+        ))
+    }
+
+    /// Each connected crate's items under its dir, plus every file
+    /// read, for callers that register cargo dependencies.
+    fn connected_groups(&self) -> (Vec<(PathBuf, Vec<syn::Item>)>, Vec<PathBuf>) {
+        let mut groups = Vec::new();
+        let mut files_read = Vec::new();
+        for dir in &self.connected_dirs {
+            let (items, files) = collect_items_from_crate_dirs(std::slice::from_ref(dir), |w| {
+                eprintln!("warning: {w}")
+            });
+            files_read.extend(files);
+            groups.push((dir.clone(), items));
+        }
+        (groups, files_read)
+    }
+
+    /// An embedded extension's state type is a window inside the
+    /// consumer's account, not an account of its own: strip its
+    /// annotation so it reaches the IDL as a referenced type. The
+    /// consumer's items are not in `groups`, so a same-named consumer
+    /// struct, which is a different type, is untouched. Dedicated mode
+    /// has no embed entry and nothing to strip.
+    fn demote_embedded_state(&self, groups: &mut [(PathBuf, Vec<syn::Item>)]) {
+        let embedded_state: HashSet<&str> = self
+            .embeds
+            .iter()
+            .filter_map(|e| e.state_type.rsplit("::").next())
+            .collect();
+        for (_, items) in groups.iter_mut() {
+            for item in items.iter_mut() {
+                let (attrs, name) = match item {
+                    syn::Item::Struct(s) => (&mut s.attrs, s.ident.to_string()),
+                    syn::Item::Enum(e) => (&mut e.attrs, e.ident.to_string()),
+                    _ => continue,
+                };
+                if embedded_state.contains(name.as_str()) {
+                    attrs.retain(|a| !has_account_type_attr(std::slice::from_ref(a)));
+                }
+            }
+        }
+    }
+
+    /// The rest of the dependency graph, as the source referenced types
+    /// are resolved from on demand.
+    pub fn unowned_defs(&self) -> crate::idl_gen::UnownedTypeDefs {
+        use crate::dep_walk::canonical_key;
+        let connected: HashSet<PathBuf> = self
+            .connected_dirs
+            .iter()
+            .map(|d| canonical_key(d))
+            .collect();
+        crate::idl_gen::UnownedTypeDefs::new(
+            self.graph
+                .transitive_dirs
+                .iter()
+                .filter(|d| !connected.contains(&canonical_key(d)))
+                .cloned()
+                .collect(),
+        )
+    }
+}
+
+impl ProgramDeps {
+    /// Run every pass the gate pass depends on, in the one order that
+    /// works: resolve derivations, rewrite embedded roles against the
+    /// consumer's own instructions, then filter the wraps the marker
+    /// skipped.
+    ///
+    /// # Errors
+    ///
+    /// `Err` when a derivation has no slot carrier, when an embedded
+    /// role matches no inject account, when the embedding account has
+    /// no canonical declaration, or when two embeds collide. Callers
+    /// surface it as a compile error.
+    pub fn prepare(
+        mut self,
+        mod_items: &[syn::Item],
+        carriers: Carriers<'_>,
+    ) -> Result<PreparedProgram, String> {
+        let connected_dirs = self.connected_dirs();
+        let locations = match carriers {
+            Carriers::Resolve(items) => {
+                resolve_derived_offsets(&mut self.extensions, items)?;
+                check_dormant_anchors(&self.extensions.dormant_anchors, items)?;
+                GateLocations::Emit
+            },
+            Carriers::Skip => GateLocations::Omit,
+        };
+
+        let consumer_fns = collect_instruction_fns(mod_items);
+        rewrite_embedded_roles(
+            &mut self.extensions.inject_specs,
+            &self.extensions.embeds,
+            &consumer_fns,
+        )?;
+
+        let instructions = self
+            .extensions
+            .instructions
+            .into_iter()
+            .map(|(func, crate_path)| PreparedInstruction {
+                qualified: qualified_instruction_name(&crate_path, &func.sig.ident),
+                func,
+                crate_path,
+            })
+            .collect();
+
+        Ok(PreparedProgram {
+            graph: self.graph,
+            active_wraps: active_wraps(&self.extensions.wraps)?,
+            inject_specs: self.extensions.inject_specs,
+            embeds: self.extensions.embeds,
+            bound_calls: self.extensions.bound_calls,
+            instructions,
+            locations,
+            connected_dirs,
+        })
+    }
+}
+
+/// Two layouts of one name make the IDL ambiguous. Both declarations
+/// sit in code the author owns or activated, so the error names the
+/// type and both crates and leaves the rename to them.
+fn check_layout_collisions(groups: &[(PathBuf, Vec<syn::Item>)]) -> Result<(), String> {
+    let mut seen: HashMap<String, &Path> = HashMap::new();
+    for (dir, items) in groups {
+        for item in items {
+            let name = match item {
+                syn::Item::Struct(s) if has_account_type_attr(&s.attrs) => s.ident.to_string(),
+                syn::Item::Enum(e) if has_account_type_attr(&e.attrs) => e.ident.to_string(),
+                _ => continue,
+            };
+            if let Some(first) = seen.insert(name.clone(), dir) {
+                return Err(format!(
+                    "account layout `{name}` is declared in both `{}` and `{}`; \
+                    two layouts of one name make the IDL ambiguous, rename one",
+                    first.display(),
+                    dir.display()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A slot field marker with no anchored fn is a silent mode
+/// disagreement: the struct declares embedded intent and the extension
+/// resolved dedicated. For a bootstrap anchor the window would ship
+/// born renounced, for a no-op anchor it is dead bytes. Refused rather
+/// than silently compiled as dedicated mode. Runs only with carriers
+/// in scope. The IDL producers skip it, the consumer's build is the
+/// gate.
+fn check_dormant_anchors(dormant: &[DormantAnchor], items: &[syn::Item]) -> Result<(), String> {
+    for anchor in dormant {
+        if let Some(carrier) = find_slot_carrier(items, &anchor.role)? {
+            return Err(format!(
+                "struct `{}` carries a #[{}] field but no fn carries \
+                #[{}]; the marked field declares embedded mode and \
+                nothing anchors it, so the program would compile as \
+                dedicated mode with a dead slot window. Anchor the \
+                account-creating instruction with #[{}], or remove the \
+                #[{}] marker for dedicated mode",
+                carrier.struct_name, carrier.attr_name, anchor.attr, anchor.attr, carrier.attr_name
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The `crate::fn_name` form a wrap's `exempt` list matches, built from
+/// the declaring crate's path and the fn's own name.
+fn qualified_instruction_name(crate_path: &syn::Path, fn_name: &syn::Ident) -> String {
+    format!(
+        "{}::{fn_name}",
+        crate_path
+            .segments
+            .first()
+            .map(|s| s.ident.to_string())
+            .unwrap_or_default()
+    )
+}
+
+impl ProgramDeps {
+    /// Crates whose `#[account_type]` declares one of this program's
+    /// account layouts: the code its author owns, plus the extensions
+    /// they activated. Derived from the two lists rather than stored
+    /// beside them, so it cannot fall out of step with either.
+    ///
+    /// An extension linked by path appears in both, so the result is
+    /// deduplicated by canonical path.
+    pub fn connected_dirs(&self) -> Vec<PathBuf> {
+        let mut seen = HashSet::new();
+        self.graph
+            .owned_dirs
+            .iter()
+            .chain(&self.extensions.activated_dirs)
+            .filter(|dir| seen.insert(crate::dep_walk::canonical_key(dir)))
+            .cloned()
+            .collect()
+    }
 }
 
 /// One component of an injected account's PDA seed.
@@ -175,6 +492,11 @@ pub struct InjectSpec {
     // Crate name of the extension that declared this spec. Names the
     // offender when two extensions inject conflicting params.
     pub source: String,
+    /// Where the declaring extension's state sits inside the consumer's
+    /// account, set by [`rewrite_embedded_roles`]. `Some` exactly when
+    /// this extension is in embedded mode, which is what makes the
+    /// framework the only writer of the gate's location kwargs.
+    pub embedded_offset: Option<OffsetSpec>,
 }
 
 /// Parsed `[package.metadata.spel.wrap_instructions]` for an extension
@@ -204,10 +526,46 @@ struct MatchedExtension {
     instructions: Vec<(ItemFn, syn::Path)>,
     inject_specs: Vec<InjectSpec>,
     wraps: Vec<(String, WrapInstructions)>,
-    embeds: Vec<(String, EmbedDecl)>,
-    embedded_state_types: HashMap<String, String>,
-    bound_calls: HashMap<String, Vec<usize>>,
+    embeds: Vec<Embed>,
+    bound_calls: HashMap<String, Vec<BoundValue>>,
     marker: String,
+    dir: PathBuf,
+    dormant_anchor: Option<DormantAnchor>,
+}
+
+/// One extension's embedded-mode declaration: which extension declared
+/// it, where its window sits, and the type occupying that window.
+///
+/// The three travel together because embedded mode requires all three:
+/// discovery refuses an embed whose extension declares no
+/// `embedded.state_type`, so a window always knows its own length and
+/// the collision asserts can be emitted from the embed alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Embed {
+    /// Crate name of the declaring extension.
+    pub source: String,
+    /// Role, embedding account, and offset from the module marker.
+    pub decl: EmbedDecl,
+    /// Type occupying the window, from `embedded.state_type` metadata.
+    /// Window collision asserts read its `FixedBorshSize::SIZE`.
+    pub state_type: String,
+    /// The consumer struct carrying this role's `*_slot` field, bound by
+    /// [`resolve_derived_offsets`]. `None` under [`Carriers::Skip`], and
+    /// for a literal offset whose role no struct marks.
+    pub carrier: Option<SlotCarrier>,
+}
+
+/// An anchor-capable extension that resolved to dedicated mode: it
+/// declares `embedded.anchor_attr` and no fn carries the attr. Kept so
+/// the dispatcher can refuse a slot carrier with no anchor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DormantAnchor {
+    /// Crate name of the declaring extension.
+    pub source: String,
+    /// The anchor attr no fn carries.
+    pub attr: String,
+    /// The role whose `*_slot` field marker declares embedded intent.
+    pub role: String,
 }
 
 /// Producer entry point: marker pre-check, graph resolution, and
@@ -223,12 +581,33 @@ struct MatchedExtension {
 pub fn resolve_program_deps<F: FnMut(String)>(
     start: &Path,
     mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
     on_warning: &mut F,
 ) -> Result<ProgramDeps, String> {
     let with_metadata = has_extension_marker_candidates(mod_attrs);
     let graph = crate::dep_walk::resolve_dep_graph(start, with_metadata, on_warning);
+    resolve_program_deps_with_graph(graph, mod_attrs, mod_items, on_warning)
+}
+
+/// [`resolve_program_deps`] over a graph the caller already resolved.
+///
+/// A producer that needs the graph for its own work hands it over
+/// rather than paying for a second `cargo metadata` of the same
+/// manifest. Discovery reads `direct_dirs`, so a graph resolved with
+/// metadata enabled satisfies every marker a self-resolved one would.
+///
+/// # Errors
+///
+/// The same as [`resolve_program_deps`].
+pub fn resolve_program_deps_with_graph<F: FnMut(String)>(
+    graph: crate::dep_walk::DepGraph,
+    mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
+    on_warning: &mut F,
+) -> Result<ProgramDeps, String> {
+    let with_metadata = has_extension_marker_candidates(mod_attrs);
     let extensions = if with_metadata {
-        discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?
+        discover_extensions(&graph.direct_dirs, mod_attrs, mod_items, on_warning)?
     } else {
         ExtensionDiscoveries::default()
     };
@@ -272,206 +651,315 @@ pub fn resolve_program_deps<F: FnMut(String)>(
 /// it decides instruction order in the dispatcher and IDL, and the
 /// account order of injected params.
 ///
+/// `mod_items` are the program module's top-level items, the only
+/// place a dispatched fn (and so an embed anchor) can live. File-backed
+/// modules and path deps never participate, unlike the carrier scan
+/// for derived offsets. Tests without anchors pass `&[]`.
+///
 /// # Errors
 ///
 /// `Err` on malformed spel metadata (callers surface it as a compile
 /// error). Environmental skips are reported via `on_warning`.
-pub fn discover_extensions<F: FnMut(String)>(
+fn discover_extensions<F: FnMut(String)>(
     dep_dirs: &[PathBuf],
     mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
     on_warning: &mut F,
 ) -> Result<ExtensionDiscoveries, String> {
-    let mut matched: Vec<MatchedExtension> = Vec::new();
-
     let lez_pos = mod_attrs
         .iter()
         .position(|a| a.path().is_ident("lez_program"));
+    let mut matched: Vec<MatchedExtension> = Vec::new();
     for dep_dir in dep_dirs {
-        let Some(manifest_value) = read_manifest_value(dep_dir) else {
-            continue;
-        };
-        let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
-            continue;
-        };
-        if !mod_attrs.iter().any(|a| a.path().is_ident(&ext_attr)) {
-            continue;
+        if let Some(m) = match_extension(dep_dir, lez_pos, mod_attrs, mod_items, on_warning)? {
+            matched.push(m);
         }
-        if let (Some(lez), Some(marker)) = (
-            lez_pos,
-            mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)),
-        ) {
-            if marker < lez {
-                return Err(format!(
-                    "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
-                    above expand first and are invisible to the compiled program, so the \
-                    extension would appear in the IDL but not in the dispatcher. Move \
-                    #[{ext_attr}] below #[lez_program]."
-                ));
-            }
-        }
-        let Some(crate_name) = read_package_ident(&manifest_value) else {
-            on_warning(format!(
-                "extension at '{}' matched module attribute but has no [package].name, skipped",
-                dep_dir.display()
-            ));
-            continue;
-        };
-
-        let marker_pos = mod_attrs
-            .iter()
-            .position(|a| a.path().is_ident(&ext_attr))
-            .unwrap_or(usize::MAX);
-        let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
-        for spec in &mut injects {
-            spec.source = crate_name.clone();
-        }
-        let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
-        let embedded = read_spel_embedded(&manifest_value, dep_dir)?;
-        let has_wrap = wrap.is_some();
-        let marker_args = mod_attrs
-            .iter()
-            .find_map(|a| parse_marker_args(a, &ext_attr).transpose())
-            .transpose()?
-            .unwrap_or_default();
-
-        let mut wraps = Vec::new();
-        if let Some(w) = wrap {
-            wraps.push((marker_args.word.clone().unwrap_or_default(), w));
-        }
-        let is_embedded = marker_args.embed.is_some();
-        let embed_offset = marker_args.embed.as_ref().map(|e| e.offset);
-        let mut embeds = Vec::new();
-        let mut embedded_state_types = HashMap::new();
-        if let Some(embed) = marker_args.embed {
-            let Some(state_type) = embedded.state_type.clone() else {
-                return Err(format!(
-                    "extension '{crate_name}' is used in embedded mode but its \
-                    metadata declares no `embedded.state_type`; name the type \
-                    occupying the embedded window (e.g. state_type = \
-                    \"{crate_name}::MyConfig\") so window collision asserts can \
-                    be emitted"
-                ));
-            };
-            embedded_state_types.insert(crate_name.clone(), state_type);
-            embeds.push((crate_name.clone(), embed));
-        }
-
-        let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
-        let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
-
-        let (items, _) =
-            collect_items_from_crate_dirs(std::slice::from_ref(dep_dir), &mut *on_warning);
-        let funcs = collect_instruction_fns(&items);
-        let funcs: Vec<ItemFn> = if is_embedded {
-            funcs
-                .into_iter()
-                .filter(|f| !embedded.skip.iter().any(|s| f.sig.ident == *s))
-                .collect()
-        } else {
-            funcs
-        };
-        let bound_args = read_spel_bound_args(&manifest_value, dep_dir)?;
-        for bound in &bound_args {
-            let kwarg = bound
-                .from
-                .split_once("::")
-                .map_or(bound.from.as_str(), |(_, k)| k);
-            if kwarg != "offset" {
-                return Err(format!(
-                    "extension '{crate_name}': bound_args.from = \"{}\" names kwarg \
-                    \"{kwarg}\", which is not a marker kwarg the framework knows; \
-                    only \"offset\" carries a value",
-                    bound.from
-                ));
-            }
-        }
-        let mut bound_calls = HashMap::new();
-        let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
-        for mut f in funcs {
-            let mut values = Vec::new();
-            let mut found: Vec<usize> = Vec::new();
-            for bound in &bound_args {
-                let Some(pos) = f.sig.inputs.iter().position(|input| {
-                    matches!(input, syn::FnArg::Typed(pt)
-                        if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
-                }) else {
-                    continue;
-                };
-                found.push(pos);
-                values.push(resolve_bound_value(
-                    bound,
-                    embed_offset,
-                    mod_attrs,
-                    &crate_name,
-                )?);
-            }
-            let n = f.sig.inputs.len();
-            let k = found.len();
-            let trailing_in_order = found.iter().enumerate().all(|(i, pos)| *pos == n - k + i);
-            if !trailing_in_order {
-                return Err(format!(
-                    "extension '{crate_name}': bound_args params of `{}` must be \
-                    the trailing params, in bound_args block order; the dispatcher \
-                    appends their values after the transaction args",
-                    f.sig.ident
-                ));
-            }
-            f.sig.inputs = f.sig.inputs.iter().take(n - k).cloned().collect();
-            if !values.is_empty() {
-                bound_calls.insert(f.sig.ident.to_string(), values);
-            }
-            stripped.push(f);
-        }
-        let funcs = stripped;
-        if funcs.is_empty() && injects.is_empty() && !has_wrap {
-            on_warning(format!(
-                "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
-                #[instruction] fns, no inject specs, and no wrap config"
-            ));
-        }
-        let mut instructions = Vec::new();
-        for func in funcs {
-            instructions.push((func, crate_path.clone()));
-        }
-        matched.push(MatchedExtension {
-            marker_pos,
-            instructions,
-            inject_specs: injects,
-            wraps,
-            embeds,
-            embedded_state_types,
-            bound_calls,
-            marker: ext_attr.clone(),
-        });
     }
-
     Ok(flatten_in_marker_order(matched))
 }
 
-/// Resolve one bound arg to its compile-time value.
+/// One dependency dir against the module: `None` when it is not an
+/// extension the consumer activated, `Some` with everything it
+/// contributes when it is.
 ///
-/// Self shape (`from = "offset"`) reads the extension's own marker's
-/// offset kwarg. Cross shape (`from = "<marker>::offset"`) reads the
-/// named peer marker's offset from the same module, so an extension
-/// can depend on where a peer embedded its state (freeze ADR-0012:
-/// freeze binding `admin_offset` from `admin_authority::offset`).
-/// A missing marker or missing kwarg falls back to `default`; a bound
-/// without a default makes both hard errors at the consumer's build.
-fn resolve_bound_value(
-    bound: &BoundArg,
-    self_offset: Option<usize>,
+/// The opening reads stay in sequence rather than behind names: manifest,
+/// `extension_attr`, marker match and package ident together are the
+/// four conditions that must all hold before a crate counts as an
+/// activated extension.
+///
+/// # Errors
+///
+/// `Err` on malformed spel metadata, a marker above `#[lez_program]`,
+/// embedded mode without `embedded.state_type`, or misdeclared bound
+/// args. Callers surface it as a compile error.
+fn match_extension<F: FnMut(String)>(
+    dep_dir: &Path,
+    lez_pos: Option<usize>,
+    mod_attrs: &[Attribute],
+    mod_items: &[syn::Item],
+    on_warning: &mut F,
+) -> Result<Option<MatchedExtension>, String> {
+    let dir = dep_dir.to_path_buf();
+    let Some(manifest_value) = read_manifest_value(dep_dir) else {
+        return Ok(None);
+    };
+    let Some(ext_attr) = read_spel_extension_attr(&manifest_value, dep_dir)? else {
+        return Ok(None);
+    };
+    let Some(marker_pos) = mod_attrs.iter().position(|a| a.path().is_ident(&ext_attr)) else {
+        return Ok(None);
+    };
+    check_marker_below_lez(&ext_attr, marker_pos, lez_pos)?;
+    let Some(crate_name) = read_package_ident(&manifest_value) else {
+        on_warning(format!(
+            "extension at '{}' matched module attribute but has no [package].name, skipped",
+            dep_dir.display()
+        ));
+        return Ok(None);
+    };
+
+    let mut injects = read_spel_inject_specs(&manifest_value, dep_dir)?;
+    for spec in &mut injects {
+        spec.source = crate_name.clone();
+    }
+    let wrap = read_spel_wrap_instructions(&manifest_value, dep_dir)?;
+    let embedded = read_spel_embedded(&manifest_value, dep_dir)?;
+    let has_wrap = wrap.is_some();
+    let marker_args = mod_attrs
+        .iter()
+        .find_map(|a| parse_marker_args(a, &ext_attr).transpose())
+        .transpose()?
+        .unwrap_or_default();
+
+    let mut wraps = Vec::new();
+    if let Some(w) = wrap {
+        wraps.push((marker_args.word.clone().unwrap_or_default(), w));
+    }
+
+    let embeds: Vec<Embed> = resolve_embed(
+        marker_args.embed,
+        &embedded,
+        mod_items,
+        &crate_name,
+        &ext_attr,
+    )?
+    .into_iter()
+    .collect();
+    let is_embedded = !embeds.is_empty();
+
+    // Anchor declared, no fn carries it: dedicated mode, unless the
+    // consumer marked a slot field. prepare() refuses that shape.
+    let dormant_anchor = if embeds.is_empty() {
+        embedded.anchor.as_ref().map(|a| DormantAnchor {
+            source: crate_name.clone(),
+            attr: a.attr.clone(),
+            role: a.role.clone(),
+        })
+    } else {
+        None
+    };
+
+    let crate_ident = syn::Ident::new(&crate_name, proc_macro2::Span::call_site());
+    let crate_path: syn::Path = syn::parse_quote!(::#crate_ident);
+
+    let (items, _) = collect_items_from_crate_dirs(std::slice::from_ref(&dir), &mut *on_warning);
+    let funcs = collect_instruction_fns(&items);
+    let funcs: Vec<ItemFn> = if is_embedded {
+        funcs
+            .into_iter()
+            .filter(|f| !embedded.skip.iter().any(|s| f.sig.ident == *s))
+            .collect()
+    } else {
+        funcs
+    };
+    let bound_args = read_spel_bound_args(&manifest_value, dep_dir)?;
+    let (funcs, bound_calls) = strip_bound_args(
+        funcs,
+        &bound_args,
+        embeds.first().map(|e| &e.decl),
+        mod_attrs,
+        &crate_name,
+    )?;
+
+    if funcs.is_empty() && injects.is_empty() && !has_wrap {
+        on_warning(format!(
+            "extension '{crate_name}' matched #[{ext_attr}] but contributes no \
+            #[instruction] fns, no inject specs, and no wrap config"
+        ));
+    }
+    let instructions = funcs
+        .into_iter()
+        .map(|func| (func, crate_path.clone()))
+        .collect();
+    Ok(Some(MatchedExtension {
+        marker_pos,
+        instructions,
+        inject_specs: injects,
+        wraps,
+        embeds,
+        bound_calls,
+        marker: ext_attr,
+        dir,
+        dormant_anchor,
+    }))
+}
+
+/// A marker above `#[lez_program]` expands first and is invisible to
+/// the compiled program: the extension would appear in the IDL but not
+/// in the dispatcher, so the placement is refused.
+fn check_marker_below_lez(
+    ext_attr: &str,
+    marker_pos: usize,
+    lez_pos: Option<usize>,
+) -> Result<(), String> {
+    if lez_pos.is_some_and(|lez| marker_pos < lez) {
+        return Err(format!(
+            "extension marker #[{ext_attr}] is above #[lez_program]: attributes \
+            above expand first and are invisible to the compiled program, so the \
+            extension would appear in the IDL but not in the dispatcher. Move \
+            #[{ext_attr}] below #[lez_program]."
+        ));
+    }
+    Ok(())
+}
+
+/// Decide an extension's embed, requiring its window type with it.
+///
+/// Embedded mode needs `embedded.state_type`: the window collision
+/// asserts read the window's size through it, so an embed without one
+/// is refused at discovery rather than surfacing at emission.
+fn resolve_embed(
+    marker_embed: Option<EmbedDecl>,
+    embedded: &EmbeddedMeta,
+    mod_items: &[syn::Item],
+    crate_name: &str,
+    ext_attr: &str,
+) -> Result<Option<Embed>, String> {
+    let Some(decl) = resolve_embed_decl(marker_embed, embedded, mod_items, crate_name, ext_attr)?
+    else {
+        return Ok(None);
+    };
+    let Some(state_type) = embedded.state_type.clone() else {
+        return Err(format!(
+            "extension '{crate_name}' is used in embedded mode but its \
+            metadata declares no `embedded.state_type`; name the type \
+            occupying the embedded window (e.g. state_type = \
+            \"{crate_name}::MyConfig\") so window collision asserts can \
+            be emitted"
+        ));
+    };
+    Ok(Some(Embed {
+        source: crate_name.to_string(),
+        decl,
+        state_type,
+        carrier: None,
+    }))
+}
+
+/// A crate's discovered fns with their bound params stripped, paired
+/// with the values the dispatcher appends per fn.
+type StrippedFns = (Vec<ItemFn>, HashMap<String, Vec<BoundValue>>);
+
+/// Resolve an extension's bound args against the module's markers and
+/// strip the bound trailing params form it's discovered fns.
+///
+/// Each bound arg names a trailing fn param the dispatcher fills at the
+/// call site as a compile-time literal; the params come off here so no
+/// IDL or validation path ever sees them. Trailing is enforced in
+/// bound_args block order, because the dispatcher appends the values
+/// after the transaction args.
+///
+/// # Errors
+///
+/// `Err` when a bound arg references a kwarg the framework does not
+/// know, when a referenced marker or kwarg is absent with no declared
+/// default, or when the bound params are not the trailing params in
+/// declaration order. Callers surface it as a compile error.
+fn strip_bound_args(
+    funcs: Vec<ItemFn>,
+    bound_args: &[BoundArg],
+    embed: Option<&EmbedDecl>,
     mod_attrs: &[Attribute],
     crate_name: &str,
-) -> Result<usize, String> {
-    let marker_offset = match bound.from.split_once("::") {
-        None => self_offset,
+) -> Result<StrippedFns, String> {
+    for bound in bound_args {
+        let kwarg = bound
+            .from
+            .split_once("::")
+            .map_or(bound.from.as_str(), |(_, k)| k);
+        if kwarg != "offset" {
+            return Err(format!(
+                "extension '{crate_name}': bound_args.from = \"{}\" names kwarg \
+                \"{kwarg}\", which is not a marker kwarg the framework knows; \
+                only \"offset\" carries a value",
+                bound.from
+            ));
+        }
+    }
+    let mut bound_calls: HashMap<String, Vec<BoundValue>> = HashMap::new();
+    let mut stripped: Vec<ItemFn> = Vec::with_capacity(funcs.len());
+    for mut f in funcs {
+        let mut values = Vec::new();
+        let mut found: Vec<usize> = Vec::new();
+        for bound in bound_args {
+            let Some(pos) = f.sig.inputs.iter().position(|input| {
+                matches!(input, syn::FnArg::Typed(pt)
+                    if matches!(&*pt.pat, syn::Pat::Ident(pi) if pi.ident == bound.arg))
+            }) else {
+                continue;
+            };
+            found.push(pos);
+            values.push(resolve_bound_value(bound, embed, mod_attrs, crate_name)?);
+        }
+        let n = f.sig.inputs.len();
+        let k = found.len();
+        let trailing_in_order = found.iter().enumerate().all(|(i, pos)| *pos == n - k + i);
+        if !trailing_in_order {
+            return Err(format!(
+                "extension '{crate_name}': bound_args params of `{}` must be \
+                the trailing params, in bound_args block order; the dispatcher \
+                appends their values after the transaction args",
+                f.sig.ident
+            ));
+        }
+        f.sig.inputs = f.sig.inputs.iter().take(n - k).cloned().collect();
+        if !values.is_empty() {
+            bound_calls.insert(f.sig.ident.to_string(), values);
+        }
+        stripped.push(f);
+    }
+    Ok((stripped, bound_calls))
+}
+
+/// Resolve one bound arg to its dispatch-time value.
+///
+/// Self shape (`from = "offset"`) reads the extension's own marker's
+/// embed declaration. Cross shape (`from = "<marker>::offset"`) reads
+/// the named peer marker's, so an extension can depend on where a peer
+/// embedded its state (freeze ADR-0012: freeze binding `admin_offset`
+/// from `admin_authority::offset`).
+///
+/// An explicit offset resolves to its number, a marker without one
+/// stays a derivation for `resolve_derived_offsets` to lower, and the
+/// `default` applies only when there is no embed at all. Deriving is a
+/// resolution, not an absence: the default must never swallow it. A
+/// missing marker or missing embed without a default is a hard error
+/// at the consumer's build.
+fn resolve_bound_value(
+    bound: &BoundArg,
+    self_embed: Option<&EmbedDecl>,
+    mod_attrs: &[Attribute],
+    crate_name: &str,
+) -> Result<BoundValue, String> {
+    let embed = match bound.from.split_once("::") {
+        None => self_embed.cloned(),
         Some((marker, _)) => {
             let Some(args) = mod_attrs
                 .iter()
                 .find_map(|a| parse_marker_args(a, marker).transpose())
                 .transpose()?
             else {
-                return bound.default.ok_or_else(|| {
+                return bound.default.map(BoundValue::Literal).ok_or_else(|| {
                     format!(
                         "extension '{crate_name}': bound_arg '{}' requires marker \
                         '#[{marker}]', which is not declared on this module, and \
@@ -480,16 +968,23 @@ fn resolve_bound_value(
                     )
                 });
             };
-            args.embed.map(|e| e.offset)
+            args.embed
         },
     };
-    marker_offset.or(bound.default).ok_or_else(|| {
-        format!(
-            "extension '{crate_name}': bound_arg '{}' reads '{}' but the marker \
-            carries no offset kwarg and the bound_arg declares no default",
-            bound.arg, bound.from
-        )
-    })
+    match embed {
+        Some(e) => Ok(match e.offset {
+            OffsetSpec::Literal(n) => BoundValue::Literal(n),
+            OffsetSpec::Path(p) => BoundValue::Path(p),
+            OffsetSpec::Derived => BoundValue::Derived { role: e.role },
+        }),
+        None => bound.default.map(BoundValue::Literal).ok_or_else(|| {
+            format!(
+                "extension `{crate_name}`: bound_arg `{}` read `{}` but the marker \
+                declares no embed and the bound_arg declares no default",
+                bound.arg, bound.from
+            )
+        }),
+    }
 }
 
 /// Read a crate's `[[package.metadata.spe.inject]]` blocks from its
@@ -517,7 +1012,7 @@ pub fn read_inject_specs(crate_dir: &Path) -> Result<Vec<InjectSpec>, String> {
 /// Used by framework codegen to pull instruction definitions out of
 /// extension libraries (e.g. admin-authority) that ship pre-defined
 /// instructions to be merged into a consuming program's IDL + dispatcher.
-fn collect_instruction_fns(items: &[syn::Item]) -> Vec<ItemFn> {
+pub fn collect_instruction_fns(items: &[syn::Item]) -> Vec<ItemFn> {
     items
         .iter()
         .filter_map(|it| match it {
@@ -573,11 +1068,34 @@ fn flatten_in_marker_order(mut matched: Vec<MatchedExtension>) -> ExtensionDisco
         out.inject_specs.extend(m.inject_specs);
         out.wraps.extend(m.wraps);
         out.embeds.extend(m.embeds);
-        out.embed_state_types.extend(m.embedded_state_types);
         out.bound_calls.extend(m.bound_calls);
         out.matched_markers.push(m.marker);
+        out.activated_dirs.push(m.dir);
+        out.dormant_anchors.extend(m.dormant_anchor);
     }
     out
+}
+
+/// Decide an extension's embedded declaration: the marker's role kwarg
+/// for anchorless extensions, anchor inference for anchored ones, and
+/// a hard error when both speak.
+fn resolve_embed_decl(
+    marker_embed: Option<EmbedDecl>,
+    embedded: &EmbeddedMeta,
+    mod_items: &[syn::Item],
+    crate_name: &str,
+    ext_attr: &str,
+) -> Result<Option<EmbedDecl>, String> {
+    match (marker_embed, &embedded.anchor) {
+        (Some(_), Some(_)) => Err(format!(
+            "extension `{crate_name}` declares an embed anchor \
+            (embedded.anchor_attr); the marker's role kwarg is retired for \
+            it, the anchor fn names the embedding account. Drop the kwarg \
+            from #[{ext_attr}]"
+        )),
+        (None, Some(a)) => marker::infer_anchor_embed(mod_items, &a.attr, &a.role, crate_name),
+        (embed, None) => Ok(embed),
+    }
 }
 
 #[cfg(test)]
@@ -593,7 +1111,7 @@ mod tests {
         on_warning: &mut F,
     ) -> Result<Vec<(ItemFn, syn::Path)>, String> {
         let graph = crate::dep_walk::resolve_dep_graph(dir, true, on_warning);
-        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, on_warning)?.instructions)
+        Ok(discover_extensions(&graph.direct_dirs, mod_attrs, &[], on_warning)?.instructions)
     }
 
     fn wrap_fixture(tmp: &TempDir, wrap_toml: &str) {
@@ -617,47 +1135,16 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
     #[test]
     fn discover_extension_instructions_picks_up_matching_ext() {
         let tmp = TempDir::new("discover-match");
-
-        // Extension crate at <tmp>/my-ext/
-        tmp.write(
-            "my-ext/Cargo.toml",
+        let mod_attrs = ext_fixture(
+            &tmp,
             r#"
-[package]
-name = "my-ext"
-version = "0.1.0"
-edition = "2021"
-
 [package.metadata.spel]
 extension_attr = "my_ext"
 "#,
-        );
-        tmp.write(
-            "my-ext/src/lib.rs",
             r#"
 #[instruction]
 pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
-        );
-
-        // User crate at <tmp>/user/ depending on my-ext
-        tmp.write(
-            "user/Cargo.toml",
-            r#"
-[package]
-name = "user"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-my-ext = { path = "../my-ext" }
-"#,
-        );
-        tmp.write("user/src/lib.rs", "");
-
-        // mod_attrs simulating: #[lez_program] #[my_ext] mod user { ... }
-        let mod_attrs: Vec<Attribute> = syn::parse_quote!(
-            #[lez_program]
-            #[my_ext]
         );
 
         let found =
@@ -856,7 +1343,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
 
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect("discovery through the producer entry point");
         assert_eq!(deps.extensions.instructions.len(), 1);
         assert!(
@@ -889,7 +1376,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_extt]
         );
 
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("an unmatched marker must refuse to compile");
         assert!(
             err.contains("my_extt") && err.contains("transitive"),
@@ -936,7 +1423,7 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
             #[doc = "no markers here"]
         );
         let mut warnings = Vec::new();
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |w| {
             warnings.push(w)
         })
         .expect("no markers is not an error");
@@ -963,7 +1450,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[lez_program]
         );
 
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("misplaced marker must propagate");
         assert!(
             err.contains("above #[lez_program]"),
@@ -990,7 +1477,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("an unknown bound_args.from must be rejected");
         assert!(
             err.contains("only \"offset\" carries a value"),
@@ -1025,7 +1512,7 @@ pub fn ext_action(offset: usize, account: AccountWithMetadata) -> SpelResult { t
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("a non-trailing bound param must be refused");
         assert!(
             err.contains("ext_action") && err.contains("trailing"),
@@ -1067,7 +1554,7 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded discovery must succeed");
         let (func, _) = &ext.instructions[0];
         let param_names: Vec<String> = func
@@ -1087,15 +1574,21 @@ pub fn ext_action(account: AccountWithMetadata, offset: usize) -> SpelResult { t
             vec!["account".to_string()],
             "offset must be stripped"
         );
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![32]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(32)])
+        );
 
         // Bare marker: dedicated mode resolves the default.
         let tmp = TempDir::new("bound-strip-dedicated");
         let mod_attrs = ext_fixture(&tmp, metadata, lib_rs);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("dedicated discovery must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(0)])
+        );
     }
 
     #[test]
@@ -1123,17 +1616,23 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
             #[peer_ext(peer_config = prog_config, offset = 16)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("cross-marker discovery must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![16]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(16)])
+        );
 
         // Peer marker absent: the declared default applies.
         let tmp = TempDir::new("bound-cross-dedicated");
         let mod_attrs = ext_fixture(&tmp, metadata, lib_rs);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("absent peer with default must succeed");
-        assert_eq!(ext.bound_calls.get("ext_action"), Some(&vec![0]));
+        assert_eq!(
+            ext.bound_calls.get("ext_action"),
+            Some(&vec![BoundValue::Literal(0)])
+        );
     }
 
     #[test]
@@ -1155,7 +1654,7 @@ pub fn ext_action(account: AccountWithMetadata, admin_offset: usize) -> SpelResu
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("absent peer without default must be rejected");
         assert!(
             err.contains("requires marker '#[peer_ext]'"),
@@ -1184,7 +1683,7 @@ edition = "2021"
             #[lez_program]
             #[ghost_ext]
         );
-        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |_| {})
+        let err = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
             .expect_err("unmatched marker with failed metadata must refuse to compile");
         assert!(
             err.contains("refusing to compile"),
@@ -1235,7 +1734,7 @@ my-ext = { path = "../my-ext" }
             #[my_ext]
         );
         let mut warnings = Vec::new();
-        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &mut |w| {
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |w| {
             warnings.push(w)
         })
         .expect("matched path marker must compile through a degraded resolution");
@@ -1280,7 +1779,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded discovery must succeed");
         let names: Vec<String> = ext
             .instructions
@@ -1311,7 +1810,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("dedicated discovery must succeed");
         let names: Vec<String> = ext
             .instructions
@@ -1353,23 +1852,23 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded marker must be collected");
         assert_eq!(
             ext.embeds,
-            vec![(
-                "my_ext".to_string(),
-                EmbedDecl {
+            vec![Embed {
+                source: "my_ext".to_string(),
+                carrier: None,
+                // The window state type travels with the embed, so an
+                // embed can always report its own length.
+                state_type: "my_ext::ExtConfig".to_string(),
+                decl: EmbedDecl {
                     role: "gate_config".to_string(),
                     account: "prog_config".to_string(),
-                    offset: 32,
-                }
-            )]
-        );
-        assert_eq!(
-            ext.embed_state_types.get("my_ext").map(String::as_str),
-            Some("my_ext::ExtConfig"),
-            "the window state type must travel with the embed"
+                    offset: OffsetSpec::Literal(32),
+                    initializer: None,
+                },
+            }]
         );
     }
 
@@ -1403,7 +1902,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             #[my_ext(gate_config = prog_config, offset = 32)]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("embedded mode without state_type must be refused");
         assert!(
             err.contains("my_ext") && err.contains("embedded.state_type"),
@@ -1447,7 +1946,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
             }
         )];
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let mut ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let mut ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("embedded marker must be collected");
         rewrite_embedded_roles(&mut ext.inject_specs, &ext.embeds, &consumer_fns)
             .expect("rewrite must succeed");
@@ -1472,15 +1971,19 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 embedded: false,
             }],
             source: "my_ext".to_string(),
+            embedded_offset: None,
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            carrier: None,
+            state_type: "my_ext::ExtConfig".to_string(),
+            decl: EmbedDecl {
                 role: "nonexistent".to_string(),
                 account: "prog_config".to_string(),
-                offset: 8,
+                offset: OffsetSpec::Literal(8),
+                initializer: None,
             },
-        )];
+        }];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
             pub fn initialize(
                 #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
@@ -1507,15 +2010,19 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 embedded: false,
             }],
             source: "my_ext".to_string(),
+            embedded_offset: None,
         }];
-        let embeds = vec![(
-            "my_ext".to_string(),
-            EmbedDecl {
+        let embeds = vec![Embed {
+            source: "my_ext".to_string(),
+            carrier: None,
+            state_type: "my_ext::ExtConfig".to_string(),
+            decl: EmbedDecl {
                 role: "gate_config".to_string(),
                 account: "prog_config".to_string(),
-                offset: 32,
+                offset: OffsetSpec::Literal(32),
+                initializer: None,
             },
-        )];
+        }];
         let consumer_fns: Vec<ItemFn> = vec![syn::parse_quote!(
             pub fn initialize(
                 #[account(init, pda = literal("prog_config"))] mut prog_config: AccountWithMetadata,
@@ -1539,7 +2046,8 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
                 todo!()
             }
         );
-        let injected = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap();
+        let injected =
+            apply_wrap_and_inject(&mut func, &[], &specs, GateLocations::Emit, None).unwrap();
         assert_eq!(injected, vec!["prog_config".to_string()]);
         let expected: Attribute =
             syn::parse_quote!(#[my_gate(gate_config = prog_config, offset = 32)]);
@@ -1581,7 +2089,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
 "#,
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("inject block must be collected");
         assert_eq!(ext.inject_specs.len(), 1);
         assert_eq!(ext.inject_specs[0].wrapper, "my_gate");
@@ -1647,7 +2155,7 @@ ext-b = { path = "../ext-b" }
             #[ext_b]
             #[ext_a]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &b_first, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &b_first, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.inject_specs[0].wrapper, "ext_b_gate");
         assert_eq!(ext.inject_specs[1].wrapper, "ext_a_gate");
         assert_eq!(ext.instructions[0].0.sig.ident, "ext_b_action");
@@ -1659,7 +2167,7 @@ ext-b = { path = "../ext-b" }
             #[ext_a]
             #[ext_b]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &a_first, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &a_first, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.inject_specs[0].wrapper, "ext_a_gate");
         assert_eq!(ext.inject_specs[1].wrapper, "ext_b_gate");
     }
@@ -1686,7 +2194,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         );
 
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let err = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect_err("marker above lez_program must fail discovery");
         assert!(
             err.contains("above #[lez_program]"),
@@ -1711,7 +2219,7 @@ pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
         );
 
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &mut |_| {})
+        let ext = discover_extensions(&graph.direct_dirs, &mod_attrs, &[], &mut |_| {})
             .expect("marker below lez_program must be accepted");
         assert_eq!(ext.instructions.len(), 1);
     }
@@ -1834,37 +2342,16 @@ extension_attr = "my_ext"
     #[test]
     fn discover_extension_instructions_skips_when_attr_absent_on_mod() {
         let tmp = TempDir::new("discover-skip-attr");
-
-        tmp.write(
-            "my-ext/Cargo.toml",
+        // The fixture's own marker attrs are discarded: this test is
+        // about a module that carries no extension marker at all.
+        ext_fixture(
+            &tmp,
             r#"
-[package]
-name = "my-ext"
-version = "0.1.0"
-edition = "2021"
-
 [package.metadata.spel]
 extension_attr = "my_ext"
 "#,
-        );
-        tmp.write(
-            "my-ext/src/lib.rs",
             r#"#[instruction] pub fn ext_action() -> SpelResult { todo!() }"#,
         );
-        tmp.write(
-            "user/Cargo.toml",
-            r#"
-[package]
-name = "user"
-version = "0.1.0"
-edition = "2021"
-
-[dependencies]
-my-ext = { path = "../my-ext" }
-"#,
-        );
-        tmp.write("user/src/lib.rs", "");
-
         let mod_attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
 
         let found =
@@ -1943,6 +2430,416 @@ lib-no-meta = { path = "../lib-no-meta" }
             ),
         ];
         assert!(check_duplicate_instruction_names(pairs).is_ok());
+    }
+
+    // Two layouts of one name make the IDL ambiguous, and both sit in
+    // code the author owns or activated, so the error names both crates
+    // and leaves the rename to them.
+    #[test]
+    fn colliding_layouts_name_both_crates() {
+        let tmp = TempDir::new("dup-layouts");
+        tmp.write(
+            "a/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u64 }",
+        );
+        tmp.write(
+            "b/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u8 }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("a"), tmp.path().join("b")],
+            ..Default::default()
+        };
+        let err = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .unwrap_err();
+        assert!(
+            err.contains("Same") && err.contains("/a") && err.contains("/b"),
+            "the error names the type and both crates: {err}"
+        );
+    }
+
+    // An embedded extension's state type is a window inside the
+    // consumer's account: its annotation is stripped so it arrives by
+    // reference, while the extension's other layouts stay.
+    #[test]
+    fn embedded_state_type_is_not_a_layout() {
+        let tmp = TempDir::new("demote-embedded");
+        tmp.write(
+            "ext/src/lib.rs",
+            "#[account_type]\npub struct ExtConfig { pub v: u64 }\n\
+             #[account_type]\npub struct Keeper { pub v: u64 }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            embeds: vec![Embed {
+                source: "my_ext".to_string(),
+                state_type: "my_ext::ExtConfig".to_string(),
+                carrier: None,
+                decl: EmbedDecl {
+                    role: "ext_config".to_string(),
+                    account: "cfg".to_string(),
+                    offset: OffsetSpec::Literal(0),
+                    initializer: None,
+                },
+            }],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .expect("no collision");
+
+        let annotated: Vec<String> = layout
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) if has_account_type_attr(&s.attrs) => {
+                    Some(s.ident.to_string())
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(annotated, vec!["Keeper".to_string()]);
+        assert!(
+            layout
+                .iter()
+                .any(|i| matches!(i, syn::Item::Struct(s) if s.ident == "ExtConfig")),
+            "the demoted type stays in the item set for reference resolution"
+        );
+    }
+
+    // The consumer's group is exempt from the demotion: a same-named
+    // consumer struct is a different type and keeps its annotation.
+    #[test]
+    fn consumer_layout_survives_a_same_named_embed() {
+        let tmp = TempDir::new("demote-exempt");
+        tmp.write("ext/src/lib.rs", "");
+        let consumer_items =
+            syn::parse_file("#[account_type]\npub struct ExtConfig { pub own: u64 }")
+                .unwrap()
+                .items;
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            embeds: vec![Embed {
+                source: "my_ext".to_string(),
+                state_type: "my_ext::ExtConfig".to_string(),
+                carrier: None,
+                decl: EmbedDecl {
+                    role: "ext_config".to_string(),
+                    account: "cfg".to_string(),
+                    offset: OffsetSpec::Literal(0),
+                    initializer: None,
+                },
+            }],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), consumer_items)
+            .expect("no collision");
+        assert!(
+            layout.iter().any(|i| matches!(i, syn::Item::Struct(s)
+                    if s.ident == "ExtConfig" && has_account_type_attr(&s.attrs))),
+            "the consumer's own layout keeps its annotation"
+        );
+    }
+
+    // A cfg-gated consumer item is never compiled into the program, so
+    // it is not a layout and cannot collide with one.
+    #[test]
+    fn cfg_gated_consumer_item_is_not_a_layout() {
+        let tmp = TempDir::new("cfg-gated-consumer");
+        tmp.write(
+            "ext/src/lib.rs",
+            "#[account_type]\npub struct Same { pub v: u64 }",
+        );
+        let consumer_items =
+            syn::parse_file("#[cfg(test)]\n#[account_type]\npub struct Same { pub fixture: u8 }")
+                .unwrap()
+                .items;
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("ext")],
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), consumer_items)
+            .expect("a test fixture cannot collide");
+        let same: Vec<&syn::ItemStruct> = layout
+            .iter()
+            .filter_map(|i| match i {
+                syn::Item::Struct(s) if s.ident == "Same" => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(same.len(), 1, "the gated fixture is screened out");
+        assert!(
+            same[0]
+                .fields
+                .iter()
+                .any(|f| f.ident.as_ref().is_some_and(|id| id == "v")),
+            "the connected crate's layout survives"
+        );
+    }
+
+    // The whole pipeline over a fabricated graph: an unowned crate's
+    // annotation is inert, while a type it declares is still described
+    // once something connected references it.
+    #[test]
+    fn unowned_annotations_are_inert_and_references_resolve() {
+        let tmp = TempDir::new("unowned-inert");
+        tmp.write(
+            "conn/src/lib.rs",
+            "#[account_type]\npub struct Wrapper { pub e: ExtEnum }",
+        );
+        tmp.write(
+            "un/src/lib.rs",
+            "#[account_type]\npub struct Planted { pub v: u64 }\n\
+             pub enum ExtEnum { A, B }",
+        );
+        let program = PreparedProgram {
+            connected_dirs: vec![tmp.path().join("conn")],
+            graph: crate::dep_walk::DepGraph {
+                transitive_dirs: vec![tmp.path().join("conn"), tmp.path().join("un")],
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let (layout, _) = program
+            .layout_items(Path::new("user/src/main.rs"), vec![])
+            .expect("no collision");
+        let mut defs = program.unowned_defs();
+        let (accounts, types) =
+            crate::account_types::collect_account_types_from(&layout, &mut defs);
+
+        let account_names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(
+            account_names,
+            vec!["Wrapper"],
+            "the unowned annotation is inert"
+        );
+        assert!(
+            types.iter().any(|t| t.name == "ExtEnum"),
+            "the referenced type resolves on demand: {types:?}"
+        );
+        assert!(
+            !types.iter().any(|t| t.name == "Planted"),
+            "nothing references the planted type, so it appears nowhere"
+        );
+        assert!(
+            defs.files_read()
+                .iter()
+                .any(|f| f.ends_with("un/src/lib.rs")),
+            "the lookup reports the file it read for rebuild tracking"
+        );
+    }
+
+    // Anchor declared, no fn carries it, nothing marked: dedicated mode,
+    // and discovery records the dormancy for the carrier check.
+    #[test]
+    fn unanchored_extension_records_a_dormant_anchor() {
+        let tmp = TempDir::new("dormant-anchor");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[package.metadata.spel.embedded]
+state_type = "my_ext::ExtConfig"
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
+            .expect("dedicated resolution succeeds");
+        assert_eq!(
+            deps.extensions.dormant_anchors,
+            vec![DormantAnchor {
+                source: "my_ext".to_string(),
+                attr: "ext_init".to_string(),
+                role: "ext_config".to_string(),
+            }]
+        );
+        assert!(deps.extensions.embeds.is_empty());
+    }
+
+    // A slot field marker with no anchored fn is a mode disagreement,
+    // so prepare refuses it, naming the struct and both attrs.
+    #[test]
+    fn slot_carrier_without_anchor_refuses() {
+        let mut deps = ProgramDeps::default();
+        deps.extensions.dormant_anchors.push(DormantAnchor {
+            source: "my_ext".to_string(),
+            attr: "ext_init".to_string(),
+            role: "ext_config".to_string(),
+        });
+        let items: Vec<syn::Item> =
+            syn::parse_file("pub struct ProgConfig { pub v: u64, #[ext_slot] pub s: u8 }")
+                .unwrap()
+                .items;
+        let Err(err) = deps.prepare(&[], Carriers::Resolve(&items)) else {
+            panic!("a marked field with no anchor must refuse");
+        };
+        assert!(
+            err.contains("ProgConfig")
+                && err.contains("#[ext_init]")
+                && err.contains("dedicated mode with a dead slot window"),
+            "got: {err}"
+        );
+    }
+
+    // Without the marked field the same dormancy is plain dedicated
+    // mode, which is what an anchor-capable extension looks like for
+    // every consumer that does not embed it.
+    #[test]
+    fn dormant_anchor_without_carrier_is_dedicated_mode() {
+        let mut deps = ProgramDeps::default();
+        deps.extensions.dormant_anchors.push(DormantAnchor {
+            source: "my_ext".to_string(),
+            attr: "ext_init".to_string(),
+            role: "ext_config".to_string(),
+        });
+        let items: Vec<syn::Item> = syn::parse_file("pub struct ProgConfig { pub v: u64 }")
+            .unwrap()
+            .items;
+        deps.prepare(&[], Carriers::Resolve(&items))
+            .expect("no marked field, dedicated mode stands");
+    }
+
+    // The connected set is the author's own code plus the extensions
+    // they switched on. An extension linked by path is in both lists and
+    // must still appear once.
+    #[test]
+    fn connected_dirs_are_owned_plus_activated_without_repeats() {
+        let tmp = TempDir::new("connected-dirs");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &[], &mut |_| {})
+            .expect("discovery succeeds");
+
+        assert_eq!(
+            deps.extensions.activated_dirs.len(),
+            1,
+            "the matched extension is recorded"
+        );
+        let connected = deps.connected_dirs();
+        let canonical: HashSet<_> = connected
+            .iter()
+            .map(|d| crate::dep_walk::canonical_key(d))
+            .collect();
+        assert_eq!(
+            canonical.len(),
+            connected.len(),
+            "a path-linked extension is owned and activated, and appears once: {connected:?}"
+        );
+        assert!(
+            connected.iter().any(|d| d.ends_with("my-ext")),
+            "the extension's crate is connected: {connected:?}"
+        );
+    }
+
+    // Resolving carriers and writing location kwargs are one decision:
+    // a producer that writes a location is exactly the one that resolved
+    // the carrier it names.
+    #[test]
+    fn carriers_decide_whether_locations_are_written() {
+        let prepared = ProgramDeps::default()
+            .prepare(&[], Carriers::Resolve(&[]))
+            .expect("nothing to resolve");
+        assert_eq!(prepared.locations, GateLocations::Emit);
+
+        let prepared = ProgramDeps::default()
+            .prepare(&[], Carriers::Skip)
+            .expect("nothing to resolve");
+        assert_eq!(prepared.locations, GateLocations::Omit);
+    }
+
+    // A producer holding a resolved graph hands it to IDL generation
+    // instead of paying for a second resolution of one manifest. The
+    // document must not depend on which entry point produced it.
+    #[test]
+    fn graph_entry_point_matches_the_dep_dirs_one() {
+        let tmp = TempDir::new("idl-graph-entry");
+        tmp.write(
+            "my-ext/Cargo.toml",
+            r#"
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2021"
+
+[package.metadata.spel]
+extension_attr = "my_ext"
+"#,
+        );
+        tmp.write(
+            "my-ext/src/lib.rs",
+            r#"
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+
+#[account_type]
+pub struct ExtState { pub v: u64 }
+"#,
+        );
+        tmp.write(
+            "user/Cargo.toml",
+            r#"
+[package]
+name = "user"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+my-ext = { path = "../my-ext" }
+"#,
+        );
+        tmp.write(
+            "user/src/main.rs",
+            r#"
+#[lez_program]
+#[my_ext]
+mod user_program {
+    #[instruction]
+    pub fn update_value(account: AccountWithMetadata, value: u64) -> SpelResult { todo!() }
+}
+"#,
+        );
+
+        let source = tmp.path().join("user/src/main.rs");
+        let graph = crate::dep_walk::resolve_dep_graph(&source, true, &mut |_| {});
+        let dirs = graph.transitive_dirs.clone();
+
+        let from_graph = crate::idl_gen::generate_idl_from_file_with_graph(&source, graph)
+            .expect("generation over a caller-supplied graph");
+        let from_dirs =
+            crate::idl_gen::generate_idl_from_file_with_deps(&source, &dirs, &mut |_| {})
+                .expect("generation that resolves its own graph");
+
+        assert_eq!(
+            serde_json::to_value(&from_graph).unwrap(),
+            serde_json::to_value(&from_dirs).unwrap(),
+            "the graph the caller supplies must not change the document"
+        );
+        assert!(
+            from_graph
+                .instructions
+                .iter()
+                .any(|i| i.name == "ext_action"),
+            "the extension's instruction must survive both paths: {:?}",
+            from_graph.instructions
+        );
     }
 
     #[test]
@@ -2024,7 +2921,7 @@ self_exempt_marker = "my_exempt"
             #[my_ext]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps.len(), 1);
         assert_eq!(ext.wraps[0].0, "");
         assert!(ext.wraps[0].1.skip.is_none());
@@ -2049,7 +2946,7 @@ self_exempt_marker = "my_exempt"
             #[my_ext]
         );
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &bare, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &bare, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps.len(), 1);
         assert_eq!(ext.wraps[0].0, "");
 
@@ -2059,7 +2956,7 @@ self_exempt_marker = "my_exempt"
             #[lez_program]
             #[my_ext(manual)]
         );
-        let ext = discover_extensions(&graph.direct_dirs, &manual, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &manual, &[], &mut |_| {}).unwrap();
         assert_eq!(ext.wraps[0].0, "manual");
     }
 
@@ -2076,7 +2973,248 @@ self_exempt_marker = "my_exempt"
         );
         let attrs: Vec<Attribute> = syn::parse_quote!(#[lez_program]);
         let graph = crate::dep_walk::resolve_dep_graph(&tmp.path().join("user"), true, &mut |_| {});
-        let ext = discover_extensions(&graph.direct_dirs, &attrs, &mut |_| {}).unwrap();
+        let ext = discover_extensions(&graph.direct_dirs, &attrs, &[], &mut |_| {}).unwrap();
         assert!(ext.wraps.is_empty());
+    }
+
+    // The dedicated-mode default fills a missing embed, never a derived
+    // one: deriving is a resolution, and a default of 0 silently
+    // pointing every gate at offset 0 is the failure this pins against.
+    #[test]
+    fn derived_embed_never_falls_back_to_the_default() {
+        let bound = BoundArg {
+            arg: "offset".into(),
+            from: "offset".into(),
+            default: Some(0),
+        };
+        let embed = EmbedDecl {
+            role: "gate_config".into(),
+            account: "cfg".into(),
+            offset: OffsetSpec::Derived,
+            initializer: None,
+        };
+        let v = resolve_bound_value(&bound, Some(&embed), &[], "my-ext").expect("resolves");
+        assert_eq!(
+            v,
+            BoundValue::Derived {
+                role: "gate_config".into()
+            }
+        );
+    }
+
+    // No embed at all is what the default is for.
+    #[test]
+    fn absent_embed_falls_back_to_the_default() {
+        let bound = BoundArg {
+            arg: "offset".into(),
+            from: "offset".into(),
+            default: Some(0),
+        };
+        let v = resolve_bound_value(&bound, None, &[], "my-ext").expect("resolves");
+        assert_eq!(v, BoundValue::Literal(0));
+    }
+
+    fn anchor_meta(anchor: Option<(&str, &str)>) -> EmbeddedMeta {
+        EmbeddedMeta {
+            anchor: anchor.map(|(attr, role)| metadata::EmbedAnchor {
+                attr: attr.to_string(),
+                role: role.to_string(),
+            }),
+            ..EmbeddedMeta::default()
+        }
+    }
+
+    fn kwarg_embed() -> EmbedDecl {
+        EmbedDecl {
+            role: "ext_config".into(),
+            account: "cfg".into(),
+            offset: OffsetSpec::Literal(32),
+            initializer: None,
+        }
+    }
+
+    // The four arms of the embed decision, in one place.
+    #[test]
+    fn marker_kwarg_with_anchor_metadata_refuses() {
+        let err = resolve_embed_decl(
+            Some(kwarg_embed()),
+            &anchor_meta(Some(("ext_init", "ext_config"))),
+            &[],
+            "my-ext",
+            "my_ext",
+        )
+        .expect_err("two writers must refuse");
+        assert!(err.contains("anchor") && err.contains("my_ext"), "{err}");
+    }
+
+    #[test]
+    fn marker_kwarg_without_anchor_passes_through() {
+        let embed = resolve_embed_decl(
+            Some(kwarg_embed()),
+            &anchor_meta(None),
+            &[],
+            "my-ext",
+            "my_ext",
+        )
+        .unwrap()
+        .expect("the kwarg decl survives");
+        assert_eq!(embed.account, "cfg");
+    }
+
+    #[test]
+    fn anchor_without_kwarg_infers_from_the_module() {
+        let items: Vec<syn::Item> = syn::parse_file(
+            "#[ext_init]\npub fn initialize(#[account(init)] cfg: A) -> R { todo!() }",
+        )
+        .unwrap()
+        .items;
+        let embed = resolve_embed_decl(
+            None,
+            &anchor_meta(Some(("ext_init", "ext_config"))),
+            &items,
+            "my-ext",
+            "my_ext",
+        )
+        .unwrap()
+        .expect("the anchor infers");
+        assert_eq!(embed.account, "cfg");
+        assert_eq!(embed.offset, OffsetSpec::Derived);
+    }
+
+    #[test]
+    fn neither_kwarg_nor_anchor_is_dedicated() {
+        let embed = resolve_embed_decl(None, &anchor_meta(None), &[], "my-ext", "my_ext").unwrap();
+        assert!(embed.is_none());
+    }
+
+    // The reason inference lives in discovery: embedded.skip filters the
+    // instruction set right there, so an inferred embed must drop the
+    // extension's initializer exactly like a kwarg-declared one.
+    #[test]
+    fn anchored_extension_infers_embed_and_skips_initializer() {
+        let tmp = TempDir::new("program-deps-anchored");
+        let mod_attrs = ext_fixture(
+            &tmp,
+            r#"
+[package.metadata.spel]
+extension_attr = "my_ext"
+
+[package.metadata.spel.embedded]
+skip = ["ext_init"]
+state_type = "my_ext::ExtConfig"
+anchor_attr = "ext_init"
+anchor_role = "ext_config"
+"#,
+            r#"
+#[instruction]
+pub fn ext_init(account: AccountWithMetadata) -> SpelResult { todo!() }
+#[instruction]
+pub fn ext_action(account: AccountWithMetadata) -> SpelResult { todo!() }
+"#,
+        );
+        let items: Vec<syn::Item> = syn::parse_file(
+            "#[ext_init]\npub fn initialize(#[account(init)] my_cfg: A) -> R { todo!() }",
+        )
+        .unwrap()
+        .items;
+
+        let deps = resolve_program_deps(&tmp.path().join("user"), &mod_attrs, &items, &mut |_| {})
+            .expect("anchored discovery succeeds");
+        assert_eq!(
+            deps.extensions.embeds,
+            vec![Embed {
+                source: "my_ext".to_string(),
+                carrier: None,
+                state_type: "my_ext::ExtConfig".to_string(),
+                decl: EmbedDecl {
+                    role: "ext_config".into(),
+                    account: "my_cfg".into(),
+                    offset: OffsetSpec::Derived,
+                    initializer: Some("ext_init".into()),
+                },
+            }]
+        );
+        let names: Vec<String> = deps
+            .extensions
+            .instructions
+            .iter()
+            .map(|(f, _)| f.sig.ident.to_string())
+            .collect();
+        assert!(
+            !names.contains(&"ext_init".to_string()),
+            "the skip filter must fire on an inferred embed: {names:?}"
+        );
+        assert!(names.contains(&"ext_action".to_string()), "{names:?}");
+    }
+
+    // The shorthand was swapped only inside the dispatcher macro, so an
+    // IDL built from #[initialize] described an instruction without the
+    // accounts the dispatcher injects, and a client generated from it
+    // sent the wrong accounts. Both spellings must gate alike.
+    #[test]
+    fn the_shorthand_gates_exactly_as_the_explicit_anchor() {
+        let program = || PreparedProgram {
+            inject_specs: vec![InjectSpec {
+                wrapper: "admin_initialize".to_string(),
+                accounts: vec![InjectAccount {
+                    name: "caller".to_string(),
+                    role: "caller".to_string(),
+                    seeds: Vec::new(),
+                    signer: true,
+                    embedded: false,
+                }],
+                source: "admin".to_string(),
+                embedded_offset: None,
+            }],
+            embeds: vec![Embed {
+                source: "admin".to_string(),
+                carrier: None,
+                state_type: "admin::Cfg".to_string(),
+                decl: EmbedDecl {
+                    role: "admin_config".to_string(),
+                    account: "config".to_string(),
+                    offset: OffsetSpec::Literal(32),
+                    initializer: Some("admin_initialize".to_string()),
+                },
+            }],
+            ..Default::default()
+        };
+        let params = |f: &ItemFn| -> Vec<String> {
+            f.sig
+                .inputs
+                .iter()
+                .filter_map(|a| match a {
+                    syn::FnArg::Typed(pt) => match &*pt.pat {
+                        syn::Pat::Ident(pi) => Some(pi.ident.to_string()),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect()
+        };
+        let mut shorthand: ItemFn = syn::parse_quote! {
+            #[initialize]
+            pub fn initialize(config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        let mut explicit: ItemFn = syn::parse_quote! {
+            #[admin_initialize]
+            pub fn initialize(config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        program()
+            .gate(&mut shorthand, None)
+            .expect("the shorthand gates");
+        program()
+            .gate(&mut explicit, None)
+            .expect("the explicit anchor gates");
+        assert_eq!(
+            params(&shorthand),
+            params(&explicit),
+            "the shorthand must inject what the explicit anchor injects"
+        );
+        assert!(
+            params(&shorthand).iter().any(|p| p == "caller"),
+            "the bootstrap's injected caller must reach every producer: {:?}",
+            params(&shorthand)
+        );
     }
 }

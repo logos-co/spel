@@ -197,6 +197,17 @@ struct AccountParam {
     is_rest: bool,
 }
 
+impl spel_framework_core::idl_gen::MergeableAccount for AccountParam {
+    fn param_name(&self) -> &Ident {
+        &self.name
+    }
+
+    fn merge_constraints(&mut self, repeat: &Self) {
+        self.constraints.mutable |= repeat.constraints.mutable;
+        self.constraints.signer |= repeat.constraints.signer;
+    }
+}
+
 #[derive(Default)]
 struct AccountConstraints {
     mutable: bool,
@@ -229,6 +240,86 @@ struct ArgParam {
     ty: Type,
 }
 
+/// The source file defining the target module, parsed. Candidates
+/// cover the common bin and module plus the manifest's
+/// declared bin paths; a file matches only if it defines the module,
+/// avoiding false matches. `None` when nothing does.
+fn locate_module_source(mod_name: &Ident) -> Option<(std::path::PathBuf, syn::File)> {
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").ok()?;
+    let manifest = std::path::Path::new(&manifest_dir);
+    let module_path = mod_name.to_string();
+
+    let mut candidate_paths: Vec<std::path::PathBuf> = vec![
+        manifest.join("src/bin").join(format!("{module_path}.rs")), // src/bin/{name}.rs
+        manifest.join("src/bin").join(&module_path).join("main.rs"), // src/bin/{name}/main.rs
+        manifest.join("src").join(format!("{module_path}.rs")),     // src/{name}.rs
+        manifest.join("src").join(&module_path).join("mod.rs"),     // src/{name}/mod.rs
+        manifest.join("src").join("lib.rs"),                        // src/lib.rs
+        manifest.join("src").join("main.rs"),                       // src/main.rs
+    ];
+
+    // Scan src/bin/ for additional files and subdirectories
+    let src_bin = manifest.join("src/bin");
+    if let Ok(entries) = std::fs::read_dir(&src_bin) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if !candidate_paths.iter().any(|p| p == &path) {
+                    candidate_paths.push(path);
+                }
+            } else if path.is_dir() {
+                let main_rs = path.join("main.rs");
+                if main_rs.is_file() && !candidate_paths.iter().any(|p| p == &main_rs) {
+                    candidate_paths.push(main_rs);
+                }
+            }
+        }
+    }
+
+    // Scan src/ for additional files and subdirectories
+    let src = manifest.join("src");
+    if let Ok(entries) = std::fs::read_dir(&src) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs") {
+                if !candidate_paths.iter().any(|p| p == &path) {
+                    candidate_paths.push(path);
+                }
+            } else if path.is_dir() {
+                let mod_rs = path.join("mod.rs");
+                if mod_rs.is_file() && !candidate_paths.iter().any(|p| p == &mod_rs) {
+                    candidate_paths.push(mod_rs);
+                }
+            }
+        }
+    }
+
+    // Manifest 'declared bin paths: entry files outside src/
+    // (custom [[bin]] path, test harnesses) must not be missed,
+    // a missed entry file silently skips the slot assert.
+    for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+        if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
+            candidate_paths.push(bin_path);
+        }
+    }
+
+    for guest_path in candidate_paths {
+        if let Ok(content_str) = std::fs::read_to_string(&guest_path) {
+            if let Ok(parsed_file) = syn::parse_file(&content_str) {
+                if parsed_file
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, syn::Item::Mod(m) if m.ident == *mod_name))
+                {
+                    return Some((guest_path, parsed_file));
+                }
+            }
+        }
+    }
+
+    None
+}
+
 fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<TokenStream2> {
     let mod_name = &input.ident;
 
@@ -240,29 +331,52 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
-    let mut deps = spel_framework_core::extension::resolve_program_deps(
+    let deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &input.attrs,
+        items,
         &mut |_| {},
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let mut slot_assert = proc_macro2::TokenStream::new();
-    let bound_calls = deps.extensions.bound_calls.clone();
-    let consumer_fns: Vec<ItemFn> = items
-        .iter()
-        .filter_map(|i| match i {
-            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-            _ => None,
-        })
-        .collect();
-    spel_framework_core::extension::rewrite_embedded_roles(
-        &mut deps.extensions.inject_specs,
-        &deps.extensions.embeds,
-        &consumer_fns,
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-
-    let active_wraps: Vec<_> = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
+    let module_source = locate_module_source(mod_name);
+    if module_source.is_none() && !deps.extensions.embeds.is_empty() {
+        return Err(syn::Error::new(
+            proc_macro2::Span::call_site(),
+            "embedded markers are declared but the module's source file \
+            could not be located, so slot offsets cannot be resolved and \
+            the slot checks cannot be emitted; refusing to compile rather \
+            than skip them silently",
+        ));
+    }
+    // The binding scan set, built once: offset resolution and the
+    // agreement asserts bind roles to carriers against the same items.
+    // The binding scan reads the consumer's sources and every local path
+    // dependency, so a program that binds nothing skips it. Binding
+    // means an embed, a derived bound value, or a dormant anchor — the
+    // last binds no offset, but its check still reads the scan, and an
+    // empty scan would let a slot carrier with no anchored fn pass
+    // vacuously.
+    let binds_a_carrier = !deps.extensions.embeds.is_empty()
+        || !deps.extensions.dormant_anchors.is_empty()
+        || deps.extensions.bound_calls.values().flatten().any(|v| {
+            matches!(
+                v,
+                spel_framework_core::extension::BoundValue::Derived { .. }
+            )
+        });
+    let scan_items: Vec<syn::Item> = module_source
+        .as_ref()
+        .filter(|_| binds_a_carrier)
+        .map(|(path, _)| slot_offsets::consumer_scan_items(path))
+        .unwrap_or_default();
+    let mut program = deps
+        .prepare(
+            items,
+            spel_framework_core::extension::Carriers::Resolve(&scan_items),
+        )
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let bound_calls = program.bound_calls.clone();
 
     // Collect instruction functions and other items
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -273,14 +387,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             syn::Item::Fn(func) => {
                 if has_instruction_attr(&func.attrs) {
                     let mut func = func.clone();
-                    let injected = spel_framework_core::extension::apply_wrap_and_inject(
-                        &mut func,
-                        &active_wraps,
-                        &deps.extensions.inject_specs,
-                        &deps.extensions.embeds,
-                        None,
-                    )
-                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                    let injected = program
+                        .gate(&mut func, None)
+                        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                     let mut info = parse_instruction(func)?;
                     info.injected = injected;
                     instructions.push(info);
@@ -301,27 +410,13 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         ));
     }
 
-    for (func, crate_path) in deps.extensions.instructions {
-        let mut func = func;
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        spel_framework_core::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &deps.extensions.inject_specs,
-            &deps.extensions.embeds,
-            Some(&qualified),
-        )
-        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
-        let name = &info.fn_name;
+        let (crate_path, name) = (&ext.crate_path, &info.fn_name);
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }
@@ -445,131 +540,34 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         segments.join("::")
     });
 
-    // Collect #[account_type] annotated types from the source file's top-level items.
-    // Expands the candidate set to cover common Rust module/bin layouts and verifies
-    // that the candidate file actually defines the target module, avoiding false matches.
-    let (accounts, types) = {
-        let module_path = mod_name.to_string();
-        let mut result = (Vec::new(), Vec::new());
-
-        if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
-            let manifest = std::path::Path::new(&manifest_dir);
-
-            // Check if a parsed file defines the target module
-            let file_matches_module = |parsed_file: &syn::File| {
-                parsed_file.items.iter().any(
-                    |item| matches!(item, syn::Item::Mod(item_mod) if item_mod.ident == *mod_name),
-                )
-            };
-
-            let mut candidate_paths: Vec<std::path::PathBuf> = vec![
-                manifest.join("src/bin").join(format!("{module_path}.rs")), // src/bin/{name}.rs
-                manifest.join("src/bin").join(&module_path).join("main.rs"), // src/bin/{name}/main.rs
-                manifest.join("src").join(format!("{module_path}.rs")),      // src/{name}.rs
-                manifest.join("src").join(&module_path).join("mod.rs"),      // src/{name}/mod.rs
-                manifest.join("src").join("lib.rs"),                         // src/lib.rs
-                manifest.join("src").join("main.rs"),                        // src/main.rs
-            ];
-
-            // Scan src/bin/ for additional files and subdirectories
-            let src_bin = manifest.join("src/bin");
-            if let Ok(entries) = std::fs::read_dir(&src_bin) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-                    {
-                        if !candidate_paths.iter().any(|p| p == &path) {
-                            candidate_paths.push(path);
-                        }
-                    } else if path.is_dir() {
-                        let main_rs = path.join("main.rs");
-                        if main_rs.is_file() && !candidate_paths.iter().any(|p| p == &main_rs) {
-                            candidate_paths.push(main_rs);
+    // Collect #[account_type] annotated types from the located module
+    // source: its top-level items, the module body, and the connected
+    // crates' items, with referenced types resolved on demand.
+    let (accounts, types) = match &module_source {
+        Some((guest_path, parsed_file)) => {
+            // The consumer's own items: the file's top level plus the
+            // program module's body.
+            let mut consumer_items: Vec<syn::Item> = parsed_file.items.clone();
+            for item in &parsed_file.items {
+                if let syn::Item::Mod(m) = item {
+                    if m.ident == *mod_name {
+                        if let Some((_, mod_items)) = &m.content {
+                            consumer_items.extend(mod_items.clone());
                         }
                     }
                 }
             }
-
-            // Scan src/ for additional files and subdirectories
-            let src = manifest.join("src");
-            if let Ok(entries) = std::fs::read_dir(&src) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("rs")
-                    {
-                        if !candidate_paths.iter().any(|p| p == &path) {
-                            candidate_paths.push(path);
-                        }
-                    } else if path.is_dir() {
-                        let mod_rs = path.join("mod.rs");
-                        if mod_rs.is_file() && !candidate_paths.iter().any(|p| p == &mod_rs) {
-                            candidate_paths.push(mod_rs);
-                        }
-                    }
-                }
-            }
-
-            // Manifest 'declared bin paths: entry files outside src/
-            // (custom [[bin]] path, test harnesses) must not be missed,
-            // a missed entry file silently skips the slot assert.
-            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
-                if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
-                    candidate_paths.push(bin_path);
-                }
-            }
-
-            let mut module_source_found = false;
-            for guest_path in &candidate_paths {
-                if let Ok(content_str) = std::fs::read_to_string(guest_path) {
-                    if let Ok(parsed_file) = syn::parse_file(&content_str) {
-                        if file_matches_module(&parsed_file) {
-                            module_source_found = true;
-                            // Collect from top-level items AND from inside the
-                            // #[lez_program] module body (account types are often
-                            // defined inside the module).
-                            let mut all_items: Vec<syn::Item> = parsed_file.items.clone();
-                            for item in &parsed_file.items {
-                                if let syn::Item::Mod(m) = item {
-                                    if m.ident == *mod_name {
-                                        if let Some((_, mod_items)) = &m.content {
-                                            all_items.extend(mod_items.clone());
-                                        }
-                                    }
-                                }
-                            }
-                            // Also include items from path-dependency crates, so types defined in
-                            // extension libraries (account types, instruction-arg types) reach the IDL.
-                            let (extra_items, _) =
-                                spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-                                    &deps.graph.transitive_dirs,
-                                    |w| eprintln!("warning: {w}"),
-                                );
-                            all_items.extend(extra_items);
-                            slot_assert.extend(slot_offsets::emit_agreement_asserts(
-                                guest_path,
-                                &deps.extensions.embeds,
-                            )?);
-                            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
-                                &deps.extensions.embeds,
-                                &deps.extensions.embed_state_types,
-                            )?);
-                            result = account_types::collect_account_types(&all_items);
-                            break;
-                        }
-                    }
-                }
-            }
-            if !module_source_found && !deps.extensions.embeds.is_empty() {
-                return Err(syn::Error::new(
-                    proc_macro2::Span::call_site(),
-                    "embedded markers are declared but the module's source \
-                    file could not be located, so the slot agreement checks \
-                    cannot be emitted; refusing to compile rather than skip \
-                    them silently",
-                ));
-            }
-        }
-        result
+            let (layout, _) = program
+                .layout_items(guest_path, consumer_items)
+                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+            slot_assert.extend(slot_offsets::emit_agreement_asserts(&program.embeds));
+            slot_assert.extend(slot_offsets::embed_window_collision_asserts(
+                &program.embeds,
+            )?);
+            let mut defs = program.unowned_defs();
+            account_types::collect_account_types_from(&layout, &mut defs)
+        },
+        None => (Vec::new(), Vec::new()),
     };
 
     let idl_fn = generate_idl_fn(
@@ -684,17 +682,7 @@ fn parse_instruction(func: ItemFn) -> syn::Result<InstructionInfo> {
     }
 
     let call_accounts: Vec<Ident> = accounts.iter().map(|a| a.name.clone()).collect();
-    let mut deduped: Vec<AccountParam> = Vec::new();
-    for a in accounts {
-        match deduped.iter_mut().find(|d| d.name == a.name) {
-            Some(kept) => {
-                kept.constraints.mutable |= a.constraints.mutable;
-                kept.constraints.signer |= a.constraints.signer;
-            },
-            None => deduped.push(a),
-        }
-    }
-    let accounts = deduped;
+    let accounts = spel_framework_core::idl_gen::merge_duplicate_accounts(accounts);
 
     Ok(InstructionInfo {
         fn_name,
@@ -981,7 +969,10 @@ fn generate_enum_variants(instructions: &[InstructionInfo]) -> Vec<TokenStream2>
 fn generate_match_arms(
     mod_name: &Ident,
     instructions: &[InstructionInfo],
-    bound_calls: &std::collections::HashMap<String, Vec<usize>>,
+    bound_calls: &std::collections::HashMap<
+        String,
+        Vec<spel_framework_core::extension::BoundValue>,
+    >,
 ) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -1063,10 +1054,7 @@ fn generate_match_arms(
                     quote! { #name }
                 }));
                 if let Some(values) = bound_calls.get(&ix.fn_name.to_string()) {
-                    args.extend(values.iter().map(|v| {
-                        let lit = proc_macro2::Literal::usize_unsuffixed(*v);
-                        quote! { #lit }
-                    }));
+                    args.extend(values.iter().map(slot_offsets::bound_value_tokens));
                 }
                 args
             };
@@ -1282,11 +1270,14 @@ impl<'a> ExecuteTransformer<'a> {
 
     /// Post-state clones for the injected params, in accounts order.
     /// Injected params never appear in a consumer-authored accounts
-    /// expression, the consumer does not know they exist.
-    fn injected_clones(&self) -> Vec<TokenStream2> {
+    /// expression, the consumer does not know they exist. `skip` names
+    /// the accounts the body already lists, so an injected param a
+    /// consumer happens to name is cloned once.
+    fn injected_clones(&self, skip: &[Ident]) -> Vec<TokenStream2> {
         self.accounts
             .iter()
             .filter(|a| self.injected.iter().any(|n| a.name == *n))
+            .filter(|a| !skip.iter().any(|i| *i == a.name))
             .map(|a| {
                 let ident = &a.name;
                 quote! { #ident.account.clone() }
@@ -1318,19 +1309,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
         // Try vec![ident, ...] pattern first (fixed-size accounts, most common case)
         if let Some(account_idents) = extract_vec_macro_idents(&accounts_arg) {
-            // Verify all account names are known before transforming
-            let mut account_clones: Vec<TokenStream2> = Vec::new();
             // Injected params the body does not know about: pass their
             // post-state through unchanged, in declaration order (they sit
             // at the front of self.accounts, keeping claims alignment).
-            for acc in self.accounts {
-                if self.injected.iter().any(|n| acc.name == *n)
-                    && !account_idents.iter().any(|i| *i == acc.name)
-                {
-                    let ident = &acc.name;
-                    account_clones.push(quote! { #ident.account.clone() });
-                }
-            }
+            let mut account_clones: Vec<TokenStream2> = self.injected_clones(&account_idents);
+            // Verify all account names are known before transforming
             for ident in &account_idents {
                 if !self.accounts.iter().any(|a| a.name == *ident) {
                     return; // unknown account — don't transform
@@ -1352,7 +1335,7 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             return;
         }
 
-        let injected_clones: Vec<TokenStream2> = self.injected_clones();
+        let injected_clones: Vec<TokenStream2> = self.injected_clones(&[]);
         // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
         // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
         if self.has_rest() {
@@ -2378,26 +2361,16 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         .ok_or_else(|| syn::Error::new_spanned(span_token, "lez_program module has no body"))?;
 
     let manifest_dir = std::path::PathBuf::from(&resolved_path);
-    let mut deps = spel_framework_core::extension::resolve_program_deps(
+    // `Carriers::Skip`: `generate_idl!` emits IDL JSON, which carries no
+    // offset, so nothing here could read a resolved derivation.
+    let mut program = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &program_mod.attrs,
+        items,
         &mut |_| {},
     )
+    .and_then(|deps| deps.prepare(items, spel_framework_core::extension::Carriers::Skip))
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    let consumer_fns: Vec<ItemFn> = items
-        .iter()
-        .filter_map(|i| match i {
-            syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-            _ => None,
-        })
-        .collect();
-    spel_framework_core::extension::rewrite_embedded_roles(
-        &mut deps.extensions.inject_specs,
-        &deps.extensions.embeds,
-        &consumer_fns,
-    )
-    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
-    let active_wraps = spel_framework_core::extension::active_wraps(&deps.extensions.wraps);
 
     // Parse instructions
     let mut instructions: Vec<InstructionInfo> = Vec::new();
@@ -2405,14 +2378,9 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                let injected = spel_framework_core::extension::apply_wrap_and_inject(
-                    &mut func,
-                    &active_wraps,
-                    &deps.extensions.inject_specs,
-                    &deps.extensions.embeds,
-                    None,
-                )
-                .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+                let injected = program
+                    .gate(&mut func, None)
+                    .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
                 let mut info = parse_instruction(func)?;
                 info.injected = injected;
                 instructions.push(info);
@@ -2427,25 +2395,12 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
         ));
     }
 
-    for (func, crate_path) in deps.extensions.instructions {
-        let mut func = func.clone();
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        spel_framework_core::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &deps.extensions.inject_specs,
-            &deps.extensions.embeds,
-            Some(&qualified),
-        )
-        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        let crate_path = ext.crate_path;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
         let mut info = parse_instruction(func)?;
         let name = &info.fn_name;
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
@@ -2490,18 +2445,18 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
 
-    // Also scan path-dependency crates for #[account_type] types.
-    // This handles the common project structure where account types are defined
-    // in a shared core crate (e.g. my_program_core) and the program binary
-    // depends on it via `path = "..."`.
-    let (extra_items, dep_source_files) =
-        spel_framework_core::idl_gen::collect_items_from_crate_dirs(
-            &deps.graph.transitive_dirs,
-            |w| eprintln!("warning: {w}"),
-        );
-    all_items.extend(extra_items);
-
-    let (accounts, types) = account_types::collect_account_types(&all_items);
+    // Layouts come from connected sources; referenced types are resolved
+    // on demand from the rest of the graph. Both report the files they
+    // read, so cargo re-expands this macro when any of them changes.
+    let (layout, layout_files) = program
+        .layout_items(std::path::Path::new(&resolved_path), all_items)
+        .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
+    let mut defs = program.unowned_defs();
+    let (accounts, types) = account_types::collect_account_types_from(&layout, &mut defs);
+    let dep_source_files: Vec<std::path::PathBuf> = layout_files
+        .into_iter()
+        .chain(defs.files_read().iter().cloned())
+        .collect();
 
     // Generate the IDL JSON
     let idl_json = generate_idl_json(
@@ -2880,7 +2835,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(
                 caller: AccountWithMetadata,
                 mut config: AccountWithMetadata,
@@ -2913,7 +2868,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
                 Ok(SpelOutput::execute(vec![config.account], vec![]))
             }
