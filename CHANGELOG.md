@@ -58,7 +58,7 @@
   project with `cannot find function compute_pda_raw`. Every crate `init` writes now uses
   one default, and a test holds them together. Existing projects: change the FFI crate's
   `spel-framework-core` to match `methods/guest`. `spel init --help` also shows the real
-  defaults. (#278)
+  defaults. (#280)
 - **`spel program-id` explains a raw ELF** instead of failing opaquely — it needs the R0BF
   `.bin` the guest build writes next to the ELF. (#273)
 - **IDL generation skips dependency source files the consumer's Rust edition cannot re-lex**,
