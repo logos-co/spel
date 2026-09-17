@@ -75,14 +75,16 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
     }
 }
 
-/// Return the crate-root directories of all `path = "..."` entries in the
-/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+/// Return the crate-root directories of the runtime dependencies of the
+/// crate whose `Cargo.toml` is nearest to `source_path`.
 ///
 /// Only runtime dependencies are considered.  `[dev-dependencies]` and
 /// `[build-dependencies]` are deliberately excluded: types defined in those
 /// crates are not part of the program's on-chain interface and must not appear
-/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
-/// are also excluded so that only project-local crates are scanned.
+/// in the generated IDL.  Path dependencies always come from the manifest
+/// walk. Registry and git dependencies come from `cargo metadata` and are
+/// included when it resolves the graph. When it cannot, they drop out with a
+/// warning and only path dependencies remain.
 ///
 /// **Transitive path-dependencies** are resolved: if a discovered dependency
 /// itself declares path-based dependencies, those are included as well (with
@@ -389,8 +391,11 @@ mod tests {
 
         let result = find_path_dep_dirs(&program);
         assert!(
-            result.warnings.iter().any(|w| w.contains("cargo metadata")),
-            "expected a `cargo metadata` warning, got: {:?}",
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("`cargo metadata --locked` also failed")),
+            "expected the failed `cargo metadata` retry warning, got: {:?}",
             result.warnings
         );
         // The path dep (core) is still returned via the manifest walk.

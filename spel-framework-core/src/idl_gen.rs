@@ -85,9 +85,9 @@ pub fn generate_idl_from_file(source_path: &Path) -> Result<SpelIdl, IdlGenError
 /// `#[account_type]`-annotated types.
 ///
 /// Each entry in `dep_source_dirs` should be a Rust crate root (the directory
-/// that contains `src/lib.rs`).  Only local path-dependencies should be passed
-/// here — third-party registry or git crates are intentionally excluded to
-/// avoid pulling in unrelated type definitions.
+/// that contains `src/lib.rs`). The CLI passes every runtime dependency it
+/// resolved, so git and registry crates are scanned too whenever
+/// `cargo metadata` resolved them.
 ///
 /// `on_warning` receives non-fatal notes from the dependency scan, currently
 /// the skip of a source file the consumer's edition cannot re-lex.
