@@ -52,6 +52,13 @@
 
 ### 🐛 Fixes
 
+- **`spel init` projects build their FFI again.** The scaffold pinned the FFI crate's
+  `spel-framework-core` to `v0.4.0` while the guest and `examples/` followed `main`, so
+  since v0.5.0 `make ffi` — and `make all` / `ui-build` / `install` — failed on a fresh
+  project with `cannot find function compute_pda_raw`. Every crate `init` writes now uses
+  one default, and a test holds them together. Existing projects: change the FFI crate's
+  `spel-framework-core` to match `methods/guest`. `spel init --help` also shows the real
+  defaults. (#278)
 - **`spel program-id` explains a raw ELF** instead of failing opaquely — it needs the R0BF
   `.bin` the guest build writes next to the ELF. (#273)
 - **IDL generation skips dependency source files the consumer's Rust edition cannot re-lex**,

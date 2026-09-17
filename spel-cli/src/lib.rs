@@ -238,8 +238,14 @@ pub async fn run() {
                     println!("Create a new SPEL project");
                     println!();
                     println!("Options:");
-                    println!("  --lez-tag <TAG>     LEZ version tag (default: v0.1.2)");
-                    println!("  --spel-rev <REV>    SPEL revision (default: refs/pull/122/head)");
+                    println!(
+                        "  --lez-tag <TAG>     LEZ version tag (default: {})",
+                        init::DEFAULT_LEZ_TAG
+                    );
+                    println!(
+                        "  --spel-rev <REV>    SPEL revision (default: branch {})",
+                        init::DEFAULT_SPEL_BRANCH
+                    );
                     println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
                     println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
                     println!(
@@ -249,7 +255,8 @@ pub async fn run() {
                     println!("Examples:");
                     println!("  spel init my-project");
                     println!(
-                        "  spel init --lez-tag v0.1.2 --spel-rev refs/pull/122/head my-project"
+                        "  spel init --spel-tag v{} my-project",
+                        env!("CARGO_PKG_VERSION")
                     );
                     return;
                 }
