@@ -244,7 +244,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &input.attrs,
-        &mut |_| {},
+        &mut |w| eprintln!("warning: {w}"),
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let mut slot_assert = proc_macro2::TokenStream::new();
@@ -2396,7 +2396,7 @@ fn expand_generate_idl(file_path: &str, span_token: &syn::LitStr) -> syn::Result
     let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
         &program_mod.attrs,
-        &mut |_| {},
+        &mut |w| eprintln!("warning: {w}"),
     )
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
     let consumer_fns: Vec<ItemFn> = items

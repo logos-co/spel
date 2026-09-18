@@ -127,7 +127,8 @@ pub struct ExtensionDiscoveries {
 /// Everything a producer needs from the dependency side, resolved in
 /// one call by [`resolve_program_deps`].
 pub struct ProgramDeps {
-    /// The dependency graph, one `cargo metadata` invocation at most.
+    /// The dependency graph, at most two `cargo metadata` invocations,
+    /// `--offline` and then a `--locked` retry.
     pub graph: crate::dep_walk::DepGraph,
     /// What matched extensions contribute to the program.
     pub extensions: ExtensionDiscoveries,
@@ -243,7 +244,12 @@ pub fn resolve_program_deps<F: FnMut(String)>(
                     "marker(s) {unmatched:?} matched no discoverable extension and \
                     dependency resolution failed: {reason}. A git or registry \
                     extension cannot be located in this state, refusing to compile \
-                    a program that could be silently missing its extension surface."
+                    a program that could be silently missing its extension surface. \
+                    If `cargo metadata` is the cause, any warnings printed before \
+                    this error carry cargo's own message. Discovery retries a failed \
+                    offline attempt with `--locked`, which needs network access, so \
+                    allow network access for the build or fetch the full dependency \
+                    graph beforehand with `cargo fetch --locked`."
                 ));
             }
             on_warning(format!(
@@ -1191,6 +1197,10 @@ edition = "2021"
             "unexpected error: {err}"
         );
         assert!(err.contains("ghost_ext"), "must name the marker: {err}");
+        assert!(
+            err.contains("cargo fetch --locked"),
+            "must name a remedy: {err}"
+        );
     }
 
     // The counterpart: when every marker matched a path dependency,

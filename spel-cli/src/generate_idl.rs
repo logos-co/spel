@@ -75,14 +75,16 @@ pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
     }
 }
 
-/// Return the crate-root directories of all `path = "..."` entries in the
-/// `[dependencies]` table of the `Cargo.toml` nearest to `source_path`.
+/// Return the crate-root directories of the runtime dependencies of the
+/// crate whose `Cargo.toml` is nearest to `source_path`.
 ///
 /// Only runtime dependencies are considered.  `[dev-dependencies]` and
 /// `[build-dependencies]` are deliberately excluded: types defined in those
 /// crates are not part of the program's on-chain interface and must not appear
-/// in the generated IDL.  Registry (`version = "..."`) and git dependencies
-/// are also excluded so that only project-local crates are scanned.
+/// in the generated IDL.  Path dependencies always come from the manifest
+/// walk. Registry and git dependencies come from `cargo metadata` and are
+/// included when it resolves the graph. When it cannot, they drop out with a
+/// warning and only path dependencies remain.
 ///
 /// **Transitive path-dependencies** are resolved: if a discovered dependency
 /// itself declares path-based dependencies, those are included as well (with
@@ -364,10 +366,11 @@ mod tests {
 
     #[test]
     fn find_path_dep_dirs_falls_back_to_path_only_when_metadata_fails() {
-        // The unfetchable git dep makes `cargo metadata --offline` fail, so
-        // the walk warns and degrades to path-only results. Registry and git
-        // deps are then absent not because they are ignored, but because the
-        // metadata source for them is unavailable.
+        // The git dep's URL is one cargo rejects while parsing the manifest,
+        // so `cargo metadata` fails in both attempts without touching the
+        // network. The walk warns and degrades to path-only results.
+        // Registry and git deps are then absent not because they are ignored,
+        // but because the metadata source for them is unavailable.
         let tmp = TempDir::new("find-path-deps-filter");
 
         tmp.write(
@@ -382,14 +385,17 @@ mod tests {
              [dependencies]\n\
              token_core = { path = \"../../core\" }\n\
              serde = { version = \"1.0\" }\n\
-             nssa_core = { git = \"https://example.com/repo.git\", tag = \"v1.0\" }\n",
+             nssa_core = { git = \"not-a-url\", tag = \"v1.0\" }\n",
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
 
         let result = find_path_dep_dirs(&program);
         assert!(
-            result.warnings.iter().any(|w| w.contains("cargo metadata")),
-            "expected a `cargo metadata` warning, got: {:?}",
+            result
+                .warnings
+                .iter()
+                .any(|w| w.contains("`cargo metadata --locked` also failed")),
+            "expected the failed `cargo metadata` retry warning, got: {:?}",
             result.warnings
         );
         // The path dep (core) is still returned via the manifest walk.
