@@ -100,7 +100,50 @@ library and its macros. The library re-exports the macros so consumers declare
 one dependency.
 
 The macros crate exports the marker attribute (pass-through — the framework
-matches it by name and never expands it) and any gate attributes.
+matches it by name and never expands it) and any gate attributes. A complete
+macros crate is small; this is the whole of one, with a marker and a gate:
+
+```rust
+use proc_macro::TokenStream;
+use quote::quote;
+
+/// Marker. The framework matches it by name and never expands it, so a
+/// pass-through is correct.
+#[proc_macro_attribute]
+pub fn my_extension(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+
+/// Gate. `#[lez_program]` leaves this attribute on the handler it emits, so
+/// this runs *after* the framework — the injected account parameter is already
+/// in scope — and removes itself by returning the function without it.
+#[proc_macro_attribute]
+pub fn require_my_gate(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut func = syn::parse_macro_input!(item as syn::ItemFn);
+    let body = &func.block;
+    // Prepend the check, then the original body. `my_config` is the account
+    // named in the inject block, so it is a parameter of every gated handler.
+    func.block = Box::new(syn::parse_quote!({
+        {
+            let cfg = ::my_extension::MyConfig::read(&my_config)?;
+            if cfg.blocked {
+                return Err(::spel_framework::error::SpelError::custom(
+                    7001, "blocked by my_extension",
+                ));
+            }
+        }
+        #body
+    }));
+    quote!(#func).into()
+}
+```
+
+with `[lib] proc-macro = true` and `syn = { version = "2", features = ["full"] }`,
+`quote`, `proc-macro2` as dependencies. The gate returns a `SpelError`, so the
+rejection surfaces in the sequencer log as
+`Program error 7001: blocked by my_extension` and the transaction never
+confirms — see [gotchas](../../skills/spel/references/gotchas.md) on reading the
+sequencer log.
 
 Instruction functions use the framework's own `#[instruction]`, re-exported from
 the library:
@@ -196,9 +239,9 @@ instruction is parsed.
 
 Both IDL producers agree: `generate_idl!` and `spel generate-idl` emit identical
 instruction lists, identical injected-account ordering, and identical account
-types. (They differ on two empty fields — `errors` and `types` serialize as
-`null` from the CLI and `[]` from the macro — but that predates extensions and
-shows up on programs that use none.)
+types. (They differ on two empty fields: `generate_idl!` emits `errors: []` and
+`types: []`, while `spel generate-idl` omits both keys. That predates extensions
+and shows up on programs that use none.)
 
 Instruction names must be unique across the consumer and every active
 extension; a collision is a compile error naming both sources.

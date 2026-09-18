@@ -40,6 +40,31 @@ Ok(SpelOutput::execute(vec![state, owner], vec![chained_call]))
 
 ---
 
+## `AutoClaim` and `Claim`
+
+```rust
+enum AutoClaim { None, Claimed(Claim), ClaimedIfDefault(Claim) }
+
+enum Claim {
+    Authorized,     // ownership of an account the signer authorised
+    Pda(PdaSeed),   // ownership via a PDA — ONE seed, not a Vec
+}
+```
+
+`Claim::Pda` takes a **single** `PdaSeed`, including for multi-seed PDAs: the
+program emits one seed and LEZ derives the address from `(program_id, seed)`.
+Passing a `Vec<PdaSeed>` gives `expected PdaSeed, found Vec<PdaSeed>`.
+
+Inside `#[lez_program]` the macro builds these for you (see
+[Macros → Claims](macros.md#claims)); you construct them by hand only in code
+the rewrite does not reach, such as an [extension](extensions.md) crate.
+
+Build a seed with `PdaSeed::new(seed_from_str("name"))`, and prefer
+`AutoClaim::ClaimedIfDefault` over `Claimed` for accounts that may already be
+owned — claiming an owned account is rejected with `ClaimedNonDefaultAccount`.
+
+---
+
 ## `SpelResult`
 
 Type alias for instruction handler return types:

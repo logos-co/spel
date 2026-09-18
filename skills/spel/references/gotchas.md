@@ -23,7 +23,7 @@ Ok(SpelOutput::execute(vec![state, owner], vec![]))
 
 `SpelOutput::execute(vec![a, b, c], vec![])` passes each `AccountWithMetadata` ident through. The `#[lez_program]` macro reads each parameter's `#[account(init/mut/…)]` constraints and emits the correct `AutoClaim` automatically:
 
-- `#[account(init, …)]` → `AutoClaim::Claimed(Claim::Authorized)` for non-PDA, `Claim::Pda(…)` for PDAs.
+- `#[account(init, …)]` → `AutoClaim::Claimed(Claim::Authorized)` for non-PDA, `Claim::Pda(seed)` for PDAs (one `PdaSeed`, never a `Vec`).
 - `#[account(signer)]` → `AutoClaim::ClaimedIfDefault(Claim::Authorized)` (see
   [Rule 7](#rule-7-a-returned-account-must-not-be-default-owned-once-it-has-state)).
 - `#[account(mut, …)]` without `init` or `signer` → `AutoClaim::None`.

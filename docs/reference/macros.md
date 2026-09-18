@@ -285,7 +285,7 @@ The macro therefore emits a claim for you:
 
 | attribute | emitted claim |
 |-----------|---------------|
-| `#[account(init, pda = ...)]` | `AutoClaim::Claimed(Claim::Pda(seeds))` |
+| `#[account(init, pda = ...)]` | `AutoClaim::Claimed(Claim::Pda(seed))` — one `PdaSeed`, even for multi-seed PDAs ([Types](types.md#autoclaim-and-claim)) |
 | `#[account(init)]` | `AutoClaim::Claimed(Claim::Authorized)` |
 | `#[account(signer)]` | `AutoClaim::ClaimedIfDefault(Claim::Authorized)` |
 | everything else | `AutoClaim::None` |

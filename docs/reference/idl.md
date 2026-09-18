@@ -30,9 +30,9 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md). For other referenc
 | `version` | `string` | Yes | IDL version. Currently `"0.1.0"`. |
 | `name` | `string` | Yes | Program name (from the module name). |
 | `instructions` | `array` | Yes | List of instruction definitions. |
-| `accounts` | `array` | Yes | Account type definitions (currently unused, always `[]`). |
-| `types` | `array` | Yes | Custom type definitions (currently unused, always `[]`). |
-| `errors` | `array` | Yes | Error definitions (currently unused, always `[]`). |
+| `accounts` | `array` | Yes | Account type definitions — one entry per `#[account_type]` struct, with its field schema. `spel inspect --type` decodes against these. |
+| `types` | `array` | No | Custom type definitions. Currently always empty: `generate_idl!` emits `[]`, `spel generate-idl` omits the key. |
+| `errors` | `array` | No | Error definitions. Currently always empty, same as `types`. |
 | `spec` | `string` | No | IDL spec version identifier (lssa-lang compat). |
 | `metadata` | `object` | No | Program metadata with `name` and `version` (lssa-lang compat). |
 | `instruction_type` | `string` | No | Fully-qualified Rust path to external instruction enum. When set, generated FFI imports this type. E.g., `"multisig_core::Instruction"`. |
@@ -165,7 +165,7 @@ Types in the IDL are represented as JSON using an untagged format:
 | `AccountId` | `"account_id"` | Alias for `[u8; 32]` |
 | `Vec<T>` | `{ "vec": <T> }` | Vector of inner type |
 | `Option<T>` | `{ "option": <T> }` | Optional inner type |
-| `[T; N]` | `{ "array": [<T>, N] }` | Fixed-size array |
+| `[T; N]` | `{ "array": [<T>, N] }` | Fixed-size array. **Keep N ≤ 32** — Rust's `Default` and serde only implement arrays up to 32, so a field like `[u8; 64]` fails to compile with `the trait bound [u8; 64]: Default is not satisfied`. For longer payloads use `String` or `Vec<u8>`. |
 | Custom type | `{ "defined": "TypeName" }` | Reference to a named type |
 
 **Examples:**

@@ -334,8 +334,10 @@ First, set up your accounts and deploy the program:
 # Create a signer account in your wallet
 make setup
 
-# Initialise it for the transfer program, before it signs anything (see below)
-wallet auth-transfer init --account-id <SIGNER_FROM_make_setup>
+# Initialise it for the transfer program, before it signs anything (see below).
+# Account ids carry a privacy prefix here: pass `Public/<id>`, not the bare id
+# `make setup` prints — a bare id fails with "No account found for label".
+wallet auth-transfer init --account-id Public/<SIGNER_FROM_make_setup>
 
 # Deploy the program binary to the sequencer
 make deploy
@@ -386,7 +388,8 @@ USAGE:
   spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
 
 COMMANDS:
-  inspect <FILE> [FILE...]   Print ProgramId for ELF binary(ies)
+  program-id <FILE> [FILE...]  Extract ProgramId from a program .bin (R0BF)
+  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data
   generate-idl [PATH]        Generate IDL JSON
   idl                        Print the loaded IDL
   initialize           --owner <BASE58|HEX>
@@ -442,7 +445,10 @@ Hex:     0500000000000000cdc32169...b905ded1c169a66aca040a277584bdbf13
 
 The decode works because `CounterState` is annotated with `#[account_type]` in your program source, which puts its field schema in the IDL. The annotation works whether the struct sits at file level or inside the `#[lez_program]` module, and both IDL generators pick it up.
 
-> **Note:** If `spel inspect` inside the project complains that `--type` is required even when inspecting an ELF binary, run it from a directory without a `spel.toml` (e.g. `cd /tmp && spel inspect /full/path/to/my_counter.bin`). The binary-vs-account mode selector is currently ambiguous when a spel.toml provides a default IDL.
+> **Note:** `inspect` decodes account data only, and requires both `--idl` and
+> `--type`. To read a ProgramId out of a built binary use `spel program-id
+> <FILE>` — pointing `inspect` at a file reports `Account inspection requires
+> --idl <IDL_FILE>`.
 
 ### Dry run (no submission)
 

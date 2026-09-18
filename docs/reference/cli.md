@@ -135,24 +135,9 @@ make cli ARGS="--help"
 
 ## `inspect`
 
-Two modes — the one you get depends on whether `--idl`/`--type` are set.
-
-### Mode 1: Print ProgramId for ELF binaries
-
-```bash
-spel inspect <FILE> [FILE...]
-```
-
-**Does not require `--idl`.**
-
-**Output for each binary:**
-
-```
-📦 path/to/program.bin
-   ProgramId (decimal): 12345,67890,11111,22222,33333,44444,55555,66666
-   ProgramId (hex):     00003039,000109b2,...
-   ImageID (hex bytes): 393000009b210100...
-```
+Decodes on-chain account data. **`--idl` and `--type` are both required**, and
+`inspect` no longer reads program binaries — use [`program-id`](#program-id) for
+that. Passing a file path here reports `Account inspection requires --idl <IDL_FILE>`.
 
 - **Decimal**: comma-separated `[u32; 8]` values
 - **Hex**: comma-separated hex `[u32; 8]` values
@@ -408,8 +393,8 @@ spel program-id <BINARY> [--format text|hex|json]
 ```
 
 Prints the `ProgramId` derived from a compiled guest binary. This is the current
-name for what `inspect <FILE>` did; `inspect` still works and additionally decodes
-account data (see above).
+name for what `inspect <FILE>` used to do. `inspect` is now account-decoding only
+(see above).
 
 `<BINARY>` is the **R0BF `.bin`** the guest build writes to
 `methods/guest/target/riscv32im-risc0-zkvm-elf/docker/<name>.bin`, not the raw
