@@ -9,6 +9,11 @@ use crate::hex::{decode_bytes_32, hex_decode, hex_encode};
 
 /// Inspect an on-chain account: fetch its data, borsh-decode it using the IDL
 /// type definition, and print the result as JSON.
+///
+/// # Panics
+///
+/// Does not panic: invalid CLI input or a failed fetch/decode exits the
+/// process with an error message instead.
 pub async fn inspect_account(
     account_id_str: &str,
     idl: &SpelIdl,
@@ -45,7 +50,10 @@ pub async fn inspect_account(
     // Borsh decode via shared library
     match decode::decode_account_data(&data, type_name, idl) {
         Ok(value) => {
-            println!("{}", serde_json::to_string_pretty(&value).unwrap());
+            // `serde_json::Value` always uses string map keys, so this cannot fail.
+            #[allow(clippy::unwrap_used)]
+            let json = serde_json::to_string_pretty(&value).unwrap();
+            println!("{}", json);
         },
         Err(e) if e.contains("not found in IDL") => {
             eprintln!("Type '{}' not found in IDL.", type_name);

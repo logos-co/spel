@@ -189,6 +189,11 @@ impl serde::Serialize for InstructionData<'_> {
 ///
 /// Produces: variant_index (u32), then each field serialized in order.
 /// Delegates to `risc0_zkvm::serde::to_vec` for format correctness.
+///
+/// # Errors
+///
+/// Returns an error if a field's `ParsedValue` doesn't match its `IdlType`,
+/// or if the risc0 serializer itself fails.
 pub fn serialize_to_risc0(
     variant_index: u32,
     parsed_args: &[(&IdlType, &ParsedValue)],

@@ -83,6 +83,12 @@ impl std::fmt::Display for ParsedValue {
 }
 
 /// Parse a CLI string value according to its IDL type.
+///
+/// # Errors
+///
+/// Returns an error if `raw` doesn't match the shape `ty` expects (e.g.
+/// invalid hex, wrong element count, an unknown enum variant, or a value
+/// that fails to parse as the target primitive).
 pub fn parse_value(raw: &str, ty: &IdlType, types: &[IdlTypeDef]) -> Result<ParsedValue, String> {
     match ty {
         IdlType::Primitive(p) => parse_primitive(raw, p),
@@ -133,16 +139,18 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
     }
 
     // JSON object
-    let json: serde_json::Value = serde_json::from_str(raw).map_err(|_| {
+    let json: serde_json::Value = serde_json::from_str(raw).map_err(|e| {
         let names: Vec<&str> = def.variants.iter().map(|v| v.name.as_str()).collect();
         format!(
-            "expected one of [{}] or a JSON object for '{name}'",
+            "expected one of [{}] or a JSON object for '{name}': {e}",
             names.join(", ")
         )
     })?;
     let obj = json.as_object().filter(|o| o.len() == 1).ok_or_else(|| {
         "expected a JSON object with exactly one key (the variant name)".to_string()
     })?;
+    // `obj.len() == 1` was just checked, so a first entry always exists.
+    #[allow(clippy::expect_used)]
     let (variant_name, payload) = obj.iter().next().expect("len checked above");
 
     let (index, variant) = def
@@ -232,11 +240,14 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
         Ok(ParsedValue::U32Array(vals))
     } else if raw.len() == 64 && raw.chars().all(|c| c.is_ascii_hexdigit()) {
         let bytes = hex_decode(raw)?;
-        let mut vals = Vec::with_capacity(8);
-        for chunk in bytes.chunks(4) {
-            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        Ok(ParsedValue::U32Array(vals))
+        // `raw.len() == 64` was just checked, so `hex_decode` always returns 32 bytes.
+        #[allow(clippy::map_err_ignore)]
+        let bytes: [u8; 32] = bytes
+            .try_into()
+            .map_err(|_| "ProgramId hex must decode to exactly 32 bytes".to_string())?;
+        Ok(ParsedValue::U32Array(
+            crate::hex::bytes32_to_u32_words(bytes).to_vec(),
+        ))
     } else {
         // base58 (or 0x-prefixed hex) ImageID → little-endian u32 limbs, matching the bare-hex
         // branch above so all representations of the same ProgramId agree.
@@ -255,9 +266,9 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
                 raw
             ));
         }
-        let bytes = crate::hex::decode_bytes_32(raw).map_err(|_| {
+        let bytes = crate::hex::decode_bytes_32(raw).map_err(|e| {
             format!(
-                "Invalid ProgramId '{}': expected 8 comma-separated u32s, a 64-char hex ImageID, or base58",
+                "Invalid ProgramId '{}': expected 8 comma-separated u32s, a 64-char hex ImageID, or base58 ({e})",
                 raw
             )
         })?;
@@ -279,11 +290,9 @@ fn parse_program_id(raw: &str) -> Result<ParsedValue, String> {
                 ));
             }
         }
-        let mut vals = Vec::with_capacity(8);
-        for chunk in bytes.chunks(4) {
-            vals.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        Ok(ParsedValue::U32Array(vals))
+        Ok(ParsedValue::U32Array(
+            crate::hex::bytes32_to_u32_words(bytes).to_vec(),
+        ))
     }
 }
 
@@ -319,7 +328,9 @@ fn parse_array(raw: &str, elem_type: &IdlType, size: usize) -> Result<ParsedValu
                     ));
                 }
                 let mut bytes = vec![0u8; size];
-                bytes[..str_bytes.len()].copy_from_slice(str_bytes);
+                if let Some(dst) = bytes.get_mut(..str_bytes.len()) {
+                    dst.copy_from_slice(str_bytes);
+                }
                 Ok(ParsedValue::ByteArray(bytes))
             }
         },
