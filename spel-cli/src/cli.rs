@@ -23,6 +23,7 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("                             Program name from spel.toml, 64-char hex program ID,");
     println!("                             or path to program binary (or set in spel.toml)");
     println!("  --dry-run[=text|json]      Resolve & print transaction without submitting (text default)");
+    println!("  --sequencer <URL>          Sequencer for `inspect` (default: wallet_config.json in the wallet home)");
     println!(
         "  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)"
     );
