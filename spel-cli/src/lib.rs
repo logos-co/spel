@@ -51,6 +51,7 @@ pub async fn run() {
     let mut dry_run: Option<tx::DryRunFormat> = None;
     let mut type_name: Option<String> = None;
     let mut data_hex: Option<String> = None;
+    let mut sequencer: Option<String> = None;
     let mut inspect_format: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
     let mut co_signers: Vec<String> = Vec::new();
@@ -97,6 +98,22 @@ pub async fn run() {
                 if i < args.len() {
                     data_hex = Some(args[i].clone());
                 }
+            },
+            "--sequencer" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --sequencer requires a value: the sequencer URL, e.g. https://testnet.lez.logos.co");
+                    process::exit(1);
+                }
+                sequencer = Some(args[i].clone());
+            },
+            s if s.starts_with("--sequencer=") => {
+                let val = &s["--sequencer=".len()..];
+                if val.is_empty() {
+                    eprintln!("❌ --sequencer requires a value: the sequencer URL, e.g. https://testnet.lez.logos.co");
+                    process::exit(1);
+                }
+                sequencer = Some(val.to_string());
             },
             "--dry-run" => {
                 dry_run = Some(tx::DryRunFormat::Text);
@@ -328,7 +345,7 @@ pub async fn run() {
                     process::exit(1);
                 }
                 let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                    eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>] [--sequencer <URL>]", args[0]);
                     process::exit(1);
                 });
                 let idl_content = match fs::read_to_string(&idl_path) {
@@ -347,6 +364,7 @@ pub async fn run() {
                     &idl,
                     type_name.as_ref().unwrap(),
                     data_hex.as_deref(),
+                    sequencer.as_deref(),
                 )
                 .await;
                 return;
@@ -461,7 +479,7 @@ pub async fn run() {
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
         );
-        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data");
+        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE> [--sequencer <URL>]   Decode account data");
         eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
         eprintln!();
         eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
@@ -502,7 +520,7 @@ pub async fn run() {
         Some("inspect") => {
             let account_id = remaining_args.get(2).unwrap_or_else(|| {
                 eprintln!(
-                    "Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]",
+                    "Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>] [--sequencer <URL>]",
                     args[0]
                 );
                 process::exit(1);
@@ -512,6 +530,7 @@ pub async fn run() {
                 &idl,
                 type_name.as_ref().unwrap(),
                 data_hex.as_deref(),
+                sequencer.as_deref(),
             )
             .await;
         },

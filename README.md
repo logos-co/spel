@@ -327,6 +327,10 @@ spel inspect <account-id> --idl my_program-idl.json --type VaultState
 # Same, but supply raw borsh bytes directly instead of fetching from the network
 spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
 
+# Fetch from an explicit sequencer instead of the one in wallet_config.json.
+# Public reads never open the wallet storage, so no wallet home is needed here.
+spel inspect <account-id> --idl my_program-idl.json --type VaultState --sequencer https://testnet.lez.logos.co
+
 # Show available commands
 spel --idl program-idl.json --help
 
