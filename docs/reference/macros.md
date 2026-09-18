@@ -294,6 +294,22 @@ The macro therefore emits a claim for you:
 `DEFAULT_PROGRAM_ID`, so claiming is a one-time event: the first program a user
 transacts with takes ownership, and later programs return the account unchanged.
 
+**Tell your users to initialise their accounts first.** Ownership is permanent
+(rule 4) and only an account's owner may decrease its balance (rule 5). Native
+transfers execute as the `authenticated_transfer` program, so a wallet account
+must be owned by *it* to send anything. `wallet account new public` leaves an
+account unowned, so if it signs for your program first, your program owns it —
+it can still receive tokens but can never send them, and no later transaction
+can undo that. One command before first use avoids it, after which the claim
+above is a no-op:
+
+```bash
+wallet auth-transfer init --account-id <id>
+```
+
+An account that has already received a transfer is owned by the transfer program
+already and is unaffected.
+
 Two failures worth recognising, both raised by LEZ at execution rather than
 compile time:
 

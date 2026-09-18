@@ -24,7 +24,9 @@ Ok(SpelOutput::execute(vec![state, owner], vec![]))
 `SpelOutput::execute(vec![a, b, c], vec![])` passes each `AccountWithMetadata` ident through. The `#[lez_program]` macro reads each parameter's `#[account(init/mut/…)]` constraints and emits the correct `AutoClaim` automatically:
 
 - `#[account(init, …)]` → `AutoClaim::Claimed(Claim::Authorized)` for non-PDA, `Claim::Pda(…)` for PDAs.
-- `#[account(mut, …)]` or `#[account(signer)]` without `init` → `AutoClaim::None`.
+- `#[account(signer)]` → `AutoClaim::ClaimedIfDefault(Claim::Authorized)` (see
+  [Rule 7](#rule-7-a-returned-account-must-not-be-default-owned-once-it-has-state)).
+- `#[account(mut, …)]` without `init` or `signer` → `AutoClaim::None`.
 - Read-only accounts → `AutoClaim::None`.
 
 The legacy `SpelOutput::states_only(…)` / `SpelOutput::with_chained_calls(…)` constructors plus hand-built `AccountPostState::new_claimed(acc, Claim::Authorized)` / `AccountPostState::new(acc)` still compile but carry a `#[deprecated]` note. Use them only when you need a shape `execute` can't produce (which is rare).
@@ -49,6 +51,24 @@ LEZ rejects any output returning a **non-default** account still owned by
 `#[account(signer)]` emits `AutoClaim::ClaimedIfDefault` — the first program a
 user transacts with claims their account while it is still default, and every
 later transaction is then fine.
+
+**Initialise a wallet account before signing with it.** That claim has a
+consequence: in LEZ only the owning program may decrease an account's balance
+(rule 5), and ownership never changes once set (rule 4). Native transfers run
+through the `authenticated_transfer` program, so the sender must be owned by it.
+`wallet account new public` does *not* initialise an account, so if a brand-new
+account signs for a SPEL program first, that program owns it for good — it can
+still **receive** tokens but can never **send** them
+(`UnauthorizedBalanceDecrease`). Run
+
+```bash
+wallet auth-transfer init --account-id <id>
+```
+
+before using an account as a signer, and the claim becomes a no-op. (Sending
+*to* an uninitialised account fails the same way, with
+`ClaimedUnauthorizedAccount` — recipients need `init` too.) Verified on LEZ
+v0.2.4; LEZ's own `hello_world_with_authorization` claims signers identically.
 
 Two related rejections, both raised at execution rather than compile time:
 

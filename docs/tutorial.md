@@ -334,12 +334,24 @@ First, set up your accounts and deploy the program:
 # Create a signer account in your wallet
 make setup
 
+# Initialise it for the transfer program, before it signs anything (see below)
+wallet auth-transfer init --account-id <SIGNER_FROM_make_setup>
+
 # Deploy the program binary to the sequencer
 make deploy
 
 # Verify the deployment — prints the ProgramId
 make inspect
 ```
+
+> **Initialise the signer first.** `#[account(signer)]` claims an account that no
+> program owns yet — LEZ rejects a returned account that has state but no owner, so
+> the claim is required. It also means the first program a brand-new account signs
+> for owns it permanently, and only an account's owner may move its balance. An
+> account that goes straight to a SPEL program can still receive tokens but can
+> never send them. `wallet auth-transfer init` hands ownership to the transfer
+> program first, after which the claim does nothing. `make setup` does not do this
+> for you. See [Claims](reference/macros.md#claims).
 
 The `make inspect` command shows your program's ID:
 

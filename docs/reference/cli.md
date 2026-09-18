@@ -96,6 +96,12 @@ Available options: `--lez-tag <TAG>`, `--lez-rev <REV>`, `--spel-tag <TAG>`,
 pulls the framework from; defaults to `https://github.com/logos-co/spel.git`).
 A fork's CI passes its own URL so the scaffolded project tests the fork's code.
 
+Whatever you pass applies to **every** crate the scaffold writes — the guest,
+`examples/` and the FFI crate — and so do the defaults (LEZ `v0.2.4`, framework
+`branch = "main"`). They have to agree: `spel-client-gen` generates FFI code
+against the current framework, so an FFI crate pinned to an older one fails
+`make ffi`. Run `spel init --help` for the defaults your binary actually uses.
+
 Creates a complete project structure with:
 - Workspace `Cargo.toml`
 - `{name}_core/` crate for shared types
