@@ -269,6 +269,7 @@ fn test_pda_helpers_single_arg_seed() {
         spec: None,
         metadata: None,
         instruction_type: None,
+        events: vec![],
     };
 
     let output = generate_pda_helpers(&idl);
@@ -352,6 +353,7 @@ fn test_pda_helpers_multi_seed() {
         spec: None,
         metadata: None,
         instruction_type: None,
+        events: vec![],
     };
 
     let output = generate_pda_helpers(&idl);
@@ -433,6 +435,7 @@ fn test_pda_helpers_deduplication() {
         spec: None,
         metadata: None,
         instruction_type: None,
+        events: vec![],
     };
 
     let output = generate_pda_helpers(&idl);
@@ -507,6 +510,7 @@ fn test_pda_helpers_u64_single_seed() {
         spec: None,
         metadata: None,
         instruction_type: None,
+        events: vec![],
     };
 
     let output = generate_pda_helpers(&idl);
@@ -595,6 +599,7 @@ fn test_pda_helpers_u64_multi_seed() {
         spec: None,
         metadata: None,
         instruction_type: None,
+        events: vec![],
     };
 
     let output = generate_pda_helpers(&idl);

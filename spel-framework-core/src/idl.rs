@@ -36,6 +36,9 @@ pub struct SpelIdl {
     /// Example: "multisig_core::Instruction"
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instruction_type: Option<String>,
+    /// Events emitted by this program.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub events: Vec<IdlEvent>,
 }
 
 /// Program metadata (lssa-lang compat).
@@ -191,6 +194,17 @@ pub struct IdlError {
     pub msg: Option<String>,
 }
 
+/// An event type emitted by a program.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdlEvent {
+    /// Event name (matches the struct name).
+    pub name: String,
+    /// Program-defined discriminant identifying this event type.
+    pub discriminant: u32,
+    /// Fields of the event payload (Borsh-encoded).
+    pub fields: Vec<IdlArg>,
+}
+
 /// Compute the lssa-lang discriminator for an instruction name.
 ///
 /// This is SHA256("global:{name}")[..8], matching lssa-lang's convention.
@@ -215,6 +229,7 @@ impl SpelIdl {
             spec: None,
             metadata: None,
             instruction_type: None,
+            events: vec![],
         }
     }
 
