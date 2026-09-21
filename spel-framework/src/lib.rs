@@ -10,7 +10,12 @@ pub use spel_framework_macros::{account_type, generate_idl, instruction, lez_pro
 pub use spel_framework_core::types::{SpelOutput, SpelOutputParts};
 pub use spel_framework_core::*;
 
-// Re-export serde_json for use in generated code
+// Re-export serde_json and borsh for use in generated code.
+//
+// borsh is the instruction wire format LEZ deserializes, so re-exporting it here
+// pins one version against lee_core's rather than leaving each program to declare
+// its own — a mismatch would be a silent encoding bug, not a build error.
+pub use borsh;
 pub use serde_json;
 
 pub mod prelude {

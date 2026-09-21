@@ -344,7 +344,23 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     } else {
         let enum_variants = generate_enum_variants(&instructions);
         quote! {
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            // Borsh is the instruction wire format since LEZ v0.2.5
+            // (`read_lee_call` deserializes it); serde stays for IDL/tooling.
+            //
+            // Borsh encodes the variant as a leading tag byte, so variants are
+            // append-only: inserting one shifts every existing encoding.
+            #[derive(
+                Debug,
+                Clone,
+                serde::Serialize,
+                serde::Deserialize,
+                spel_framework::borsh::BorshSerialize,
+                spel_framework::borsh::BorshDeserialize,
+            )]
+            // borsh's derive resolves `borsh` from the consumer's Cargo.toml, so point it
+            // at the framework's re-export — a program needs no borsh dependency of its own,
+            // and cannot drift to a version lee_core doesn't speak.
+            #[borsh(crate = "spel_framework::borsh")]
             pub enum Instruction {
                 #(#enum_variants),*
             }
