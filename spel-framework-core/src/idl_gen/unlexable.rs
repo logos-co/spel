@@ -40,12 +40,25 @@ pub(crate) fn has_metavar_glued_literal(content: &str) -> bool {
                 }
             },
             b'/' if i + 1 < n && b[i + 1] == b'*' => i = skip_block_comment(b, i),
+            // An identifier glued to a quote is a reserved prefix under
+            // edition 2021.  Legal prefixes (r, b, br, c, cr) are handled
+            // by their own arms below, which fire only when !prev_ident.
+            // A quote reaching this arm with prev_ident set therefore has
+            // a non-prefix identifier before it — the glued shape.
+            b'"' if prev_ident && !is_legal_string_prefix(b, i) => return true,
             b'"' => i = skip_string(b, i),
+            // No legal Rust prefix ends with ' before a char literal, so
+            // any identifier glued to ' is a reserved prefix.
+            b'\'' if prev_ident => return true,
+            b'\'' => i = skip_char_or_lifetime(b, i),
             b'r' | b'b' if !prev_ident => match raw_or_byte_literal_end(b, i) {
                 Some(j) => i = j,
                 None => i += 1,
             },
-            b'\'' => i = skip_char_or_lifetime(b, i),
+            b'c' if !prev_ident => match c_string_literal_end(b, i) {
+                Some(j) => i = j,
+                None => i += 1,
+            },
             b'$' => {
                 let start = i + 1;
                 let mut j = start;
@@ -62,6 +75,40 @@ pub(crate) fn has_metavar_glued_literal(content: &str) -> bool {
         prev_ident = was_ident;
     }
     false
+}
+
+/// The identifier ending immediately before position `quote_pos`, scanned
+/// backwards. Used to check whether a quote preceded by an identifier is a
+/// legal string prefix (r, b, br, c, cr) or a reserved glued shape.
+fn preceding_ident(b: &[u8], quote_pos: usize) -> &[u8] {
+    let mut start = quote_pos;
+    while start > 0 && (b[start - 1].is_ascii_alphanumeric() || b[start - 1] == b'_') {
+        start -= 1;
+    }
+    &b[start..quote_pos]
+}
+
+/// True when the identifier before `quote_pos` is a legal Rust string
+/// prefix: `r`, `b`, `br`, `c`, or `cr`.
+fn is_legal_string_prefix(b: &[u8], quote_pos: usize) -> bool {
+    matches!(
+        preceding_ident(b, quote_pos),
+        b"r" | b"b" | b"br" | b"c" | b"cr"
+    )
+}
+
+/// Advance past a C-string literal starting at `c`: either `c"..."` (plain,
+/// with escapes) or `cr#"..."#` (raw, no escapes). `None` when the position
+/// is not a C-string opener (e.g. a variable named `c`).
+fn c_string_literal_end(b: &[u8], i: usize) -> Option<usize> {
+    let n = b.len();
+    if i + 1 < n && b[i + 1] == b'"' {
+        return Some(skip_string(b, i + 1));
+    }
+    if i + 2 < n && b[i + 1] == b'r' {
+        return raw_string_body(b, i + 2);
+    }
+    None
 }
 
 /// Advance past a block comment starting at `/*`. Rust block comments
@@ -143,13 +190,19 @@ fn raw_string_body(b: &[u8], mut j: usize) -> Option<usize> {
 }
 
 /// Advance past a char literal, or just past the quote when it is a
-/// lifetime. A multi-byte char literal falls through to the lifetime
-/// case, which is safe: its bytes are then scanned as code.
+/// lifetime.
 ///
 /// The escape arm consumes quote, backslash and one escaped byte
 /// unconditionally, then scans plainly for the closing quote. No char
 /// escape contains a quote after its first escaped byte, and symmetric
 /// escape handling would overshoot the terminator of `'\\'`.
+///
+/// For a non-escaped char, scan a small window forward for the closing
+/// quote. A Rust char is at most 4 UTF-8 bytes, so 5 bytes after the
+/// opening quote (content + closing quote) is enough. A lifetime (`'a`)
+/// has no closing quote in that window, so it falls through to `i + 1`.
+/// The previous fixed-offset check (`b[i + 2] == b'\''`) missed multi-byte
+/// chars like `'é'`, landing the scanner inside the next token.
 fn skip_char_or_lifetime(b: &[u8], i: usize) -> usize {
     let n = b.len();
     if i + 1 < n && b[i + 1] == b'\\' {
@@ -159,8 +212,13 @@ fn skip_char_or_lifetime(b: &[u8], i: usize) -> usize {
         }
         return (j + 1).min(n);
     }
-    if i + 2 < n && b[i + 2] == b'\'' {
-        return i + 3;
+    let max_scan = (i + 6).min(n);
+    let scan_start = i + 1;
+    if let Some(offset) = b[scan_start..max_scan]
+        .iter()
+        .position(|&byte| byte == b'\'')
+    {
+        return scan_start + offset + 1;
     }
     i + 1
 }
@@ -227,6 +285,83 @@ mod tests {
         // A lifetime is not a char literal.
         assert!(has_metavar_glued_literal(
             r#"fn f<'a>(x: &'a u8) {} stringify!($Fp"x")"#
+        ));
+    }
+
+    // --- Regression tests for issue #258 ---
+
+    // Section 1: missed glued shapes (the fatal diagnostic still comes back).
+
+    #[test]
+    fn metavar_glued_to_char_literal_is_detected() {
+        // $f'a' — metavar glued to a char literal start.
+        assert!(has_metavar_glued_literal(
+            r#"macro_rules! m { ($f:ident) => { stringify!($f'a') } }"#
+        ));
+    }
+
+    #[test]
+    fn metavar_glued_to_string_in_pattern_is_detected() {
+        // $f"px" — metavar glued to a string in a pattern position.
+        assert!(has_metavar_glued_literal(
+            r#"macro_rules! m { ($f:ident"px") => { () } }"#
+        ));
+    }
+
+    #[test]
+    fn plain_ident_glued_to_string_is_detected() {
+        // foo"bar" — a plain identifier glued to a string (no metavar).
+        assert!(has_metavar_glued_literal(
+            r#"macro_rules! m { () => { stringify!(foo"bar") } }"#
+        ));
+    }
+
+    // Section 2: multi-byte char literal desyncs the scanner.
+
+    #[test]
+    fn multibyte_char_does_not_desync_scanner() {
+        // 'é' is 2 UTF-8 bytes; the old fixed-offset check landed inside
+        // the next token and flipped parity, masking the target shape.
+        assert!(has_metavar_glued_literal(
+            "let v = ['\u{00e9}','\"']; stringify!($Fp\"({})\")"
+        ));
+    }
+
+    // Section 3: raw C-strings must not cause false positives.
+
+    #[test]
+    fn raw_c_string_with_backslash_body_is_not_flagged() {
+        // cr#"C:\temp\"# — the old scanner did not recognize cr-prefixed
+        // raw C-strings, so the backslash in the body desynced quote
+        // parity and the clean file was falsely skipped.
+        assert!(!has_metavar_glued_literal(
+            "let p = cr#\"C:\\temp\\\"#; let s = \"cost $USD\"; #[account_type] pub struct A { x: u8 }"
+        ));
+    }
+
+    #[test]
+    fn plain_c_string_is_not_flagged() {
+        // c"..." — plain C-string literal in clean code.
+        assert!(!has_metavar_glued_literal(
+            r#"let s = c"hello"; #[account_type] pub struct A { x: u8 }"#
+        ));
+    }
+
+    // Legal prefixes must still be treated as literals, not glued shapes.
+
+    #[test]
+    fn legal_prefixes_are_not_flagged() {
+        assert!(!has_metavar_glued_literal(r#"let s = r"raw"; fn f() {}"#));
+        assert!(!has_metavar_glued_literal(
+            r##"let s = r#"raw"#; fn f() {}"##
+        ));
+        assert!(!has_metavar_glued_literal(r#"let s = b"bytes"; fn f() {}"#));
+        assert!(!has_metavar_glued_literal(
+            r##"let s = br#"raw bytes"#; fn f() {}"##
+        ));
+        assert!(!has_metavar_glued_literal(r#"let s = c"cstr"; fn f() {}"#));
+        assert!(!has_metavar_glued_literal(
+            r##"let s = cr#"raw cstr"#; fn f() {}"##
         ));
     }
 }
