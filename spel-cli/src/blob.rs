@@ -81,6 +81,13 @@ pub struct TxBlob {
 }
 
 impl TxBlob {
+    /// Load and validate a blob file: version must be 1, and every witness
+    /// must be for a listed signer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file can't be read, isn't valid blob JSON,
+    /// has an unsupported version, or has a witness for a non-signer.
     pub fn load(path: &str) -> Result<TxBlob, String> {
         let content = fs::read_to_string(path)
             .map_err(|e| format!("cannot read blob file '{}': {}", path, e))?;
@@ -102,6 +109,10 @@ impl TxBlob {
         Ok(blob)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error if the blob can't be serialized to JSON or the file
+    /// can't be written.
     pub fn save(&self, path: &str) -> Result<(), String> {
         let mut content = serde_json::to_string_pretty(self)
             .map_err(|e| format!("cannot convert to json: {}", e))?;
@@ -111,11 +122,20 @@ impl TxBlob {
 
     /// Raw message bytes. Signatures are made over and verified against
     /// the 32-byte hash of these bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `message_hex` is not valid hex.
     pub fn message_bytes(&self) -> Result<Vec<u8>, String> {
         hex_decode(&self.message_hex).map_err(|e| format!("blob message_hex: {}", e))
     }
 
     /// Decoded message, for display and for assembling the final transaction.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `message_hex` is not valid hex or does not
+    /// borsh-decode to a `Message`.
     pub fn message(&self) -> Result<Message, String> {
         let bytes = self.message_bytes()?;
         borsh::from_slice::<Message>(&bytes).map_err(|e| format!("cannot decode message: {}", e))
@@ -131,6 +151,12 @@ impl TxBlob {
 
     /// Check every collected witness: signature must verify over the stored
     /// message bytes, and pubkey must derive the claimed account id.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the message can't be decoded, or if any witness
+    /// has a malformed signature, fails verification, or was signed by a
+    /// key that doesn't belong to its claimed account.
     pub fn verify_witnesses(&self) -> Result<(), String> {
         // v0.2.0: witnesses sign the 32-byte message hash, not the raw bytes.
         let message_hash = self.message()?.hash();
@@ -164,6 +190,11 @@ impl TxBlob {
 
     /// Assemble the final witness set IN SIGNERS ORDER, which matches the
     /// nonce order inside the message. Fails if any signer has no witness.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any listed signer has no witness, or a witness
+    /// has a malformed signature.
     pub fn witness_set(&self) -> Result<WitnessSet, String> {
         let mut witnesses_pairs: Vec<(Signature, PublicKey)> = Vec::new();
         for id in &self.signers {

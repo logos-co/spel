@@ -2,6 +2,9 @@
 
 use std::process::Command;
 
+// Test helpers, not #[test] fns themselves: a failure here is a setup
+// error the test should panic on, not a condition to handle gracefully.
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 fn spel(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_spel"))
         .args(args)
@@ -79,6 +82,9 @@ fn dry_run_conflicts_with_export() {
 }
 
 /// Minimal one-instruction IDL for exercising instruction-arg parsing.
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::unwrap_used)]
 fn write_fixture_idl(dir: &std::path::Path) -> std::path::PathBuf {
     let idl = serde_json::json!({
         "version": "0.1.0",

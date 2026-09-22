@@ -145,27 +145,30 @@ pub fn parse_instruction_args(
 ) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     let mut i = 0;
-    while i < args.len() {
-        if args[i].starts_with("--") {
-            let key = args[i][2..].to_string();
-            if i + 1 < args.len() && !args[i + 1].starts_with("--") {
-                map.entry(key).or_default().push(args[i + 1].clone());
-                i += 2;
-            } else {
-                // Bare flag (no value follows).  Only valid for bool args
-                // or --help/-h; everything else is a user error.
-                let is_bool = ix.args.iter().any(|a| {
-                    snake_to_kebab(&a.name) == key
-                        && matches!(&a.type_, IdlType::Primitive(p) if p == "bool")
-                });
-                let is_help = key == "help" || key == "h";
-                if is_bool || is_help {
-                    map.entry(key).or_default().push("true".to_string());
-                } else {
-                    eprintln!("❌ --{}: missing value", key);
-                    std::process::exit(1);
-                }
-                i += 1;
+    while let Some(arg) = args.get(i) {
+        if let Some(key) = arg.strip_prefix("--") {
+            let key = key.to_string();
+            match args.get(i + 1) {
+                Some(next) if !next.starts_with("--") => {
+                    map.entry(key).or_default().push(next.clone());
+                    i += 2;
+                },
+                _ => {
+                    // Bare flag (no value follows).  Only valid for bool args
+                    // or --help/-h; everything else is a user error.
+                    let is_bool = ix.args.iter().any(|a| {
+                        snake_to_kebab(&a.name) == key
+                            && matches!(&a.type_, IdlType::Primitive(p) if p == "bool")
+                    });
+                    let is_help = key == "help" || key == "h";
+                    if is_bool || is_help {
+                        map.entry(key).or_default().push("true".to_string());
+                    } else {
+                        eprintln!("❌ --{}: missing value", key);
+                        std::process::exit(1);
+                    }
+                    i += 1;
+                },
             }
         } else {
             i += 1;
@@ -285,7 +288,7 @@ mod tests {
         .expect("fixture deserializes")
     }
 
-    fn map_of(keys: &[&str]) -> std::collections::HashMap<String, Vec<String>> {
+    fn map_of(keys: &[&str]) -> HashMap<String, Vec<String>> {
         keys.iter()
             .map(|k| ((*k).to_string(), vec!["x".to_string()]))
             .collect()

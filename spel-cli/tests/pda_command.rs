@@ -6,6 +6,9 @@ use nssa_core::program::PdaSeed;
 use nssa_core::NullifierPublicKey;
 use std::process::Command;
 
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::expect_used)]
 fn spel(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_spel"))
         .args(args)
@@ -22,6 +25,9 @@ fn stderr_of(out: &std::process::Output) -> String {
 }
 
 /// One public PDA and one private PDA, both seeded by the constant "vault".
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::unwrap_used)]
 fn write_fixture_idl(dir: &std::path::Path) -> std::path::PathBuf {
     let idl = serde_json::json!({
         "version": "0.1.0",
@@ -47,6 +53,8 @@ const PROGRAM_ID_HEX: &str = "ababababababababababababababababababababababababab
 const NPK_HEX: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
 /// The fixture program id as the CLI decodes it: 32 hex bytes read as 8 little-endian u32s.
+// Test helper, not a #[test] fn itself; the fixture constant is known-good.
+#[allow(clippy::expect_used)]
 fn fixture_program_id() -> [u32; 8] {
     let bytes = hex::decode(PROGRAM_ID_HEX).expect("fixture program id is valid hex");
     let words: Vec<u32> = bytes
@@ -57,6 +65,8 @@ fn fixture_program_id() -> [u32; 8] {
 }
 
 /// The IDL's const seed "vault", zero-padded to 32 bytes as the CLI does.
+// Test helper, not a #[test] fn itself; `b"vault".len()` (5) is always <= 32.
+#[allow(clippy::indexing_slicing)]
 fn vault_seed() -> [u8; 32] {
     let mut seed = [0u8; 32];
     seed[..b"vault".len()].copy_from_slice(b"vault");
@@ -67,6 +77,8 @@ fn fixture_vpk() -> ViewingPublicKey {
     ViewingPublicKey::from_seed(&[1u8; 32], &[2u8; 32])
 }
 
+// Test helper, not a #[test] fn itself; the fixture constant is known-good.
+#[allow(clippy::expect_used)]
 fn expected_private_vault(identifier: u128) -> String {
     let program_id = fixture_program_id();
     let seed = vault_seed();
@@ -279,6 +291,9 @@ fn identifier_equals_form_is_named_in_the_error() {
 
 /// An instruction whose PDA is seeded by an arg literally named `identifier`.
 /// Before this flag existed, `--identifier` was that seed arg; it must stay so.
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::unwrap_used)]
 fn write_identifier_seed_idl(dir: &std::path::Path) -> std::path::PathBuf {
     let idl = serde_json::json!({
         "version": "0.1.0",
@@ -305,6 +320,9 @@ fn write_identifier_seed_idl(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+// Test helper, not a #[test] fn itself; `b"slot".len()` (4) is always <= 32
+// and SHA-256 always produces a 32-byte digest.
+#[allow(clippy::indexing_slicing, clippy::expect_used)]
 fn expected_slot_seed(identifier_arg: u64) -> [u8; 32] {
     // Mirrors the CLI: SHA-256(const_seed || arg_seed), u64 arg big-endian in the last 8 bytes.
     use risc0_zkvm::sha::{Impl, Sha256};

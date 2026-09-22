@@ -22,7 +22,9 @@ fn resolve_seed(
             if src.len() > 32 {
                 return Err(format!("Const seed '{}' exceeds 32 bytes", value));
             }
-            bytes[..src.len()].copy_from_slice(src);
+            if let Some(dst) = bytes.get_mut(..src.len()) {
+                dst.copy_from_slice(src);
+            }
             Ok(bytes)
         },
         IdlSeed::Account { path } => {
@@ -64,7 +66,9 @@ fn resolve_seed(
                     if src.len() > 32 {
                         return Err(format!("String arg '{}' exceeds 32 bytes", path));
                     }
-                    bytes[..src.len()].copy_from_slice(src);
+                    if let Some(dst) = bytes.get_mut(..src.len()) {
+                        dst.copy_from_slice(src);
+                    }
                     Ok(bytes)
                 }
                 _ => Err(format!(
@@ -86,10 +90,14 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
     for seed in seeds {
         bytes.extend_from_slice(seed);
     }
-    Impl::hash_bytes(&bytes)
-        .as_bytes()
-        .try_into()
-        .expect("SHA-256 output must be exactly 32 bytes")
+    // SHA-256 always produces a 32-byte digest.
+    #[allow(clippy::expect_used)]
+    {
+        Impl::hash_bytes(&bytes)
+            .as_bytes()
+            .try_into()
+            .expect("SHA-256 output must be exactly 32 bytes")
+    }
 }
 
 /// Compute PDA AccountId from IDL seed definitions.
@@ -103,6 +111,12 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
 /// Pass `npk = Some(key)` for private PDAs; the address will be derived via
 /// `AccountId::for_private_pda` with the given `identifier`. For public PDAs pass
 /// `npk = None`; `identifier` is then ignored, it is not part of public derivation.
+///
+/// # Errors
+///
+/// Returns an error if `seeds` is empty, if an `account`/`arg` seed can't be
+/// resolved from `account_map`/`parsed_args`, or if a private PDA is
+/// requested (`npk` is `Some`) without a `vpk`.
 pub fn compute_pda_from_seeds(
     seeds: &[IdlSeed],
     program_id: &ProgramId,
@@ -124,8 +138,8 @@ pub fn compute_pda_from_seeds(
 
     // Single seed: use directly. Multi-seed: SHA-256(seed1 || seed2 || ...)
     // This avoids XOR commutativity and self-cancellation issues.
-    let combined = if resolved.len() == 1 {
-        resolved[0]
+    let combined = if let [only] = resolved.as_slice() {
+        *only
     } else {
         hash_seeds(&resolved)
     };
@@ -223,7 +237,6 @@ mod tests {
 
     #[test]
     fn test_hash_seeds_not_commutative() {
-        use risc0_zkvm::sha::{Impl, Sha256};
         // SHA-256(A || B) != SHA-256(B || A) for A != B
         let a = [0x01u8; 32];
         let b = [0x02u8; 32];
