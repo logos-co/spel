@@ -11,6 +11,11 @@ pub enum ParsedValue {
     U32(u32),
     U64(u64),
     U128(u128),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    I128(i128),
     Str(String),
     ByteArray(Vec<u8>),         // [u8; N]
     U32Array(Vec<u32>),         // [u32; N] / ProgramId
@@ -29,6 +34,11 @@ impl std::fmt::Display for ParsedValue {
             ParsedValue::U32(v) => write!(f, "{}", v),
             ParsedValue::U64(v) => write!(f, "{}", v),
             ParsedValue::U128(v) => write!(f, "{}", v),
+            ParsedValue::I8(v) => write!(f, "{}", v),
+            ParsedValue::I16(v) => write!(f, "{}", v),
+            ParsedValue::I32(v) => write!(f, "{}", v),
+            ParsedValue::I64(v) => write!(f, "{}", v),
+            ParsedValue::I128(v) => write!(f, "{}", v),
             ParsedValue::Str(s) => write!(f, "\"{}\"", s),
             ParsedValue::ByteArray(bytes) => {
                 if let Ok(s) = std::str::from_utf8(bytes) {
@@ -96,6 +106,26 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
             .parse::<u128>()
             .map(ParsedValue::U128)
             .map_err(|e| format!("Invalid u128 '{}': {}", raw, e)),
+        "i8" => raw
+            .parse::<i8>()
+            .map(ParsedValue::I8)
+            .map_err(|e| format!("Invalid i8 '{}': {}", raw, e)),
+        "i16" => raw
+            .parse::<i16>()
+            .map(ParsedValue::I16)
+            .map_err(|e| format!("Invalid i16 '{}': {}", raw, e)),
+        "i32" => raw
+            .parse::<i32>()
+            .map(ParsedValue::I32)
+            .map_err(|e| format!("Invalid i32 '{}': {}", raw, e)),
+        "i64" => raw
+            .parse::<i64>()
+            .map(ParsedValue::I64)
+            .map_err(|e| format!("Invalid i64 '{}': {}", raw, e)),
+        "i128" => raw
+            .parse::<i128>()
+            .map(ParsedValue::I128)
+            .map_err(|e| format!("Invalid i128 '{}': {}", raw, e)),
         "program_id" => parse_program_id(raw),
         // `AccountId` serializes via `SerializeDisplay` (base58 string), so normalize the
         // input (base58 or 0x-hex) to canonical base58 and carry it as a string.

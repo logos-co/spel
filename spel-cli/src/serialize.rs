@@ -28,6 +28,11 @@ enum DynamicValue {
     U32(u32),
     U64(u64),
     U128(u128),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    I128(i128),
     Str(String),
     Tuple(Vec<DynamicValue>),
     Seq(Vec<DynamicValue>),
@@ -43,6 +48,11 @@ impl serde::Serialize for DynamicValue {
             DynamicValue::U32(v) => serializer.serialize_u32(*v),
             DynamicValue::U64(v) => serializer.serialize_u64(*v),
             DynamicValue::U128(v) => serializer.serialize_u128(*v),
+            DynamicValue::I8(v) => serializer.serialize_i8(*v),
+            DynamicValue::I16(v) => serializer.serialize_i16(*v),
+            DynamicValue::I32(v) => serializer.serialize_i32(*v),
+            DynamicValue::I64(v) => serializer.serialize_i64(*v),
+            DynamicValue::I128(v) => serializer.serialize_i128(*v),
             DynamicValue::Str(s) => serializer.serialize_str(s),
             DynamicValue::Tuple(elems) => {
                 use serde::ser::SerializeTuple;
@@ -126,6 +136,11 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         ("u32", ParsedValue::U32(v)) => Ok(DynamicValue::U32(*v)),
         ("u64", ParsedValue::U64(v)) => Ok(DynamicValue::U64(*v)),
         ("u128", ParsedValue::U128(v)) => Ok(DynamicValue::U128(*v)),
+        ("i8", ParsedValue::I8(v)) => Ok(DynamicValue::I8(*v)),
+        ("i16", ParsedValue::I16(v)) => Ok(DynamicValue::I16(*v)),
+        ("i32", ParsedValue::I32(v)) => Ok(DynamicValue::I32(*v)),
+        ("i64", ParsedValue::I64(v)) => Ok(DynamicValue::I64(*v)),
+        ("i128", ParsedValue::I128(v)) => Ok(DynamicValue::I128(*v)),
         ("string" | "String", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
         ("program_id", ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
             vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
@@ -569,6 +584,73 @@ mod tests {
                 v128: 0x0102030405060708090a0b0c0d0e0f10,
             }
         );
+    }
+
+    #[test]
+    fn serde_roundtrip_signed_prims() {
+        #[derive(Deserialize, Debug, PartialEq)]
+        enum TestInstruction {
+            Signed {
+                v8: i8,
+                v16: i16,
+                v32: i32,
+                v64: i64,
+                v128_min: i128,
+                v128_neg: i128,
+                v128_max: i128,
+            },
+        }
+
+        // Parsed from CLI strings, so this covers `parse_value` as well as the
+        // serializer, and decodes with the same risc0 deserializer a guest uses.
+        let cli = [
+            ("i8", "-128"),
+            ("i16", "-32768"),
+            ("i32", "-887272"),
+            ("i64", "-9223372036854775808"),
+            ("i128", "-170141183460469231731687303715884105728"),
+            ("i128", "-1000000000"),
+            ("i128", "170141183460469231731687303715884105727"),
+        ];
+        let types: Vec<IdlType> = cli
+            .iter()
+            .map(|(t, _)| IdlType::Primitive((*t).into()))
+            .collect();
+        let vals: Vec<ParsedValue> = cli
+            .iter()
+            .zip(types.iter())
+            .map(|((_, raw), ty)| parse_value(raw, ty).expect("signed value must parse"))
+            .collect();
+
+        let args: Vec<(&IdlType, &ParsedValue)> = types.iter().zip(vals.iter()).collect();
+        let words = serialize_to_risc0(0, &args).unwrap();
+
+        let instruction: TestInstruction =
+            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
+                .expect("deserialization must succeed");
+
+        assert_eq!(
+            instruction,
+            TestInstruction::Signed {
+                v8: i8::MIN,
+                v16: i16::MIN,
+                v32: -887_272,
+                v64: i64::MIN,
+                v128_min: i128::MIN,
+                v128_neg: -1_000_000_000,
+                v128_max: i128::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_signed_rejects_out_of_range() {
+        let i8_ty = IdlType::Primitive("i8".into());
+        assert!(parse_value("128", &i8_ty).is_err());
+        assert!(parse_value("-129", &i8_ty).is_err());
+        let i128_ty = IdlType::Primitive("i128".into());
+        assert!(parse_value("170141183460469231731687303715884105728", &i128_ty).is_err());
+        assert!(parse_value("not-a-number", &i128_ty).is_err());
     }
 
     #[test]
