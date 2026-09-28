@@ -30,6 +30,11 @@ enum DynamicValue {
     U32(u32),
     U64(u64),
     U128(u128),
+    I8(i8),
+    I16(i16),
+    I32(i32),
+    I64(i64),
+    I128(i128),
     Str(String),
     Tuple(Vec<DynamicValue>),
     Seq(Vec<DynamicValue>),
@@ -47,6 +52,11 @@ impl serde::Serialize for DynamicValue {
             DynamicValue::U32(v) => serializer.serialize_u32(*v),
             DynamicValue::U64(v) => serializer.serialize_u64(*v),
             DynamicValue::U128(v) => serializer.serialize_u128(*v),
+            DynamicValue::I8(v) => serializer.serialize_i8(*v),
+            DynamicValue::I16(v) => serializer.serialize_i16(*v),
+            DynamicValue::I32(v) => serializer.serialize_i32(*v),
+            DynamicValue::I64(v) => serializer.serialize_i64(*v),
+            DynamicValue::I128(v) => serializer.serialize_i128(*v),
             DynamicValue::Str(s) => serializer.serialize_str(s),
             DynamicValue::Tuple(elems) => {
                 use serde::ser::SerializeTuple;
@@ -157,6 +167,11 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         ("u32", ParsedValue::U32(v)) => Ok(DynamicValue::U32(*v)),
         ("u64", ParsedValue::U64(v)) => Ok(DynamicValue::U64(*v)),
         ("u128", ParsedValue::U128(v)) => Ok(DynamicValue::U128(*v)),
+        ("i8", ParsedValue::I8(v)) => Ok(DynamicValue::I8(*v)),
+        ("i16", ParsedValue::I16(v)) => Ok(DynamicValue::I16(*v)),
+        ("i32", ParsedValue::I32(v)) => Ok(DynamicValue::I32(*v)),
+        ("i64", ParsedValue::I64(v)) => Ok(DynamicValue::I64(*v)),
+        ("i128", ParsedValue::I128(v)) => Ok(DynamicValue::I128(*v)),
         ("string" | "String", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
         ("program_id", ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
             vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
@@ -200,6 +215,11 @@ impl DynamicValue {
             DynamicValue::U32(v) => out.extend_from_slice(&v.to_le_bytes()),
             DynamicValue::U64(v) => out.extend_from_slice(&v.to_le_bytes()),
             DynamicValue::U128(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::I8(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::I16(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::I32(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::I64(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::I128(v) => out.extend_from_slice(&v.to_le_bytes()),
             DynamicValue::Str(s) => {
                 let len = u32::try_from(s.len())
                     .map_err(|_| SerializeError::Borsh("string exceeds u32 length".into()))?;
@@ -465,6 +485,68 @@ mod tests {
             String::try_from_slice(&encode_one(&prim("string"), "hello")).unwrap(),
             "hello"
         );
+    }
+
+    #[test]
+    fn signed_primitives_round_trip() {
+        #[derive(borsh::BorshDeserialize, Debug, PartialEq)]
+        enum Instruction {
+            Signed {
+                v8: i8,
+                v16: i16,
+                v32: i32,
+                v64: i64,
+                v128_min: i128,
+                v128_neg: i128,
+                v128_max: i128,
+            },
+        }
+
+        // Parsed from CLI strings, so this covers `parse_value` as well as the encoder.
+        let cli = [
+            ("i8", "-128"),
+            ("i16", "-32768"),
+            ("i32", "-887272"),
+            ("i64", "-9223372036854775808"),
+            ("i128", "-170141183460469231731687303715884105728"),
+            ("i128", "-1000000000"),
+            ("i128", "170141183460469231731687303715884105727"),
+        ];
+        let types: Vec<IdlType> = cli.iter().map(|(t, _)| prim(t)).collect();
+        let vals: Vec<ParsedValue> = cli
+            .iter()
+            .zip(types.iter())
+            .map(|((_, raw), ty)| parse_value(raw, ty, &[]).expect("signed value must parse"))
+            .collect();
+        let args: Vec<(&IdlType, &ParsedValue)> = types.iter().zip(vals.iter()).collect();
+
+        let bytes = serialize_to_borsh(0, &args).unwrap();
+
+        assert_eq!(
+            Instruction::try_from_slice(&bytes).unwrap(),
+            Instruction::Signed {
+                v8: i8::MIN,
+                v16: i16::MIN,
+                v32: -887_272,
+                v64: i64::MIN,
+                v128_min: i128::MIN,
+                v128_neg: -1_000_000_000,
+                v128_max: i128::MAX,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_signed_rejects_out_of_range() {
+        assert!(parse_value("128", &prim("i8"), &[]).is_err());
+        assert!(parse_value("-129", &prim("i8"), &[]).is_err());
+        assert!(parse_value(
+            "170141183460469231731687303715884105728",
+            &prim("i128"),
+            &[]
+        )
+        .is_err());
+        assert!(parse_value("not-a-number", &prim("i128"), &[]).is_err());
     }
 
     #[test]
