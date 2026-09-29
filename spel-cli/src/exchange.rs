@@ -63,6 +63,13 @@ pub async fn sign_command(path: &str) {
         .map(|b| format!("{:02x}", b))
         .collect();
     println!("Instruction data: 0x{}", instruction_data_hex);
+    match &message.fee {
+        Some(fee) => println!(
+            "Fee: payer={} gas_limit={} tip={} max_fee={}",
+            fee.payer, fee.gas_limit, fee.tip, fee.max_fee
+        ),
+        None => println!("Fee: none (fee-exempt)"),
+    }
     println!("Accounts:");
     for id in &message.account_ids {
         println!("  0x{}", hex_encode(id.value()));

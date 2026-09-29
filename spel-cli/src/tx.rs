@@ -10,7 +10,7 @@ use common::transaction::LeeTransaction;
 use hex;
 use nssa::program::Program;
 use nssa::public_transaction::{Message, WitnessSet};
-use nssa::{AccountId, PublicTransaction};
+use nssa::{AccountId, FeeDeclaration, PublicTransaction};
 use nssa::{PublicKey, Signature};
 use nssa_core::account::Nonce;
 use sequencer_service_rpc::RpcClient as _;
@@ -21,7 +21,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
 use std::process;
-use wallet::WalletCore;
+use wallet::{WalletCore, DEFAULT_GAS_LIMIT, DEFAULT_MAX_FEE};
 
 /// Format PDA seeds into a display string for human-readable output.
 /// E.g. `[program_id, "owner", Account(vault)]`
@@ -76,6 +76,8 @@ pub async fn execute_instruction(
     dry_run: Option<DryRunFormat>,
     extra_bins: &HashMap<String, String>,
     co_signers: &[String],
+    fee_payer: Option<&str>,
+    gas_limit: Option<u64>,
     export: Option<&str>,
 ) {
     // In JSON dry-run mode, suppress all human-readable preamble — only emit JSON to stdout.
@@ -578,6 +580,47 @@ pub async fn execute_instruction(
             }
         }
 
+        // Since LEZ v0.2.5 an ordinary program call is a CHARGED transaction: omitting
+        // the fee declaration is rejected outright as `MissingFeeDeclaration`, which the
+        // sequencer reports as the opaque "Incorrect fee". So every public transaction
+        // now names a payer.
+        //
+        // The payer must also SIGN -- `is_fee_authorized` looks for a witness whose
+        // account id equals the payer -- so it joins `signer_accounts` (and therefore the
+        // nonce list, which pairs with signatures, not with `account_ids`). Default is the
+        // first signer, i.e. self-pay; `--fee-payer` covers the common case where the
+        // signers are freshly created accounts holding nothing.
+        let payer = match fee_payer {
+            Some(raw) => {
+                let bytes = decode_bytes_32(raw).unwrap_or_else(|e| {
+                    eprintln!("❌ --fee-payer '{}': {}", raw, e);
+                    process::exit(1);
+                });
+                let id = AccountId::new(bytes);
+                if !signer_accounts.contains(&id) {
+                    signer_accounts.push(id);
+                }
+                id
+            },
+            None => *signer_accounts.first().unwrap_or_else(|| {
+                eprintln!("❌ This transaction has no signing account to pay its fee.");
+                eprintln!("   Name a funded account with --fee-payer <ADDRESS>.");
+                process::exit(1);
+            }),
+        };
+
+        // `gas_limit` is not an accounting figure: it is the zkVM SESSION LIMIT the guest
+        // runs under (`chain_state::apply` passes it straight to
+        // `from_public_transaction_metered` as the cycle budget). Overrun is not an error the
+        // caller sees -- the guest bails, the full budget is charged, and the transaction
+        // lands having advanced nonces and written nothing. The wallet's 2M default is sized
+        // for its own small native calls; a RISC Zero guest costs millions of cycles, so
+        // anything non-trivial needs `--gas-limit`. The ceiling is `MAX_GAS_EXEC` (10M).
+        let gas_limit = gas_limit.unwrap_or(DEFAULT_GAS_LIMIT);
+        // Keep max_fee in step with the limit, mirroring how the wallet sizes its default
+        // (gas + assumed data bytes, at 8x the genesis minimum base fee).
+        let max_fee = std::cmp::max(DEFAULT_MAX_FEE, u128::from(gas_limit + 100_000) * 64);
+
         let nonces = if signer_accounts.is_empty() {
             vec![]
         } else {
@@ -595,7 +638,7 @@ pub async fn execute_instruction(
             account_ids,
             nonces,
             instruction_data,
-            None,
+            Some(FeeDeclaration::new(payer, gas_limit, 0, max_fee)),
         );
 
         if let Some(export_path) = export {

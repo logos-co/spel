@@ -54,6 +54,8 @@ pub async fn run() {
     let mut inspect_format: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
     let mut co_signers: Vec<String> = Vec::new();
+    let mut fee_payer: Option<String> = None;
+    let mut gas_limit: Option<u64> = None;
     let mut export_path: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut used_separator = false;
@@ -144,6 +146,25 @@ pub async fn run() {
                     process::exit(1);
                 }
                 co_signers.push(args[i].clone());
+            },
+            "--fee-payer" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --fee-payer requires an account id");
+                    process::exit(1);
+                }
+                fee_payer = Some(args[i].clone());
+            },
+            "--gas-limit" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --gas-limit requires a cycle count");
+                    process::exit(1);
+                }
+                gas_limit = Some(args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("❌ --gas-limit '{}' is not a number", args[i]);
+                    process::exit(1);
+                }));
             },
             "--export" => {
                 i += 1;
@@ -563,6 +584,8 @@ pub async fn run() {
                         dry_run,
                         &extra_bins,
                         &co_signers,
+                        fee_payer.as_deref(),
+                        gas_limit,
                         export_path.as_deref(),
                     )
                     .await;
