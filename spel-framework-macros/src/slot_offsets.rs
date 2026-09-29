@@ -36,11 +36,11 @@ pub(crate) fn expand(item: TokenStream) -> TokenStream {
     let mut tests = proc_macro2::TokenStream::new();
 
     for slot in &slots {
-        consts.extend(offset_const(
-            &struct_ident,
-            slot,
-            &named_types[..slot.index],
-        ));
+        // `slot.index` was produced by `enumerate()` over the same field
+        // list `named_types` was built from, so it is always in bounds.
+        #[allow(clippy::indexing_slicing)]
+        let preceding = &named_types[..slot.index];
+        consts.extend(offset_const(&struct_ident, slot, preceding));
         tests.extend(layout_test(&struct_ident, slot));
     }
 
@@ -160,6 +160,8 @@ fn strip_slot_fields(st: &mut syn::ItemStruct) -> Vec<SlotField> {
             slots.push(SlotField {
                 index,
                 attr_name,
+                // `Fields::Named` guarantees every field carries an ident.
+                #[allow(clippy::expect_used)]
                 ident: field.ident.clone().expect("named field has an ident"),
                 ty: field.ty.clone(),
             });

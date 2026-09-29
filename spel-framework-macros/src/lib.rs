@@ -43,14 +43,6 @@ use syn::{
 mod account_types;
 mod slot_offsets;
 
-/// Main entry point: `#[lez_program]` on a module.
-///
-/// This macro:
-/// 1. Finds all `#[instruction]` functions in the module
-/// 2. Generates a serde-serializable `Instruction` enum
-/// 3. Generates the `fn main()` with read/dispatch/write boilerplate
-/// 4. Generates account validation code per instruction
-/// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
 /// Program-level configuration parsed from `#[lez_program(...)]` attributes.
 struct ProgramConfig {
     /// External instruction enum path, e.g. `my_crate::Instruction`.
@@ -94,6 +86,14 @@ impl ProgramConfig {
     }
 }
 
+/// Main entry point: `#[lez_program]` on a module.
+///
+/// This macro:
+/// 1. Finds all `#[instruction]` functions in the module
+/// 2. Generates a serde-serializable `Instruction` enum
+/// 3. Generates the `fn main()` with read/dispatch/write boilerplate
+/// 4. Generates account validation code per instruction
+/// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
 #[proc_macro_attribute]
 pub fn lez_program(attr: TokenStream, item: TokenStream) -> TokenStream {
     let config = match ProgramConfig::parse(attr) {
@@ -237,8 +237,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(&input, "lez_program module must have a body"))?;
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|e| {
+        syn::Error::new_spanned(&input.ident, format!("CARGO_MANIFEST_DIR not set: {e}"))
+    })?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
     let mut deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
@@ -338,19 +339,18 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Generate the Instruction enum (or use external one)
-    let enum_def = if config.external_instruction.is_none() {
+    let enum_def = if let Some(path) = config.external_instruction.as_ref() {
+        // External instruction: import it as `Instruction` if it's not already named that
+        quote! {
+            use #path as Instruction;
+        }
+    } else {
         let enum_variants = generate_enum_variants(&instructions);
         quote! {
             #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
             pub enum Instruction {
                 #(#enum_variants),*
             }
-        }
-    } else {
-        // External instruction: import it as `Instruction` if it's not already named that
-        let path = config.external_instruction.as_ref().unwrap();
-        quote! {
-            use #path as Instruction;
         }
     };
 
@@ -512,7 +512,7 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             // Manifest 'declared bin paths: entry files outside src/
             // (custom [[bin]] path, test harnesses) must not be missed,
             // a missed entry file silently skips the slot assert.
-            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+            for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(manifest) {
                 if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
                     candidate_paths.push(bin_path);
                 }
@@ -832,20 +832,19 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                 "`private_pda` requires `pda = ...` seeds",
             ));
         }
-        if constraints.npk_arg.is_none() {
+        let Some(npk_name) = constraints.npk_arg.as_deref() else {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "`private_pda` requires `npk = arg(\"arg_name\")`",
             ));
-        }
-        if constraints.vpk_arg.is_none() {
+        };
+        let Some(vpk_name) = constraints.vpk_arg.as_deref() else {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "`private_pda` requires `vpk = arg(\"arg_name\")` (LEZ v0.2.1+)",
             ));
-        }
+        };
         // Validate the npk arg name is a valid Rust identifier
-        let npk_name = constraints.npk_arg.as_deref().unwrap();
         if syn::parse_str::<Ident>(npk_name).is_err() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -853,7 +852,6 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
             ));
         }
         // Validate the vpk arg name is a valid Rust identifier
-        let vpk_name = constraints.vpk_arg.as_deref().unwrap();
         if syn::parse_str::<Ident>(vpk_name).is_err() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -921,14 +919,13 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> syn::Result<PdaSeedDef> {
         String::new()
     };
 
-    if call.args.len() != 1 {
+    let mut args_iter = call.args.iter();
+    let (Some(arg), None) = (args_iter.next(), args_iter.next()) else {
         return Err(syn::Error::new_spanned(
             call,
             "PDA seed function takes exactly one string argument",
         ));
-    }
-
-    let arg = &call.args[0];
+    };
     let string_val = if let syn::Expr::Lit(lit) = arg {
         if let syn::Lit::Str(s) = &lit.lit {
             s.value()
@@ -997,11 +994,11 @@ fn generate_match_arms(
                 quote! { Instruction::#variant_name { #(#field_names),* } }
             };
 
-            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
-            let account_destructure = if has_rest {
+            let account_destructure = if let Some(rest_account) =
+                ix.accounts.iter().find(|a| a.is_rest)
+            {
                 // Split into fixed accounts + rest
                 let fixed_accounts: Vec<&AccountParam> = ix.accounts.iter().filter(|a| !a.is_rest).collect();
-                let rest_account = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let num_fixed = fixed_accounts.len();
                 let fixed_names: Vec<&Ident> = fixed_accounts.iter().map(|a| &a.name).collect();
                 let rest_name = &rest_account.name;
@@ -1051,7 +1048,12 @@ fn generate_match_arms(
                     });
                 }
                 args.extend(ix.call_accounts.iter().enumerate().map(|(i, name)| {
-                    let repeats_later = ix.call_accounts[i + 1..].iter().any(|n| n == name);
+                    let repeats_later = ix
+                        .call_accounts
+                        .get(i + 1..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|n| n == name);
                     if repeats_later {
                         quote! { #name.clone() }
                     } else {
@@ -1128,13 +1130,13 @@ fn generate_match_arms(
                 .collect();
 
             let validation_call = if has_validation {
-                if has_rest {
+                if let Some(rest_account) = ix.accounts.iter().find(|a| a.is_rest) {
                     // For instructions with Vec accounts, build the slice dynamically
                     let fixed_refs: Vec<TokenStream2> = ix.accounts.iter()
                         .filter(|a| !a.is_rest)
                         .map(|a| { let name = &a.name; quote! { #name.clone() } })
                         .collect();
-                    let rest_ref = &ix.accounts.iter().find(|a| a.is_rest).unwrap().name;
+                    let rest_ref = &rest_account.name;
                     quote! {
                         let mut __all_accounts = vec![#(#fixed_refs),*];
                         __all_accounts.extend(#rest_ref.clone());
@@ -1307,10 +1309,16 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             } else {
                 return;
             };
-            if !is_spel_output_execute(&call.func) || call.args.len() != 2 {
+            if !is_spel_output_execute(&call.func) {
                 return;
             }
-            (call.args[0].clone(), call.args[1].clone())
+            let mut args_iter = call.args.iter();
+            let (Some(arg0), Some(arg1), None) =
+                (args_iter.next(), args_iter.next(), args_iter.next())
+            else {
+                return;
+            };
+            (arg0.clone(), arg1.clone())
         };
 
         let claims_fn = format_ident!("__claims_{}", self.fn_name);
@@ -1325,7 +1333,7 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             // at the front of self.accounts, keeping claims alignment).
             for acc in self.accounts {
                 if self.injected.iter().any(|n| acc.name == *n)
-                    && !account_idents.iter().any(|i| *i == acc.name)
+                    && !account_idents.contains(&acc.name)
                 {
                     let ident = &acc.name;
                     account_clones.push(quote! { #ident.account.clone() });
@@ -1415,9 +1423,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
 fn is_spel_output_execute(func: &syn::Expr) -> bool {
     if let syn::Expr::Path(ep) = func {
-        let segments: Vec<_> = ep.path.segments.iter().collect();
-        if segments.len() == 2 {
-            return segments[0].ident == "SpelOutput" && segments[1].ident == "execute";
+        let mut segments = ep.path.segments.iter();
+        if let (Some(first), Some(second), None) =
+            (segments.next(), segments.next(), segments.next())
+        {
+            return first.ident == "SpelOutput" && second.ident == "execute";
         }
     }
     false
@@ -1500,8 +1510,7 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                 }
             })
             .collect();
-        if seed_bytes.len() == 1 {
-            let seed = &seed_bytes[0];
+        if let [seed] = seed_bytes.as_slice() {
             quote! {
                 spel_framework::spel_output::AutoClaim::Claimed(
                     nssa_core::program::Claim::Pda(
@@ -1537,26 +1546,6 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
     }
 }
 
-/// Generate per-instruction `__claims_{fn_name}()` functions that return
-/// `Vec<AutoClaim>` based on account constraints. These are used by
-/// `SpelOutput::execute_with_claims()` so users don't have to manually
-/// choose `new()` vs `new_claimed()`.
-///
-/// Auto-claim rules:
-/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
-/// - `#[account(init, signer)]`    → `Claim::Authorized`
-/// - `#[account(init)]`            → `Claim::Authorized`
-/// - `#[account(mut)]`             → `Claim::None`
-/// - `#[account]`                  → `Claim::None`
-///
-/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
-/// generated function takes a `rest_count: usize` parameter and repeats
-/// the rest account's claim that many times.
-///
-/// For `account(...)` PDA seeds, the generated function takes an additional
-/// `__account_seed_{name}: &[u8; 32]` parameter per referenced account, so the
-/// caller can pass the actual runtime account ID (matching what validation does).
-
 /// Collect the unique PDA arg seed parameters for a given instruction as typed
 /// `__pda_arg_<name>: &<type>` token streams, used in generated function signatures.
 fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
@@ -1577,7 +1566,7 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             let actual_type = ix
                 .args
                 .iter()
-                .find(|a| a.name.to_string() == *name)
+                .find(|a| a.name == name.as_str())
                 .map(|a| &a.ty);
             if let Some(ty) = actual_type {
                 quote! { #ident: &#ty }
@@ -1611,19 +1600,37 @@ fn pda_account_seed_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
         .collect()
 }
 
+/// Generate per-instruction `__claims_{fn_name}()` functions that return
+/// `Vec<AutoClaim>` based on account constraints. These are used by
+/// `SpelOutput::execute_with_claims()` so users don't have to manually
+/// choose `new()` vs `new_claimed()`.
+///
+/// Auto-claim rules:
+/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
+/// - `#[account(init, signer)]`    → `Claim::Authorized`
+/// - `#[account(init)]`            → `Claim::Authorized`
+/// - `#[account(mut)]`             → `Claim::None`
+/// - `#[account]`                  → `Claim::None`
+///
+/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
+/// generated function takes a `rest_count: usize` parameter and repeats
+/// the rest account's claim that many times.
+///
+/// For `account(...)` PDA seeds, the generated function takes an additional
+/// `__account_seed_{name}: &[u8; 32]` parameter per referenced account, so the
+/// caller can pass the actual runtime account ID (matching what validation does).
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
             let fn_name = format_ident!("__claims_{}", ix.fn_name);
-            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
             let arg_params = pda_arg_params(ix);
             let account_seed_params = pda_account_seed_params(ix);
             let all_params: Vec<TokenStream2> = arg_params.into_iter()
                 .chain(account_seed_params)
                 .collect();
 
-            if has_rest {
+            if let Some(rest_acc) = ix.accounts.iter().find(|a| a.is_rest) {
                 let fixed_claims: Vec<TokenStream2> = ix
                     .accounts
                     .iter()
@@ -1631,7 +1638,6 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .map(generate_single_claim_expr)
                     .collect();
 
-                let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let rest_claim = generate_single_claim_expr(rest_acc);
 
                 quote! {
@@ -1710,11 +1716,10 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .accounts
                 .iter()
                 .enumerate()
-                .filter(|(_, acc)| acc.constraints.owner.is_some())
-                .map(|(i, acc)| {
+                .filter_map(|(i, acc)| Some((i, acc, acc.constraints.owner.as_ref()?)))
+                .map(|(i, acc, owner_expr)| {
                     let idx = i;
                     let acc_name = acc.name.to_string();
-                    let owner_expr = acc.constraints.owner.as_ref().unwrap();
                     // self_program_id is passed as &ProgramId; deref for comparison.
                     quote! {
                         if accounts[#idx].account.program_owner != *#owner_expr {
@@ -1811,9 +1816,13 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         // Private PDA: address = for_private_pda(program_id, seed, npk, vpk, identifier).
                         // The attribute has no `identifier` constraint yet, so validation uses the
                         // framework default (0); non-zero identifiers need hand-written validation.
+                        // parse_account_constraints() rejects private_pda without npk/vpk args
+                        // before an AccountParam with private_pda: true can exist here.
+                        #[allow(clippy::expect_used)]
                         let npk_name = acc.constraints.npk_arg.as_deref()
                             .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
                         let npk_param = format_ident!("__npk_arg_{}", npk_name);
+                        #[allow(clippy::expect_used)]
                         let vpk_name = acc.constraints.vpk_arg.as_deref()
                             .expect("private_pda without vpk_arg — should have been caught in parse_account_constraints");
                         let vpk_param = format_ident!("__vpk_arg_{}", vpk_name);
@@ -1908,7 +1917,10 @@ fn to_pascal_case(ident: &Ident) -> Ident {
 fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
         Type::Path(type_path) => {
-            let segment = type_path.path.segments.last().unwrap();
+            // A parsed `syn::Path` always has at least one segment.
+            let Some(segment) = type_path.path.segments.last() else {
+                return quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) };
+            };
             let ident = segment.ident.to_string();
             match ident.as_str() {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
@@ -1988,7 +2000,10 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
 fn rust_type_to_idl_json(ty: &Type) -> String {
     match ty {
         Type::Path(type_path) => {
-            let segment = type_path.path.segments.last().unwrap();
+            // A parsed `syn::Path` always has at least one segment.
+            let Some(segment) = type_path.path.segments.last() else {
+                return "\"unknown\"".to_string();
+            };
             let ident = segment.ident.to_string();
             match ident.as_str() {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
@@ -2031,7 +2046,7 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(format!("global:{name}").as_bytes());
     let result = hasher.finalize();
-    result[..8].to_vec()
+    result.get(..8).unwrap_or_default().to_vec()
 }
 
 fn generate_idl_fn(
@@ -2558,10 +2573,6 @@ mod tests {
             TempDir(path)
         }
 
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-
         fn write(&self, rel: &str, content: &str) -> std::path::PathBuf {
             let p = self.0.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -2880,7 +2891,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(
                 caller: AccountWithMetadata,
                 mut config: AccountWithMetadata,
@@ -2913,7 +2924,7 @@ pub mod token {
             fn_name: &fn_name,
             injected: &injected,
         };
-        let mut func: syn::ItemFn = syn::parse_quote! {
+        let mut func: ItemFn = syn::parse_quote! {
             pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
                 Ok(SpelOutput::execute(vec![config.account], vec![]))
             }
