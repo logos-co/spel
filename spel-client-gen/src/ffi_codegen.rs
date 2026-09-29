@@ -57,11 +57,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "use std::ffi::{{CStr, CString}};").unwrap();
     writeln!(out, "use std::os::raw::c_char;").unwrap();
     writeln!(out, "use serde_json::{{Value, json}};").unwrap();
-    writeln!(
-        out,
-        "use nssa::{{AccountId, ProgramId, PublicTransaction}};"
-    )
-    .unwrap();
+    writeln!(out, "use nssa::{{AccountId, PublicTransaction}};").unwrap();
     writeln!(
         out,
         "use nssa::public_transaction::{{Message, WitnessSet}};"
@@ -82,10 +78,20 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     if let Some(ref itype) = idl.instruction_type {
         writeln!(out, "use {itype} as ProgramInstruction;").unwrap();
     } else {
-        // Generate local instruction enum
+        // Generate local instruction enum.
+        //
+        // Borsh is the instruction wire format since LEZ v0.2.5 (`Message::try_new`
+        // serializes it, the guest reads it with `read_lee_call`); serde stays for the
+        // JSON the FFI boundary speaks. Variants are append-only: Borsh encodes the
+        // variant as a leading tag byte, so inserting one shifts every encoding after it.
         writeln!(out, "use serde::{{Serialize, Deserialize}};").unwrap();
+        writeln!(out, "use borsh::{{BorshSerialize, BorshDeserialize}};").unwrap();
         writeln!(out).unwrap();
-        writeln!(out, "#[derive(Debug, Clone, Serialize, Deserialize)]").unwrap();
+        writeln!(
+            out,
+            "#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]"
+        )
+        .unwrap();
         writeln!(out, "pub enum {local_enum} {{").unwrap();
         for ix in &idl.instructions {
             let variant = pascal_case(&ix.name);
@@ -177,44 +183,37 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out).unwrap();
 
     // PDA derivation delegates to spel_framework_core::pda::compute_pda_raw.
-    writeln!(out, "fn compute_pda_with_program(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
+    writeln!(out, "fn compute_pda_with_program(program_account_id: &AccountId, seeds: &[&[u8]]) -> Result<AccountId, String> {{").unwrap();
     writeln!(
         out,
-        "    spel_framework_core::pda::compute_pda_raw(program_id, seeds)"
+        "    spel_framework_core::pda::compute_pda_raw(program_account_id, seeds)"
     )
     .unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     // parse_program_id_hex
+    //
+    // Since LEZ v0.2.5 a program is identified by the account its header was
+    // deployed to, so this parses an address (base58 or hex) rather than unpacking
+    // a 32-byte image id into eight u32 words.
     writeln!(
         out,
-        "fn parse_program_id_hex(s: &str) -> Result<ProgramId, String> {{"
+        "fn parse_program_id_hex(s: &str) -> Result<AccountId, String> {{"
     )
     .unwrap();
-    writeln!(out, "    let s = s.trim_start_matches(\"0x\");").unwrap();
-    writeln!(out, "    if s.len() != 64 {{ return Err(format!(\"program_id hex must be 64 chars, got {{}}\", s.len())); }}").unwrap();
     writeln!(
         out,
-        "    let bytes = hex::decode(s).map_err(|e| format!(\"invalid hex: {{}}\", e))?;"
+        "    spel_framework_core::pda::parse_bytes32(s).map(AccountId::new)"
     )
     .unwrap();
-    writeln!(out, "    let mut pid = [0u32; 8];").unwrap();
-    writeln!(out, "    for (i, chunk) in bytes.chunks(4).enumerate() {{").unwrap();
-    writeln!(
-        out,
-        "        pid[i] = u32::from_le_bytes(chunk.try_into().unwrap());"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "    Ok(pid)").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
-    // parse_program_id (alias for ProgramId-typed args)
+    // parse_program_id (alias for program-address args)
     writeln!(
         out,
-        "fn parse_program_id(s: &str) -> Result<ProgramId, String> {{"
+        "fn parse_program_id(s: &str) -> Result<AccountId, String> {{"
     )
     .unwrap();
     writeln!(out, "    parse_program_id_hex(s)").unwrap();
@@ -414,7 +413,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
                                 "[u8; 32]" | "[u8;32]" | "AccountId" | "account_id" => {
                                     seed_entries.push(format!("        {pname}.as_ref(),"));
                                 },
-                                "[u32; 8]" | "[u32;8]" | "ProgramId" => {
+                                "ProgramId" | "program_id" => {
+                                    // a program address is 32 bytes, like any AccountId
+                                    seed_entries.push(format!("        {pname}.as_ref(),"));
+                                },
+                                "[u32; 8]" | "[u32;8]" => {
                                     // collect() into a Vec to avoid a reference to a temporary
                                     seed_pre_bindings.push(format!("    let {pname}_seed_bytes: Vec<u8> = {pname}.iter().flat_map(|w| w.to_le_bytes()).collect();"));
                                     seed_entries.push(format!("        &{pname}_seed_bytes,"));
@@ -579,9 +582,15 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    to_cstring(\"{}\".to_string())", idl.version).unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
-    // program_id: locate the guest binary and compute its ProgramId via nssa::program::Program.
+    // program_id: locate the guest binary and compute its image id via nssa::program::Program.
     // Tries the standard project-relative path first, then walks up ancestor directories
     // so it works whether the process cwd is the project root or a build subdirectory.
+    //
+    // Since LEZ v0.2.5 this is NOT the program's address: a program is identified by the
+    // account its header was deployed to, chosen at deploy time and not derivable from the
+    // bytes. The result is reported under `image_id_hex` so a caller that forwards it into
+    // a `program_id_hex` argument fails on the missing key rather than transacting against
+    // an address that does not exist.
     writeln!(out, "#[no_mangle]").unwrap();
     writeln!(
         out,
@@ -612,7 +621,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "    let program = match Program::new(data.into()) {{ Ok(p) => p, Err(_) => return std::ptr::null_mut() }};").unwrap();
     writeln!(out, "    let id = program.id();").unwrap();
     writeln!(out, "    let hex: String = id.iter().flat_map(|w| w.to_le_bytes()).map(|b| format!(\"{{:02x}}\", b)).collect();").unwrap();
-    out.push_str("    let json = json!({\"program_id_hex\": hex}).to_string();\n");
+    out.push_str("    let json = json!({\"image_id_hex\": hex}).to_string();\n");
     writeln!(
         out,
         "    CString::new(json).map(|cs| cs.into_raw()).unwrap_or(std::ptr::null_mut())"
@@ -704,7 +713,11 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     )
     .unwrap();
     // program_owner classification
-    writeln!(out, "    let owner_bytes: Vec<u8> = account.program_owner.iter().flat_map(|w: &u32| w.to_le_bytes()).collect();").unwrap();
+    writeln!(
+        out,
+        "    let owner_bytes: Vec<u8> = account.program_owner.as_ref().to_vec();"
+    )
+    .unwrap();
     writeln!(
         out,
         "    let program_owner_hex = hex::encode(&owner_bytes);"
@@ -712,7 +725,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     .unwrap();
     writeln!(
         out,
-        "    let is_uninitialized = account.program_owner == [0u32; 8];"
+        "    let is_uninitialized = account.program_owner == nssa_core::program::DEFAULT_PROGRAM_OWNER;"
     )
     .unwrap();
     writeln!(
@@ -905,7 +918,7 @@ pub fn generate_ffi(idl: &SpelIdl, idl_json: &str) -> Result<String, String> {
     writeln!(out, "                    Ok(account) => {{").unwrap();
     writeln!(
         out,
-        "                        let is_uninit = account.program_owner == [0u32; 8];"
+        "                        let is_uninit = account.program_owner == nssa_core::program::DEFAULT_PROGRAM_OWNER;"
     )
     .unwrap();
     writeln!(
@@ -1127,7 +1140,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
                             // Normalise aliases to raw array types for cleaner FFI signatures
                             let param_ty = match ty.as_str() {
                                 "AccountId" => "[u8; 32]".to_string(),
-                                "ProgramId" => "[u32; 8]".to_string(),
+                                "ProgramId" => "[u8; 32]".to_string(),
                                 other => other.to_string(),
                             };
                             params.push((rust_ident(path), param_ty));
@@ -1159,7 +1172,7 @@ pub fn generate_pda_helpers(idl: &SpelIdl) -> String {
 
                 // Function signature
                 write!(out, "pub fn compute_{acc_name}_pda(").unwrap();
-                write!(out, "program_id: &ProgramId").unwrap();
+                write!(out, "program_id: &AccountId").unwrap();
                 for (name, ty) in &params {
                     // Primitive scalars (u64, u32, etc.) are passed by value
                     let is_scalar = matches!(
@@ -1371,7 +1384,10 @@ fn idl_type_to_borsh_rust(ty: &IdlType) -> String {
     match ty {
         IdlType::Primitive(p) => match p.as_str() {
             "account_id" | "AccountId" | "[u8; 32]" | "[u8;32]" => "[u8; 32]".to_string(),
-            "program_id" | "ProgramId" | "[u32; 8]" | "[u32;8]" => "[u32; 8]".to_string(),
+            // A program is addressed by a 32-byte account id since LEZ v0.2.5; a literal
+            // [u32; 8] still means eight words.
+            "program_id" | "ProgramId" => "[u8; 32]".to_string(),
+            "[u32; 8]" | "[u32;8]" => "[u32; 8]".to_string(),
             "string" => "String".to_string(),
             s => s.to_string(),
         },
@@ -1462,14 +1478,17 @@ pub fn generate_account_fetch_functions(idl: &SpelIdl, prefix: &str, out: &mut S
                         );
                         seed_parse_lines.push(format!("        let {pname} = {parse_expr};"));
                         // Seed bytes expression: pre-bind types that can't be safely
-                        // borrowed inline (ProgramId → Vec, scalars → fixed-size array).
+                        // borrowed inline (scalars → fixed-size array).
                         // Note: [u8;32]/AccountId args are parsed as AccountId by
                         // idl_type_to_json_parse, so .as_ref() gives a valid &[u8].
                         match arg_ty.as_str() {
                             "[u8; 32]" | "[u8;32]" | "AccountId" | "account_id" => {
                                 pda_seeds_code.push(format!("        {pname}.as_ref(),"));
                             },
-                            "[u32; 8]" | "[u32;8]" | "ProgramId" => {
+                            "ProgramId" | "program_id" => {
+                                pda_seeds_code.push(format!("        {pname}.as_ref(),"));
+                            },
+                            "[u32; 8]" | "[u32;8]" => {
                                 seed_parse_lines.push(format!("        let {pname}_seed_bytes: Vec<u8> = {pname}.iter().flat_map(|w| w.to_le_bytes()).collect();"));
                                 pda_seeds_code.push(format!("        &{pname}_seed_bytes,"));
                             },

@@ -5,7 +5,7 @@ use crate::cli::{snake_to_kebab, to_pascal_case};
 use crate::hex::{decode_bytes_32, hex_encode, parse_account_id};
 use crate::parse::{parse_string_vec, parse_value, ParsedValue};
 use crate::pda::compute_pda_from_seeds;
-use crate::serialize::serialize_to_risc0;
+use crate::serialize::serialize_to_borsh;
 use common::transaction::LeeTransaction;
 use hex;
 use nssa::program::Program;
@@ -13,7 +13,6 @@ use nssa::public_transaction::{Message, WitnessSet};
 use nssa::{AccountId, PublicTransaction};
 use nssa::{PublicKey, Signature};
 use nssa_core::account::Nonce;
-use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
 use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
@@ -73,7 +72,7 @@ pub async fn execute_instruction(
     ix: &IdlInstruction,
     args: &HashMap<String, Vec<String>>,
     program_path: Option<&str>,
-    program_id_hex: Option<&str>,
+    program_address: Option<&str>,
     dry_run: Option<DryRunFormat>,
     extra_bins: &HashMap<String, String>,
     co_signers: &[String],
@@ -86,20 +85,19 @@ pub async fn execute_instruction(
     say!("📋 Instruction: {}", ix.name);
     say!("");
 
-    let mut args = args.clone();
+    let args = args.clone();
 
     // Auto-fill program-id args from binary paths
+    // A program's address used to be its image id, so `--bin name=path` could fill a
+    // program-id argument straight from the binary. Since LEZ v0.2.5 the address is
+    // chosen at deploy time and the binary does not carry it, so the value has to be
+    // passed explicitly; `--bin` now only supplies the ELF for the privacy path.
     for (key, bin_path) in extra_bins {
         if !args.contains_key(key) {
-            if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(program) = Program::new(bytes.into()) {
-                    let id = program.id();
-                    let id_str: Vec<String> = id.iter().map(|w| w.to_string()).collect();
-                    let val = id_str.join(",");
-                    say!("  ℹ️  Auto-filled --{} from {}", key, bin_path);
-                    args.insert(key.clone(), vec![val]);
-                }
-            }
+            say!(
+                "  ℹ️  --{key} not auto-filled from {bin_path}: a program's address is not \
+                 in its binary. Pass --{key} <address>."
+            );
         }
     }
 
@@ -202,52 +200,45 @@ pub async fn execute_instruction(
         .iter()
         .position(|i| i.name == ix.name)
         .unwrap_or(0);
-    let risc0_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
-    let instruction_data = serialize_to_risc0(ix_index as u32, &risc0_args).unwrap_or_else(|e| {
+    let borsh_args: Vec<_> = parsed_args.iter().map(|(_, ty, val)| (*ty, val)).collect();
+    let instruction_data = serialize_to_borsh(ix_index as u32, &borsh_args).unwrap_or_else(|e| {
         eprintln!("❌ Serialization error: {}", e);
         process::exit(1);
     });
 
-    // ─── Resolve program_id (load binary if needed) ─────────────
-    let (program_id, program_obj): (ProgramId, Option<Program>) =
-        match (program_id_hex, program_path) {
-            (Some(hex), _) => {
-                let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-                    eprintln!("❌ Invalid program ID '{}': {}", hex, e);
-                    process::exit(1);
-                });
-                let mut pid = [0u32; 8];
-                for (i, chunk) in bytes.chunks(4).enumerate() {
-                    pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                }
-                (pid, None)
-            },
-            (None, Some(path)) => {
-                let program_bytecode = fs::read(path).unwrap_or_else(|e| {
-                    eprintln!("❌ Failed to read program binary '{}': {}", path, e);
-                    eprintln!("   Hint: pass --program <64-char-hex> to skip loading the binary.");
-                    eprintln!("   Or configure in spel.toml.");
-                    process::exit(1);
-                });
-                let program = Program::new(program_bytecode.into()).unwrap_or_else(|e| {
-                    eprintln!("❌ Failed to load program: {:?}", e);
-                    process::exit(1);
-                });
-                let pid = program.id();
-                (pid, Some(program))
-            },
-            (None, None) => {
-                eprintln!(
-                "❌ No program specified. Use --program <name|hex|path> or configure in spel.toml."
-            );
+    // ─── Resolve the program's account, and its binary if we have one ─────────
+    //
+    // Since LEZ v0.2.5 a transaction names the program by its deployed header
+    // account. The binary is a separate, optional input: only the
+    // privacy-preserving path needs it, to prove against the ELF.
+    let program_account_id: AccountId = match program_address {
+        Some(value) => {
+            let bytes = spel_framework_core::pda::parse_bytes32(value).unwrap_or_else(|e| {
+                eprintln!("❌ Invalid program address '{}': {}", value, e);
                 process::exit(1);
+            });
+            AccountId::new(bytes)
+        },
+        None => {
+            eprintln!(
+                "❌ No program specified. Use --program <name|address> or configure in spel.toml."
+            );
+            process::exit(1);
+        },
+    };
+
+    let program_obj: Option<Program> = program_path.and_then(|path| {
+        let program_bytecode = fs::read(path).ok()?;
+        match Program::new(program_bytecode.into()) {
+            Ok(program) => Some(program),
+            Err(e) => {
+                eprintln!("⚠️  Ignoring unreadable program binary '{}': {:?}", path, e);
+                None
             },
-        };
-    let program_id_hex_str: String = program_id
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .map(|b| format!("{:02x}", b))
-        .collect();
+        }
+    });
+
+    let program_account_str = program_account_id.to_string();
 
     // ─── Build account map and resolve PDAs ─────────────────────
     let mut account_map: HashMap<String, AccountId> = HashMap::new();
@@ -306,7 +297,7 @@ pub async fn execute_instruction(
         if let Some(pda) = &acc.pda {
             match compute_pda_from_seeds(
                 &pda.seeds,
-                &program_id,
+                &program_account_id,
                 &account_map,
                 &parsed_arg_map,
                 None,
@@ -339,7 +330,7 @@ pub async fn execute_instruction(
         let signer_nonces = fetch_nonces_best_effort(signer_ids).await;
 
         let summary = DryRunSummary {
-            program_id_hex: &program_id_hex_str,
+            program_id_hex: &program_account_str,
             ix,
             account_map: &account_map,
             parsed_account_ids: &parsed_accounts
@@ -402,9 +393,9 @@ pub async fn execute_instruction(
     }
     say!("");
     say!("🔧 Transaction:");
-    say!("  program-id: {}", program_id_hex_str);
-    if let (None, Some(path)) = (program_id_hex, program_path) {
-        say!("  program:    {}", path);
+    say!("  program:    {}", program_account_str);
+    if let Some(path) = program_path {
+        say!("  binary:     {}", path);
     }
     say!("  instruction index: {}", ix_index);
     say!("  instruction: {} {{", to_pascal_case(&ix.name));
@@ -414,14 +405,14 @@ pub async fn execute_instruction(
     say!("  }}");
     say!("");
     say!(
-        "  Serialized instruction data ({} u32 words):",
+        "  Serialized instruction data ({} bytes, borsh):",
         instruction_data.len()
     );
-    let hex_words: Vec<String> = instruction_data
+    let ix_data_hex: String = instruction_data
         .iter()
-        .map(|w| format!("{:08x}", w))
+        .map(|b| format!("{b:02x}"))
         .collect();
-    say!("    [{}]", hex_words.join(", "));
+    say!("    0x{ix_data_hex}");
     say!("");
 
     // ─── Transaction submission ─────────────────────────────────
@@ -457,14 +448,34 @@ pub async fn execute_instruction(
 
         // Build dependencies from extra_bins
         let mut dependencies = HashMap::new();
-        for (_, bin_path) in extra_bins {
-            if let Ok(bytes) = fs::read(bin_path) {
-                if let Ok(dep_program) = Program::new(bytes.into()) {
-                    dependencies.insert(dep_program.id(), dep_program);
-                }
+        // Dependencies are keyed by the dependency's deployed account id since v0.2.5.
+        // A binary does not carry that, so take it from the same-named argument the
+        // caller passed (e.g. `--bin token=... --token-program-id <address>`).
+        for (name, bin_path) in extra_bins {
+            let Ok(bytes) = fs::read(bin_path) else {
+                continue;
+            };
+            let Ok(dep_program) = Program::new(bytes.into()) else {
+                continue;
+            };
+            let dep_address = args
+                .get(name)
+                .and_then(|v| v.first())
+                .and_then(|raw| spel_framework_core::pda::parse_bytes32(raw).ok());
+            match dep_address {
+                Some(bytes) => {
+                    dependencies.insert(AccountId::new(bytes), dep_program);
+                },
+                None => {
+                    eprintln!(
+                        "⚠️  Skipping dependency '{name}': no address. Pass --{name} \
+                         <address> so the proof can name the program it calls."
+                    );
+                },
             }
         }
-        let program_with_deps = ProgramWithDependencies::new(program, dependencies);
+        let program_with_deps =
+            ProgramWithDependencies::new(program, program_account_id, dependencies);
 
         // Build privacy-preserving account list
         let mut pp_accounts: Vec<AccountIdentity> = Vec::new();
@@ -579,7 +590,13 @@ pub async fn execute_instruction(
                 })
         };
 
-        let message = Message::new_preserialized(program_id, account_ids, nonces, instruction_data);
+        let message = Message::new_preserialized(
+            program_account_id,
+            account_ids,
+            nonces,
+            instruction_data,
+            None,
+        );
 
         if let Some(export_path) = export {
             // (1) the exact bytes every signer signs
@@ -607,7 +624,7 @@ pub async fn execute_instruction(
             let signer_nonces: Vec<Option<Nonce>> =
                 message.nonces.iter().copied().map(Some).collect();
             let summary_data = DryRunSummary {
-                program_id_hex: &program_id_hex_str,
+                program_id_hex: &program_account_str,
                 ix,
                 account_map: &account_map,
                 parsed_account_ids: &parsed_accounts
@@ -742,7 +759,7 @@ struct DryRunSummary<'a> {
     /// Rest (variadic) accounts: `(name, [raw_32_bytes…])`.
     rest_account_ids: &'a [(&'a str, Vec<&'a [u8]>)],
     parsed_args: &'a [(&'a str, &'a IdlType, ParsedValue)],
-    instruction_data: &'a [u32],
+    instruction_data: &'a [u8],
     signer_names: &'a [&'a str],
     signer_nonces: &'a [Option<Nonce>],
 }
@@ -858,7 +875,6 @@ fn print_dry_run_json(s: &DryRunSummary<'_>) {
     let ix_data_hex: String = s
         .instruction_data
         .iter()
-        .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))
         .collect();
 
@@ -936,7 +952,6 @@ fn render_dry_run_text(s: &DryRunSummary<'_>) -> String {
     let ix_data_hex: String = s
         .instruction_data
         .iter()
-        .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))
         .collect();
     writeln!(out, "Instruction data: 0x{}", ix_data_hex).unwrap();

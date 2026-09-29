@@ -56,17 +56,10 @@ pub async fn sign_command(path: &str) {
     // What the bytes actually say. Rendered locally from message_hex,
     // independent of the summary text.
     println!("=== Decoded from message bytes ===");
-    let program_id_hex: String = message
-        .program_id
-        .iter()
-        .flat_map(|w| w.to_le_bytes())
-        .map(|b| format!("{:02x}", b))
-        .collect();
-    println!("Program ID: {}", program_id_hex);
+    println!("Program account: {}", message.program_account_id);
     let instruction_data_hex: String = message
         .instruction_data
         .iter()
-        .flat_map(|w| w.to_le_bytes())
         .map(|b| format!("{:02x}", b))
         .collect();
     println!("Instruction data: 0x{}", instruction_data_hex);
