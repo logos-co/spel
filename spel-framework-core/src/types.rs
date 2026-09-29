@@ -4,16 +4,20 @@
 //! with real SPEL core types.
 
 use nssa_core::program::{
-    AccountPostState, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow,
+    AccountStateDiff, BlockValidityWindow, ChainedCall, InvalidWindow, TimestampValidityWindow,
     ValidityWindow,
 };
 
-/// Trait for types that can be converted into an [`AccountPostState`].
+/// Trait for types that can be converted into an [`AccountStateDiff`].
 ///
-/// Implemented for `(Account, AutoClaim)`, `(Account, &AutoClaim)`, and
-/// `AccountPostState` itself, so [`SpelOutput::execute`] accepts any of these.
-pub trait IntoPostState {
-    fn into_post_state(self) -> AccountPostState;
+/// Implemented for `AccountStateDiff` itself and for `AccountWithMetadata` (which
+/// becomes an unchanged diff), so [`SpelOutput::execute`] accepts either.
+///
+/// Since LEZ v0.2.5 a program reports what it *changed* rather than the account it
+/// ended up with, so a diff can only be built where the pre-state is in hand — in
+/// the handler, not here.
+pub trait IntoStateDiff {
+    fn into_state_diff(self) -> AccountStateDiff;
 }
 
 /// Output from an instruction handler.
@@ -24,7 +28,7 @@ pub trait IntoPostState {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SpelOutput {
-    pub post_states: Vec<AccountPostState>,
+    pub state_diffs: Vec<AccountStateDiff>,
     pub chained_calls: Vec<ChainedCall>,
     pub block_validity_window: BlockValidityWindow,
     pub timestamp_validity_window: TimestampValidityWindow,
@@ -34,7 +38,7 @@ impl SpelOutput {
     /// Create an empty output.
     pub fn empty() -> Self {
         Self {
-            post_states: vec![],
+            state_diffs: vec![],
             chained_calls: vec![],
             block_validity_window: ValidityWindow::new_unbounded(),
             timestamp_validity_window: ValidityWindow::new_unbounded(),
@@ -98,7 +102,7 @@ impl SpelOutput {
     /// future field additions don't require updating every call site.
     pub fn into_parts(self) -> SpelOutputParts {
         SpelOutputParts {
-            post_states: self.post_states,
+            state_diffs: self.state_diffs,
             chained_calls: self.chained_calls,
             block_validity_window: self.block_validity_window,
             timestamp_validity_window: self.timestamp_validity_window,
@@ -113,8 +117,8 @@ impl SpelOutput {
 #[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct SpelOutputParts {
-    /// Post-transaction account states (claims, mutability).
-    pub post_states: Vec<AccountPostState>,
+    /// Per-account state diffs (balance delta and, when changed, new data).
+    pub state_diffs: Vec<AccountStateDiff>,
     /// Chained calls to other programs.
     pub chained_calls: Vec<ChainedCall>,
     /// Block range in which the transaction is valid.

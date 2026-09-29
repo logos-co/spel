@@ -7,6 +7,7 @@ use spel_framework_core::idl::IdlType;
 pub enum SerializeError {
     TypeMismatch { expected: String, got: String },
     Risc0(String),
+    Borsh(String),
 }
 
 impl std::fmt::Display for SerializeError {
@@ -16,6 +17,7 @@ impl std::fmt::Display for SerializeError {
                 write!(f, "type mismatch: expected {}, got {}", expected, got)
             },
             SerializeError::Risc0(msg) => write!(f, "risc0 serialization error: {}", msg),
+            SerializeError::Borsh(msg) => write!(f, "borsh serialization error: {}", msg),
         }
     }
 }
@@ -159,8 +161,20 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
         ("program_id", ParsedValue::U32Array(vals)) => Ok(DynamicValue::Tuple(
             vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
         )),
-        // `AccountId` serializes via `SerializeDisplay`, i.e. as its base58 string.
-        ("account_id", ParsedValue::Str(s)) => Ok(DynamicValue::Str(s.clone())),
+        // `AccountId` is `{ value: [u8; 32] }` and its BorshSerialize writes those 32 raw
+        // bytes -- no length prefix. Its base58 form comes from `SerializeDisplay`, which is
+        // the SERDE impl and no longer governs the wire: instruction data has been Borsh
+        // since LEZ v0.2.5. Emitting the base58 text here produced a borsh String (a u32
+        // length of 44 followed by ASCII) where the guest expected 32 bytes, so every
+        // instruction taking an `account_id` argument failed to deserialize and the program
+        // reverted -- visible on chain only as an advanced nonce and no state change.
+        ("account_id", ParsedValue::Str(s)) => {
+            let bytes = crate::hex::decode_bytes_32(s)
+                .map_err(|e| SerializeError::Borsh(format!("invalid account_id '{s}': {e}")))?;
+            Ok(DynamicValue::Tuple(
+                bytes.iter().map(|b| DynamicValue::U8(*b)).collect(),
+            ))
+        },
         _ => Err(SerializeError::TypeMismatch {
             expected: prim.to_string(),
             got: format!("{:?}", val),
@@ -168,121 +182,100 @@ fn primitive_to_dynamic(prim: &str, val: &ParsedValue) -> Result<DynamicValue, S
     }
 }
 
-struct InstructionData<'a> {
-    variant_index: u32,
-    fields: &'a [DynamicValue],
-}
-
-impl serde::Serialize for InstructionData<'_> {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        use serde::ser::SerializeTupleVariant;
-        let mut tv =
-            serializer.serialize_tuple_variant("", self.variant_index, "", self.fields.len())?;
-        for field in self.fields {
-            tv.serialize_field(field)?;
+impl DynamicValue {
+    /// Append this value's Borsh encoding to `out`.
+    ///
+    /// Borsh is the instruction wire format since LEZ v0.2.5. It is a
+    /// length-prefixed little-endian format with no field names and no padding:
+    ///
+    /// - integers little-endian, `bool` as one byte
+    /// - `String` and `Vec<T>` as a u32 length prefix then the elements
+    /// - fixed arrays and tuples as their elements, with no prefix
+    /// - `Option<T>` as `0u8`, or `1u8` followed by the value
+    /// - an enum as a u8 variant tag, then that variant's fields
+    fn write_borsh(&self, out: &mut Vec<u8>) -> Result<(), SerializeError> {
+        match self {
+            DynamicValue::Bool(v) => out.push(u8::from(*v)),
+            DynamicValue::U8(v) => out.push(*v),
+            DynamicValue::U32(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::U64(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::U128(v) => out.extend_from_slice(&v.to_le_bytes()),
+            DynamicValue::Str(s) => {
+                let len = u32::try_from(s.len())
+                    .map_err(|_| SerializeError::Borsh("string exceeds u32 length".into()))?;
+                out.extend_from_slice(&len.to_le_bytes());
+                out.extend_from_slice(s.as_bytes());
+            },
+            // A fixed-size array or tuple: elements only, the length is in the type.
+            DynamicValue::Tuple(elems) => {
+                for elem in elems {
+                    elem.write_borsh(out)?;
+                }
+            },
+            DynamicValue::Seq(elems) => {
+                let len = u32::try_from(elems.len())
+                    .map_err(|_| SerializeError::Borsh("sequence exceeds u32 length".into()))?;
+                out.extend_from_slice(&len.to_le_bytes());
+                for elem in elems {
+                    elem.write_borsh(out)?;
+                }
+            },
+            DynamicValue::UnitVariant(idx) => out.push(variant_tag(*idx)?),
+            DynamicValue::StructVariant(idx, fields) => {
+                out.push(variant_tag(*idx)?);
+                for f in fields {
+                    f.write_borsh(out)?;
+                }
+            },
+            DynamicValue::None => out.push(0),
+            DynamicValue::Some(inner) => {
+                out.push(1);
+                inner.write_borsh(out)?;
+            },
         }
-        tv.end()
+        Ok(())
     }
 }
 
-/// Serialize an instruction to risc0 serde format (Vec<u32>).
+/// Borsh encodes an enum variant as a single tag byte, so an index past 255 has
+/// no representation.
+fn variant_tag(index: u32) -> Result<u8, SerializeError> {
+    u8::try_from(index).map_err(|_| {
+        SerializeError::Borsh(format!(
+            "variant index {index} exceeds the 255 Borsh encodes in one tag byte"
+        ))
+    })
+}
+
+/// Serialize an instruction to the Borsh wire format LEZ reads (`Vec<u8>`).
 ///
-/// Produces: variant_index (u32), then each field serialized in order.
-/// Delegates to `risc0_zkvm::serde::to_vec` for format correctness.
-pub fn serialize_to_risc0(
+/// Produces the variant tag byte, then each field in order — matching the
+/// `#[derive(BorshSerialize)]` layout of the `Instruction` enum the guest
+/// deserializes with `read_lee_call`.
+///
+/// Because the tag leads, instruction variants are append-only: inserting one
+/// shifts the encoding of every variant after it.
+pub fn serialize_to_borsh(
     variant_index: u32,
     parsed_args: &[(&IdlType, &ParsedValue)],
-) -> Result<Vec<u32>, SerializeError> {
+) -> Result<Vec<u8>, SerializeError> {
     let fields: Vec<DynamicValue> = parsed_args
         .iter()
         .map(|(ty, val)| to_dynamic_value(ty, val))
         .collect::<Result<_, _>>()?;
 
-    let instruction = InstructionData {
-        variant_index,
-        fields: &fields,
-    };
-
-    risc0_zkvm::serde::to_vec(&instruction).map_err(|e| SerializeError::Risc0(e.to_string()))
+    let mut out = vec![variant_tag(variant_index)?];
+    for field in &fields {
+        field.write_borsh(&mut out)?;
+    }
+    Ok(out)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parse::{parse_string_vec, parse_value};
-    use risc0_zkvm::serde::Deserializer;
-    use serde::Deserialize;
     use spel_framework_core::idl::IdlType;
-
-    #[test]
-    fn serialize_bytes32_one_word_per_byte() {
-        // risc0 serde format: each u8 is its own u32 word (zero-extended).
-        // A [u8; 32] produces 32 u32 words, NOT 8 packed words.
-        let idl_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".to_string())), 32),
-        };
-
-        let parsed = parse_value(
-            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-            &idl_type,
-            &[],
-        )
-        .unwrap();
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &parsed)]).unwrap();
-
-        // words[0] = variant index, words[1..33] = 32 individual u8-as-u32 words
-        let payload = &words[1..];
-        assert_eq!(payload.len(), 32, "expected 32 u32 words for [u8; 32]");
-        assert_eq!(payload[0], 0x01);
-        assert_eq!(payload[1], 0x02);
-        assert_eq!(payload[31], 0x20);
-    }
-
-    #[test]
-    fn serialize_vec_u8_one_word_per_byte() {
-        // Vec<u8> in risc0 serde: length prefix + one u32 word per byte.
-        let elem_type = IdlType::Primitive("u8".to_string());
-        let idl_type = IdlType::Vec {
-            vec: Box::new(elem_type),
-        };
-
-        let bytes = ParsedValue::ByteArray(vec![0x3b, 0x50, 0x9c, 0x40]);
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &bytes)]).unwrap();
-
-        // words[0] = variant index, words[1] = length (4), words[2..6] = bytes as u32
-        let payload = &words[1..];
-        assert_eq!(payload[0], 4, "length prefix");
-        assert_eq!(payload.len(), 5, "1 length + 4 bytes");
-        assert_eq!(payload[1], 0x3b);
-        assert_eq!(payload[2], 0x50);
-    }
-
-    #[test]
-    fn serialize_vec_byte_array_one_word_per_byte() {
-        // Vec<[u8; 4]>: vec length prefix, then each element's bytes as individual words.
-        let inner = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".to_string())), 4),
-        };
-        let idl_type = IdlType::Vec {
-            vec: Box::new(inner),
-        };
-
-        let bytes = ParsedValue::ByteArrayVec(vec![
-            vec![0x3b, 0x50, 0x9c, 0x40],
-            vec![0x61, 0x13, 0x01, 0xf7],
-        ]);
-
-        let words = serialize_to_risc0(0, &[(&idl_type, &bytes)]).unwrap();
-
-        // words[0] = variant, words[1] = vec len (2), words[2..6] = elem0, words[6..10] = elem1
-        let payload = &words[1..];
-        assert_eq!(payload[0], 2, "vec length");
-        assert_eq!(payload.len(), 9, "1 length + 2*4 bytes");
-        assert_eq!(payload[1], 0x3b);
-        assert_eq!(payload[5], 0x61);
-    }
 
     /// Verify risc0's own serializer as the reference for [u8; 32] format.
     #[test]
@@ -326,146 +319,6 @@ mod tests {
         assert_eq!(reference[34], 42, "strength");
     }
 
-    /// Verifies spel CLI's serialization is compatible with the guest-side
-    /// Deserializer from risc0_zkvm (used by nssa_core::program::read_nssa_inputs).
-    /// This is the contract between the CLI (transaction sender) and the
-    /// on-chain program (transaction executor) at LEZ v0.1.2.
-    #[test]
-    fn serialize_deserialize_roundtrip_with_bytes32() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            CommitRun {
-                seed: [u8; 32],
-                class: u8,
-                strength: u32,
-            },
-        }
-
-        // 1. Define IDL arg types matching the enum variant fields
-        let seed_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".into())), 32),
-        };
-        let class_type = IdlType::Primitive("u8".into());
-        let strength_type = IdlType::Primitive("u32".into());
-
-        // 2. Parse CLI values exactly as spel would
-        let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let parsed_seed = parse_value(seed_hex, &seed_type, &[]).unwrap();
-        let parsed_class = parse_value("2", &class_type, &[]).unwrap();
-        let parsed_strength = parse_value("42", &strength_type, &[]).unwrap();
-
-        // 3. Serialize to u32 words (variant_index=0 for CommitRun)
-        let words = serialize_to_risc0(
-            0,
-            &[
-                (&seed_type, &parsed_seed),
-                (&class_type, &parsed_class),
-                (&strength_type, &parsed_strength),
-            ],
-        )
-        .unwrap();
-
-        // 4. Deserialize using risc0's Deserializer — the SAME code the guest runs
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("guest-side deserialization must succeed");
-
-        // 5. Assert values survived the roundtrip
-        let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-            0x1d, 0x1e, 0x1f, 0x20,
-        ];
-        assert_eq!(
-            instruction,
-            TestInstruction::CommitRun {
-                seed: expected_seed,
-                class: 2,
-                strength: 42,
-            }
-        );
-    }
-
-    /// Verifies the CLI's dynamic enum-arg serialization is word-identical to
-    /// what a guest program's derived serde produces. This is the contract for
-    /// IDL `defined`-type arguments (e.g. admin-authority's AdminCandidate).
-    #[test]
-    fn enum_arg_roundtrip_matches_derived_serde() {
-        use spel_framework_core::idl::IdlTypeDef;
-
-        // The guest-side shape, exactly as a program would declare it.
-        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            AdminTransfer { new_admin: TestCandidate },
-        }
-        #[derive(serde::Serialize, serde::Deserialize, Debug, PartialEq)]
-        enum TestCandidate {
-            Signer,
-            Pda {
-                program_id: [u32; 8],
-                seed: [u8; 32],
-            },
-        }
-
-        // The IDL-side description, in the exact JSON shape generate-idl emits.
-        let def: IdlTypeDef = serde_json::from_str(
-            r#"{
-                "name": "TestCandidate",
-                "kind": "enum",
-                "variants": [
-                    {"name": "Signer"},
-                    {"name": "Pda", "fields": [
-                        {"name": "program_id", "type": "program_id"},
-                        {"name": "seed", "type": {"array": ["u8", 32]}}
-                    ]}
-                ]
-            }"#,
-        )
-        .unwrap();
-        let types = std::slice::from_ref(&def);
-        let arg_ty = IdlType::Defined {
-            defined: "TestCandidate".into(),
-        };
-
-        // Unit variant: CLI words must equal derived-serde words.
-        let parsed = parse_value("Signer", &arg_ty, types).unwrap();
-        let words = serialize_to_risc0(0, &[(&arg_ty, &parsed)]).unwrap();
-        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::AdminTransfer {
-            new_admin: TestCandidate::Signer,
-        })
-        .unwrap();
-        assert_eq!(
-            words, reference,
-            "Signer wire format diverges from derived serde"
-        );
-
-        // Payload variant, patterned bytes so an endianness slip would show.
-        let seed_hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let raw = format!(
-            r#"{{"Pda": {{"program_id": "{}", "seed": "{}"}}}}"#,
-            "cd".repeat(32),
-            seed_hex,
-        );
-        let parsed = parse_value(&raw, &arg_ty, types).unwrap();
-        let words = serialize_to_risc0(0, &[(&arg_ty, &parsed)]).unwrap();
-
-        let mut seed = [0u8; 32];
-        for (i, b) in seed.iter_mut().enumerate() {
-            *b = i as u8 + 1;
-        }
-        let reference = risc0_zkvm::serde::to_vec(&TestInstruction::AdminTransfer {
-            new_admin: TestCandidate::Pda {
-                program_id: [0xcdcdcdcd; 8],
-                seed,
-            },
-        })
-        .unwrap();
-        assert_eq!(
-            words, reference,
-            "Pda wire format diverges from derived serde"
-        );
-    }
-
     #[test]
     fn dynamic_value_u32_smoke() {
         let val = DynamicValue::U32(42);
@@ -487,24 +340,6 @@ mod tests {
         let val = DynamicValue::Seq(vec![DynamicValue::U8(1), DynamicValue::U8(2)]);
         let words = risc0_zkvm::serde::to_vec(&val).unwrap();
         assert_eq!(words, vec![2, 1, 2]); // length=2, then elements
-    }
-
-    #[test]
-    fn to_dynamic_value_bytes32_matches_old_serializer() {
-        let ty = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".to_string())), 32),
-        };
-        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
-        let parsed = parse_value(hex, &ty, &[]).unwrap();
-
-        let dv = to_dynamic_value(&ty, &parsed).unwrap();
-        let serde_words = risc0_zkvm::serde::to_vec(&dv).unwrap();
-
-        // Full serializer output (minus variant index)
-        let mut full_words = serialize_to_risc0(0, &[(&ty, &parsed)]).unwrap();
-        full_words.remove(0); // remove variant index
-
-        assert_eq!(serde_words, full_words);
     }
 
     #[test]
@@ -534,256 +369,12 @@ mod tests {
         assert_eq!(words[0], 3, "Seq length prefix");
     }
 
-    /// The critical contract test for Vec<String>: bytes the CLI emits must
-    /// deserialize as Vec<String> via the same risc0 Deserializer the guest uses.
-    #[test]
-    fn serde_roundtrip_vec_string() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            AnchorBatch { cids: Vec<String> },
-        }
-
-        let ty = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("string".to_string())),
-        };
-        let parsed = parse_string_vec(&[
-            "bafy1".to_string(),
-            "bafy2".to_string(),
-            "bafy3".to_string(),
-        ]);
-
-        let words = serialize_to_risc0(0, &[(&ty, &parsed)]).unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("guest-side Vec<String> deserialization must succeed");
-
-        assert_eq!(
-            instruction,
-            TestInstruction::AnchorBatch {
-                cids: vec![
-                    "bafy1".to_string(),
-                    "bafy2".to_string(),
-                    "bafy3".to_string()
-                ],
-            }
-        );
-    }
-
     #[test]
     fn to_dynamic_value_type_mismatch_returns_err() {
         let ty = IdlType::Primitive("u8".to_string());
         let val = ParsedValue::Str("not a u8".to_string());
 
         let result = to_dynamic_value(&ty, &val);
-        assert!(result.is_err());
-    }
-
-    /// The critical contract test: serde path must roundtrip through risc0 Deserializer.
-    #[test]
-    fn serde_roundtrip_with_bytes32() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            CommitRun {
-                seed: [u8; 32],
-                class: u8,
-                strength: u32,
-            },
-        }
-
-        let seed_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".into())), 32),
-        };
-        let class_type = IdlType::Primitive("u8".into());
-        let strength_type = IdlType::Primitive("u32".into());
-
-        let parsed_seed = parse_value(
-            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
-            &seed_type,
-            &[],
-        )
-        .unwrap();
-        let parsed_class = parse_value("2", &class_type, &[]).unwrap();
-        let parsed_strength = parse_value("42", &strength_type, &[]).unwrap();
-
-        let words = serialize_to_risc0(
-            0,
-            &[
-                (&seed_type, &parsed_seed),
-                (&class_type, &parsed_class),
-                (&strength_type, &parsed_strength),
-            ],
-        )
-        .unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("guest-side deserialization must succeed");
-
-        let expected_seed: [u8; 32] = [
-            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
-            0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
-            0x1d, 0x1e, 0x1f, 0x20,
-        ];
-        assert_eq!(
-            instruction,
-            TestInstruction::CommitRun {
-                seed: expected_seed,
-                class: 2,
-                strength: 42
-            }
-        );
-    }
-
-    #[test]
-    fn serde_roundtrip_all_primitives() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            AllPrims {
-                b: bool,
-                v8: u8,
-                v32: u32,
-                v64: u64,
-                v128: u128,
-            },
-        }
-
-        let types: Vec<IdlType> = vec![
-            IdlType::Primitive("bool".into()),
-            IdlType::Primitive("u8".into()),
-            IdlType::Primitive("u32".into()),
-            IdlType::Primitive("u64".into()),
-            IdlType::Primitive("u128".into()),
-        ];
-        let vals: Vec<ParsedValue> = vec![
-            ParsedValue::Bool(true),
-            ParsedValue::U8(255),
-            ParsedValue::U32(0xDEADBEEF),
-            ParsedValue::U64(0x0102030405060708),
-            ParsedValue::U128(0x0102030405060708090a0b0c0d0e0f10),
-        ];
-
-        let args: Vec<(&IdlType, &ParsedValue)> = types.iter().zip(vals.iter()).collect();
-        let words = serialize_to_risc0(0, &args).unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("deserialization must succeed");
-
-        assert_eq!(
-            instruction,
-            TestInstruction::AllPrims {
-                b: true,
-                v8: 255,
-                v32: 0xDEADBEEF,
-                v64: 0x0102030405060708,
-                v128: 0x0102030405060708090a0b0c0d0e0f10,
-            }
-        );
-    }
-
-    #[test]
-    fn serde_roundtrip_option() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            Opts { a: Option<u32>, b: Option<u32> },
-        }
-
-        let opt_type = IdlType::Option {
-            option: Box::new(IdlType::Primitive("u32".into())),
-        };
-
-        let some_val = ParsedValue::Some(Box::new(ParsedValue::U32(42)));
-        let none_val = ParsedValue::None;
-
-        let words =
-            serialize_to_risc0(0, &[(&opt_type, &some_val), (&opt_type, &none_val)]).unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("deserialization must succeed");
-
-        assert_eq!(
-            instruction,
-            TestInstruction::Opts {
-                a: Some(42),
-                b: None
-            }
-        );
-    }
-
-    #[test]
-    fn serde_roundtrip_vec_types() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            Vecs { a: Vec<u8>, b: Vec<u32> },
-        }
-
-        let vec_u8_type = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("u8".into())),
-        };
-        let vec_u32_type = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("u32".into())),
-        };
-
-        let val_u8 = ParsedValue::ByteArray(vec![0x3b, 0x50]);
-        let val_u32 = ParsedValue::U32Array(vec![100, 200]);
-
-        let words =
-            serialize_to_risc0(0, &[(&vec_u8_type, &val_u8), (&vec_u32_type, &val_u32)]).unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("deserialization must succeed");
-
-        assert_eq!(
-            instruction,
-            TestInstruction::Vecs {
-                a: vec![0x3b, 0x50],
-                b: vec![100, 200]
-            }
-        );
-    }
-
-    #[test]
-    fn serde_roundtrip_vec_byte_arrays() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            ByteVec { data: Vec<[u8; 4]> },
-        }
-
-        let inner_type = IdlType::Array {
-            array: (Box::new(IdlType::Primitive("u8".into())), 4),
-        };
-        let vec_type = IdlType::Vec {
-            vec: Box::new(inner_type),
-        };
-
-        let val = ParsedValue::ByteArrayVec(vec![
-            vec![0x01, 0x02, 0x03, 0x04],
-            vec![0x05, 0x06, 0x07, 0x08],
-        ]);
-
-        let words = serialize_to_risc0(0, &[(&vec_type, &val)]).unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("deserialization must succeed");
-
-        assert_eq!(
-            instruction,
-            TestInstruction::ByteVec {
-                data: vec![[0x01, 0x02, 0x03, 0x04], [0x05, 0x06, 0x07, 0x08]]
-            }
-        );
-    }
-
-    #[test]
-    fn serde_error_on_type_mismatch() {
-        let ty = IdlType::Primitive("u8".to_string());
-        let val = ParsedValue::Str("wrong".to_string());
-
-        let result = serialize_to_risc0(0, &[(&ty, &val)]);
         assert!(result.is_err());
     }
 
@@ -812,60 +403,154 @@ mod tests {
         assert_eq!(words, vec![0]);
     }
 
+    // ── Borsh wire format ────────────────────────────────────────────────
+    //
+    // These round-trip through the real `borsh` crate rather than asserting byte
+    // layouts by hand: what matters is that what this encoder emits is exactly what
+    // a guest's derived `BorshDeserialize` reads back.
+
+    use borsh::BorshDeserialize;
+
+    fn prim(name: &str) -> IdlType {
+        IdlType::Primitive(name.to_string())
+    }
+
+    /// Encode one argument and hand back everything after the variant tag.
+    fn encode_one(ty: &IdlType, raw: &str) -> Vec<u8> {
+        let parsed = parse_value(raw, ty, &[]).expect("value parses");
+        let bytes = serialize_to_borsh(0, &[(ty, &parsed)]).expect("encodes");
+        assert_eq!(bytes[0], 0, "variant tag leads the encoding");
+        bytes[1..].to_vec()
+    }
+
     #[test]
-    fn serde_roundtrip_vec_u64_u128_bool() {
-        #[derive(Deserialize, Debug, PartialEq)]
-        enum TestInstruction {
-            Vecs {
-                a: Vec<u64>,
-                b: Vec<u128>,
-                c: Vec<bool>,
-                d: Vec<u128>,
-            },
-        }
+    fn variant_tag_is_one_leading_byte() {
+        let bytes = serialize_to_borsh(3, &[]).unwrap();
+        assert_eq!(bytes, vec![3], "a fieldless variant is just its tag");
+    }
 
-        let vec_u64 = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("u64".into())),
+    #[test]
+    fn variant_index_past_a_byte_is_refused() {
+        let err = serialize_to_borsh(256, &[]).expect_err("256 has no tag byte");
+        assert!(
+            matches!(err, SerializeError::Borsh(_)),
+            "expected a borsh error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn primitives_round_trip() {
+        assert_eq!(
+            u8::try_from_slice(&encode_one(&prim("u8"), "7")).unwrap(),
+            7
+        );
+        assert_eq!(
+            u32::try_from_slice(&encode_one(&prim("u32"), "4000000000")).unwrap(),
+            4_000_000_000
+        );
+        assert_eq!(
+            u64::try_from_slice(&encode_one(&prim("u64"), "18446744073709551615")).unwrap(),
+            u64::MAX
+        );
+        assert_eq!(
+            u128::try_from_slice(&encode_one(
+                &prim("u128"),
+                "340282366920938463463374607431768211455"
+            ))
+            .unwrap(),
+            u128::MAX
+        );
+        assert!(bool::try_from_slice(&encode_one(&prim("bool"), "true")).unwrap());
+        assert_eq!(
+            String::try_from_slice(&encode_one(&prim("string"), "hello")).unwrap(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn fixed_array_has_no_length_prefix() {
+        let ty = IdlType::Array {
+            array: (Box::new(prim("u8")), 32),
         };
-        let vec_u128 = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("u128".into())),
-        };
-        let vec_bool = IdlType::Vec {
-            vec: Box::new(IdlType::Primitive("bool".into())),
-        };
-
-        let a = parse_value("1,18446744073709551615", &vec_u64, &[]).unwrap();
-        let b = parse_value(
-            "300,700,340282366920938463463374607431768211455",
-            &vec_u128,
-            &[],
-        )
-        .unwrap();
-        let c = parse_value("true,false", &vec_bool, &[]).unwrap();
-        let d = parse_value("", &vec_u128, &[]).unwrap();
-
-        let words = serialize_to_risc0(
-            0,
-            &[
-                (&vec_u64, &a),
-                (&vec_u128, &b),
-                (&vec_bool, &c),
-                (&vec_u128, &d),
-            ],
-        )
-        .unwrap();
-
-        let instruction: TestInstruction =
-            TestInstruction::deserialize(&mut Deserializer::new(words.as_ref()))
-                .expect("deserialization must succeed");
+        let hex = "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20";
+        let payload = encode_one(&ty, hex);
 
         assert_eq!(
-            instruction,
-            TestInstruction::Vecs {
-                a: vec![1, u64::MAX],
-                b: vec![300, 700, u128::MAX],
-                c: vec![true, false],
-                d: vec![],
+            payload.len(),
+            32,
+            "a fixed array is its elements, nothing else"
+        );
+        let decoded = <[u8; 32]>::try_from_slice(&payload).unwrap();
+        assert_eq!(decoded[0], 0x01);
+        assert_eq!(decoded[31], 0x20);
+    }
+
+    #[test]
+    fn vec_carries_a_u32_length_prefix() {
+        let ty = IdlType::Vec {
+            vec: Box::new(prim("u8")),
+        };
+        let val = ParsedValue::ByteArray(vec![0x3b, 0x50, 0x9c, 0x40]);
+        let bytes = serialize_to_borsh(0, &[(&ty, &val)]).expect("encodes");
+        let payload = &bytes[1..];
+
+        assert_eq!(&payload[..4], &4u32.to_le_bytes(), "u32 length leads");
+        assert_eq!(payload.len(), 8, "4-byte prefix + 4 bytes");
+        assert_eq!(
+            Vec::<u8>::try_from_slice(payload).unwrap(),
+            vec![0x3b, 0x50, 0x9c, 0x40]
+        );
+    }
+
+    #[test]
+    fn empty_vec_is_a_zero_length_prefix() {
+        let ty = IdlType::Vec {
+            vec: Box::new(prim("u128")),
+        };
+        let payload = encode_one(&ty, "");
+        assert_eq!(payload, 0u32.to_le_bytes().to_vec());
+        assert!(Vec::<u128>::try_from_slice(&payload).unwrap().is_empty());
+    }
+
+    #[test]
+    fn several_fields_concatenate_in_order() {
+        let u64_ty = prim("u64");
+        let u32_ty = prim("u32");
+        let a = parse_value("1", &u64_ty, &[]).unwrap();
+        let b = parse_value("2", &u32_ty, &[]).unwrap();
+
+        let bytes = serialize_to_borsh(1, &[(&u64_ty, &a), (&u32_ty, &b)]).unwrap();
+
+        let mut expected = vec![1u8];
+        expected.extend_from_slice(&1u64.to_le_bytes());
+        expected.extend_from_slice(&2u32.to_le_bytes());
+        assert_eq!(
+            bytes, expected,
+            "tag, then each field in declaration order, no padding"
+        );
+    }
+
+    /// The shape a guest actually sees: a derived enum decoding the bytes we sent.
+    #[test]
+    fn decodes_as_the_guest_instruction_enum_would() {
+        #[derive(borsh::BorshDeserialize, Debug, PartialEq)]
+        enum Instruction {
+            Noop,
+            Transfer { amount: u128, memo: String },
+        }
+
+        let amount_ty = prim("u128");
+        let memo_ty = prim("string");
+        let amount = parse_value("250", &amount_ty, &[]).unwrap();
+        let memo = parse_value("rent", &memo_ty, &[]).unwrap();
+
+        let bytes = serialize_to_borsh(1, &[(&amount_ty, &amount), (&memo_ty, &memo)]).unwrap();
+
+        assert_eq!(
+            Instruction::try_from_slice(&bytes).unwrap(),
+            Instruction::Transfer {
+                amount: 250,
+                memo: "rent".to_string()
             }
         );
     }

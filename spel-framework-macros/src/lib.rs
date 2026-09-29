@@ -34,10 +34,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
 use sha2::{Digest, Sha256};
 use syn::{
-    parse::Parser,
-    parse_macro_input,
-    visit_mut::{self, VisitMut},
-    Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
+    parse::Parser, parse_macro_input, Attribute, FnArg, Ident, ItemFn, ItemMod, Pat, PatType, Type,
 };
 
 mod account_types;
@@ -90,7 +87,7 @@ impl ProgramConfig {
 ///
 /// This macro:
 /// 1. Finds all `#[instruction]` functions in the module
-/// 2. Generates a serde-serializable `Instruction` enum
+/// 2. Generates a Borsh-serializable `Instruction` enum
 /// 3. Generates the `fn main()` with read/dispatch/write boilerplate
 /// 4. Generates account validation code per instruction
 /// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
@@ -347,7 +344,30 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     } else {
         let enum_variants = generate_enum_variants(&instructions);
         quote! {
-            #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+            // Borsh is the instruction wire format since LEZ v0.2.5
+            // (`read_lee_call` deserializes it), and deliberately the only encoding
+            // derived here. Deriving serde as well would make this a type that accepts
+            // either encoder, so a stale `risc0_zkvm::serde::to_vec(&instruction)` still
+            // compiles and still produces bytes the runtime rejects -- silently, since
+            // nothing in the signature distinguishes the wire format from tooling. With
+            // no serde impl that is a compile error. Nothing consumed it: `spel-cli`
+            // encodes Borsh straight from the IDL (`serialize_to_borsh`), IDL generation
+            // parses guest source, and the runtime IDL path deserializes the framework's
+            // own `IdlAccountType`/`IdlTypeDef`. Dropping it also means a guest no longer
+            // needs a direct `serde` dependency just to satisfy a derive.
+            //
+            // Borsh encodes the variant as a leading tag byte, so variants are
+            // append-only: inserting one shifts every existing encoding.
+            #[derive(
+                Debug,
+                Clone,
+                spel_framework::borsh::BorshSerialize,
+                spel_framework::borsh::BorshDeserialize,
+            )]
+            // borsh's derive resolves `borsh` from the consumer's Cargo.toml, so point it
+            // at the framework's re-export — a program needs no borsh dependency of its own,
+            // and cannot drift to a version lee_core doesn't speak.
+            #[borsh(crate = "spel_framework::borsh")]
             pub enum Instruction {
                 #(#enum_variants),*
             }
@@ -363,18 +383,28 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     // Generate validation functions
     let validation_fns = generate_validation(&instructions);
 
-    // Generate per-instruction __claims_*() functions for auto-claim
-    let claim_fns = generate_claim_fns(&instructions);
-
     // Generate main function.
     // `pub fn main` (not just `fn main`) is required so the zkVM linker can find the entry point
     // when this crate is compiled as a guest binary dependency.
     let main_fn = quote! {
         pub fn main() {
-            // Read inputs from zkVM host
-            let (nssa_core::program::ProgramInput { self_program_id, caller_program_id, pre_states, instruction }, instruction_words)
-                = nssa_core::program::read_lee_inputs::<Instruction>();
-            let pre_states_clone = pre_states.clone();
+            // Read this invocation from the zkVM host.
+            //
+            // A call kind this build doesn't implement is a no-op, not a rejection:
+            // `respond_unsupported_call` emits the diagnostic event and exits, so a
+            // program deployed today survives a call kind introduced later.
+            let __call = nssa_core::program::read_lee_call::<Instruction>();
+            let nssa_core::program::ProgramCall::Execute(
+                nssa_core::program::ProgramInput {
+                    self_account_id,
+                    caller_account_id,
+                    pre_states,
+                    instruction,
+                },
+                instruction_data,
+            ) = __call else {
+                nssa_core::program::respond_unsupported_call(__call);
+            };
 
             // Dispatch to instruction handler
             let result: Result<
@@ -391,46 +421,27 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
                     panic!("Program error [{}]: {}", e.error_code(), e);
                 }
             };
-            let post_states = parts.post_states;
+            let state_diffs = parts.state_diffs;
             let chained_calls = parts.chained_calls;
             let block_validity_window = parts.block_validity_window;
             let timestamp_validity_window = parts.timestamp_validity_window;
 
-            // Filter out non-program-owned, non-default-state accounts from the output.
+            // Every declared account is reported, untouched ones included.
             //
-            // LEZ validate_execution rule 7: if post.program_owner == DEFAULT_PROGRAM_ID
-            // and pre.account != Account::default(), validation fails. This would happen
-            // for signer accounts (e.g., proposer/executor) whose nonce has been incremented
-            // by a prior transaction — they are not owned by the program and must not be
-            // returned in the program's post-states.
-            //
-            // We drop any (pre, post) pair where:
-            //   - pre.program_owner == DEFAULT_PROGRAM_ID (not owned by this program), AND
-            //   - pre.account != Account::default() (has non-trivial state), AND
-            //   - post has no claim (init accounts are fine since their pre == default)
-            let (filtered_pre, filtered_post): (
-                Vec<nssa_core::account::AccountWithMetadata>,
-                Vec<nssa_core::program::AccountPostState>,
-            ) = pre_states_clone
-                .into_iter()
-                .zip(post_states.into_iter())
-                .filter(|(pre, post)| {
-                    let is_default_owner =
-                        pre.account.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID;
-                    let pre_is_default =
-                        pre.account == nssa_core::account::Account::default();
-                    let has_claim = post.required_claim().is_some();
-                    !is_default_owner || pre_is_default || has_claim
-                })
-                .unzip();
+            // Up to v0.2.4 this dropped any (pre, post) pair for an account the program
+            // neither owned nor claimed, to satisfy a `validate_execution` rule that
+            // rejected a non-default account returned still default-owned. v0.2.5 removed
+            // that rule and added its opposite: an account the transaction declared but
+            // the output omits fails with `DeclaredAccountMissingFromOutput`. So the
+            // handler's diffs go out as-is — an unchanged account belongs in the output as
+            // `AccountStateDiff::unchanged`, never by being filtered away.
 
             // Write outputs to zkVM host
             nssa_core::program::ProgramOutput::new(
-                self_program_id,
-                caller_program_id,
-                instruction_words,
-                filtered_pre,
-                filtered_post,
+                self_account_id,
+                caller_account_id,
+                instruction_data,
+                state_diffs,
             )
             .with_chained_calls(chained_calls)
             .with_block_validity_window(block_validity_window)
@@ -607,8 +618,6 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
             #(#handler_fns)*
 
             #(#validation_fns)*
-
-            #(#claim_fns)*
         }
 
         // IDL generation (available at host-side for tooling)
@@ -1038,12 +1047,13 @@ fn generate_match_arms(
             let call_args: Vec<TokenStream2> = {
                 let mut args: Vec<TokenStream2> = Vec::new();
                 // Context is always first if present (enforced by parse_instruction).
-                // caller_program_id is Option<ProgramId> from ProgramInput; default to zeroed ID.
+                // caller_account_id is Option<AccountId> from ProgramInput; a top-level call
+                // has no caller, which reads as the default (all-zero) program owner.
                 if ix.has_context {
                     args.push(quote! {
                         spel_framework::context::ProgramContext::new(
-                            self_program_id,
-                            caller_program_id.unwrap_or(nssa_core::program::DEFAULT_PROGRAM_ID)
+                            self_account_id,
+                            caller_account_id.unwrap_or(nssa_core::program::DEFAULT_PROGRAM_OWNER)
                         )
                     });
                 }
@@ -1142,8 +1152,8 @@ fn generate_match_arms(
                         __all_accounts.extend(#rest_ref.clone());
                         #mod_name::#validate_fn_name(
                             &__all_accounts,
-                            &self_program_id,
-                            &instruction_words,
+                            &self_account_id,
+                            &instruction_data,
                             #(#all_extra_args),*
                         ).expect("account validation failed");
                     }
@@ -1159,8 +1169,8 @@ fn generate_match_arms(
                     quote! {
                         #mod_name::#validate_fn_name(
                             &[#(#account_refs.clone()),*],
-                            &self_program_id,
-                            &instruction_words,
+                            &self_account_id,
+                            &instruction_data,
                             #(#all_extra_args),*
                         ).expect("account validation failed");
                     }
@@ -1184,267 +1194,6 @@ fn generate_match_arms(
         .collect()
 }
 
-// ─── SpelOutput::execute() auto-claim transformer ──────────────────────
-
-/// Walks a handler function body and rewrites `SpelOutput::execute(...)` calls:
-///
-/// - **Fixed accounts** (`vec![a, b]`):
-///   → `SpelOutput::execute_with_claims(&[a.account.clone(), ...], &__claims_fn(...), calls)`
-///
-/// - **Dynamic accounts** (any expression, for instructions with `Vec<AccountWithMetadata>`):
-///   → `{ let __accs = accounts_expr; let __extracted = ...; SpelOutput::execute_with_claims(&__extracted, &__claims_fn(__accs.len() - NUM_FIXED, ...), calls) }`
-///   The block binds accounts_expr once to avoid double evaluation.
-struct ExecuteTransformer<'a> {
-    accounts: &'a [AccountParam],
-    fn_name: &'a Ident,
-    /// Injected param names: their post-states are prepended to the
-    /// execute output since the handler body does not know them.
-    injected: &'a [String],
-}
-
-impl<'a> ExecuteTransformer<'a> {
-    fn has_rest(&self) -> bool {
-        self.accounts.iter().any(|a| a.is_rest)
-    }
-
-    fn num_fixed(&self) -> usize {
-        self.accounts.iter().filter(|a| !a.is_rest).count()
-    }
-
-    /// Collect arg seed values as function call arguments for __claims_* functions.
-    /// For each unique PdaSeedDef::Arg across all accounts, generates: &arg_name
-    fn arg_seed_args(&self) -> Vec<TokenStream2> {
-        let mut names: Vec<String> = Vec::new();
-        for acc in self.accounts {
-            for seed in &acc.constraints.pda_seeds {
-                if let PdaSeedDef::Arg(name) = seed {
-                    if !names.contains(name) {
-                        names.push(name.clone());
-                    }
-                }
-            }
-        }
-        names
-            .iter()
-            .map(|name| {
-                let ident = format_ident!("{}", name);
-                quote! { &#ident }
-            })
-            .collect()
-    }
-
-    /// Collect account-seed arguments for the vec![ident, ...] pattern.
-    /// For each unique PdaSeedDef::Account, generates: &*ident.account_id.value()
-    fn account_seed_args_from_idents(&self, account_idents: &[Ident]) -> Vec<TokenStream2> {
-        let mut seen: Vec<String> = Vec::new();
-        let mut result = Vec::new();
-        for acc in self.accounts {
-            for seed in &acc.constraints.pda_seeds {
-                if let PdaSeedDef::Account(path) = seed {
-                    let name = path.split('.').next().unwrap_or(path.as_str()).to_string();
-                    if !seen.contains(&name) {
-                        seen.push(name.clone());
-                        if let Some(ident) = account_idents.iter().find(|i| i.to_string() == name) {
-                            result.push(quote! { &*#ident.account_id.value() });
-                        } else if self.injected.iter().any(|n| n == &name) {
-                            let ident = format_ident!("{}", name);
-                            result.push(quote! { &*#ident.account_id.value() });
-                        }
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    /// Collect account-seed arguments for the rest-accounts branch.
-    /// `binding` is the local variable name holding Vec<AccountWithMetadata>.
-    /// For each unique PdaSeedDef::Account, generates: &*binding[idx].account_id.value()
-    fn account_seed_args_for_rest(&self, binding: &TokenStream2) -> Vec<TokenStream2> {
-        let mut seen: Vec<String> = Vec::new();
-        let mut result = Vec::new();
-        for acc in self.accounts {
-            for seed in &acc.constraints.pda_seeds {
-                if let PdaSeedDef::Account(path) = seed {
-                    let name = path.split('.').next().unwrap_or(path.as_str()).to_string();
-                    if !seen.contains(&name) {
-                        seen.push(name.clone());
-                        let idx = self
-                            .accounts
-                            .iter()
-                            .position(|a| a.name == name)
-                            .unwrap_or(0);
-                        result.push(quote! { &*#binding[#idx].account_id.value() });
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    /// Post-state clones for the injected params, in accounts order.
-    /// Injected params never appear in a consumer-authored accounts
-    /// expression, the consumer does not know they exist.
-    fn injected_clones(&self) -> Vec<TokenStream2> {
-        self.accounts
-            .iter()
-            .filter(|a| self.injected.iter().any(|n| a.name == *n))
-            .map(|a| {
-                let ident = &a.name;
-                quote! { #ident.account.clone() }
-            })
-            .collect()
-    }
-}
-
-impl<'a> VisitMut for ExecuteTransformer<'a> {
-    fn visit_expr_mut(&mut self, expr: &mut syn::Expr) {
-        // Recurse into sub-expressions first
-        visit_mut::visit_expr_mut(self, expr);
-
-        // Clone what we need before mutably borrowing expr below
-        let (accounts_arg, chained_arg) = {
-            let call = if let syn::Expr::Call(c) = &*expr {
-                c
-            } else {
-                return;
-            };
-            if !is_spel_output_execute(&call.func) {
-                return;
-            }
-            let mut args_iter = call.args.iter();
-            let (Some(arg0), Some(arg1), None) =
-                (args_iter.next(), args_iter.next(), args_iter.next())
-            else {
-                return;
-            };
-            (arg0.clone(), arg1.clone())
-        };
-
-        let claims_fn = format_ident!("__claims_{}", self.fn_name);
-        let arg_seed_args: Vec<TokenStream2> = self.arg_seed_args();
-
-        // Try vec![ident, ...] pattern first (fixed-size accounts, most common case)
-        if let Some(account_idents) = extract_vec_macro_idents(&accounts_arg) {
-            // Verify all account names are known before transforming
-            let mut account_clones: Vec<TokenStream2> = Vec::new();
-            // Injected params the body does not know about: pass their
-            // post-state through unchanged, in declaration order (they sit
-            // at the front of self.accounts, keeping claims alignment).
-            for acc in self.accounts {
-                if self.injected.iter().any(|n| acc.name == *n)
-                    && !account_idents.contains(&acc.name)
-                {
-                    let ident = &acc.name;
-                    account_clones.push(quote! { #ident.account.clone() });
-                }
-            }
-            for ident in &account_idents {
-                if !self.accounts.iter().any(|a| a.name == *ident) {
-                    return; // unknown account — don't transform
-                }
-                account_clones.push(quote! { #ident.account.clone() });
-            }
-            let account_seed_args = self.account_seed_args_from_idents(&account_idents);
-            let all_seed_args: Vec<TokenStream2> =
-                arg_seed_args.into_iter().chain(account_seed_args).collect();
-            if let syn::Expr::Call(call) = expr {
-                call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
-                call.args.clear();
-                call.args
-                    .push(syn::parse_quote! { &[#(#account_clones),*] });
-                call.args
-                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
-                call.args.push(syn::parse_quote! { #chained_arg });
-            }
-            return;
-        }
-
-        let injected_clones: Vec<TokenStream2> = self.injected_clones();
-        // For instructions with Vec<AccountWithMetadata> (rest accounts): use a block to bind
-        // accounts_expr exactly once, fixing double evaluation and allowing account-seed lookup.
-        if self.has_rest() {
-            // ix.accounts counts injected params as fixed, but the
-            // consumer's vec does not contain them: subtract so the claims
-            // fn sees only the declared fixed params.
-            let num_fixed = self.num_fixed() - injected_clones.len();
-            let accs = quote! { __accs };
-            let account_seed_args = self.account_seed_args_for_rest(&accs);
-            let all_seed_args: Vec<TokenStream2> =
-                arg_seed_args.into_iter().chain(account_seed_args).collect();
-            *expr = syn::parse_quote! {
-                {
-                    let __accs: ::std::vec::Vec<_> = #accounts_arg;
-                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
-                    __all.extend(__accs.iter().map(|__a| __a.account.clone()));
-                    SpelOutput::execute_with_claims(
-                        &__all,
-                        &#claims_fn(__accs.len() - #num_fixed #(, #all_seed_args)*),
-                        #chained_arg
-                    )
-                }
-            };
-            return;
-        }
-
-        // Fixed-account instruction with an arbitrary accounts expression (e.g. a Vec<Account>
-        // variable built by the handler). The vec![name, ...] pattern above handles the common
-        // case; this catches anything else. Note: account(...) PDA seeds cannot be resolved here
-        // because AccountWithMetadata is not available — use vec![...] for those instructions.
-        //
-        // Injected params never appear in a consumer-authored expression, the
-        // consumer does not know they exist. Prepend their post-states here,
-        // same as the rest-accounts branch, so the claims stay aligned.
-        let all_seed_args: Vec<TokenStream2> = arg_seed_args;
-        if injected_clones.is_empty() {
-            if let syn::Expr::Call(call) = expr {
-                call.func = syn::parse_quote! { SpelOutput::execute_with_claims };
-                call.args.clear();
-                call.args.push(syn::parse_quote! { &#accounts_arg });
-                call.args
-                    .push(syn::parse_quote! { &#claims_fn(#(#all_seed_args),*) });
-                call.args.push(syn::parse_quote! { #chained_arg });
-            }
-        } else {
-            *expr = syn::parse_quote! {
-                {
-                    let mut __all: ::std::vec::Vec<_> = ::std::vec![#(#injected_clones),*];
-                    __all.extend(#accounts_arg);
-                    SpelOutput::execute_with_claims(
-                        &__all,
-                        &#claims_fn(#(#all_seed_args),*),
-                        #chained_arg
-                    )
-                }
-            };
-        }
-    }
-}
-
-fn is_spel_output_execute(func: &syn::Expr) -> bool {
-    if let syn::Expr::Path(ep) = func {
-        let mut segments = ep.path.segments.iter();
-        if let (Some(first), Some(second), None) =
-            (segments.next(), segments.next(), segments.next())
-        {
-            return first.ident == "SpelOutput" && second.ident == "execute";
-        }
-    }
-    false
-}
-
-fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
-    if let syn::Expr::Macro(em) = expr {
-        if em.mac.path.is_ident("vec") {
-            let parser = syn::punctuated::Punctuated::<Ident, syn::Token![,]>::parse_terminated;
-            if let Ok(idents) = parser.parse2(em.mac.tokens.clone()) {
-                return Some(idents.into_iter().collect());
-            }
-        }
-    }
-    None
-}
-
 /// Drop the `#[account(...)]` helper attributes from a function's parameters.
 ///
 /// The attribute is inert syntax that only the framework reads, so whoever
@@ -1459,6 +1208,12 @@ fn strip_account_attrs(func: &mut ItemFn) {
     }
 }
 
+/// Emit each handler as an ordinary function.
+///
+/// Up to LEZ v0.2.4 this also rewrote every `SpelOutput::execute(...)` in the body
+/// into `execute_with_claims(...)`, threading the `#[account(...)]`-derived
+/// `AutoClaim` values in behind the author's back. v0.2.5 removed claims entirely,
+/// so the call the author wrote is the call that runs.
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -1467,83 +1222,9 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
             strip_account_attrs(&mut func);
-            // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
-            let mut transformer = ExecuteTransformer {
-                accounts: &ix.accounts,
-                fn_name: &ix.fn_name,
-                injected: &ix.injected,
-            };
-            transformer.visit_item_fn_mut(&mut func);
             quote! { #func }
         })
         .collect()
-}
-
-/// Generate the `AutoClaim` token stream for a single account based on its constraints.
-///
-/// For `PdaSeedDef::Account`, the generated expression references a `__account_seed_{name}: &[u8;32]`
-/// parameter that the caller (claims function) receives at runtime, matching the actual account ID
-/// used by the validation function. This is the correct counterpart to `generate_validation`.
-fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
-    if acc.constraints.init && !acc.constraints.pda_seeds.is_empty() {
-        let seed_bytes: Vec<TokenStream2> = acc
-            .constraints
-            .pda_seeds
-            .iter()
-            .map(|seed| {
-                match seed {
-                    PdaSeedDef::Const(v) => {
-                        let val = v.clone();
-                        quote! { &spel_framework::pda::seed_from_str(#val) }
-                    },
-                    PdaSeedDef::Account(path) => {
-                        // Use a runtime parameter holding the actual account ID bytes,
-                        // matching how generate_validation resolves account seeds.
-                        let account_name = path.split('.').next().unwrap_or(path.as_str());
-                        let ident = format_ident!("__account_seed_{}", account_name);
-                        quote! { #ident } // already &[u8; 32]
-                    },
-                    PdaSeedDef::Arg(name) => {
-                        let ident = format_ident!("__pda_arg_{}", name);
-                        quote! { &spel_framework::pda::ToSeed::to_seed(#ident) }
-                    },
-                }
-            })
-            .collect();
-        if let [seed] = seed_bytes.as_slice() {
-            quote! {
-                spel_framework::spel_output::AutoClaim::Claimed(
-                    nssa_core::program::Claim::Pda(
-                        nssa_core::program::PdaSeed::new(*#seed)
-                    )
-                )
-            }
-        } else {
-            quote! {
-                spel_framework::spel_output::AutoClaim::pda_from_seeds(
-                    &[#(#seed_bytes),*]
-                )
-            }
-        }
-    } else if acc.constraints.init {
-        quote! {
-            spel_framework::spel_output::AutoClaim::Claimed(
-                nssa_core::program::Claim::Authorized
-            )
-        }
-    } else if acc.constraints.signer {
-        // A signer is a plain user account: default-owned until some program claims
-        // it. LEZ rule 7 forbids returning a non-default account that is still
-        // default-owned, so claim it while it is still default — exactly what LEZ's
-        // own `hello_world_with_authorization` does via `new_claimed_if_default`.
-        quote! {
-            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(
-                nssa_core::program::Claim::Authorized
-            )
-        }
-    } else {
-        quote! { spel_framework::spel_output::AutoClaim::None }
-    }
 }
 
 /// Collect the unique PDA arg seed parameters for a given instruction as typed
@@ -1572,97 +1253,6 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
                 quote! { #ident: &#ty }
             } else {
                 quote! { #ident: &[u8; 32] }
-            }
-        })
-        .collect()
-}
-
-/// Collect the unique PDA account seed parameters for a given instruction as typed
-/// `__account_seed_<name>: &[u8; 32]` token streams.
-fn pda_account_seed_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
-    let mut names: Vec<String> = Vec::new();
-    for acc in &ix.accounts {
-        for seed in &acc.constraints.pda_seeds {
-            if let PdaSeedDef::Account(path) = seed {
-                let name = path.split('.').next().unwrap_or(path.as_str()).to_string();
-                if !names.contains(&name) {
-                    names.push(name);
-                }
-            }
-        }
-    }
-    names
-        .iter()
-        .map(|name| {
-            let ident = format_ident!("__account_seed_{}", name);
-            quote! { #ident: &[u8; 32] }
-        })
-        .collect()
-}
-
-/// Generate per-instruction `__claims_{fn_name}()` functions that return
-/// `Vec<AutoClaim>` based on account constraints. These are used by
-/// `SpelOutput::execute_with_claims()` so users don't have to manually
-/// choose `new()` vs `new_claimed()`.
-///
-/// Auto-claim rules:
-/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
-/// - `#[account(init, signer)]`    → `Claim::Authorized`
-/// - `#[account(init)]`            → `Claim::Authorized`
-/// - `#[account(mut)]`             → `Claim::None`
-/// - `#[account]`                  → `Claim::None`
-///
-/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
-/// generated function takes a `rest_count: usize` parameter and repeats
-/// the rest account's claim that many times.
-///
-/// For `account(...)` PDA seeds, the generated function takes an additional
-/// `__account_seed_{name}: &[u8; 32]` parameter per referenced account, so the
-/// caller can pass the actual runtime account ID (matching what validation does).
-fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
-    instructions
-        .iter()
-        .map(|ix| {
-            let fn_name = format_ident!("__claims_{}", ix.fn_name);
-            let arg_params = pda_arg_params(ix);
-            let account_seed_params = pda_account_seed_params(ix);
-            let all_params: Vec<TokenStream2> = arg_params.into_iter()
-                .chain(account_seed_params)
-                .collect();
-
-            if let Some(rest_acc) = ix.accounts.iter().find(|a| a.is_rest) {
-                let fixed_claims: Vec<TokenStream2> = ix
-                    .accounts
-                    .iter()
-                    .filter(|a| !a.is_rest)
-                    .map(generate_single_claim_expr)
-                    .collect();
-
-                let rest_claim = generate_single_claim_expr(rest_acc);
-
-                quote! {
-                    #[allow(dead_code)]
-                    pub fn #fn_name(rest_count: usize, #(#all_params),*) -> Vec<spel_framework::spel_output::AutoClaim> {
-                        let mut claims = vec![#(#fixed_claims),*];
-                        claims.extend(
-                            std::iter::repeat(#rest_claim).take(rest_count)
-                        );
-                        claims
-                    }
-                }
-            } else {
-                let claim_exprs: Vec<TokenStream2> = ix
-                    .accounts
-                    .iter()
-                    .map(generate_single_claim_expr)
-                    .collect();
-
-                quote! {
-                    #[allow(dead_code)]
-                    pub fn #fn_name(#(#all_params),*) -> Vec<spel_framework::spel_output::AutoClaim> {
-                        vec![#(#claim_exprs),*]
-                    }
-                }
             }
         })
         .collect()
@@ -1720,7 +1310,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .map(|(i, acc, owner_expr)| {
                     let idx = i;
                     let acc_name = acc.name.to_string();
-                    // self_program_id is passed as &ProgramId; deref for comparison.
+                    // self_account_id is passed as &AccountId; deref for comparison.
                     quote! {
                         if accounts[#idx].account.program_owner != *#owner_expr {
                             return Err(spel_framework::error::SpelError::AccountOwnerMismatch {
@@ -1830,7 +1420,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                             {
                                 #(#seed_exprs)*
                                 let __expected_id = spel_framework::pda::compute_private_pda(
-                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param,
+                                    self_account_id, &[#(#seed_refs),*], #npk_param, #vpk_param,
                                     spel_framework::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER,
                                 );
                                 if accounts[#idx].account_id != __expected_id {
@@ -1847,7 +1437,7 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                             {
                                 #(#seed_exprs)*
                                 let __expected_id = spel_framework::pda::compute_pda(
-                                    self_program_id, &[#(#seed_refs),*]
+                                    self_account_id, &[#(#seed_refs),*]
                                 );
                                 if accounts[#idx].account_id != __expected_id {
                                     return Err(spel_framework::error::SpelError::PdaMismatch {
@@ -1876,10 +1466,10 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 #[allow(dead_code)]
                 pub fn #fn_name(
                     accounts: &[nssa_core::account::AccountWithMetadata],
-                    self_program_id: &nssa_core::program::ProgramId,
+                    self_account_id: &nssa_core::account::AccountId,
                     // Retained for future use (e.g. instruction-level replay protection or
                     // content-based dispatch). Not used in validation logic today.
-                    _instruction_words: &nssa_core::program::InstructionData,
+                    _instruction_data: &nssa_core::program::InstructionData,
                     #(#all_validate_params),*
                 ) -> Result<(), spel_framework::error::SpelError> {
                     // Owner checks first — fail fast if account isn't owned by this program.
@@ -2119,8 +1709,8 @@ fn generate_idl_fn(
                     let owner_literal = if let Some(ref owner) = acc.constraints.owner {
                         if let syn::Expr::Path(ep) = owner {
                             if let Some(seg) = ep.path.segments.last() {
-                                if seg.ident == "self_program_id" {
-                                    quote! { Some("self_program_id".to_string()) }
+                                if seg.ident == "self_account_id" {
+                                    quote! { Some("self_account_id".to_string()) }
                                 } else {
                                     let s = format!("{}", quote!(#owner));
                                     quote! { Some(#s.to_string()) }
@@ -2821,122 +2411,6 @@ pub mod token {
         assert!(
             output.contains("VaultConfig"),
             "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
-        );
-    }
-
-    /// A compound-seed account whose seed source is an auto-injected param
-    /// (not present in the user's `vec![...]`) must still produce the
-    /// `&*<name>.account_id.value()` seed arg — the injected param is in
-    /// scope in the fn body just like a user-listed account.
-    #[test]
-    fn account_seed_args_from_idents_falls_back_to_injected_accounts() {
-        let accounts = vec![AccountParam {
-            name: format_ident!("freeze_account"),
-            constraints: AccountConstraints {
-                pda_seeds: vec![
-                    PdaSeedDef::Const("frozen".into()),
-                    PdaSeedDef::Account("caller".into()),
-                ],
-                ..Default::default()
-            },
-            is_rest: false,
-        }];
-        let fn_name = format_ident!("update_value");
-        let injected = vec![
-            "freeze_config".to_string(),
-            "freeze_account".to_string(),
-            "caller".to_string(),
-        ];
-        let transformer = ExecuteTransformer {
-            accounts: &accounts,
-            fn_name: &fn_name,
-            injected: &injected,
-        };
-
-        let result = transformer.account_seed_args_from_idents(&[]);
-
-        assert_eq!(result.len(), 1);
-        assert_eq!(
-            result[0].to_string(),
-            quote! { &*caller.account_id.value() }.to_string()
-        );
-    }
-
-    // The claims fn counts every account param, injected ones included,
-    // so the fallback branch must prepend injected post-states to any
-    // consumer-authored accounts expression (e.g. vec![config.account]).
-    // Without the prepend the guest panics at execution with
-    // execute_with_claims: accounts.len() != claims.len().
-    #[test]
-    fn fallback_prepends_injected_post_states() {
-        let accounts = vec![
-            AccountParam {
-                name: format_ident!("caller"),
-                constraints: AccountConstraints {
-                    signer: true,
-                    ..Default::default()
-                },
-                is_rest: false,
-            },
-            AccountParam {
-                name: format_ident!("config"),
-                constraints: AccountConstraints::default(),
-                is_rest: false,
-            },
-        ];
-        let fn_name = format_ident!("update_value");
-        let injected = vec!["caller".to_string()];
-        let mut transformer = ExecuteTransformer {
-            accounts: &accounts,
-            fn_name: &fn_name,
-            injected: &injected,
-        };
-        let mut func: ItemFn = syn::parse_quote! {
-            pub fn update_value(
-                caller: AccountWithMetadata,
-                mut config: AccountWithMetadata,
-            ) -> SpelResult {
-                Ok(SpelOutput::execute(vec![config.account], vec![]))
-            }
-        };
-
-        transformer.visit_item_fn_mut(&mut func);
-
-        let out = quote! { #func }.to_string();
-        assert!(out.contains("execute_with_claims"), "{out}");
-        assert!(
-            out.contains("caller . account . clone ()"),
-            "the injected caller's post-state must be prepended: {out}"
-        );
-    }
-
-    #[test]
-    fn fallback_without_injection_passes_the_expression_through() {
-        let accounts = vec![AccountParam {
-            name: format_ident!("config"),
-            constraints: AccountConstraints::default(),
-            is_rest: false,
-        }];
-        let fn_name = format_ident!("update_value");
-        let injected: Vec<String> = Vec::new();
-        let mut transformer = ExecuteTransformer {
-            accounts: &accounts,
-            fn_name: &fn_name,
-            injected: &injected,
-        };
-        let mut func: ItemFn = syn::parse_quote! {
-            pub fn update_value(mut config: AccountWithMetadata) -> SpelResult {
-                Ok(SpelOutput::execute(vec![config.account], vec![]))
-            }
-        };
-
-        transformer.visit_item_fn_mut(&mut func);
-
-        let out = quote! { #func }.to_string();
-        assert!(out.contains("execute_with_claims"), "{out}");
-        assert!(
-            !out.contains("__all"),
-            "no injected params, the expression must pass through unwrapped: {out}"
         );
     }
 }

@@ -1,6 +1,7 @@
 //! `spel pda` regression tests against the real binary: IDL-mode routing and
 //! the private-PDA `--identifier` flag.
 
+use nssa_core::account::AccountId;
 use nssa_core::encryption::ViewingPublicKey;
 use nssa_core::program::PdaSeed;
 use nssa_core::NullifierPublicKey;
@@ -43,17 +44,17 @@ fn write_fixture_idl(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
-const PROGRAM_ID_HEX: &str = "abababababababababababababababababababababababababababababababab";
+const PROGRAM_ADDRESS_HEX: &str =
+    "abababababababababababababababababababababababababababababababab";
 const NPK_HEX: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 
-/// The fixture program id as the CLI decodes it: 32 hex bytes read as 8 little-endian u32s.
-fn fixture_program_id() -> [u32; 8] {
-    let bytes = hex::decode(PROGRAM_ID_HEX).expect("fixture program id is valid hex");
-    let words: Vec<u32> = bytes
-        .chunks_exact(4)
-        .map(|c| u32::from_le_bytes(c.try_into().expect("chunks_exact(4) yields 4 bytes")))
-        .collect();
-    words.try_into().expect("32 bytes make 8 words")
+/// The fixture program's account id as the CLI decodes it: 32 hex bytes.
+///
+/// A program is identified by its deployed header account since LEZ v0.2.5, so this
+/// is a plain 32-byte address rather than an image id packed into 8 u32 words.
+fn fixture_program_id() -> AccountId {
+    let bytes = hex::decode(PROGRAM_ADDRESS_HEX).expect("fixture program address is valid hex");
+    AccountId::new(bytes.try_into().expect("32 bytes"))
 }
 
 /// The IDL's const seed "vault", zero-padded to 32 bytes as the CLI does.
@@ -75,7 +76,7 @@ fn expected_private_vault(identifier: u128) -> String {
         .try_into()
         .expect("fixture npk is 32 bytes");
     let npk = NullifierPublicKey(npk_bytes);
-    nssa::AccountId::for_private_pda(
+    AccountId::for_private_pda(
         &program_id,
         &PdaSeed::new(seed),
         &npk,
@@ -90,7 +91,7 @@ fn private_pda_args<'a>(idl: &'a str, vpk_hex: &'a str, extra: &[&'a str]) -> Ve
         "--idl",
         idl,
         "--program",
-        PROGRAM_ID_HEX,
+        PROGRAM_ADDRESS_HEX,
         "pda",
         "private_vault",
         "--npk",
@@ -201,7 +202,7 @@ fn public_pda_refuses_identifier() {
         "--idl",
         idl.to_str().unwrap(),
         "--program",
-        PROGRAM_ID_HEX,
+        PROGRAM_ADDRESS_HEX,
         "pda",
         "public_vault",
         "--identifier",
@@ -218,7 +219,7 @@ fn public_pda_refuses_identifier() {
 fn expected_public_vault() -> String {
     let program_id = fixture_program_id();
     let seed = vault_seed();
-    nssa::AccountId::for_public_pda(&program_id, &PdaSeed::new(seed)).to_string()
+    AccountId::for_public_pda(&program_id, &PdaSeed::new(seed)).to_string()
 }
 
 // Half of #187 that stayed open: with `--idl` given, `--program <hex> pda <account>`
@@ -233,7 +234,7 @@ fn idl_given_routes_pda_to_idl_mode_not_raw() {
         "--idl",
         idl.to_str().unwrap(),
         "--program",
-        PROGRAM_ID_HEX,
+        PROGRAM_ADDRESS_HEX,
         "pda",
         "public_vault",
     ]);
@@ -251,7 +252,7 @@ fn no_idl_keeps_raw_pda_mode() {
     let dir = tempfile::tempdir().unwrap();
     let out = Command::new(env!("CARGO_BIN_EXE_spel"))
         .current_dir(dir.path())
-        .args(["--program", PROGRAM_ID_HEX, "pda", "vault"])
+        .args(["--program", PROGRAM_ADDRESS_HEX, "pda", "vault"])
         .output()
         .expect("failed to run spel binary");
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
@@ -330,18 +331,16 @@ fn seed_arg_named_identifier_keeps_its_meaning_on_public_pda() {
         "--idl",
         idl.to_str().unwrap(),
         "--program",
-        PROGRAM_ID_HEX,
+        PROGRAM_ADDRESS_HEX,
         "pda",
         "slot",
         "--identifier",
         "5",
     ]);
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    let expected = nssa::AccountId::for_public_pda(
-        &fixture_program_id(),
-        &PdaSeed::new(expected_slot_seed(5)),
-    )
-    .to_string();
+    let expected =
+        AccountId::for_public_pda(&fixture_program_id(), &PdaSeed::new(expected_slot_seed(5)))
+            .to_string();
     assert_eq!(
         stdout_of(&out),
         expected,
@@ -359,7 +358,7 @@ fn seed_arg_named_identifier_on_private_pda_uses_default_and_says_so() {
         "--idl",
         idl.to_str().unwrap(),
         "--program",
-        PROGRAM_ID_HEX,
+        PROGRAM_ADDRESS_HEX,
         "pda",
         "private_slot",
         "--npk",
@@ -371,7 +370,7 @@ fn seed_arg_named_identifier_on_private_pda_uses_default_and_says_so() {
     ]);
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
     let npk_bytes: [u8; 32] = hex::decode(NPK_HEX).unwrap().try_into().unwrap();
-    let expected = nssa::AccountId::for_private_pda(
+    let expected = AccountId::for_private_pda(
         &fixture_program_id(),
         &PdaSeed::new(expected_slot_seed(5)),
         &NullifierPublicKey(npk_bytes),

@@ -93,8 +93,15 @@ fn test_parse_and_generate() {
         .client_code
         .contains("pub fn compute_multisig_state_pda("));
 
-    // Correct endianness — in client's parse_program_id_hex
-    assert!(output.client_code.contains("from_le_bytes"));
+    // A program is addressed by its deployed account, parsed like any other 32-byte
+    // address rather than unpacked into little-endian words.
+    assert!(
+        output
+            .client_code
+            .contains("pub fn parse_program_id_hex(s: &str) -> Result<AccountId, String>"),
+        "program address parser should yield an AccountId: {}",
+        output.client_code
+    );
 }
 
 #[test]
@@ -279,7 +286,7 @@ fn test_pda_helpers_single_arg_seed() {
         "missing fn signature: {output}"
     );
     assert!(
-        output.contains("program_id: &ProgramId"),
+        output.contains("program_id: &AccountId"),
         "missing program_id param: {output}"
     );
     assert!(
@@ -651,7 +658,7 @@ fn test_standalone_pda_helpers() {
 
     // PDA helper is a standalone pub function (not a method)
     assert!(
-        code.contains("pub fn compute_multisig_state_pda(program_id: &ProgramId"),
+        code.contains("pub fn compute_multisig_state_pda(program_id: &AccountId"),
         "should generate standalone PDA helper with program_id parameter"
     );
 

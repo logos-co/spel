@@ -104,11 +104,12 @@ mod treasury {
 
     /// Delegate a mutation to another program instead of performing it directly.
     ///
-    /// This is the shape a program must use for accounts it does not own — LEZ
-    /// rule 5 only lets the *owning* program decrease a balance, and a chained
-    /// call runs with the callee as `executing_program_id`. The caller returns
-    /// the target unchanged and hands the mutation on, flagging the account
-    /// authorized so the callee inherits the authority.
+    /// This is the shape a program must use for accounts it does not own — a
+    /// balance decrease needs the account authorized, and a chained call runs with
+    /// the callee as the executing program. Since LEZ v0.2.5 the call names its
+    /// pre-states by `AccountId` rather than carrying them: the state machine
+    /// resolves them, and the callee inherits authority from the caller's own
+    /// authorized set rather than from a flag on a cloned pre-state.
     #[instruction]
     pub fn delegate_to_program(
         #[account(mut, pda = literal("treasury_state"))]
@@ -116,19 +117,17 @@ mod treasury {
         #[account(signer)]
         authority: AccountWithMetadata,
         target: AccountWithMetadata,
-        target_program_id: nssa_core::program::ProgramId,
+        target_program_account_id: AccountId,
     ) -> SpelResult {
-        let mut authorized_target = target.clone();
-        authorized_target.is_authorized = true;
-
         let call = nssa_core::program::ChainedCall {
-            program_id: target_program_id,
+            program_account_id: target_program_account_id,
             instruction_data: vec![],
-            pre_states: vec![authorized_target],
+            pre_state_ids: vec![target.account_id],
             pda_seeds: vec![],
         };
 
-        // `target` is returned untouched: this program never mutates it.
+        // `target` is returned unchanged: this program never mutates it, but every
+        // declared account must still appear in the output.
         Ok(SpelOutput::execute(
             vec![state, authority, target],
             vec![call],
@@ -163,16 +162,16 @@ mod treasury {
     }
 
     /// Initialize a holding account, validating the definition is owned by this program.
-    /// Exercises ProgramContext injection and #[account(owner = self_program_id)].
+    /// Exercises ProgramContext injection and #[account(owner = self_account_id)].
     #[instruction]
     pub fn initialize_holding(
         ctx: ProgramContext,
-        #[account(owner = self_program_id)]
+        #[account(owner = self_account_id)]
         definition: AccountWithMetadata,
         #[account(init, signer)]
         holding: AccountWithMetadata,
     ) -> SpelResult {
-        // ctx.self_program_id and ctx.caller_program_id are available here
+        // ctx.self_account_id and ctx.caller_account_id are available here
         let _ = ctx; // suppress unused warning in this example
         Ok(SpelOutput::execute(vec![definition, holding], vec![]))
     }
@@ -196,11 +195,11 @@ mod tests {
 
     /// The chained-call path through the macro: a program that delegates a
     /// mutation instead of performing it. Nothing else in the repo exercises a
-    /// non-empty `calls` vec, so this covers the `ExecuteTransformer` rewrite
-    /// and `SpelOutputParts` plumbing for that shape.
+    /// non-empty `calls` vec, so this covers `SpelOutputParts` plumbing for that
+    /// shape.
     #[test]
     fn delegate_emits_chained_call_to_the_target_program() {
-        let target_program: nssa_core::program::ProgramId = [42u32; 8];
+        let target_program = AccountId::new([42u8; 32]);
         let out = treasury::delegate_to_program(
             make_account(false),
             make_account(true),
@@ -211,67 +210,57 @@ mod tests {
 
         assert_eq!(out.chained_calls.len(), 1, "one chained call expected");
         assert_eq!(
-            out.chained_calls[0].program_id, target_program,
+            out.chained_calls[0].program_account_id, target_program,
             "the call must target the program the caller named"
         );
     }
 
     #[test]
-    fn delegate_authorizes_the_target_for_the_callee() {
-        // LEZ derives the callee's authority from accounts flagged authorized in
-        // the caller's output; without this the callee cannot touch the account.
+    fn delegate_names_the_target_as_a_pre_state_of_the_call() {
+        // Since v0.2.5 a chained call carries account *ids*, not pre-states: the
+        // state machine resolves them, and the callee's authority comes from the
+        // caller's own authorized set rather than a flag on a cloned pre-state.
+        // Naming the target here is what puts it in the callee's reach at all.
+        let target = make_account_with_id([7u8; 32], false);
         let out = treasury::delegate_to_program(
             make_account(false),
             make_account(true),
-            make_account(false),
-            [42u32; 8],
+            target.clone(),
+            AccountId::new([42u8; 32]),
         )
         .unwrap();
-        assert!(
-            out.chained_calls[0].pre_states[0].is_authorized,
-            "target must reach the callee authorized"
+        assert_eq!(
+            out.chained_calls[0].pre_state_ids,
+            vec![target.account_id],
+            "the call must name the target it delegates to"
         );
     }
 
     #[test]
     fn delegate_returns_the_target_unmodified() {
-        // The whole point of delegating: the caller must not mutate an account
-        // it does not own, or LEZ rejects the transaction (rules 5 and 6).
-        let target = make_account(false);
+        // The whole point of delegating: the caller must not mutate an account it
+        // does not own. It must still *report* it — v0.2.5 fails a transaction
+        // whose output omits a declared account.
+        let target = make_account_with_id([7u8; 32], false);
         let out = treasury::delegate_to_program(
             make_account(false),
             make_account(true),
             target.clone(),
-            [42u32; 8],
+            AccountId::new([42u8; 32]),
         )
         .unwrap();
-        assert_eq!(out.post_states.len(), 3);
+        assert_eq!(out.state_diffs.len(), 3, "every declared account is reported");
+        let target_diff = &out.state_diffs[2];
+        assert_eq!(target_diff.pre_state.account_id, target.account_id);
         assert_eq!(
-            out.post_states[2].account(),
-            &target.account,
-            "target must come back byte-identical"
+            target_diff.post_data, None,
+            "target must come back with no data change"
         );
-    }
-
-    #[test]
-    fn claims_delegate_to_program_does_not_claim_the_plain_target() {
-        // state: mut, not init  -> None
-        // authority: signer     -> ClaimedIfDefault (see LEZ rule 7)
-        // target: plain account -> None; claiming it would steal ownership
-        let claims = treasury::__claims_delegate_to_program();
-        assert_eq!(claims.len(), 3);
-        assert!(matches!(
-            &claims[0],
-            spel_framework::spel_output::AutoClaim::None
-        ));
-        assert!(matches!(
-            &claims[1],
-            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(_)
-        ));
-        assert!(matches!(
-            &claims[2],
-            spel_framework::spel_output::AutoClaim::None
-        ));
+        assert_eq!(
+            target_diff.post_balance_diff,
+            nssa_core::account::BalanceDiff::Add(0),
+            "target must come back with no balance change"
+        );
     }
 
     fn make_account(authorized: bool) -> AccountWithMetadata {
@@ -402,11 +391,11 @@ mod tests {
         }
     }
 
-    fn test_program_id() -> nssa_core::program::ProgramId {
-        [1u32; 8]
+    fn test_program_id() -> AccountId {
+        AccountId::new([1u8; 32])
     }
 
-    fn empty_ix_data() -> Vec<u32> {
+    fn empty_ix_data() -> Vec<u8> {
         vec![]
     }
 
@@ -665,53 +654,6 @@ mod tests {
         assert!(result.is_ok());
     }
 
-    /// Critical regression test: __claims_create_record must encode the *owner's account ID*
-    /// as the PDA seed, not a hash of the string "owner". Before the fix, Account PDA seeds
-    /// used seed_from_str(account_name) which is always wrong.
-    #[test]
-    fn claims_create_record_encodes_owner_account_id_as_seed() {
-        let owner_id = [42u8; 32];
-        let claims = treasury::__claims_create_record(&owner_id);
-
-        assert_eq!(claims.len(), 2);
-
-        // record (index 0): must be a PDA claim — not None, not Authorized
-        assert!(
-            matches!(&claims[0], spel_framework::spel_output::AutoClaim::Claimed(_)),
-            "record claim should be Claimed(Pda(...)), got: {:?}",
-            &claims[0]
-        );
-
-        // owner (index 1): signer → claimed only while still default-owned, so a
-        // used wallet account is never returned default-owned (LEZ rule 7).
-        assert!(
-            matches!(
-                &claims[1],
-                spel_framework::spel_output::AutoClaim::ClaimedIfDefault(
-                    nssa_core::program::Claim::Authorized
-                )
-            ),
-            "owner claim should be ClaimedIfDefault(Authorized), got: {:?}",
-            &claims[1]
-        );
-
-        // The encoded seed must be the owner_id bytes, not seed_from_str("owner").
-        let wrong_seed = spel_framework::pda::seed_from_str("owner");
-        let wrong_claim = spel_framework::spel_output::AutoClaim::Claimed(
-            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(wrong_seed))
-        );
-        assert_ne!(
-            claims[0], wrong_claim,
-            "claim must use the runtime account ID, not seed_from_str(\"owner\")"
-        );
-
-        // It must match the claim built from the actual owner_id bytes.
-        let correct_claim = spel_framework::spel_output::AutoClaim::Claimed(
-            nssa_core::program::Claim::Pda(nssa_core::program::PdaSeed::new(owner_id))
-        );
-        assert_eq!(claims[0], correct_claim);
-    }
-
     #[test]
     fn validate_create_record_accepts_correct_pda() {
         let program_id = test_program_id();
@@ -760,7 +702,7 @@ mod tests {
         let acc = make_account(true);
         let result = treasury::batch_update(acc, vec![], 0);
         assert!(result.is_ok());
-        assert_eq!(result.unwrap().post_states.len(), 1); // only authority
+        assert_eq!(result.unwrap().state_diffs.len(), 1); // only authority
     }
 
     #[test]
@@ -772,30 +714,14 @@ mod tests {
         assert_eq!(ix.args[0].name, "value");
     }
 
-    /// Tests the ExecuteTransformer rest-branch (arbitrary accounts expression):
-    /// __claims_batch_update(rest_count) must return 1 + rest_count claims.
+    /// The rest-accounts branch must report a diff per account, confirming the
+    /// accounts expression is evaluated and extracted correctly.
     #[test]
-    fn claims_batch_update_rest_count() {
-        let claims = treasury::__claims_batch_update(3);
-        assert_eq!(claims.len(), 4); // 1 fixed (authority) + 3 rest (targets)
-        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
-        assert!(matches!(
-            &claims[0],
-            spel_framework::spel_output::AutoClaim::ClaimedIfDefault(_)
-        ));
-        for claim in &claims[1..] {
-            assert!(matches!(claim, spel_framework::spel_output::AutoClaim::None)); // targets
-        }
-    }
-
-    /// Tests that the rest-branch ExecuteTransformer produces the correct number of
-    /// post_states, confirming the accounts expression is evaluated and extracted correctly.
-    #[test]
-    fn batch_update_post_states_match_account_count() {
+    fn batch_update_state_diffs_match_account_count() {
         let authority = make_account(true);
         let targets = vec![make_account(false), make_account(false)];
         let result = treasury::batch_update(authority, targets, 99).unwrap();
-        assert_eq!(result.post_states.len(), 3); // authority + 2 targets
+        assert_eq!(result.state_diffs.len(), 3); // authority + 2 targets
     }
 
     // ── init_private_account (private PDA) ──────────────────────────────────
@@ -894,22 +820,6 @@ mod tests {
     }
 
     #[test]
-    fn claims_init_private_account_emits_pda_claim() {
-        use spel_framework::spel_output::AutoClaim;
-        use nssa_core::program::Claim;
-        // __claims_* takes no npk — Claim::Pda encodes only the seed; the circuit
-        // handles the (seed, npk) binding for private PDAs independently.
-        let claims = treasury::__claims_init_private_account();
-        assert_eq!(claims.len(), 2);
-        assert!(
-            matches!(&claims[0], AutoClaim::Claimed(Claim::Pda(_))),
-            "private PDA account must emit Claim::Pda"
-        );
-        // authority is a signer → ClaimedIfDefault (see LEZ rule 7)
-        assert!(matches!(&claims[1], AutoClaim::ClaimedIfDefault(_)));
-    }
-
-    #[test]
     fn idl_init_private_account_marks_pda_as_private() {
         let idl = __program_idl();
         let ix = idl.instructions.iter()
@@ -929,7 +839,7 @@ mod tests {
 
     // ── ProgramContext + owner constraint tests ──────────────────────────────
 
-    fn make_account_with_owner(id: [u8; 32], owner: nssa_core::program::ProgramId, authorized: bool) -> AccountWithMetadata {
+    fn make_account_with_owner(id: [u8; 32], owner: AccountId, authorized: bool) -> AccountWithMetadata {
         let mut account = nssa_core::account::Account::default();
         account.program_owner = owner;
         AccountWithMetadata {
@@ -955,8 +865,8 @@ mod tests {
         let idl = __program_idl();
         let ix = idl.instructions.iter().find(|i| i.name == "initialize_holding")
             .expect("initialize_holding must be in IDL");
-        // definition account has #[account(owner = self_program_id)]
-        assert_eq!(ix.accounts[0].owner, Some("self_program_id".to_string()));
+        // definition account has #[account(owner = self_account_id)]
+        assert_eq!(ix.accounts[0].owner, Some("self_account_id".to_string()));
     }
 
     #[test]
@@ -971,8 +881,8 @@ mod tests {
 
     #[test]
     fn handler_initialize_holding_callable_with_context() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
-        let ctx = ProgramContext::new(program_id, [2u32; 8]);
+        let program_id = AccountId::new([1u8; 32]);
+        let ctx = ProgramContext::new(program_id, AccountId::new([2u8; 32]));
         let definition = make_account_with_owner([3u8; 32], program_id, false);
         let holding = make_account(true); // init + signer
         let result = treasury::initialize_holding(ctx, definition, holding);
@@ -981,8 +891,8 @@ mod tests {
 
     #[test]
     fn validate_initialize_holding_rejects_wrong_owner() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
-        let other_program: nssa_core::program::ProgramId = [99u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
+        let other_program = AccountId::new([99u8; 32]);
         let accounts = vec![
             make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
             make_account_with_id([4u8; 32], true),                     // holding: init + signer (empty)
@@ -999,8 +909,8 @@ mod tests {
     fn validate_initialize_holding_owner_check_runs_first() {
         // Owner check must fire before init/signer checks.
         // Even if holding is not empty and not authorized, owner error should surface first.
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
-        let other_program: nssa_core::program::ProgramId = [99u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
+        let other_program = AccountId::new([99u8; 32]);
         let mut bad_account = nssa_core::account::Account::default();
         bad_account.data = vec![1u8; 32].try_into().unwrap(); // not empty → init violation
         let accounts = vec![
@@ -1022,7 +932,7 @@ mod tests {
 
     #[test]
     fn validate_initialize_holding_accepts_correct_owner() {
-        let program_id: nssa_core::program::ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let accounts = vec![
             make_account_with_owner([3u8; 32], program_id, false), // definition — correct owner
             make_account_with_id([4u8; 32], true),                 // holding: init + signer (empty)

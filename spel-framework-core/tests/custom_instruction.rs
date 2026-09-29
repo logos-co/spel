@@ -3,7 +3,7 @@
 //! This tests the contract: programs can bring their own Instruction enum
 //! and the framework will use it instead of generating one.
 
-use nssa_core::program::AccountPostState;
+use nssa_core::program::AccountStateDiff;
 use spel_framework_core::error::SpelError;
 use spel_framework_core::types::SpelOutput;
 
@@ -46,7 +46,7 @@ mod simulated_external_instruction {
         if value == 0 {
             return Err(SpelError::custom(1, "value cannot be zero"));
         }
-        Ok(SpelOutput::execute(Vec::<AccountPostState>::new(), vec![]))
+        Ok(SpelOutput::execute(Vec::<AccountStateDiff>::new(), vec![]))
     }
 
     #[test]

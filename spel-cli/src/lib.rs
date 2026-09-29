@@ -54,6 +54,8 @@ pub async fn run() {
     let mut inspect_format: Option<String> = None;
     let mut extra_bins: HashMap<String, String> = HashMap::new();
     let mut co_signers: Vec<String> = Vec::new();
+    let mut fee_payer: Option<String> = None;
+    let mut gas_limit: Option<u64> = None;
     let mut export_path: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut used_separator = false;
@@ -145,6 +147,25 @@ pub async fn run() {
                 }
                 co_signers.push(args[i].clone());
             },
+            "--fee-payer" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --fee-payer requires an account id");
+                    process::exit(1);
+                }
+                fee_payer = Some(args[i].clone());
+            },
+            "--gas-limit" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --gas-limit requires a cycle count");
+                    process::exit(1);
+                }
+                gas_limit = Some(args[i].parse().unwrap_or_else(|_| {
+                    eprintln!("❌ --gas-limit '{}' is not a number", args[i]);
+                    process::exit(1);
+                }));
+            },
             "--export" => {
                 i += 1;
                 if i >= args.len() || args[i].starts_with('-') {
@@ -173,9 +194,13 @@ pub async fn run() {
         .and_then(|cwd| SpelConfig::discover(&cwd));
     let has_config = config.is_some();
 
-    // Resolve --program value: config name → 64-char hex → file path
+    // Resolve --program value: config name → program account address.
+    //
+    // Since LEZ v0.2.5 a program is identified by its deployed header account, which
+    // cannot be derived from the binary — so a path is no longer a way to name one.
+    // The binary is still resolved alongside, for the privacy-preserving path.
     let mut program_path: Option<String> = None;
-    let mut program_id_hex: Option<String> = None;
+    let mut program_address: Option<String> = None;
 
     if let Some(ref value) = program_ref {
         let resolved_from_config = config.as_ref().and_then(|(_, cfg)| {
@@ -187,21 +212,30 @@ pub async fn run() {
         });
 
         if let Some(prog) = resolved_from_config {
-            // Config name → set both IDL and binary from config entry
+            // Config name → address, IDL and binary from the config entry
             let config_dir = config.as_ref().unwrap().0.parent().unwrap();
             if idl_path.is_empty() {
                 if let Some(ref idl) = prog.idl {
                     idl_path = config_dir.join(idl).to_string_lossy().to_string();
                 }
             }
+            program_address = prog.address.clone();
             program_path = prog
                 .binary
                 .as_ref()
                 .map(|b| config_dir.join(b).to_string_lossy().to_string());
-        } else if is_hex_program_id(value) {
-            program_id_hex = Some(value.clone());
+        } else if std::path::Path::new(value).exists() {
+            eprintln!("❌ --program takes a program account address, not a binary path.");
+            eprintln!("   Since LEZ v0.2.5 a program is identified by the header account it was");
+            eprintln!("   deployed to, which is chosen at deploy time and is not derivable from");
+            eprintln!("   '{}'.", value);
+            eprintln!(
+                "   Pass --program <address>, or name a [programs.<name>] entry in spel.toml"
+            );
+            eprintln!("   carrying `address` (and `binary` for privacy-preserving calls).");
+            process::exit(1);
         } else {
-            program_path = Some(value.clone());
+            program_address = Some(value.clone());
         }
     }
 
@@ -214,6 +248,9 @@ pub async fn run() {
                     if let Some(ref idl) = prog.idl {
                         idl_path = config_dir.join(idl).to_string_lossy().to_string();
                     }
+                }
+                if program_address.is_none() {
+                    program_address = prog.address.clone();
                 }
                 if program_path.is_none() {
                     program_path = prog
@@ -415,16 +452,16 @@ pub async fn run() {
             },
             "pda"
                 if idl_path.is_empty()
-                    && program_id_hex.is_some()
+                    && program_address.is_some()
                     && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) =>
             {
-                // Raw PDA mode: no IDL given, --program <hex> resolves to a program ID.
+                // Raw PDA mode: no IDL given, --program resolves to a program account.
                 // With --idl present, `pda <account-name>` is the IDL-defined derivation
                 // below (the documented `--idl ... --program <hex> pda vault` form), so
                 // raw mode must not shadow it.
-                // Usage: <bin> --program <hex> pda <seed1> [seed2] ...
+                // Usage: <bin> --program <address> pda <seed1> [seed2] ...
                 let mut raw_args =
-                    vec!["--program-id".to_string(), program_id_hex.clone().unwrap()];
+                    vec!["--program-id".to_string(), program_address.clone().unwrap()];
                 raw_args.extend_from_slice(&remaining_args[2..]);
                 compute_pda_raw(&raw_args);
                 return;
@@ -519,7 +556,7 @@ pub async fn run() {
             compute_pda_command(
                 &idl,
                 program_path.as_deref(),
-                program_id_hex.as_deref(),
+                program_address.as_deref(),
                 &remaining_args[2..],
             );
         },
@@ -543,10 +580,12 @@ pub async fn run() {
                         ix,
                         &cli_args,
                         program_path.as_deref(),
-                        program_id_hex.as_deref(),
+                        program_address.as_deref(),
                         dry_run,
                         &extra_bins,
                         &co_signers,
+                        fee_payer.as_deref(),
+                        gas_limit,
                         export_path.as_deref(),
                     )
                     .await;
@@ -572,8 +611,8 @@ pub async fn run() {
 /// optional `--identifier` (decimal or `0x`-hex `u128`, default 0).
 fn compute_pda_command(
     idl: &SpelIdl,
-    program_path: Option<&str>,
-    program_id_hex: Option<&str>,
+    _program_path: Option<&str>,
+    program_address: Option<&str>,
     args: &[String],
 ) {
     let account_name = match args.first() {
@@ -606,7 +645,7 @@ fn compute_pda_command(
         Some(pair) => pair,
         None => {
             eprintln!("❌ No PDA account named '{}' found in IDL", account_name);
-            if program_id_hex.is_some() {
+            if program_address.is_some() {
                 eprintln!("   To derive from raw seeds instead of the IDL, omit --idl.");
             }
             eprintln!("   Available PDAs:");
@@ -691,41 +730,21 @@ fn compute_pda_command(
         }
     }
 
-    // Get program_id: from global --program-id flag, or by loading the binary
-    use crate::hex::decode_bytes_32;
-    use nssa::program::Program;
-
-    let program_id: nssa_core::program::ProgramId = if let Some(hex) = program_id_hex {
-        let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid program ID '{}': {}", hex, e);
+    // A PDA is derived from the program's *account* id since LEZ v0.2.5, so the
+    // binary no longer answers this — only the deployed address does.
+    let program_account_id: nssa::AccountId = if let Some(value) = program_address {
+        let bytes = spel_framework_core::pda::parse_bytes32(value).unwrap_or_else(|e| {
+            eprintln!("❌ Invalid program address '{}': {}", value, e);
             process::exit(1);
         });
-        let mut pid = [0u32; 8];
-        for (i, chunk) in bytes.chunks(4).enumerate() {
-            pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        }
-        pid
-    } else if let Some(path) = program_path {
-        if std::path::Path::new(path).exists() {
-            let program_bytes = fs::read(path).unwrap_or_else(|e| {
-                eprintln!("❌ Cannot read program binary '{}': {}", path, e);
-                process::exit(1);
-            });
-            Program::new(program_bytes.into())
-                .unwrap_or_else(|e| {
-                    eprintln!("❌ Invalid program binary: {:?}", e);
-                    process::exit(1);
-                })
-                .id()
-        } else {
-            eprintln!("❌ Program binary not found: {}", path);
-            process::exit(1);
-        }
+        nssa::AccountId::new(bytes)
     } else {
-        eprintln!("❌ Program ID required to compute PDA.");
-        eprintln!("   Pass --program <name>           (from spel.toml)");
-        eprintln!("   Or   --program <64-char-hex>    (program ID)");
-        eprintln!("   Or   --program <path-to-binary>");
+        eprintln!("❌ Program account address required to compute PDA.");
+        eprintln!("   Pass --program <name>       (from spel.toml, needs `address`)");
+        eprintln!("   Or   --program <address>    (base58 or 64-char hex)");
+        eprintln!();
+        eprintln!("   A program's address is chosen when it is deployed and is not");
+        eprintln!("   derivable from its binary, so a path cannot be used here.");
         process::exit(1);
     };
 
@@ -808,7 +827,7 @@ fn compute_pda_command(
     // Compute PDA
     match compute_pda_from_seeds(
         &pda_def.seeds,
-        &program_id,
+        &program_account_id,
         &account_map,
         &seed_args,
         npk.as_ref(),
@@ -916,25 +935,22 @@ fn exit_missing_private_pda_keys(account_name: &str) -> ! {
 fn compute_pda_raw(args: &[String]) {
     use crate::hex::decode_bytes_32;
     use nssa::AccountId;
-    use nssa_core::program::{PdaSeed, ProgramId};
+    use nssa_core::program::PdaSeed;
 
-    // Parse --program-id
+    // Parse --program-id (the program's deployed account, since LEZ v0.2.5)
     let pid_hex = match args.windows(2).find(|w| w[0] == "--program-id") {
         Some(w) => &w[1],
         None => {
-            eprintln!("Usage: pda --program-id <64-char-hex> <seed1> [seed2] ...");
+            eprintln!("Usage: pda --program-id <address> <seed1> [seed2] ...");
             process::exit(1);
         },
     };
 
-    let pid_bytes = decode_bytes_32(pid_hex).unwrap_or_else(|e| {
-        eprintln!("❌ Invalid --program-id '{}': {}", pid_hex, e);
+    let pid_bytes = spel_framework_core::pda::parse_bytes32(pid_hex).unwrap_or_else(|e| {
+        eprintln!("❌ Invalid program address '{}': {}", pid_hex, e);
         process::exit(1);
     });
-    let mut program_id: ProgramId = [0u32; 8];
-    for (i, chunk) in pid_bytes.chunks(4).enumerate() {
-        program_id[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-    }
+    let program_account_id = AccountId::new(pid_bytes);
 
     // Collect seed args (everything that's not --program-id or its value)
     let mut seeds: Vec<[u8; 32]> = Vec::new();
@@ -974,7 +990,7 @@ fn compute_pda_raw(args: &[String]) {
 
     if seeds.is_empty() {
         eprintln!("❌ At least one seed required");
-        eprintln!("Usage: pda --program-id <hex> <seed1> [seed2] ...");
+        eprintln!("Usage: pda --program-id <address> <seed1> [seed2] ...");
         process::exit(1);
     }
 
@@ -994,11 +1010,6 @@ fn compute_pda_raw(args: &[String]) {
     };
 
     let pda_seed = PdaSeed::new(combined);
-    let account_id = AccountId::for_public_pda(&program_id, &pda_seed);
+    let account_id = AccountId::for_public_pda(&program_account_id, &pda_seed);
     println!("{}", account_id);
-}
-
-/// Check if a string is a 64-character hex program ID.
-fn is_hex_program_id(s: &str) -> bool {
-    s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit())
 }
