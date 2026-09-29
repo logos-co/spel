@@ -87,7 +87,7 @@ impl ProgramConfig {
 ///
 /// This macro:
 /// 1. Finds all `#[instruction]` functions in the module
-/// 2. Generates a serde-serializable `Instruction` enum
+/// 2. Generates a Borsh-serializable `Instruction` enum
 /// 3. Generates the `fn main()` with read/dispatch/write boilerplate
 /// 4. Generates account validation code per instruction
 /// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
@@ -345,15 +345,22 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         let enum_variants = generate_enum_variants(&instructions);
         quote! {
             // Borsh is the instruction wire format since LEZ v0.2.5
-            // (`read_lee_call` deserializes it); serde stays for IDL/tooling.
+            // (`read_lee_call` deserializes it), and deliberately the only encoding
+            // derived here. Deriving serde as well would make this a type that accepts
+            // either encoder, so a stale `risc0_zkvm::serde::to_vec(&instruction)` still
+            // compiles and still produces bytes the runtime rejects -- silently, since
+            // nothing in the signature distinguishes the wire format from tooling. With
+            // no serde impl that is a compile error. Nothing consumed it: `spel-cli`
+            // encodes Borsh straight from the IDL (`serialize_to_borsh`), IDL generation
+            // parses guest source, and the runtime IDL path deserializes the framework's
+            // own `IdlAccountType`/`IdlTypeDef`. Dropping it also means a guest no longer
+            // needs a direct `serde` dependency just to satisfy a derive.
             //
             // Borsh encodes the variant as a leading tag byte, so variants are
             // append-only: inserting one shifts every existing encoding.
             #[derive(
                 Debug,
                 Clone,
-                serde::Serialize,
-                serde::Deserialize,
                 spel_framework::borsh::BorshSerialize,
                 spel_framework::borsh::BorshDeserialize,
             )]
@@ -1187,12 +1194,6 @@ fn generate_match_arms(
         .collect()
 }
 
-
-
-
-
-
-
 /// Drop the `#[account(...)]` helper attributes from a function's parameters.
 ///
 /// The attribute is inert syntax that only the framework reads, so whoever
@@ -1226,7 +1227,6 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .collect()
 }
 
-
 /// Collect the unique PDA arg seed parameters for a given instruction as typed
 /// `__pda_arg_<name>: &<type>` token streams, used in generated function signatures.
 fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
@@ -1257,8 +1257,6 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
         })
         .collect()
 }
-
-
 
 fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
@@ -2415,6 +2413,4 @@ pub mod token {
             "VaultConfig with qualified attribute not found in generated IDL. Output: {output}"
         );
     }
-
-
 }
