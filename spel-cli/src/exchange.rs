@@ -11,18 +11,20 @@ use wallet::WalletCore;
 use crate::blob::{TxBlob, WitnessEntry};
 use crate::hex::{decode_bytes_32, hex_encode};
 
-/// Of the missing signer ids, those the key lookup answers for.
+/// Of the missing signer ids, those the key lookup answers for, paired with
+/// their decoded `AccountId` so callers don't need to re-decode.
 /// Fails on a id that does not decode.
 fn detect_signable(
     missing: &[String],
     hold_keys: impl Fn(AccountId) -> bool,
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<(String, AccountId)>, String> {
     let mut out = Vec::new();
     for id_str in missing {
         let bytes = decode_bytes_32(id_str)
             .map_err(|e| format!("invalid signer id '{}': {}", id_str, e))?;
-        if hold_keys(AccountId::new(bytes)) {
-            out.push(id_str.clone());
+        let account_id = AccountId::new(bytes);
+        if hold_keys(account_id) {
+            out.push((id_str.clone(), account_id));
         }
     }
     Ok(out)
@@ -30,6 +32,11 @@ fn detect_signable(
 
 /// Load a blob, verify it, show what it is, and append witnesses for
 /// every required signer whose key the local wallet holds.
+///
+/// # Panics
+///
+/// Does not panic: invalid input or an I/O failure exits the process with
+/// an error message instead.
 pub async fn sign_command(path: &str) {
     let mut blob = TxBlob::load(path).unwrap_or_else(|e| {
         eprintln!("❌ {}", e);
@@ -120,13 +127,19 @@ pub async fn sign_command(path: &str) {
     }
 
     println!("This wallet can sign for:");
-    for id in &signable {
+    for (id, _) in &signable {
         println!("  {}", id);
     }
     print!("Sign and update the file? [y/N] ");
-    io::stdout().flush().unwrap();
+    io::stdout().flush().unwrap_or_else(|e| {
+        eprintln!("❌ Failed to flush stdout: {}", e);
+        process::exit(1);
+    });
     let mut answer = String::new();
-    io::stdin().read_line(&mut answer).unwrap();
+    io::stdin().read_line(&mut answer).unwrap_or_else(|e| {
+        eprintln!("❌ Failed to read answer: {}", e);
+        process::exit(1);
+    });
     if !matches!(answer.trim().to_lowercase().as_str(), "y" | "yes") {
         println!("Aborted, nothing written.");
         process::exit(1);
@@ -140,10 +153,12 @@ pub async fn sign_command(path: &str) {
             process::exit(1);
         })
         .hash();
-    for id in signable {
-        let bytes = decode_bytes_32(&id).unwrap();
+    for (id, account_id) in signable {
+        // `account_id` was already confirmed signable by `detect_signable` above,
+        // moments ago in this same single-threaded run.
+        #[allow(clippy::expect_used)]
         let key = wallet_core
-            .get_account_public_signing_key(AccountId::new(bytes))
+            .get_account_public_signing_key(account_id)
             .expect("key vanished between detection and signing");
         let signature = Signature::new(key, &message_hash);
         let pubkey = PublicKey::new_from_private_key(key);
@@ -245,7 +260,7 @@ mod tests {
 
         let signable = detect_signable(&missing, |id| id == held).unwrap();
 
-        assert_eq!(signable, vec![format!("0x{}", "aa".repeat(32))]);
+        assert_eq!(signable, vec![(format!("0x{}", "aa".repeat(32)), held)]);
     }
 
     #[test]

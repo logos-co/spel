@@ -78,7 +78,7 @@ pub fn init_project(
         "",
         &format!("{}_core/src", snake_name),
         "methods/src",
-        &format!("methods/guest/src/bin"),
+        "methods/guest/src/bin",
         "examples/src/bin",
         &format!("{}_ffi/src", snake_name),
         &format!("{}_ffi/generated", snake_name),

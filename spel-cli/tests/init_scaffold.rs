@@ -12,6 +12,9 @@ use std::process::Command;
 const NAME: &str = "scaffold_check";
 
 fn init(dir: &Path, extra: &[&str]) {
+    // This helper is only ever called from #[test] fns; a failure to launch
+    // the test binary itself is a setup error the test should panic on.
+    #[allow(clippy::expect_used)]
     let out = Command::new(env!("CARGO_BIN_EXE_spel"))
         .arg("init")
         .args(extra)

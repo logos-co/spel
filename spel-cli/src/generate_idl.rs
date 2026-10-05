@@ -33,11 +33,18 @@ pub struct PathDepResult {
 /// - `Some(dir)`    → `<dir>/methods/guest/src/bin/*.rs`
 ///
 /// Returns an error string when no sources can be found.
+///
+/// # Errors
+///
+/// Returns an error if the given file doesn't exist, the given directory
+/// has no `.rs` files under `methods/guest/src/bin/`, the argument is
+/// neither a `.rs` file nor a directory, or (with no argument) the current
+/// directory can't be determined or has no sources.
 pub fn discover_sources(arg: Option<&str>) -> Result<Vec<PathBuf>, String> {
     match arg {
         Some(p) => {
             let path = PathBuf::from(p);
-            if path.extension().map_or(false, |e| e == "rs") {
+            if path.extension().is_some_and(|e| e == "rs") {
                 if !path.exists() {
                     return Err(format!("File not found: {}", p));
                 }
@@ -102,6 +109,10 @@ pub fn find_path_dep_dirs(source_path: &Path) -> PathDepResult {
 
 /// Scan `<root>/methods/guest/src/bin/*.rs`.  Returns an empty vec — not an
 /// error — when the directory doesn't exist.
+///
+/// # Errors
+///
+/// Returns an error if the directory exists but can't be read.
 pub fn search_methods_dir(root: &Path) -> Result<Vec<PathBuf>, String> {
     let bin_dir = root.join("methods").join("guest").join("src").join("bin");
     if !bin_dir.exists() {
@@ -112,7 +123,7 @@ pub fn search_methods_dir(root: &Path) -> Result<Vec<PathBuf>, String> {
     let mut sources: Vec<PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.extension().map_or(false, |e| e == "rs"))
+        .filter(|p| p.extension().is_some_and(|e| e == "rs"))
         .collect();
     sources.sort();
     Ok(sources)

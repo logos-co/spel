@@ -46,12 +46,10 @@ pub enum DryRunFormat {
 
 const UNRESOLVED: &str = "(unresolved)";
 
-/// Execute an instruction: parse args, build TX, optionally submit.
-///
-/// `dry_run`:
-///   - `None`                       — submit to the sequencer
-///   - `Some(DryRunFormat::Text)`   — resolve & print a human-readable summary
-///   - `Some(DryRunFormat::Json)`   — resolve & emit JSON to stdout
+/// Per-account list of `(raw_32_bytes, is_private)` entries for a variadic
+/// `rest` account, keyed by account name.
+type RestAccounts<'a> = Vec<(&'a str, Vec<(Vec<u8>, bool)>)>;
+
 /// Pull the most-recently-supplied value for `key`.  Scalar flags consume
 /// the last `--key value` they see; `Vec<String>` args bypass this helper
 /// and consume the whole vec.
@@ -68,6 +66,21 @@ fn is_vec_string(ty: &IdlType) -> bool {
     )
 }
 
+/// Execute an instruction: parse args, build TX, optionally submit.
+///
+/// `dry_run`:
+///   - `None`                       — submit to the sequencer
+///   - `Some(DryRunFormat::Text)`   — resolve & print a human-readable summary
+///   - `Some(DryRunFormat::Json)`   — resolve & emit JSON to stdout
+///
+/// # Panics
+///
+/// Does not panic: invalid arguments, a failed build, or a failed submit
+/// exit the process with an error message instead.
+// One CLI instruction naturally carries this many independent knobs (IDL
+// context, program location, submission mode, and multi-signer inputs);
+// grouping them into a struct would only move the same list one hop away.
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_instruction(
     idl: &SpelIdl,
     ix: &IdlInstruction,
@@ -132,7 +145,10 @@ pub async fn execute_instruction(
     let mut has_errors = false;
     for arg in &ix.args {
         let key = snake_to_kebab(&arg.name);
-        let values = args.get(&key).unwrap();
+        // The "Validate required args" pass above already exited the process
+        // if any `--{key}` were missing, so every key here is present.
+        #[allow(clippy::indexing_slicing)]
+        let values = &args[&key];
         let result = if is_vec_string(&arg.type_) {
             Ok(parse_string_vec(values))
         } else {
@@ -154,7 +170,7 @@ pub async fn execute_instruction(
     // Parse non-PDA account IDs
     let mut parsed_accounts: Vec<(&str, Vec<u8>, bool)> = Vec::new();
     // rest accounts are variadic: each expands to 0 or more AccountIds
-    let mut rest_accounts: Vec<(&str, Vec<(Vec<u8>, bool)>)> = Vec::new();
+    let mut rest_accounts: RestAccounts = Vec::new();
     for acc in &ix.accounts {
         if acc.pda.is_some() {
             continue;
@@ -182,6 +198,9 @@ pub async fn execute_instruction(
             };
             rest_accounts.push((&acc.name, entries));
         } else {
+            // The "Validate required args" pass above already exited the process
+            // if any `--{key}` were missing, so a value is always present here.
+            #[allow(clippy::unwrap_used)]
             let raw = last_value(&args, &key).unwrap();
             match parse_account_id(raw) {
                 Ok((bytes, is_priv)) => parsed_accounts.push((&acc.name, bytes.to_vec(), is_priv)),
@@ -216,11 +235,7 @@ pub async fn execute_instruction(
                     eprintln!("❌ Invalid program ID '{}': {}", hex, e);
                     process::exit(1);
                 });
-                let mut pid = [0u32; 8];
-                for (i, chunk) in bytes.chunks(4).enumerate() {
-                    pid[i] = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-                }
-                (pid, None)
+                (crate::hex::bytes32_to_u32_words(bytes), None)
             },
             (None, Some(path)) => {
                 let program_bytecode = fs::read(path).unwrap_or_else(|e| {
@@ -388,6 +403,9 @@ pub async fn execute_instruction(
                 }
             }
         } else {
+            // Every non-PDA, non-rest account either got a `parsed_accounts` entry
+            // in the parse loop above, or its parse error already exited the process.
+            #[allow(clippy::unwrap_used)]
             let account_bytes = parsed_accounts
                 .iter()
                 .find(|(n, _, _)| *n == acc.name)
@@ -457,7 +475,7 @@ pub async fn execute_instruction(
 
         // Build dependencies from extra_bins
         let mut dependencies = HashMap::new();
-        for (_, bin_path) in extra_bins {
+        for bin_path in extra_bins.values() {
             if let Ok(bytes) = fs::read(bin_path) {
                 if let Ok(dep_program) = Program::new(bytes.into()) {
                     dependencies.insert(dep_program.id(), dep_program);
@@ -553,7 +571,12 @@ pub async fn execute_instruction(
             .accounts
             .iter()
             .filter(|a| a.signer)
-            .map(|a| *account_map.get(&a.name).unwrap())
+            .map(|a| {
+                *account_map.get(&a.name).unwrap_or_else(|| {
+                    eprintln!("❌ Account '{}' not resolved", a.name);
+                    process::exit(1);
+                })
+            })
             .collect();
 
         for co_signer in co_signers {
@@ -595,7 +618,9 @@ pub async fn execute_instruction(
                 .filter(|a| a.signer)
                 .map(|a| a.name.as_str())
                 .collect();
-            let co_signer_labels: Vec<String> = signer_accounts[signer_names.len()..]
+            let co_signer_labels: Vec<String> = signer_accounts
+                .get(signer_names.len()..)
+                .unwrap_or_default()
                 .iter()
                 .map(|id| format!("co-signer 0x{}", hex_encode(id.value())))
                 .collect();
@@ -772,8 +797,12 @@ fn account_to_json(acc: &spel_framework_core::idl::IdlAccountItem, id_str: Strin
                 IdlSeed::Arg { path } => json!({"kind": "arg", "path": path}),
             })
             .collect();
-        obj["is_pda"] = json!(true);
-        obj["seeds"] = json!(seeds);
+        // `obj` was just built by the `json!({...})` object literal above, so
+        // it's always an `Object` and `as_object_mut` is always `Some`.
+        if let Some(map) = obj.as_object_mut() {
+            map.insert("is_pda".to_string(), json!(true));
+            map.insert("seeds".to_string(), json!(seeds));
+        }
     }
     obj
 }
@@ -870,9 +899,16 @@ fn print_dry_run_json(s: &DryRunSummary<'_>) {
         "instruction_data": ix_data_hex,
         "signers": signers_json,
     });
-    println!("{}", serde_json::to_string_pretty(&summary).unwrap());
+    // `summary` is built entirely from `json!({...})`, so it always has string
+    // map keys and serialization cannot fail.
+    #[allow(clippy::unwrap_used)]
+    let rendered = serde_json::to_string_pretty(&summary).unwrap();
+    println!("{}", rendered);
 }
 
+// Every `writeln!` below targets `out: String` via `std::fmt::Write`, whose
+// impl for `String` always returns `Ok(())` — it cannot fail.
+#[allow(clippy::unwrap_used)]
 fn render_dry_run_text(s: &DryRunSummary<'_>) -> String {
     use std::fmt::Write as _;
     let mut out = String::new();

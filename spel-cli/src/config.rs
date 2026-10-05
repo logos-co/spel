@@ -43,6 +43,11 @@ impl SpelConfig {
     }
 
     /// Load and parse a `spel.toml` file at the given path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be read, is not valid TOML, or
+    /// declares both `[program]` and `[programs]`.
     pub fn load(path: &Path) -> Result<SpelConfig, String> {
         let content = std::fs::read_to_string(path)
             .map_err(|e| format!("cannot read '{}': {}", path.display(), e))?;
@@ -72,6 +77,17 @@ impl SpelConfig {
     /// - `name = None` + `[program]` exists → use it
     /// - `name = None` + exactly one `[programs.x]` → use it
     /// - `name = None` + multiple `[programs]` → error
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `name` doesn't match any `[programs.<name>]` entry,
+    /// or if `name` is `None` and there is no unambiguous default program to
+    /// resolve to.
+    ///
+    /// # Panics
+    ///
+    /// Does not panic: the single-entry `[programs]` case is only reached
+    /// after confirming there is exactly one entry.
     pub fn resolve_program(&self, name: Option<&str>) -> Result<&ProgramConfig, String> {
         if let Some(name) = name {
             // Explicit name: must be in [programs.<name>]
@@ -98,6 +114,8 @@ impl SpelConfig {
         }
         if let Some(programs) = &self.programs {
             if programs.len() == 1 {
+                // `programs.len() == 1` was just checked, so a first value exists.
+                #[allow(clippy::unwrap_used)]
                 return Ok(programs.values().next().unwrap());
             }
             if programs.is_empty() {

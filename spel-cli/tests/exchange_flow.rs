@@ -14,6 +14,9 @@ use spel::blob::{TxBlob, WitnessEntry};
 use spel::hex::hex_encode;
 
 /// A valid blob signed by `key`, listing its account as the only signer.
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::unwrap_used)]
 fn signed_blob() -> (TxBlob, PrivateKey) {
     let key = PrivateKey::try_new([1; 32]).unwrap();
     let pubkey = PublicKey::new_from_private_key(&key);
@@ -47,6 +50,9 @@ fn signed_blob() -> (TxBlob, PrivateKey) {
     (blob, key)
 }
 
+// Test helper, not a #[test] fn itself: a failure here is a setup error
+// the test should panic on.
+#[allow(clippy::expect_used)]
 fn run_spel(subcommand: &str, path: &Path) -> Output {
     Command::new(env!("CARGO_BIN_EXE_spel"))
         .arg(subcommand)
