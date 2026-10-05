@@ -1,10 +1,15 @@
-//! `spel init` must pin every crate it writes to the same framework and LEZ
-//! revisions.
+//! Invariants of the project `spel init` writes, checked straight from disk
+//! without building anything.
 //!
-//! CI always passes an explicit `--spel-rev`, so the defaults are never built
-//! there. The FFI crate's framework default drifted to a three-release-old tag
-//! that way, and `make ffi` on a fresh project failed with
+//! Every crate must pin the same framework and LEZ revisions. CI always passes
+//! an explicit `--spel-rev`, so the defaults are never built there. The FFI
+//! crate's framework default drifted to a three-release-old tag that way, and
+//! `make ffi` on a fresh project failed with
 //! `cannot find function compute_pda_raw in module spel_framework_core::pda`.
+//!
+//! Only `methods/guest` may exist under `methods/`. A second `methods/` crate
+//! used to be scaffolded as a workspace member, and its build script broke
+//! `cargo build` at the project root.
 
 use std::path::Path;
 use std::process::Command;
@@ -114,4 +119,55 @@ fn explicit_revisions_reach_every_crate() {
 
     assert_all(&framework_selectors(dir.path()), "tag = \"v9.9.9\"");
     assert_all(&lez_selectors(dir.path()), "rev = \"abc123\"");
+}
+
+/// `spel init` used to write a second `methods/` crate next to `methods/guest`:
+/// a workspace member whose `build.rs` ran `risc0_build::embed_methods()`.
+/// Nothing depended on it. `spel.toml` and the `Makefile` point at the R0BF
+/// `.bin` that `cargo risczero build` writes under `methods/guest/target`, and
+/// no crate used the `<name>-methods` package. Its manifest also had no
+/// `[package.metadata.risc0]` section, which risc0-build unwraps before it
+/// looks at `RISC0_SKIP_BUILD`, so `cargo build`, `cargo check` and
+/// `cargo test` at the project root all failed in that build script. Only the
+/// guest may remain.
+#[test]
+fn scaffold_has_no_dead_methods_crate() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path(), &[]);
+    let root = dir.path().join(NAME);
+
+    for stale in ["methods/Cargo.toml", "methods/build.rs", "methods/src"] {
+        assert!(
+            !root.join(stale).exists(),
+            "`{stale}` is scaffolded, but nothing in the project uses it"
+        );
+    }
+    for kept in [
+        "methods/guest/Cargo.toml",
+        &format!("methods/guest/src/bin/{NAME}.rs"),
+    ] {
+        assert!(root.join(kept).exists(), "`{kept}` is missing");
+    }
+
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml"))
+        .unwrap_or_else(|e| panic!("reading Cargo.toml: {e}"));
+    let workspace: toml::Value =
+        toml::from_str(&manifest).unwrap_or_else(|e| panic!("Cargo.toml does not parse: {e}"));
+    let list = |key: &str| -> Vec<&str> {
+        workspace["workspace"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("Cargo.toml has no `workspace.{key}` array"))
+            .iter()
+            .map(|v| v.as_str().expect("workspace entries are strings"))
+            .collect()
+    };
+    let members = list("members");
+    assert!(
+        !members.contains(&"methods"),
+        "workspace still lists `methods` as a member: {members:?}"
+    );
+    assert!(
+        list("exclude").contains(&"methods/guest"),
+        "workspace no longer excludes `methods/guest`"
+    );
 }

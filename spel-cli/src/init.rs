@@ -77,8 +77,7 @@ pub fn init_project(
     let dirs = [
         "",
         &format!("{}_core/src", snake_name),
-        "methods/src",
-        &format!("methods/guest/src/bin"),
+        "methods/guest/src/bin",
         "examples/src/bin",
         &format!("{}_ffi/src", snake_name),
         &format!("{}_ffi/generated", snake_name),
@@ -101,7 +100,6 @@ pub fn init_project(
 members = [
     "{snake_name}_core",
     "{snake_name}_ffi",
-    "methods",
     "examples",
 ]
 exclude = [
@@ -670,44 +668,6 @@ pub struct ProgramState {
     pub initialized: bool,
     pub owner: [u8; 32],
 }
-"#,
-    );
-
-    // methods/Cargo.toml
-    write_file(
-        root,
-        "methods/Cargo.toml",
-        &format!(
-            r#"[package]
-name = "{snake_name}-methods"
-version = "0.1.0"
-edition = "2021"
-
-[build-dependencies]
-risc0-build = "=3.0.5"
-
-[dependencies]
-risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
-{snake_name}_core = {{ path = "../{snake_name}_core" }}
-"#
-        ),
-    );
-
-    // methods/build.rs
-    write_file(
-        root,
-        "methods/build.rs",
-        r#"fn main() {
-    risc0_build::embed_methods();
-}
-"#,
-    );
-
-    // methods/src/lib.rs
-    write_file(
-        root,
-        "methods/src/lib.rs",
-        r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
 "#,
     );
 
