@@ -730,7 +730,7 @@ mod tests {
         let vals: Vec<ParsedValue> = cli
             .iter()
             .zip(types.iter())
-            .map(|((_, raw), ty)| parse_value(raw, ty).expect("signed value must parse"))
+            .map(|((_, raw), ty)| parse_value(raw, ty, &[]).expect("signed value must parse"))
             .collect();
 
         let args: Vec<(&IdlType, &ParsedValue)> = types.iter().zip(vals.iter()).collect();
@@ -757,11 +757,11 @@ mod tests {
     #[test]
     fn parse_signed_rejects_out_of_range() {
         let i8_ty = IdlType::Primitive("i8".into());
-        assert!(parse_value("128", &i8_ty).is_err());
-        assert!(parse_value("-129", &i8_ty).is_err());
+        assert!(parse_value("128", &i8_ty, &[]).is_err());
+        assert!(parse_value("-129", &i8_ty, &[]).is_err());
         let i128_ty = IdlType::Primitive("i128".into());
-        assert!(parse_value("170141183460469231731687303715884105728", &i128_ty).is_err());
-        assert!(parse_value("not-a-number", &i128_ty).is_err());
+        assert!(parse_value("170141183460469231731687303715884105728", &i128_ty, &[]).is_err());
+        assert!(parse_value("not-a-number", &i128_ty, &[]).is_err());
     }
 
     #[test]
