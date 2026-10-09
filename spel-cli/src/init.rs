@@ -430,10 +430,14 @@ idl: ## Generate IDL JSON from program source
 cli: ## Run the IDL-driven CLI (ARGS="...")
 	cargo run --bin {snake_name}_cli -- $(ARGS)
 
-deploy: ## Deploy program to sequencer
+deploy: ## Deploy program to sequencer (FEE_PAYER=<funded account>)
 	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
-	wallet deploy-program $(PROGRAM_BIN)
-	@echo "✅ Program deployed"
+	@test -n "$(FEE_PAYER)" || (echo "ERROR: set FEE_PAYER=<funded account id>. The program's new header and segment accounts hold nothing to pay fees with."; exit 1)
+	$(eval PROGRAM_ADDRESS := $(shell cargo run -q --bin {snake_name}_cli -- deploy $(PROGRAM_BIN) --fee-payer $(FEE_PAYER)))
+	@test -n "$(PROGRAM_ADDRESS)" || (echo "ERROR: deploy failed"; exit 1)
+	$(call save_var,PROGRAM_ADDRESS,$(PROGRAM_ADDRESS))
+	@echo "✅ Program deployed at $(PROGRAM_ADDRESS)"
+	@echo "   Add address = \"$(PROGRAM_ADDRESS)\" to [program] in spel.toml"
 
 inspect: ## Show ProgramId for built binary
 	cargo run --bin {snake_name}_cli -- inspect $(PROGRAM_BIN)
@@ -574,13 +578,14 @@ make build
 # 2. Generate the IDL (auto-extracts from #[lez_program] annotations)
 make idl
 
-# 3. Deploy to sequencer
-make deploy
+# 3. Deploy to sequencer. The fee payer is a funded account in your wallet;
+#    deploy prints the program address: add it to spel.toml as `address`.
+make deploy FEE_PAYER=<account-id>
 
 # 4. See available commands (auto-generated from your program)
 make cli ARGS="--help"
 
-# 5. Run an instruction (spel.toml provides IDL and binary paths)
+# 5. Run an instruction (spel.toml provides the IDL and program address)
 make cli ARGS="<command> --arg1 value1 --arg2 value2"
 
 # Dry run (no submission):
@@ -595,7 +600,7 @@ make cli ARGS="--dry-run -- <command> --arg1 value1"
 | `make build` | Build the guest binary (risc0) |
 | `make idl` | Generate IDL JSON from program source |
 | `make cli ARGS="..."` | Run the IDL-driven CLI |
-| `make deploy` | Deploy program to sequencer |
+| `make deploy FEE_PAYER=<id>` | Deploy program to sequencer, print its address |
 | `make inspect` | Show ProgramId for built binary |
 | `make setup` | Create accounts via wallet |
 | `make status` | Show saved state and binary info |

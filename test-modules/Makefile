@@ -89,10 +89,14 @@ idl: ## Generate IDL JSON from program source
 cli: ## Run the IDL-driven CLI (ARGS="...")
 	cargo run --bin test_modules_cli -- $(ARGS)
 
-deploy: ## Deploy program to sequencer
+deploy: ## Deploy program to sequencer (FEE_PAYER=<funded account>)
 	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
-	wallet deploy-program $(PROGRAM_BIN)
-	@echo "✅ Program deployed"
+	@test -n "$(FEE_PAYER)" || (echo "ERROR: set FEE_PAYER=<funded account id>. The program's new header and segment accounts hold nothing to pay fees with."; exit 1)
+	$(eval PROGRAM_ADDRESS := $(shell cargo run -q --bin test_modules_cli -- deploy $(PROGRAM_BIN) --fee-payer $(FEE_PAYER)))
+	@test -n "$(PROGRAM_ADDRESS)" || (echo "ERROR: deploy failed"; exit 1)
+	$(call save_var,PROGRAM_ADDRESS,$(PROGRAM_ADDRESS))
+	@echo "✅ Program deployed at $(PROGRAM_ADDRESS)"
+	@echo "   Add address = \"$(PROGRAM_ADDRESS)\" to [program] in spel.toml"
 
 inspect: ## Show ProgramId for built binary
 	cargo run --bin test_modules_cli -- inspect $(PROGRAM_BIN)

@@ -265,18 +265,27 @@ log "  Wallet B signer: ${SIGNER_B:0:20}..."
 # ─── Step 6: Deploy program (wallet A) ────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" \
-    | NSSA_WALLET_HOME_DIR="$WALLET_A" LEE_WALLET_HOME_DIR="$WALLET_A" \
-      "$WALLET_BIN" deploy-program "$GUEST_BIN_ABS" \
-    > "$WORK_DIR/deploy.log" 2>&1 || { cat "$WORK_DIR/deploy.log"; fail "Deploy failed"; }
-log "  ✓ Program deployed"
+# LEZ v0.2.5 deploys through program_loader: `spel deploy` creates the header +
+# segment accounts and prints the program address, which the calls below pass
+# as -p. The new accounts and both signers hold nothing, so the debug genesis
+# account pays every fee (scripts/lib/fee-payer.sh). Its key goes into wallet A
+# only: A pays and signs for the fee, B stays a pure co-signer.
+source "$SCRIPT_DIR/lib/fee-payer.sh"
+FEE_PAYER=$(LEE_WALLET_HOME_DIR="$WALLET_A" NSSA_WALLET_HOME_DIR="$WALLET_A" \
+    lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")
+[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account into wallet A"
+log "  Fee payer (wallet A): ${FEE_PAYER:0:20}..."
+PROGRAM_ADDRESS=$(NSSA_WALLET_HOME_DIR="$WALLET_A" LEE_WALLET_HOME_DIR="$WALLET_A" \
+    "$SPEL_BIN" deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$WORK_DIR/deploy.log") \
+    || { cat "$WORK_DIR/deploy.log"; fail "Deploy failed"; }
+log "  ✓ Program deployed at $PROGRAM_ADDRESS"
 
 # ─── Step 7: Initialize (single-signer, wallet A) ─────────────────────────
 
 log "Step 7: Sending initialize transaction..."
 SEQUENCER_URL="$SEQUENCER_URL" \
 NSSA_WALLET_HOME_DIR="$WALLET_A" LEE_WALLET_HOME_DIR="$WALLET_A" \
-    "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+    "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     initialize \
     --owner "$SIGNER_A" \
     > "$WORK_DIR/initialize-tx.log" 2>&1 || { cat "$WORK_DIR/initialize-tx.log"; fail "Initialize TX failed"; }
@@ -288,7 +297,7 @@ log "Step 8: Exporting partial transaction (--export / --co-signer)..."
 BLOB="$WORK_DIR/multisig-tx.json"
 SEQUENCER_URL="$SEQUENCER_URL" \
 NSSA_WALLET_HOME_DIR="$WALLET_A" LEE_WALLET_HOME_DIR="$WALLET_A" \
-    "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+    "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     --export "$BLOB" --co-signer "$SIGNER_B" \
     do_something \
     --owner "$SIGNER_A" \
@@ -299,8 +308,9 @@ grep -q "Partial transaction written" "$WORK_DIR/export.log" \
     || { cat "$WORK_DIR/export.log"; fail "Export did not report writing the blob"; }
 [ -f "$BLOB" ] || fail "Blob file not written: $BLOB"
 
-# Exporter wallet holds only signer A's key, so the blob must carry exactly
-# one witness and still list two required signers.
+# The fee payer signs too (LEZ v0.2.5's is_fee_authorized wants its witness),
+# so the blob lists three signers: A, co-signer B and the payer. Wallet A
+# holds A's and the payer's keys, so exactly B's witness is still missing.
 python3 -c '
 import json, sys
 blob = json.load(open(sys.argv[1]))
@@ -308,11 +318,11 @@ version = blob["version"]
 signers = blob["signers"]
 witnesses = blob["witnesses"]
 assert version == 1, f"unexpected version {version}"
-assert len(signers) == 2, f"expected 2 signers, got {len(signers)}"
-assert len(witnesses) == 1, f"expected 1 witness, got {len(witnesses)}"
+assert len(signers) == 3, f"expected 3 signers (A, B, fee payer), got {len(signers)}"
+assert len(witnesses) == 2, f"expected 2 witnesses (A, fee payer), got {len(witnesses)}"
 missing = [s for s in signers if s not in witnesses]
 assert len(missing) == 1, f"expected 1 missing signer, got {missing}"
-print("  ✓ Blob: 2 signers, 1 witness, co-signer still missing")
+print("  ✓ Blob: 3 signers, 2 witnesses, co-signer still missing")
 ' "$BLOB" || fail "Blob content check failed"
 log "  ✓ Partial transaction exported"
 
@@ -345,8 +355,8 @@ python3 -c '
 import json, sys
 blob = json.load(open(sys.argv[1]))
 witnesses = blob["witnesses"]
-assert len(witnesses) == 2, f"expected 2 witnesses, got {len(witnesses)}"
-print("  ✓ Blob now fully signed (2 of 2 witnesses)")
+assert len(witnesses) == 3, f"expected 3 witnesses, got {len(witnesses)}"
+print("  ✓ Blob now fully signed (3 of 3 witnesses)")
 ' "$BLOB" || fail "Blob witness count check failed"
 log "  ✓ Co-signer witness appended"
 
@@ -395,7 +405,7 @@ log "  All steps completed successfully:"
 log "    ✅ spel init + build + IDL — project ready"
 log "    ✅ two isolated wallets created (A = exporter, B = co-signer)"
 log "    ✅ deploy + initialize — program live"
-log "    ✅ --export / --co-signer — partial TX written, 1 of 2 witnesses"
+log "    ✅ --export / --co-signer — partial TX written, co-signer witness missing"
 log "    ✅ premature submit rejected — missing signers"
 log "    ✅ spel sign — co-signer witness appended, blob complete"
 log "    ✅ tampered submit rejected — signature no longer verifies"

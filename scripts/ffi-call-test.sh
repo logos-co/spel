@@ -255,8 +255,17 @@ fi
 # ─── Step 6: Deploy program ───────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" 2>&1 | tee "$WORK_DIR/deploy.log" || { echo ''; echo '=== DEPLOY LOG ==='; cat "$WORK_DIR/deploy.log"; echo '==================='; fail 'Deploy failed'; }
-log "  ✓ Program deployed"
+# LEZ v0.2.5 dropped `wallet deploy-program`: programs go through program_loader,
+# and `spel deploy` creates the header + segment accounts and prints the program
+# address. The new accounts hold nothing, so the debug genesis account pays
+# (scripts/lib/fee-payer.sh).
+source "$SCRIPT_DIR/lib/fee-payer.sh"
+FEE_PAYER="${FEE_PAYER:-$(lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")}"
+[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account as fee payer"
+log "  Fee payer: $FEE_PAYER"
+PROGRAM_ADDRESS=$("$SPEL_BIN" deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$WORK_DIR/deploy.log") \
+    || { echo ''; echo '=== DEPLOY LOG ==='; cat "$WORK_DIR/deploy.log"; echo '==================='; fail 'Deploy failed'; }
+log "  ✓ Program deployed at $PROGRAM_ADDRESS"
 
 # ─── Step 6: Generate FFI code ────────────────────────────────────────────
 
