@@ -4,7 +4,12 @@ use std::fs;
 use std::path::Path;
 
 /// LEZ tag a scaffold pins when neither `--lez-tag` nor `--lez-rev` is given.
-pub const DEFAULT_LEZ_TAG: &str = "v0.2.4";
+///
+/// Must equal the tag the framework crates pin: a scaffold's guest depends on
+/// both `spel-framework` and LEZ directly, so a different tag puts two
+/// `lee_core` versions in its graph and `#[lez_program]` fails to compile.
+/// `default_lez_tag_matches_framework` guards it.
+pub const DEFAULT_LEZ_TAG: &str = "v0.2.5-rc2";
 
 /// Framework branch a scaffold pins when neither `--spel-tag` nor `--spel-rev`
 /// is given.
@@ -919,4 +924,24 @@ fn write_file(root: &Path, rel_path: &str, content: &str) {
         eprintln!("❌ Failed to write {}: {}", path.display(), e);
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scaffold's default LEZ tag has to be the one spel-framework-core
+    /// is built against; see `DEFAULT_LEZ_TAG`.
+    #[test]
+    fn default_lez_tag_matches_framework() {
+        let manifest = include_str!("../../spel-framework-core/Cargo.toml");
+        let pin = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("nssa_core") && l.contains("logos-execution-zone"))
+            .expect("spel-framework-core/Cargo.toml has no LEZ nssa_core dependency");
+        assert!(
+            pin.contains(&format!("tag = \"{DEFAULT_LEZ_TAG}\"")),
+            "DEFAULT_LEZ_TAG ({DEFAULT_LEZ_TAG}) differs from spel-framework-core's LEZ pin: {pin}"
+        );
+    }
 }
