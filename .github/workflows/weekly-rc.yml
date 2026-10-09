@@ -79,6 +79,11 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         if: steps.check.outputs.has_changes == 'true'
 
+      - name: Install system dependencies
+        if: steps.check.outputs.has_changes == 'true'
+        # LEZ v0.2.4's wallet pulls in keycard support, which links libpcsclite.
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+
       - name: Install logos-blockchain-circuits
         if: steps.check.outputs.has_changes == 'true'
         run: |

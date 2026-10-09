@@ -1,3 +1,82 @@
+## v0.7.0 (2026-09-16)
+
+### 💥 Breaking Changes
+
+- **Upgrade to LEZ v0.2.4.** The Logos Execution Zone dependency moves from `v0.2.0` to
+  `v0.2.4` across every crate. Tooling that writes the LEZ wallet config must use the
+  `sequencers: [{ sequencer_addr }]` array — the old flat `sequencer_addr` key is silently
+  ignored. (#256, #260)
+- **Private PDAs need a viewing key.** Since LEZ v0.2.1 a private PDA is derived from
+  `SHA256(prefix || program_id || seed || npk || vpk || identifier)`, so
+  `#[account(private_pda, …)]` now requires `vpk = arg("…")` alongside `npk` — existing
+  programs fail to compile until it is added. `spel pda` likewise needs `--vpk` (and accepts
+  `--identifier`, below). (#256)
+- **`compute_private_pda` signature.** `(program_id, seeds, npk)` becomes
+  `(program_id, seeds, npk, vpk, identifier)`. Pass `DEFAULT_PRIVATE_PDA_IDENTIFIER` for the
+  previous behaviour. (#256, #274)
+- **`#[account(signer)]` now claims the signer while it is still unowned.** It emits the new
+  `AutoClaim::ClaimedIfDefault(Claim::Authorized)`. Without it, an unowned signer was rejected
+  by LEZ on its second transaction. (#262)
+
+  > ⚠️ **Initialise wallet accounts before using them with SPEL programs.**
+  > `wallet account new public` does not do this. If a never-initialised account signs for a
+  > SPEL program first, that program becomes the account's permanent owner, and the account
+  > can then **receive but never send** native tokens (`UnauthorizedBalanceDecrease`).
+  > Run `wallet auth-transfer init --account-id <id>` first; accounts owned by the transfer
+  > program are unaffected. Verified on a local LEZ v0.2.4 chain. LEZ's own
+  > `hello_world_with_authorization` example claims signers the same way.
+
+- **`spel` library API.** `parse::parse_value` takes a third argument,
+  `types: &[IdlTypeDef]` — pass `&[]` for primitive types (#257).
+  `generate_idl_from_file_with_deps` and `collect_items_from_crate_dirs` take a warning
+  callback — a no-op closure keeps the previous behaviour (#253).
+
+### ✨ Features
+
+- **Extension libraries.** A program can activate an extension crate with a marker attribute
+  under `#[lez_program]`. The extension can contribute instructions to the consumer's
+  dispatcher, inject accounts into instructions it gates, and wrap every instruction. These
+  flow into the IDL, generated FFI and generated UI like native ones. See
+  `docs/extension-trust-model.md`. (#257)
+- **Standalone `#[instruction]` strips `#[account(…)]` attributes**, so extension libraries
+  can `pub use spel_framework::instruction;` instead of shipping their own proc-macro. (#276)
+- **Witness exchange for multi-signature transactions** — `--export` and `--co-signer` build
+  a partially signed transaction; `spel sign` and `spel submit` complete and broadcast it.
+  (#246)
+- **`Vec<u64>`, `Vec<u128>` and `Vec<bool>` instruction arguments** from comma-separated
+  lists. An empty string is an empty list; an empty or malformed element is an error naming
+  its index. (#266)
+- **`spel pda --identifier <u128>`** for private PDAs derived with a non-zero identifier.
+  (#274)
+- **`spel init --spel-git <URL>`** scaffolds against a fork's framework. (#255)
+
+### 🐛 Fixes
+
+- **`spel init` projects build their FFI again.** The scaffold pinned the FFI crate's
+  `spel-framework-core` to `v0.4.0` while the guest and `examples/` followed `main`, so
+  since v0.5.0 `make ffi` — and `make all` / `ui-build` / `install` — failed on a fresh
+  project with `cannot find function compute_pda_raw`. Every crate `init` writes now uses
+  one default, and a test holds them together. Existing projects: change the FFI crate's
+  `spel-framework-core` to match `methods/guest`. `spel init --help` also shows the real
+  defaults. (#280)
+- **`spel program-id` explains a raw ELF** instead of failing opaquely — it needs the R0BF
+  `.bin` the guest build writes next to the ELF. (#273)
+- **IDL generation skips dependency source files the consumer's Rust edition cannot re-lex**,
+  instead of aborting the build. (#253)
+- **The GitHub Release body now includes the CHANGELOG entry.** (#252)
+
+### 📦 Other
+
+- CI tests each pull request merged onto current `main` rather than its possibly stale
+  branch tip. (#272)
+- CI authenticates the risc0 toolchain install (no more GitHub API rate-limit failures),
+  installs `libpcsclite-dev` wherever `spel` is built, and fixes the weekly LEZ
+  compatibility check, which had failed every run since July. (#277)
+- End-to-end coverage for chained calls and witness exchange. (#267, #268)
+- Workspace lint cleanup. (#254)
+
+---
+
 ## v0.6.0 (2026-07-15)
 
 ### 💥 Breaking Changes

@@ -101,7 +101,8 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
 /// Supports all seed types: `const`, `account`, and `arg`.
 ///
 /// Pass `npk = Some(key)` for private PDAs; the address will be derived via
-/// `AccountId::for_private_pda`. For public PDAs pass `npk = None`.
+/// `AccountId::for_private_pda` with the given `identifier`. For public PDAs pass
+/// `npk = None`; `identifier` is then ignored, it is not part of public derivation.
 pub fn compute_pda_from_seeds(
     seeds: &[IdlSeed],
     program_id: &ProgramId,
@@ -109,6 +110,7 @@ pub fn compute_pda_from_seeds(
     parsed_args: &HashMap<String, ParsedValue>,
     npk: Option<&NullifierPublicKey>,
     vpk: Option<&ViewingPublicKey>,
+    identifier: u128,
 ) -> Result<AccountId, String> {
     if seeds.is_empty() {
         return Err("PDA requires at least one seed".to_string());
@@ -131,11 +133,8 @@ pub fn compute_pda_from_seeds(
     let pda_seed = PdaSeed::new(combined);
     if let Some(npk) = npk {
         let vpk = vpk.ok_or_else(|| "Private PDA requires a ViewingPublicKey (vpk)".to_string())?;
-        // The chain now derives private PDAs with a u128 `identifier`; spel has
-        // no way to specify it yet, so default to 0 (the common case).
-        // TODO: thread a `--identifier` flag through for non-zero identifiers.
         Ok(AccountId::for_private_pda(
-            program_id, &pda_seed, npk, vpk, 0,
+            program_id, &pda_seed, npk, vpk, identifier,
         ))
     } else {
         Ok(AccountId::for_public_pda(program_id, &pda_seed))
@@ -159,6 +158,7 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            0,
         );
         assert!(result.is_ok());
     }
@@ -180,7 +180,7 @@ mod tests {
             ParsedValue::ByteArray(vec![42u8; 32]),
         );
         let result =
-            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None);
+            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None, 0);
         assert!(result.is_ok());
     }
 
@@ -198,7 +198,7 @@ mod tests {
         let mut args = HashMap::new();
         args.insert("index".to_string(), ParsedValue::U64(5));
         let result =
-            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None);
+            compute_pda_from_seeds(&seeds, &program_id, &HashMap::new(), &args, None, None, 0);
         assert!(result.is_ok());
     }
 
@@ -215,6 +215,7 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            0,
         );
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("missing"));
@@ -255,6 +256,7 @@ mod tests {
             &HashMap::new(),
             Some(&npk),
             Some(&vpk),
+            0,
         )
         .unwrap();
         let public = compute_pda_from_seeds(
@@ -264,6 +266,7 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            0,
         )
         .unwrap();
 
@@ -294,6 +297,7 @@ mod tests {
             &HashMap::new(),
             Some(&npk1),
             Some(&vpk),
+            0,
         )
         .unwrap();
         let addr2 = compute_pda_from_seeds(
@@ -303,6 +307,7 @@ mod tests {
             &HashMap::new(),
             Some(&npk2),
             Some(&vpk),
+            0,
         )
         .unwrap();
 
@@ -336,6 +341,7 @@ mod tests {
             &args,
             None,
             None,
+            0,
         )
         .unwrap();
         let single = compute_pda_from_seeds(
@@ -345,10 +351,100 @@ mod tests {
             &HashMap::new(),
             None,
             None,
+            0,
         )
         .unwrap();
 
         // Multi-seed SHA-256 must differ from single seed (no zero-cancellation)
         assert_ne!(multi, single);
+    }
+
+    #[test]
+    fn test_private_pda_identifier_matches_chain_derivation() {
+        let seeds = vec![IdlSeed::Const {
+            value: "vault".to_string(),
+        }];
+        let program_id: ProgramId = [2u32; 8];
+        let npk = NullifierPublicKey([0xABu8; 32]);
+        let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
+        let identifier: u128 = 7;
+
+        let derived = compute_pda_from_seeds(
+            &seeds,
+            &program_id,
+            &HashMap::new(),
+            &HashMap::new(),
+            Some(&npk),
+            Some(&vpk),
+            identifier,
+        )
+        .unwrap();
+
+        let mut combined = [0u8; 32];
+        combined[.."vault".len()].copy_from_slice(b"vault");
+        let expected = AccountId::for_private_pda(
+            &program_id,
+            &PdaSeed::new(combined),
+            &npk,
+            &vpk,
+            identifier,
+        );
+        assert_eq!(
+            derived, expected,
+            "non-zero identifier must reach for_private_pda"
+        );
+    }
+
+    #[test]
+    fn test_private_pda_differs_across_identifiers() {
+        let seeds = vec![IdlSeed::Const {
+            value: "vault".to_string(),
+        }];
+        let program_id: ProgramId = [2u32; 8];
+        let npk = NullifierPublicKey([0xABu8; 32]);
+        let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
+
+        let derive = |identifier: u128| {
+            compute_pda_from_seeds(
+                &seeds,
+                &program_id,
+                &HashMap::new(),
+                &HashMap::new(),
+                Some(&npk),
+                Some(&vpk),
+                identifier,
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            derive(0),
+            derive(1),
+            "different identifiers must yield different private PDAs"
+        );
+    }
+
+    #[test]
+    fn test_public_pda_ignores_identifier() {
+        let seeds = vec![IdlSeed::Const {
+            value: "vault".to_string(),
+        }];
+        let program_id: ProgramId = [2u32; 8];
+        let derive = |identifier: u128| {
+            compute_pda_from_seeds(
+                &seeds,
+                &program_id,
+                &HashMap::new(),
+                &HashMap::new(),
+                None,
+                None,
+                identifier,
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            derive(0),
+            derive(99),
+            "identifier is not part of public PDA derivation"
+        );
     }
 }

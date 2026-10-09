@@ -17,6 +17,7 @@ use nssa_core::program::ProgramId;
 use sequencer_service_rpc::RpcClient as _;
 use serde_json::{json, Value};
 use spel_framework_core::idl::{IdlInstruction, IdlSeed, IdlType, SpelIdl};
+use spel_framework_core::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs;
@@ -310,6 +311,7 @@ pub async fn execute_instruction(
                 &parsed_arg_map,
                 None,
                 None,
+                DEFAULT_PRIVATE_PDA_IDENTIFIER,
             ) {
                 Ok(id) => {
                     account_map.insert(acc.name.clone(), id);

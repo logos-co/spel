@@ -112,6 +112,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies
+        # LEZ v0.2.4's wallet pulls in keycard support, which links libpcsclite.
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+
       - name: Install logos-blockchain-circuits
         run: |
           curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash

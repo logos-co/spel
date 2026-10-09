@@ -3,6 +3,36 @@
 use std::fs;
 use std::path::Path;
 
+/// LEZ tag a scaffold pins when neither `--lez-tag` nor `--lez-rev` is given.
+pub const DEFAULT_LEZ_TAG: &str = "v0.2.4";
+
+/// Framework branch a scaffold pins when neither `--spel-tag` nor `--spel-rev`
+/// is given.
+///
+/// Every crate `init` writes — the guest, `examples/` and the FFI crate — takes
+/// this one value. `spel-client-gen` generates FFI code against the current
+/// framework, so an FFI crate pinned to an older one fails `make ffi`; the FFI
+/// default used to be a separate literal that stayed at `v0.4.0` for three
+/// releases and broke exactly that way.
+pub const DEFAULT_SPEL_BRANCH: &str = "main";
+
+/// The `tag = …` / `rev = …` / default selector for one git dependency.
+fn git_ref(tag: Option<&str>, rev: Option<&str>, default: String) -> String {
+    match (tag, rev) {
+        (Some(t), _) => format!("tag = \"{t}\""),
+        (_, Some(r)) => format!("rev = \"{r}\""),
+        _ => default,
+    }
+}
+
+fn default_lez_ref() -> String {
+    format!("tag = \"{DEFAULT_LEZ_TAG}\"")
+}
+
+fn default_spel_ref() -> String {
+    format!("branch = \"{DEFAULT_SPEL_BRANCH}\"")
+}
+
 pub fn init_project(
     name: &str,
     lez_tag: Option<&str>,
@@ -98,16 +128,8 @@ ui/
     );
 
     // FFI crate: Cargo.toml (cdylib — compiled into a .so for Qt to link against)
-    let lez_ref_ffi = match (lez_tag, lez_rev) {
-        (Some(t), _) => format!("tag = \"{}\"", t),
-        (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.4\"".to_string(),
-    };
-    let spel_ref_ffi = match (spel_tag, spel_rev) {
-        (Some(t), _) => format!("tag = \"{}\"", t),
-        (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.4.0\"".to_string(),
-    };
+    let lez_ref_ffi = git_ref(lez_tag, lez_rev, default_lez_ref());
+    let spel_ref_ffi = git_ref(spel_tag, spel_rev, default_spel_ref());
     write_file(
         root,
         &format!("{snake_name}_ffi/Cargo.toml"),
@@ -689,16 +711,8 @@ risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
 "#,
     );
 
-    let lez_ref = match (lez_tag, lez_rev) {
-        (Some(t), _) => format!("tag = \"{}\"", t),
-        (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "tag = \"v0.2.4\"".to_string(),
-    };
-    let spel_ref = match (spel_tag, spel_rev) {
-        (Some(t), _) => format!("tag = \"{}\"", t),
-        (_, Some(r)) => format!("rev = \"{}\"", r),
-        _ => "branch = \"main\"".to_string(),
-    };
+    let lez_ref = git_ref(lez_tag, lez_rev, default_lez_ref());
+    let spel_ref = git_ref(spel_tag, spel_rev, default_spel_ref());
     // methods/guest/Cargo.toml
     write_file(
         root,

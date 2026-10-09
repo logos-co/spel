@@ -43,14 +43,6 @@ use syn::{
 mod account_types;
 mod slot_offsets;
 
-/// Main entry point: `#[lez_program]` on a module.
-///
-/// This macro:
-/// 1. Finds all `#[instruction]` functions in the module
-/// 2. Generates a serde-serializable `Instruction` enum
-/// 3. Generates the `fn main()` with read/dispatch/write boilerplate
-/// 4. Generates account validation code per instruction
-/// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
 /// Program-level configuration parsed from `#[lez_program(...)]` attributes.
 struct ProgramConfig {
     /// External instruction enum path, e.g. `my_crate::Instruction`.
@@ -94,6 +86,14 @@ impl ProgramConfig {
     }
 }
 
+/// Main entry point: `#[lez_program]` on a module.
+///
+/// This macro:
+/// 1. Finds all `#[instruction]` functions in the module
+/// 2. Generates a serde-serializable `Instruction` enum
+/// 3. Generates the `fn main()` with read/dispatch/write boilerplate
+/// 4. Generates account validation code per instruction
+/// 5. Generates `PROGRAM_IDL_JSON` const with complete IDL (including PDA seeds)
 #[proc_macro_attribute]
 pub fn lez_program(attr: TokenStream, item: TokenStream) -> TokenStream {
     let config = match ProgramConfig::parse(attr) {
@@ -107,11 +107,22 @@ pub fn lez_program(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Marker attribute for instruction functions within an `#[lez_program]` module.
-/// Processed by `#[lez_program]`, not standalone.
+/// Marker attribute for instruction functions.
+///
+/// Inside an `#[lez_program]` module this never expands. The module macro
+/// consumes the whole module first and emits the handler functions itself.
+///
+/// Standalone it does expand, which is the case an extension library hits:
+/// its instruction functions live outside `#[lez_program]`. Here the macro
+/// strips the `#[account(...)]` helper attributes off the parameters, so
+/// rustc accepts a function the framework has not rewritten. Extension
+/// discovery is unaffected, because the scanner parses the library source
+/// rather than this expansion and still sees the attributes.
 #[proc_macro_attribute]
 pub fn instruction(_attr: TokenStream, item: TokenStream) -> TokenStream {
-    item
+    let mut func = parse_macro_input!(item as ItemFn);
+    strip_account_attrs(&mut func);
+    quote!(#func).into()
 }
 
 /// Marker attribute for account data types.
@@ -286,7 +297,7 @@ fn locate_module_source(mod_name: &Ident) -> Option<(std::path::PathBuf, syn::Fi
     // Manifest 'declared bin paths: entry files outside src/
     // (custom [[bin]] path, test harnesses) must not be missed,
     // a missed entry file silently skips the slot assert.
-    for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(&manifest) {
+    for bin_path in spel_framework_core::idl_gen::manifest_bin_paths(manifest) {
         if bin_path.is_file() && !candidate_paths.iter().any(|p| p == &bin_path) {
             candidate_paths.push(bin_path);
         }
@@ -317,8 +328,9 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
         .as_ref()
         .ok_or_else(|| syn::Error::new_spanned(&input, "lez_program module must have a body"))?;
 
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map_err(|_| syn::Error::new_spanned(&input.ident, "CARGO_MANIFEST_DIR not set"))?;
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").map_err(|e| {
+        syn::Error::new_spanned(&input.ident, format!("CARGO_MANIFEST_DIR not set: {e}"))
+    })?;
     let manifest_dir = std::path::PathBuf::from(manifest_dir);
     let deps = spel_framework_core::extension::resolve_program_deps(
         &manifest_dir,
@@ -422,19 +434,18 @@ fn expand_lez_program(input: ItemMod, config: ProgramConfig) -> syn::Result<Toke
     .map_err(|msg| syn::Error::new(proc_macro2::Span::call_site(), msg))?;
 
     // Generate the Instruction enum (or use external one)
-    let enum_def = if config.external_instruction.is_none() {
+    let enum_def = if let Some(path) = config.external_instruction.as_ref() {
+        // External instruction: import it as `Instruction` if it's not already named that
+        quote! {
+            use #path as Instruction;
+        }
+    } else {
         let enum_variants = generate_enum_variants(&instructions);
         quote! {
             #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
             pub enum Instruction {
                 #(#enum_variants),*
             }
-        }
-    } else {
-        // External instruction: import it as `Instruction` if it's not already named that
-        let path = config.external_instruction.as_ref().unwrap();
-        quote! {
-            use #path as Instruction;
         }
     };
 
@@ -809,20 +820,19 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
                 "`private_pda` requires `pda = ...` seeds",
             ));
         }
-        if constraints.npk_arg.is_none() {
+        let Some(npk_name) = constraints.npk_arg.as_deref() else {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "`private_pda` requires `npk = arg(\"arg_name\")`",
             ));
-        }
-        if constraints.vpk_arg.is_none() {
+        };
+        let Some(vpk_name) = constraints.vpk_arg.as_deref() else {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
                 "`private_pda` requires `vpk = arg(\"arg_name\")` (LEZ v0.2.1+)",
             ));
-        }
+        };
         // Validate the npk arg name is a valid Rust identifier
-        let npk_name = constraints.npk_arg.as_deref().unwrap();
         if syn::parse_str::<Ident>(npk_name).is_err() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -830,7 +840,6 @@ fn parse_account_constraints(attrs: &[Attribute]) -> syn::Result<AccountConstrai
             ));
         }
         // Validate the vpk arg name is a valid Rust identifier
-        let vpk_name = constraints.vpk_arg.as_deref().unwrap();
         if syn::parse_str::<Ident>(vpk_name).is_err() {
             return Err(syn::Error::new(
                 proc_macro2::Span::call_site(),
@@ -898,14 +907,13 @@ fn parse_single_pda_seed(call: &syn::ExprCall) -> syn::Result<PdaSeedDef> {
         String::new()
     };
 
-    if call.args.len() != 1 {
+    let mut args_iter = call.args.iter();
+    let (Some(arg), None) = (args_iter.next(), args_iter.next()) else {
         return Err(syn::Error::new_spanned(
             call,
             "PDA seed function takes exactly one string argument",
         ));
-    }
-
-    let arg = &call.args[0];
+    };
     let string_val = if let syn::Expr::Lit(lit) = arg {
         if let syn::Lit::Str(s) = &lit.lit {
             s.value()
@@ -977,11 +985,11 @@ fn generate_match_arms(
                 quote! { Instruction::#variant_name { #(#field_names),* } }
             };
 
-            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
-            let account_destructure = if has_rest {
+            let account_destructure = if let Some(rest_account) =
+                ix.accounts.iter().find(|a| a.is_rest)
+            {
                 // Split into fixed accounts + rest
                 let fixed_accounts: Vec<&AccountParam> = ix.accounts.iter().filter(|a| !a.is_rest).collect();
-                let rest_account = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let num_fixed = fixed_accounts.len();
                 let fixed_names: Vec<&Ident> = fixed_accounts.iter().map(|a| &a.name).collect();
                 let rest_name = &rest_account.name;
@@ -1031,7 +1039,12 @@ fn generate_match_arms(
                     });
                 }
                 args.extend(ix.call_accounts.iter().enumerate().map(|(i, name)| {
-                    let repeats_later = ix.call_accounts[i + 1..].iter().any(|n| n == name);
+                    let repeats_later = ix
+                        .call_accounts
+                        .get(i + 1..)
+                        .unwrap_or_default()
+                        .iter()
+                        .any(|n| n == name);
                     if repeats_later {
                         quote! { #name.clone() }
                     } else {
@@ -1105,13 +1118,13 @@ fn generate_match_arms(
                 .collect();
 
             let validation_call = if has_validation {
-                if has_rest {
+                if let Some(rest_account) = ix.accounts.iter().find(|a| a.is_rest) {
                     // For instructions with Vec accounts, build the slice dynamically
                     let fixed_refs: Vec<TokenStream2> = ix.accounts.iter()
                         .filter(|a| !a.is_rest)
                         .map(|a| { let name = &a.name; quote! { #name.clone() } })
                         .collect();
-                    let rest_ref = &ix.accounts.iter().find(|a| a.is_rest).unwrap().name;
+                    let rest_ref = &rest_account.name;
                     quote! {
                         let mut __all_accounts = vec![#(#fixed_refs),*];
                         __all_accounts.extend(#rest_ref.clone());
@@ -1266,7 +1279,7 @@ impl<'a> ExecuteTransformer<'a> {
         self.accounts
             .iter()
             .filter(|a| self.injected.iter().any(|n| a.name == *n))
-            .filter(|a| !skip.iter().any(|i| *i == a.name))
+            .filter(|a| !skip.contains(&a.name))
             .map(|a| {
                 let ident = &a.name;
                 quote! { #ident.account.clone() }
@@ -1287,10 +1300,16 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
             } else {
                 return;
             };
-            if !is_spel_output_execute(&call.func) || call.args.len() != 2 {
+            if !is_spel_output_execute(&call.func) {
                 return;
             }
-            (call.args[0].clone(), call.args[1].clone())
+            let mut args_iter = call.args.iter();
+            let (Some(arg0), Some(arg1), None) =
+                (args_iter.next(), args_iter.next(), args_iter.next())
+            else {
+                return;
+            };
+            (arg0.clone(), arg1.clone())
         };
 
         let claims_fn = format_ident!("__claims_{}", self.fn_name);
@@ -1387,9 +1406,11 @@ impl<'a> VisitMut for ExecuteTransformer<'a> {
 
 fn is_spel_output_execute(func: &syn::Expr) -> bool {
     if let syn::Expr::Path(ep) = func {
-        let segments: Vec<_> = ep.path.segments.iter().collect();
-        if segments.len() == 2 {
-            return segments[0].ident == "SpelOutput" && segments[1].ident == "execute";
+        let mut segments = ep.path.segments.iter();
+        if let (Some(first), Some(second), None) =
+            (segments.next(), segments.next(), segments.next())
+        {
+            return first.ident == "SpelOutput" && second.ident == "execute";
         }
     }
     false
@@ -1407,6 +1428,20 @@ fn extract_vec_macro_idents(expr: &syn::Expr) -> Option<Vec<Ident>> {
     None
 }
 
+/// Drop the `#[account(...)]` helper attributes from a function's parameters.
+///
+/// The attribute is inert syntax that only the framework reads, so whoever
+/// emits the function has to remove it before rustc sees it. Both emitters
+/// go through here: `#[lez_program]` when it generates handlers, and the
+/// standalone `#[instruction]` expansion.
+fn strip_account_attrs(func: &mut ItemFn) {
+    for input in &mut func.sig.inputs {
+        if let FnArg::Typed(pat_type) = input {
+            pat_type.attrs.retain(|a| !a.path().is_ident("account"));
+        }
+    }
+}
+
 fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
@@ -1414,11 +1449,7 @@ fn generate_handler_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
         .map(|ix| {
             let mut func = ix.func.clone();
             func.attrs.retain(|a| !a.path().is_ident("instruction"));
-            for input in &mut func.sig.inputs {
-                if let FnArg::Typed(pat_type) = input {
-                    pat_type.attrs.retain(|a| !a.path().is_ident("account"));
-                }
-            }
+            strip_account_attrs(&mut func);
             // Transform SpelOutput::execute(vec![...], calls) → execute_with_claims
             let mut transformer = ExecuteTransformer {
                 accounts: &ix.accounts,
@@ -1462,8 +1493,7 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
                 }
             })
             .collect();
-        if seed_bytes.len() == 1 {
-            let seed = &seed_bytes[0];
+        if let [seed] = seed_bytes.as_slice() {
             quote! {
                 spel_framework::spel_output::AutoClaim::Claimed(
                     nssa_core::program::Claim::Pda(
@@ -1499,26 +1529,6 @@ fn generate_single_claim_expr(acc: &AccountParam) -> TokenStream2 {
     }
 }
 
-/// Generate per-instruction `__claims_{fn_name}()` functions that return
-/// `Vec<AutoClaim>` based on account constraints. These are used by
-/// `SpelOutput::execute_with_claims()` so users don't have to manually
-/// choose `new()` vs `new_claimed()`.
-///
-/// Auto-claim rules:
-/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
-/// - `#[account(init, signer)]`    → `Claim::Authorized`
-/// - `#[account(init)]`            → `Claim::Authorized`
-/// - `#[account(mut)]`             → `Claim::None`
-/// - `#[account]`                  → `Claim::None`
-///
-/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
-/// generated function takes a `rest_count: usize` parameter and repeats
-/// the rest account's claim that many times.
-///
-/// For `account(...)` PDA seeds, the generated function takes an additional
-/// `__account_seed_{name}: &[u8; 32]` parameter per referenced account, so the
-/// caller can pass the actual runtime account ID (matching what validation does).
-
 /// Collect the unique PDA arg seed parameters for a given instruction as typed
 /// `__pda_arg_<name>: &<type>` token streams, used in generated function signatures.
 fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
@@ -1539,7 +1549,7 @@ fn pda_arg_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
             let actual_type = ix
                 .args
                 .iter()
-                .find(|a| a.name.to_string() == *name)
+                .find(|a| a.name == name.as_str())
                 .map(|a| &a.ty);
             if let Some(ty) = actual_type {
                 quote! { #ident: &#ty }
@@ -1573,19 +1583,37 @@ fn pda_account_seed_params(ix: &InstructionInfo) -> Vec<TokenStream2> {
         .collect()
 }
 
+/// Generate per-instruction `__claims_{fn_name}()` functions that return
+/// `Vec<AutoClaim>` based on account constraints. These are used by
+/// `SpelOutput::execute_with_claims()` so users don't have to manually
+/// choose `new()` vs `new_claimed()`.
+///
+/// Auto-claim rules:
+/// - `#[account(init, pda = ...)]` → `Claim::Pda(seeds)`
+/// - `#[account(init, signer)]`    → `Claim::Authorized`
+/// - `#[account(init)]`            → `Claim::Authorized`
+/// - `#[account(mut)]`             → `Claim::None`
+/// - `#[account]`                  → `Claim::None`
+///
+/// For instructions with `Vec<AccountWithMetadata>` (rest accounts), the
+/// generated function takes a `rest_count: usize` parameter and repeats
+/// the rest account's claim that many times.
+///
+/// For `account(...)` PDA seeds, the generated function takes an additional
+/// `__account_seed_{name}: &[u8; 32]` parameter per referenced account, so the
+/// caller can pass the actual runtime account ID (matching what validation does).
 fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
     instructions
         .iter()
         .map(|ix| {
             let fn_name = format_ident!("__claims_{}", ix.fn_name);
-            let has_rest = ix.accounts.iter().any(|a| a.is_rest);
             let arg_params = pda_arg_params(ix);
             let account_seed_params = pda_account_seed_params(ix);
             let all_params: Vec<TokenStream2> = arg_params.into_iter()
                 .chain(account_seed_params)
                 .collect();
 
-            if has_rest {
+            if let Some(rest_acc) = ix.accounts.iter().find(|a| a.is_rest) {
                 let fixed_claims: Vec<TokenStream2> = ix
                     .accounts
                     .iter()
@@ -1593,7 +1621,6 @@ fn generate_claim_fns(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                     .map(generate_single_claim_expr)
                     .collect();
 
-                let rest_acc = ix.accounts.iter().find(|a| a.is_rest).unwrap();
                 let rest_claim = generate_single_claim_expr(rest_acc);
 
                 quote! {
@@ -1672,11 +1699,10 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                 .accounts
                 .iter()
                 .enumerate()
-                .filter(|(_, acc)| acc.constraints.owner.is_some())
-                .map(|(i, acc)| {
+                .filter_map(|(i, acc)| Some((i, acc, acc.constraints.owner.as_ref()?)))
+                .map(|(i, acc, owner_expr)| {
                     let idx = i;
                     let acc_name = acc.name.to_string();
-                    let owner_expr = acc.constraints.owner.as_ref().unwrap();
                     // self_program_id is passed as &ProgramId; deref for comparison.
                     quote! {
                         if accounts[#idx].account.program_owner != *#owner_expr {
@@ -1770,10 +1796,16 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                         .collect();
 
                     if acc.constraints.private_pda {
-                        // Private PDA: address = for_private_pda(program_id, seed, npk, vpk)
+                        // Private PDA: address = for_private_pda(program_id, seed, npk, vpk, identifier).
+                        // The attribute has no `identifier` constraint yet, so validation uses the
+                        // framework default (0); non-zero identifiers need hand-written validation.
+                        // parse_account_constraints() rejects private_pda without npk/vpk args
+                        // before an AccountParam with private_pda: true can exist here.
+                        #[allow(clippy::expect_used)]
                         let npk_name = acc.constraints.npk_arg.as_deref()
                             .expect("private_pda without npk_arg — should have been caught in parse_account_constraints");
                         let npk_param = format_ident!("__npk_arg_{}", npk_name);
+                        #[allow(clippy::expect_used)]
                         let vpk_name = acc.constraints.vpk_arg.as_deref()
                             .expect("private_pda without vpk_arg — should have been caught in parse_account_constraints");
                         let vpk_param = format_ident!("__vpk_arg_{}", vpk_name);
@@ -1781,7 +1813,8 @@ fn generate_validation(instructions: &[InstructionInfo]) -> Vec<TokenStream2> {
                             {
                                 #(#seed_exprs)*
                                 let __expected_id = spel_framework::pda::compute_private_pda(
-                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param
+                                    self_program_id, &[#(#seed_refs),*], #npk_param, #vpk_param,
+                                    spel_framework::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER,
                                 );
                                 if accounts[#idx].account_id != __expected_id {
                                     return Err(spel_framework::error::SpelError::PdaMismatch {
@@ -1867,7 +1900,10 @@ fn to_pascal_case(ident: &Ident) -> Ident {
 fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
     match ty {
         Type::Path(type_path) => {
-            let segment = type_path.path.segments.last().unwrap();
+            // A parsed `syn::Path` always has at least one segment.
+            let Some(segment) = type_path.path.segments.last() else {
+                return quote! { spel_framework::idl::IdlType::Primitive("unknown".to_string()) };
+            };
             let ident = segment.ident.to_string();
             match ident.as_str() {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
@@ -1947,7 +1983,10 @@ fn rust_type_to_idl_type_tokens(ty: &Type) -> proc_macro2::TokenStream {
 fn rust_type_to_idl_json(ty: &Type) -> String {
     match ty {
         Type::Path(type_path) => {
-            let segment = type_path.path.segments.last().unwrap();
+            // A parsed `syn::Path` always has at least one segment.
+            let Some(segment) = type_path.path.segments.last() else {
+                return "\"unknown\"".to_string();
+            };
             let ident = segment.ident.to_string();
             match ident.as_str() {
                 "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
@@ -1990,7 +2029,7 @@ fn compute_discriminator(name: &str) -> Vec<u8> {
     let mut hasher = Sha256::new();
     hasher.update(format!("global:{name}").as_bytes());
     let result = hasher.finalize();
-    result[..8].to_vec()
+    result.get(..8).unwrap_or_default().to_vec()
 }
 
 fn generate_idl_fn(
@@ -2489,10 +2528,6 @@ mod tests {
             TempDir(path)
         }
 
-        fn path(&self) -> &std::path::Path {
-            &self.0
-        }
-
         fn write(&self, rel: &str, content: &str) -> std::path::PathBuf {
             let p = self.0.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -2505,6 +2540,75 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).ok();
         }
+    }
+
+    // ── strip_account_attrs ────────────────────────────────────────────────
+
+    fn param_attr_paths(func: &ItemFn) -> Vec<Vec<String>> {
+        func.sig
+            .inputs
+            .iter()
+            .map(|input| match input {
+                FnArg::Typed(pat_type) => pat_type
+                    .attrs
+                    .iter()
+                    .map(|a| quote!(#a).to_string())
+                    .collect(),
+                FnArg::Receiver(_) => Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn strip_account_attrs_clears_every_account_attr() {
+        let mut func: ItemFn = syn::parse_quote! {
+            pub fn set_paused(
+                #[account(mut, pda = const("pause"))] state: u32,
+                #[account(signer)] admin: u32,
+                paused: bool,
+            ) -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(
+            param_attr_paths(&func),
+            vec![Vec::<String>::new(), Vec::new(), Vec::new()],
+            "every #[account(...)] must be gone, on every parameter"
+        );
+    }
+
+    #[test]
+    fn strip_account_attrs_keeps_attrs_it_does_not_own() {
+        // The framework owns `account` and nothing else. A parameter attr
+        // belonging to an extension library has to survive to expand there.
+        let mut func: ItemFn = syn::parse_quote! {
+            pub fn gated(#[other] #[account(signer)] caller: u32) -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(param_attr_paths(&func), vec![vec!["# [other]".to_string()]]);
+    }
+
+    #[test]
+    fn strip_account_attrs_leaves_function_attrs_alone() {
+        // `#[instruction]` sits on the function, not a parameter. Removing it
+        // is `generate_handler_fns`' job, and standalone it is self-consuming.
+        let mut func: ItemFn = syn::parse_quote! {
+            #[instruction]
+            #[inline]
+            pub fn noop() -> u32 { 0 }
+        };
+        strip_account_attrs(&mut func);
+        assert_eq!(
+            func.attrs.len(),
+            2,
+            "function attrs are not this fn's business"
+        );
+    }
+
+    #[test]
+    fn strip_account_attrs_accepts_a_parameterless_fn() {
+        let mut func: ItemFn = syn::parse_quote! { pub fn noop() {} };
+        strip_account_attrs(&mut func);
+        assert!(func.sig.inputs.is_empty());
     }
 
     // ── has_account_type_attr (qualified form) ─────────────────────────────
