@@ -44,7 +44,7 @@ jobs:
       - name: Build (all packages including spel)
         run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen -p spel
       - name: E2E tests
-        run: cargo test -p spel-framework
+        run: cargo test -p spel-framework -p spel
       - name: Compile-check generated FFI
         run: cargo check -p spel-ffi-compile-test
 
