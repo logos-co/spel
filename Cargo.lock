@@ -7282,6 +7282,8 @@ dependencies = [
  "hex",
  "lee",
  "lee_core",
+ "libc",
+ "program_loader_core",
  "risc0-zkvm",
  "sequencer_service_rpc",
  "serde",

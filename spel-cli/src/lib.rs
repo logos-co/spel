@@ -13,6 +13,7 @@ pub mod account_inspect;
 pub mod blob;
 pub mod cli;
 pub mod config;
+pub mod deploy;
 pub mod exchange;
 pub mod generate_idl;
 pub mod hex;
@@ -466,6 +467,52 @@ pub async fn run() {
                 compute_pda_raw(&raw_args);
                 return;
             },
+            "deploy" => {
+                let mut immutable = false;
+                let mut binary: Option<String> = None;
+                for arg in &remaining_args[2..] {
+                    match arg.as_str() {
+                        "--immutable" => immutable = true,
+                        "-h" | "--help" => {
+                            println!(
+                                "Usage: spel deploy [BINARY] --fee-payer <ADDRESS> [--immutable]"
+                            );
+                            println!();
+                            println!("Deploy a program through LEZ's program_loader: create a header account");
+                            println!("and the segment accounts the binary needs in the wallet, upload it, and");
+                            println!("print the program address (the header account) on stdout.");
+                            println!();
+                            println!("BINARY defaults to the spel.toml program's `binary`. The new accounts");
+                            println!("hold nothing, so --fee-payer must name a funded account in the wallet.");
+                            return;
+                        },
+                        s if s.starts_with('-') => {
+                            eprintln!("❌ spel deploy: unknown option '{}'", s);
+                            process::exit(1);
+                        },
+                        s if binary.is_none() => binary = Some(s.to_string()),
+                        s => {
+                            eprintln!("❌ spel deploy takes one binary, got another: '{}'", s);
+                            process::exit(1);
+                        },
+                    }
+                }
+                let binary = binary.or(program_path.clone()).unwrap_or_else(|| {
+                    eprintln!(
+                        "Usage: {} deploy [BINARY] --fee-payer <ADDRESS> [--immutable]",
+                        args[0]
+                    );
+                    eprintln!("   (no BINARY given and no spel.toml program with a `binary`)");
+                    process::exit(1);
+                });
+                deploy::deploy_command(
+                    std::path::Path::new(&binary),
+                    fee_payer.as_deref(),
+                    immutable,
+                )
+                .await;
+                return;
+            },
             "sign" => {
                 let path = remaining_args.get(2).unwrap_or_else(|| {
                     eprintln!("Usage: {} sign <blob-file>", args[0]);
@@ -495,6 +542,7 @@ pub async fn run() {
         eprintln!();
         eprintln!("Commands that don't need --idl:");
         eprintln!("  init <name>              Scaffold a new SPEL project");
+        eprintln!("  deploy [BINARY] --fee-payer <ADDRESS>  Deploy a program, print its address");
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
         );

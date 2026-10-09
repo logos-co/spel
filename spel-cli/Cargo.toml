@@ -19,6 +19,7 @@ nssa = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", t
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2", features = ["client"] }
 wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.2.5-rc2" }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }
@@ -27,6 +28,9 @@ borsh = "1.5"
 tokio = { version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }
 hex = "0.4"
 toml = "0.8"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
