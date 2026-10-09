@@ -5,13 +5,151 @@
 //! in `spel-framework-core` and the proc-macro path (`lez_program`, `generate_idl!`) use this
 //! logic to ensure consistent IDL output.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use syn::{Attribute, Item, ItemEnum, ItemStruct, Type};
 
-use crate::idl::{IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef};
+use crate::{
+    idl::{IdlAccountType, IdlEnumVariant, IdlField, IdlType, IdlTypeDef},
+    idl_gen::{is_account_type, is_context_type, is_vec_account_type},
+};
 
 // ─── Account type scanning ────────────────────────────────────────────────
+
+/// Where a referenced type's definition is found when the scanned items
+/// do not declare it.
+///
+/// Annotations are discovered only in connected sources, so a type
+/// reached by reference may live in a crate that was never scanned.
+/// `AdminConfig.slot: AuthoritySlot` is the standing example: the field
+/// names a type from the extension's own dependency. The walk asks for
+/// it by name, and only then does anything go looking.
+pub trait TypeDefSource {
+    /// The definition of `name`, or `None` when nothing declares it.
+    fn find(&mut self, name: &str) -> Option<IdlTypeDef>;
+}
+
+/// Resolves nothing: every reference is every reference is answered from
+/// the scanned items alone.
+pub struct NoTypeDefs;
+
+impl TypeDefSource for NoTypeDefs {
+    fn find(&mut self, _name: &str) -> Option<IdlTypeDef> {
+        None
+    }
+}
+
+/// Scan `items` for `#[account_type]`-annotated types and return:
+/// - `accounts`: directly annotated types (primary account data layouts)
+/// - `types`: helper types referenced by account types but not themselves annotated
+///
+/// Helper types are resolved transitively: if `Vault` references `VaultStatus`
+/// and `VaultStatus` references `StatusFlags`, all three end up in the IDL.
+pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
+    collect_account_types_from(items, &mut NoTypeDefs)
+}
+
+/// [`collect_account_types`] with somewhere to look for definitions the
+/// scanned items do not contain.
+pub fn collect_account_types_from(
+    items: &[Item],
+    defs: &mut impl TypeDefSource,
+) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
+    // Pass 1: collect directly annotated types.
+    let mut accounts: Vec<IdlAccountType> = Vec::new();
+    let mut annotated_names: HashSet<String> = HashSet::new();
+
+    for item in items {
+        match item {
+            Item::Struct(s) if has_account_type_attr(&s.attrs) => {
+                if let Some(at) = parse_struct_account_type(s) {
+                    annotated_names.insert(at.name.clone());
+                    accounts.push(at);
+                }
+            },
+            Item::Enum(e) if has_account_type_attr(&e.attrs) => {
+                let at = parse_enum_account_type(e);
+                annotated_names.insert(at.name.clone());
+                accounts.push(at);
+            },
+            _ => {},
+        }
+    }
+
+    // Pass 2: BFS over Defined-type references to collect helper types.
+    let mut helper_types: Vec<IdlTypeDef> = Vec::new();
+    let mut visited: HashSet<String> = annotated_names.clone();
+
+    // Seed the queue with references from annotated types, deduplicated while
+    // preserving discovery order. A `HashSet` round-trip here would make the
+    // discovery order — and therefore the emitted IDL — non-deterministic
+    // across processes (hash seeds are randomized per run).
+    let mut queued: HashSet<String> = HashSet::new();
+    let mut queue: Vec<String> = Vec::new();
+    for account in &accounts {
+        for name in collect_defined_refs(&account.type_) {
+            if !visited.contains(&name) && queued.insert(name.clone()) {
+                queue.push(name);
+            }
+        }
+    }
+
+    // Pass 1.5: seed the queue from #[instruction] fn argument types, so
+    // defined types used only as instruction args (e.g. an enum argument)
+    // also end up in the IDL's `types` section.
+    for item in items {
+        let Item::Fn(f) = item else { continue };
+        if !f.attrs.iter().any(|a| a.path().is_ident("instruction")) {
+            continue;
+        }
+        for input in &f.sig.inputs {
+            let syn::FnArg::Typed(pt) = input else {
+                continue;
+            };
+            if is_account_shaped(&pt.ty) {
+                continue;
+            }
+            let idl_ty = syn_type_to_idl_type(&pt.ty);
+            let mut refs = Vec::new();
+            collect_defined_refs_from_type(&idl_ty, &mut refs);
+            for name in refs {
+                if !visited.contains(&name) {
+                    queue.push(name);
+                }
+            }
+        }
+    }
+
+    let index = index_type_items(items);
+    while !queue.is_empty() {
+        let batch: Vec<String> = std::mem::take(&mut queue);
+        for name in batch {
+            if visited.contains(&name) {
+                continue;
+            }
+            visited.insert(name.clone());
+            if let Some(def) = find_and_parse_type(&index, &name, defs) {
+                // Enqueue any new references from this helper type.
+                for ref_name in collect_defined_refs(&def) {
+                    if !visited.contains(&ref_name) {
+                        queue.push(ref_name);
+                    }
+                }
+                helper_types.push(def);
+            }
+            // Nothing declares it anywhere the program can see, so it stays an
+            // unresolved Defined reference in the IDL. The decoder reports a
+            // clear error if it meets that reference at runtime.
+        }
+    }
+
+    // Emit helper types in a canonical (name-sorted) order so the generated IDL
+    // is byte-stable across processes and independent of source declaration
+    // order. Directly annotated `accounts` already follow source item order.
+    helper_types.sort_by(|a, b| a.name.cmp(&b.name));
+
+    (accounts, helper_types)
+}
 
 /// Check if an item has the `#[account_type]` attribute.
 ///
@@ -27,64 +165,6 @@ pub fn has_account_type_attr(attrs: &[Attribute]) -> bool {
                 .last()
                 .is_some_and(|s| s.ident == "account_type")
     })
-}
-
-/// Convert a Rust `syn::Type` to an IDL type representation.
-pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
-    match ty {
-        Type::Path(type_path) => {
-            let segment = match type_path.path.segments.last() {
-                Some(s) => s,
-                None => return IdlType::Primitive("unknown".to_string()),
-            };
-            let ident = segment.ident.to_string();
-            match ident.as_str() {
-                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
-                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
-                "Vec" => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return IdlType::Vec {
-                                vec: Box::new(syn_type_to_idl_type(inner)),
-                            };
-                        }
-                    }
-                    IdlType::Primitive("vec<unknown>".to_string())
-                },
-                "Option" => {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return IdlType::Option {
-                                option: Box::new(syn_type_to_idl_type(inner)),
-                            };
-                        }
-                    }
-                    IdlType::Primitive("option<unknown>".to_string())
-                },
-                "ProgramId" => IdlType::Primitive("program_id".to_string()),
-                "AccountId" => IdlType::Primitive("account_id".to_string()),
-                other => IdlType::Defined {
-                    defined: other.to_string(),
-                },
-            }
-        },
-        Type::Array(arr) => {
-            let elem = syn_type_to_idl_type(&arr.elem);
-            if let syn::Expr::Lit(lit) = &arr.len {
-                if let syn::Lit::Int(n) = &lit.lit {
-                    if let Ok(size) = n.base10_parse::<usize>() {
-                        return IdlType::Array {
-                            array: (Box::new(elem), size),
-                        };
-                    }
-                }
-            }
-            IdlType::Array {
-                array: (Box::new(elem), 0),
-            }
-        },
-        _ => IdlType::Primitive("unknown".to_string()),
-    }
 }
 
 /// Parse a named struct annotated with `#[account_type]` into an [`IdlAccountType`].
@@ -153,6 +233,79 @@ pub fn parse_enum_account_type(item: &ItemEnum) -> IdlAccountType {
     }
 }
 
+/// Convert a Rust `syn::Type` to an IDL type representation.
+pub(crate) fn syn_type_to_idl_type(ty: &Type) -> IdlType {
+    match ty {
+        Type::Path(type_path) => {
+            let segment = match type_path.path.segments.last() {
+                Some(s) => s,
+                None => return IdlType::Primitive("unknown".to_string()),
+            };
+            let ident = segment.ident.to_string();
+            match ident.as_str() {
+                "u8" | "u16" | "u32" | "u64" | "u128" | "i8" | "i16" | "i32" | "i64" | "i128"
+                | "bool" | "String" => IdlType::Primitive(ident.to_lowercase()),
+                "Vec" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return IdlType::Vec {
+                                vec: Box::new(syn_type_to_idl_type(inner)),
+                            };
+                        }
+                    }
+                    IdlType::Primitive("vec<unknown>".to_string())
+                },
+                "Option" => {
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
+                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                            return IdlType::Option {
+                                option: Box::new(syn_type_to_idl_type(inner)),
+                            };
+                        }
+                    }
+                    IdlType::Primitive("option<unknown>".to_string())
+                },
+                "ProgramId" => IdlType::Primitive("program_id".to_string()),
+                "AccountId" => IdlType::Primitive("account_id".to_string()),
+                other => IdlType::Defined {
+                    defined: other.to_string(),
+                },
+            }
+        },
+        Type::Array(arr) => {
+            let elem = syn_type_to_idl_type(&arr.elem);
+            if let syn::Expr::Lit(lit) = &arr.len {
+                if let syn::Lit::Int(n) = &lit.lit {
+                    if let Ok(size) = n.base10_parse::<usize>() {
+                        return IdlType::Array {
+                            array: (Box::new(elem), size),
+                        };
+                    }
+                }
+            }
+            IdlType::Array {
+                array: (Box::new(elem), 0),
+            }
+        },
+        _ => IdlType::Primitive("unknown".to_string()),
+    }
+}
+
+/// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
+/// → `AccountWithMetadata`. `None` for non-path types (references, tuples).
+fn last_ident(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+        _ => None,
+    }
+}
+
+/// True for instruction params that are accounts rather than data args:
+/// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
+fn is_account_shaped(ty: &Type) -> bool {
+    is_account_type(ty) || is_vec_account_type(ty) || is_context_type(ty)
+}
+
 /// Collect all `Defined { name }` type references that appear anywhere within a
 /// type definition (fields of structs, fields of enum variants).
 fn collect_defined_refs(type_def: &IdlTypeDef) -> Vec<String> {
@@ -178,174 +331,63 @@ fn collect_defined_refs_from_type(ty: &IdlType, out: &mut Vec<String>) {
     }
 }
 
-/// Look up a type by name in the top-level items of a file and parse it.
-/// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
-fn find_and_parse_type(items: &[Item], name: &str) -> Option<IdlTypeDef> {
-    for item in items {
-        match item {
-            Item::Struct(s) if s.ident == name => {
-                return parse_struct_account_type(s).map(|at| IdlTypeDef {
-                    name: name.to_string(),
-                    ..at.type_
-                });
-            },
-            Item::Enum(e) if e.ident == name => {
-                let mut def = parse_enum_account_type(e).type_;
-                def.name = name.to_string();
-                return Some(def);
-            },
-            Item::Type(t) if t.ident == name => {
-                // Type alias: resolve the target and emit its def under the
-                // alias name, so instruction args referencing the alias find
-                // a matching entry in the IDL's `types` array.
-                if let Some(target) = last_ident(&t.ty) {
-                    if let Some(mut def) = find_and_parse_type(items, &target) {
-                        def.name = name.to_string();
-                        return Some(def);
-                    }
-                }
-                return None;
-            },
-            _ => {},
-        }
-    }
-    None
+/// The nameable type items, by name, first declaration winning.
+///
+/// `items` merges the consumer's file with every crate in its
+/// dependency graph, so one name can appear more than once. Building
+/// from the back leaves the earliest declaration in the map.
+fn index_type_items(items: &[Item]) -> HashMap<String, &Item> {
+    items
+        .iter()
+        .rev()
+        .filter_map(|item| match item {
+            Item::Struct(s) => Some((s.ident.to_string(), item)),
+            Item::Enum(e) => Some((e.ident.to_string(), item)),
+            Item::Type(t) => Some((t.ident.to_string(), item)),
+            _ => None,
+        })
+        .collect()
 }
 
-/// Last path segment of a type, e.g. `nssa_core::account::AccountWithMetadata`
-/// → `AccountWithMetadata`. `None` for non-path types (references, tuples).
-fn last_ident(ty: &Type) -> Option<String> {
-    match ty {
-        Type::Path(p) => p.path.segments.last().map(|s| s.ident.to_string()),
+/// Look up a type by name in an [`index_type_items`] index and parse it.
+/// Returns `None` if not found or the item cannot be represented (e.g. tuple struct).
+fn find_and_parse_type(
+    index: &HashMap<String, &Item>,
+    name: &str,
+    defs: &mut impl TypeDefSource,
+) -> Option<IdlTypeDef> {
+    let Some(item) = index.get(name) else {
+        // Not declared in the items in hand; ask the source. This is
+        // also the alias-target path: an alias in a connected crate may
+        // point at a type an unowned crate declares.
+        return defs.find(name);
+    };
+    match item {
+        Item::Struct(s) => parse_struct_account_type(s).map(|at| IdlTypeDef {
+            name: name.to_string(),
+            ..at.type_
+        }),
+        Item::Enum(e) => {
+            let mut def = parse_enum_account_type(e).type_;
+            def.name = name.to_string();
+            Some(def)
+        },
+        // Type alias: resolve the target and emit its def under the
+        // alias name, so instruction args referencing the alias find
+        // a matching entry in the IDL's `types` array.
+        Item::Type(t) => {
+            let mut def = find_and_parse_type(index, &last_ident(&t.ty)?, defs)?;
+            def.name = name.to_string();
+            Some(def)
+        },
         _ => None,
     }
 }
 
-/// True for instruction params that are accounts rather than data args:
-/// `AccountWithMetadata`, `Vec<AccountWithMetadata>`, and `ProgramContext`.
-fn is_account_shaped(ty: &Type) -> bool {
-    match last_ident(ty).as_deref() {
-        Some("AccountWithMetadata") | Some("ProgramContext") => true,
-        Some("Vec") => {
-            // reach into Vec<...>'s generic argument
-            if let Type::Path(p) = ty {
-                if let Some(seg) = p.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            return matches!(
-                                last_ident(inner).as_deref(),
-                                Some("AccountWithMetadata")
-                            );
-                        }
-                    }
-                }
-            }
-            false
-        },
-        _ => false,
-    }
-}
-
-/// Scan `items` for `#[account_type]`-annotated types and return:
-/// - `accounts`: directly annotated types (primary account data layouts)
-/// - `types`: helper types referenced by account types but not themselves annotated
-///
-/// Helper types are resolved transitively: if `Vault` references `VaultStatus`
-/// and `VaultStatus` references `StatusFlags`, all three end up in the IDL.
-pub fn collect_account_types(items: &[Item]) -> (Vec<IdlAccountType>, Vec<IdlTypeDef>) {
-    // Pass 1: collect directly annotated types.
-    let mut accounts: Vec<IdlAccountType> = Vec::new();
-    let mut annotated_names: HashSet<String> = HashSet::new();
-
-    for item in items {
-        match item {
-            Item::Struct(s) if has_account_type_attr(&s.attrs) => {
-                if let Some(at) = parse_struct_account_type(s) {
-                    annotated_names.insert(at.name.clone());
-                    accounts.push(at);
-                }
-            },
-            Item::Enum(e) if has_account_type_attr(&e.attrs) => {
-                let at = parse_enum_account_type(e);
-                annotated_names.insert(at.name.clone());
-                accounts.push(at);
-            },
-            _ => {},
-        }
-    }
-
-    // Pass 2: BFS over Defined-type references to collect helper types.
-    let mut helper_types: Vec<IdlTypeDef> = Vec::new();
-    let mut visited: HashSet<String> = annotated_names.clone();
-
-    // Seed the queue with references from annotated types, deduplicated while
-    // preserving discovery order. A `HashSet` round-trip here would make the
-    // discovery order — and therefore the emitted IDL — non-deterministic
-    // across processes (hash seeds are randomized per run).
-    let mut queued: HashSet<String> = HashSet::new();
-    let mut queue: Vec<String> = Vec::new();
-    for account in &accounts {
-        for name in collect_defined_refs(&account.type_) {
-            if !visited.contains(&name) && queued.insert(name.clone()) {
-                queue.push(name);
-            }
-        }
-    }
-
-    // Pass 1.5: seed the queue from #[instruction] fn argument types, so
-    // defined types used only as instruction args (e.g. an enum argument)
-    // also end up in the IDL's `types` section.
-    for item in items {
-        let Item::Fn(f) = item else { continue };
-        if !f.attrs.iter().any(|a| a.path().is_ident("instruction")) {
-            continue;
-        }
-        for input in &f.sig.inputs {
-            let syn::FnArg::Typed(pt) = input else {
-                continue;
-            };
-            if is_account_shaped(&pt.ty) {
-                continue;
-            }
-            let idl_ty = syn_type_to_idl_type(&pt.ty);
-            let mut refs = Vec::new();
-            collect_defined_refs_from_type(&idl_ty, &mut refs);
-            for name in refs {
-                if !visited.contains(&name) {
-                    queue.push(name);
-                }
-            }
-        }
-    }
-
-    while !queue.is_empty() {
-        let batch: Vec<String> = std::mem::take(&mut queue);
-        for name in batch {
-            if visited.contains(&name) {
-                continue;
-            }
-            visited.insert(name.clone());
-            if let Some(def) = find_and_parse_type(items, &name) {
-                // Enqueue any new references from this helper type.
-                for ref_name in collect_defined_refs(&def) {
-                    if !visited.contains(&ref_name) {
-                        queue.push(ref_name);
-                    }
-                }
-                helper_types.push(def);
-            }
-            // If the type isn't found in the file (e.g. it's from an external crate),
-            // leave it as an unresolved Defined reference in the IDL. The decoder will
-            // report a clear error if it encounters that reference at runtime.
-        }
-    }
-
-    // Emit helper types in a canonical (name-sorted) order so the generated IDL
-    // is byte-stable across processes and independent of source declaration
-    // order. Directly annotated `accounts` already follow source item order.
-    helper_types.sort_by(|a, b| a.name.cmp(&b.name));
-
-    (accounts, helper_types)
+/// The definition of `name` among `items`, aliases followed within the
+/// same items. For sources that parse one file at a time.
+pub(crate) fn type_def_from_items(items: &[Item], name: &str) -> Option<IdlTypeDef> {
+    find_and_parse_type(&index_type_items(items), name, &mut NoTypeDefs)
 }
 
 #[cfg(test)]
@@ -354,6 +396,90 @@ mod tests {
 
     fn items(src: &str) -> Vec<Item> {
         syn::parse_file(src).expect("failed to parse source").items
+    }
+
+    /// Answers exactly one name, counting the asks.
+    struct OneDef {
+        name: &'static str,
+        asked: Vec<String>,
+    }
+
+    impl TypeDefSource for OneDef {
+        fn find(&mut self, name: &str) -> Option<IdlTypeDef> {
+            self.asked.push(name.to_string());
+            (name == self.name).then(|| IdlTypeDef {
+                name: name.to_string(),
+                kind: "struct".to_string(),
+                fields: vec![IdlField {
+                    name: "holder".to_string(),
+                    type_: IdlType::Primitive("account_id".to_string()),
+                }],
+                variants: vec![],
+            })
+        }
+    }
+
+    // A referenced type the items do not declare is asked of the source;
+    // the def it returns joins `types` like any locally resolved helper.
+    #[test]
+    fn missing_reference_is_answered_by_the_source() {
+        let src = r#"
+            #[account_type]
+            pub struct AdminConfig { pub slot: AuthoritySlot }
+        "#;
+        let mut defs = OneDef {
+            name: "AuthoritySlot",
+            asked: vec![],
+        };
+        let (_, helpers) = collect_account_types_from(&items(src), &mut defs);
+        assert_eq!(defs.asked, vec!["AuthoritySlot"]);
+        assert!(helpers.iter().any(|t| t.name == "AuthoritySlot"));
+    }
+
+    // The alias-target path: the alias is in hand, its target is not.
+    // The def comes back under the alias name, which is what keeps
+    // `AdminCandidate` in the IDL when its target lives in an unowned
+    // crate.
+    #[test]
+    fn alias_target_is_resolved_through_the_source() {
+        let src = r#"
+            #[account_type]
+            pub struct Wrapper { pub c: AdminCandidate }
+            pub type AdminCandidate = AuthorityCandidate;
+        "#;
+        let mut defs = OneDef {
+            name: "AuthorityCandidate",
+            asked: vec![],
+        };
+        let (_, helpers) = collect_account_types_from(&items(src), &mut defs);
+        assert!(
+            helpers.iter().any(|t| t.name == "AdminCandidate"),
+            "the target's def must come back under the alias name: {helpers:?}"
+        );
+    }
+
+    #[test]
+    fn first_declaration_of_a_repeated_name_wins() {
+        // The scanned items merge the consumer's file with every crate in
+        // its dependency graph, so one name can appear more than once. It
+        // resolves to the first declaration in item order, not to
+        // whichever one the lookup index happened to keep.
+        let src = r#"
+            pub struct Helper { pub first: u8 }
+            pub struct Helper { pub second: u8 }
+
+            #[account_type]
+            pub struct VaultState {
+                pub helper: Helper,
+            }
+        "#;
+        let (_, helpers) = collect_account_types(&items(src));
+        let helper = helpers
+            .iter()
+            .find(|t| t.name == "Helper")
+            .expect("the referenced helper resolves");
+        let fields: Vec<&str> = helper.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(fields, vec!["first"]);
     }
 
     #[test]

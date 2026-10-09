@@ -13,9 +13,11 @@ use std::path::{Path, PathBuf};
 
 use syn::{Attribute, FnArg, Ident, ItemFn, Pat, PatType, Type};
 
-use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, SpelIdl};
+use crate::idl::{IdlAccountItem, IdlArg, IdlInstruction, IdlPda, IdlSeed, IdlTypeDef, SpelIdl};
 
-use crate::account_types::{collect_account_types, syn_type_to_idl_type};
+use crate::account_types::{
+    collect_account_types, collect_account_types_from, syn_type_to_idl_type,
+};
 
 use crate::extension::{check_duplicate_instruction_names, instruction_source_label};
 
@@ -31,6 +33,7 @@ pub enum IdlGenError {
     NoInstructions(String),
     MalformedExtensionMetadata(String),
     DuplicateInstruction(String),
+    DuplicateAccountLayout(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -49,6 +52,9 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::DuplicateInstruction(e) => {
                 write!(f, "Duplicate instruction: '{e}'")
+            },
+            IdlGenError::DuplicateAccountLayout(e) => {
+                write!(f, "Duplicate account layout: '{e}'")
             },
         }
     }
@@ -109,6 +115,32 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
         &source_path.display().to_string(),
         &extra_items,
         Some(source_path),
+        None,
+    )
+}
+
+/// Parse a SPEL program source file and return its [`SpelIdl`], over a
+/// dependency graph the caller already resolved.
+///
+/// The graph serves both halves of the work: extension discovery reads
+/// its `direct_dirs`, and the account types scanned into the IDL come
+/// from its `transitive_dirs`. A caller holding a graph passes it here
+/// instead of paying for a second `cargo metadata` of one manifest.
+///
+/// # Errors
+///
+/// The same as [`generate_idl_from_file_with_deps`].
+pub fn generate_idl_from_file_with_graph(
+    source_path: &Path,
+    graph: crate::dep_walk::DepGraph,
+) -> Result<SpelIdl, IdlGenError> {
+    let content = std::fs::read_to_string(source_path)?;
+    generate_idl_inner(
+        &content,
+        &source_path.display().to_string(),
+        &[],
+        Some(source_path),
+        Some(graph),
     )
 }
 
@@ -118,7 +150,7 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 /// production code goes through `generate_idl_from_file_with_deps`.
 #[cfg(test)]
 fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, IdlGenError> {
-    generate_idl_inner(content, source_label, &[], None)
+    generate_idl_inner(content, source_label, &[], None, None)
 }
 
 /// Core IDL generation logic. `extra_items` are synthetic items collected from
@@ -129,7 +161,9 @@ fn generate_idl_inner(
     source_label: &str,
     extra_items: &[syn::Item],
     manifest_dir: Option<&Path>,
+    graph: Option<crate::dep_walk::DepGraph>,
 ) -> Result<SpelIdl, IdlGenError> {
+    let scans_the_graph = graph.is_some();
     let path_str = source_label.to_string();
 
     let file = syn::parse_file(content)?;
@@ -158,33 +192,28 @@ fn generate_idl_inner(
     // Resolve the dependency side first: inject specs apply to the
     // consumer's own instructions below.
     let mut warn = |w: String| eprintln!("⚠️  {w}");
-    let (ext_instructions, inject_specs, active_wraps, embeds) = match manifest_dir {
-        Some(manifest_dir) => {
-            let mut deps =
-                crate::extension::resolve_program_deps(manifest_dir, &program_mod.attrs, &mut warn)
-                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
-            let consumer_fns: Vec<ItemFn> = items
-                .iter()
-                .filter_map(|i| match i {
-                    syn::Item::Fn(f) if has_instruction_attr(&f.attrs) => Some(f.clone()),
-                    _ => None,
-                })
-                .collect();
-            crate::extension::rewrite_embedded_roles(
-                &mut deps.extensions.inject_specs,
-                &deps.extensions.embeds,
-                &consumer_fns,
-            )
-            .map_err(IdlGenError::MalformedExtensionMetadata)?;
-            let active_wraps = crate::extension::active_wraps(&deps.extensions.wraps);
-            (
-                deps.extensions.instructions,
-                deps.extensions.inject_specs,
-                active_wraps,
-                deps.extensions.embeds,
-            )
-        },
-        None => (vec![], vec![], vec![], vec![]),
+    // `Carriers::Skip`: the IDL has no offset field and the gate attrs
+    // are dropped by `parse_instruction`, so a resolved derivation could
+    // not reach this output, and resolving one would mean scanning the
+    // consumer's crate for a slot carrier to compute a dead value.
+    let mut program = match manifest_dir {
+        Some(manifest_dir) => match graph {
+            Some(graph) => crate::extension::resolve_program_deps_with_graph(
+                graph,
+                &program_mod.attrs,
+                items,
+                &mut warn,
+            ),
+            None => crate::extension::resolve_program_deps(
+                manifest_dir,
+                &program_mod.attrs,
+                items,
+                &mut warn,
+            ),
+        }
+        .and_then(|deps| deps.prepare(items, crate::extension::Carriers::Skip))
+        .map_err(IdlGenError::MalformedExtensionMetadata)?,
+        None => crate::extension::PreparedProgram::default(),
     };
 
     // Collect instruction functions
@@ -193,14 +222,9 @@ fn generate_idl_inner(
         if let syn::Item::Fn(func) = item {
             if has_instruction_attr(&func.attrs) {
                 let mut func = func.clone();
-                crate::extension::apply_wrap_and_inject(
-                    &mut func,
-                    &active_wraps,
-                    &inject_specs,
-                    &embeds,
-                    None,
-                )
-                .map_err(IdlGenError::MalformedExtensionMetadata)?;
+                program
+                    .gate(&mut func, None)
+                    .map_err(IdlGenError::MalformedExtensionMetadata)?;
                 instructions.push(parse_instruction(func)?);
             }
         }
@@ -210,27 +234,13 @@ fn generate_idl_inner(
         return Err(IdlGenError::NoInstructions(path_str));
     }
 
-    for (func, crate_path) in ext_instructions {
-        let mut func = func;
-        let qualified = format!(
-            "{}::{}",
-            crate_path
-                .segments
-                .first()
-                .map(|s| s.ident.to_string())
-                .unwrap_or_default(),
-            func.sig.ident
-        );
-        crate::extension::apply_wrap_and_inject(
-            &mut func,
-            &active_wraps,
-            &inject_specs,
-            &embeds,
-            Some(&qualified),
-        )
-        .map_err(IdlGenError::MalformedExtensionMetadata)?;
+    for ext in std::mem::take(&mut program.instructions) {
+        let mut func = ext.func;
+        program
+            .gate(&mut func, Some(&ext.qualified))
+            .map_err(IdlGenError::MalformedExtensionMetadata)?;
         let mut info = parse_instruction(func)?;
-        let name = &info.fn_name;
+        let (crate_path, name) = (&ext.crate_path, &info.fn_name);
         info.external_call_path = Some(syn::parse_quote!(#crate_path::#name));
         instructions.push(info);
     }
@@ -325,7 +335,28 @@ fn generate_idl_inner(
     let mut all_items: Vec<syn::Item> = file.items.clone();
     all_items.extend(items.clone());
     all_items.extend_from_slice(extra_items);
-    let (accounts, types) = collect_account_types(&all_items);
+    let (accounts, types) = if scans_the_graph {
+        // A graph caller gets connected-source layouts, with everything
+        // they reference resolved on demand from the rest of the graph.
+        let mut consumer_items: Vec<syn::Item> = file.items.clone();
+        consumer_items.extend(items.clone());
+        let Some(source) = manifest_dir else {
+            // Both graph callers pass their source path; a graph without
+            // one is a caller bug, not a generation condition.
+            unreachable!("a graph arrives only with a source path")
+        };
+        let (layout, _) = program
+            .layout_items(source, consumer_items)
+            .map_err(IdlGenError::DuplicateAccountLayout)?;
+        let mut defs = program.unowned_defs();
+        collect_account_types_from(&layout, &mut defs)
+    } else {
+        // A caller that named its dirs gets exactly those.
+        let mut all_items: Vec<syn::Item> = file.items.clone();
+        all_items.extend(items.clone());
+        all_items.extend_from_slice(extra_items);
+        collect_account_types(&all_items)
+    };
 
     Ok(SpelIdl {
         version: "0.1.0".to_string(),
@@ -379,6 +410,83 @@ pub fn collect_items_from_crate_dirs<F: FnMut(String)>(
         }
     }
     (items, files_read)
+}
+
+/// Finds a referenced type's declaration in the unowned part of the
+/// dependency graph.
+///
+/// Owned sources and activated extensions are parsed up front and their
+/// items arrive in the `items` slice; everything else is read only when
+/// the walk asks for a name. Files are text-filtered before they are
+/// parsed and each AST is dropped as soon as the name is resolved, so
+/// nothing is retained across the generation.
+pub struct UnownedTypeDefs {
+    dirs: Vec<PathBuf>,
+    /// Every file parsed during lookups, reported so compile-time
+    /// callers can register them as cargo dependencies.
+    files_read: Vec<PathBuf>,
+}
+
+impl UnownedTypeDefs {
+    pub fn new(dirs: Vec<PathBuf>) -> Self {
+        Self {
+            dirs,
+            files_read: Vec::new(),
+        }
+    }
+
+    /// Every file whose parse contributed to a lookup, for callers that
+    /// register dependency files with cargo.
+    pub fn files_read(&self) -> &[PathBuf] {
+        &self.files_read
+    }
+}
+
+impl crate::account_types::TypeDefSource for UnownedTypeDefs {
+    fn find(&mut self, name: &str) -> Option<IdlTypeDef> {
+        for dir in &self.dirs {
+            let mut stack = vec![dir.join("src")];
+            while let Some(d) = stack.pop() {
+                let Ok(entries) = std::fs::read_dir(&d) else {
+                    continue;
+                };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        stack.push(path);
+                    } else if let Some(def) = probe_file(&path, name, &mut self.files_read) {
+                        return Some(def);
+                    }
+                }
+            }
+        }
+        None
+    }
+}
+
+/// The named def from one file: a cheap text filter first, the
+/// parse only when the file can declare the name. Records the file
+/// when it parses.
+fn probe_file(path: &Path, name: &str, files_read: &mut Vec<PathBuf>) -> Option<IdlTypeDef> {
+    if path.extension().is_none_or(|e| e != "rs") {
+        return None;
+    }
+    let text = std::fs::read_to_string(path).ok()?;
+    // A declaration of `name` must contain it, so the substring
+    // test can exclude but never miss.
+    if !text.contains(name) || has_metavar_glued_literal(&text) {
+        return None;
+    }
+    let file = syn::parse_file(&text).ok()?;
+    files_read.push(path.to_path_buf());
+    // Same screen as the walks: a def a default build
+    // never compiles must not answer a reference.
+    let items: Vec<syn::Item> = file
+        .items
+        .into_iter()
+        .filter(|i| !cfg_excluded_item(i))
+        .collect();
+    crate::account_types::type_def_from_items(&items, name)
 }
 
 /// Parse a source file and every module file it declares, returning the
@@ -525,20 +633,18 @@ fn collect_items_recursive<F: FnMut(String)>(
     on_warning: &mut F,
 ) {
     for item in items {
+        // A default build never compiles these, so the walk must not
+        // read them: test-only or feature-gated types are not the
+        // program's.
+        if cfg_excluded_item(item) {
+            continue;
+        }
         match item {
             syn::Item::Mod(m) => {
-                // Skip modules gated behind #[cfg(...)] that would not be
-                // compiled in a default build (e.g. #[cfg(test)],
-                // #[cfg(feature = "...")]).  This prevents test-only or
-                // feature-gated types from leaking into the on-chain IDL.
-                if is_cfg_excluded(&m.attrs) {
-                    continue;
-                }
-
                 if let Some((_, inner)) = &m.content {
-                    // Inline module — recurse into its body with an updated base_dir
-                    // so that any file-backed `mod` declarations inside it resolve
-                    // relative to `base_dir/<mod_name>/` rather than `base_dir/`.
+                    // Inline module — recurse with an updated base_dir so
+                    // file-backed `mod` declarations inside it resolve
+                    // relative to `base_dir/<mod_name>/`.
                     let inner_base = base_dir.map(|d| d.join(m.ident.to_string()));
                     collect_items_recursive(
                         inner,
@@ -555,28 +661,32 @@ fn collect_items_recursive<F: FnMut(String)>(
                     }
                 }
             },
-            // Non-module items (structs, enums, etc.) — also skip if cfg-gated.
-            other => {
-                let attrs: &[Attribute] = match other {
-                    syn::Item::Struct(s) => &s.attrs,
-                    syn::Item::Enum(e) => &e.attrs,
-                    syn::Item::Fn(f) => &f.attrs,
-                    syn::Item::Trait(t) => &t.attrs,
-                    syn::Item::Impl(i) => &i.attrs,
-                    syn::Item::Type(t) => &t.attrs,
-                    syn::Item::Static(s) => &s.attrs,
-                    syn::Item::Const(c) => &c.attrs,
-                    syn::Item::ExternCrate(e) => &e.attrs,
-                    syn::Item::Use(u) => &u.attrs,
-                    _ => &[],
-                };
-                if is_cfg_excluded(attrs) {
-                    continue;
-                }
-                out.push(other.clone());
-            },
+            other => out.push(other.clone()),
         }
     }
+}
+
+/// The item's outer attributes, for cfg screening.
+fn item_attrs(item: &syn::Item) -> &[Attribute] {
+    match item {
+        syn::Item::Struct(s) => &s.attrs,
+        syn::Item::Enum(e) => &e.attrs,
+        syn::Item::Fn(f) => &f.attrs,
+        syn::Item::Trait(t) => &t.attrs,
+        syn::Item::Impl(i) => &i.attrs,
+        syn::Item::Type(t) => &t.attrs,
+        syn::Item::Static(s) => &s.attrs,
+        syn::Item::Const(c) => &c.attrs,
+        syn::Item::ExternCrate(e) => &e.attrs,
+        syn::Item::Use(u) => &u.attrs,
+        syn::Item::Mod(m) => &m.attrs,
+        _ => &[],
+    }
+}
+
+/// True when a `#[cfg(...)]` excludes the item from a default build.
+pub(crate) fn cfg_excluded_item(item: &syn::Item) -> bool {
+    is_cfg_excluded(item_attrs(item))
 }
 
 /// Return `true` if the item's attributes contain a `#[cfg(...)]` that would
@@ -739,6 +849,44 @@ struct AccountParam {
     is_rest: bool,
 }
 
+/// A parsed account param that the shared duplicate merge can fold.
+/// The IDL's account list and the dispatcher's must dedupe by the same
+/// rule or a program's accounts and claims stop lining up, so both
+/// producers implement this and call [`merge_duplicate_accounts`].
+pub trait MergeableAccount {
+    /// The param name the merge keys on.
+    fn param_name(&self) -> &Ident;
+    /// Fold a repeat's constraints into the account already kept.
+    fn merge_constraints(&mut self, repeat: &Self);
+}
+
+/// Repeated account params become one account at the first
+/// declaration's position, carrying the union of the constraints.
+pub fn merge_duplicate_accounts<T: MergeableAccount>(accounts: Vec<T>) -> Vec<T> {
+    let mut deduped: Vec<T> = Vec::new();
+    for a in accounts {
+        match deduped
+            .iter_mut()
+            .find(|kept| kept.param_name() == a.param_name())
+        {
+            Some(kept) => kept.merge_constraints(&a),
+            None => deduped.push(a),
+        }
+    }
+    deduped
+}
+
+impl MergeableAccount for AccountParam {
+    fn param_name(&self) -> &Ident {
+        &self.name
+    }
+
+    fn merge_constraints(&mut self, repeat: &Self) {
+        self.constraints.mutable |= repeat.constraints.mutable;
+        self.constraints.signer |= repeat.constraints.signer;
+    }
+}
+
 #[derive(Default)]
 struct AccountConstraints {
     mutable: bool,
@@ -806,17 +954,7 @@ fn parse_instruction(func: ItemFn) -> Result<InstructionInfo, IdlGenError> {
         }
     }
 
-    let mut deduped: Vec<AccountParam> = Vec::new();
-    for a in accounts {
-        match deduped.iter_mut().find(|d| d.name == a.name) {
-            Some(kept) => {
-                kept.constraints.mutable |= a.constraints.mutable;
-                kept.constraints.signer |= a.constraints.signer;
-            },
-            None => deduped.push(a),
-        }
-    }
-    let accounts = deduped;
+    let accounts = merge_duplicate_accounts(accounts);
 
     Ok(InstructionInfo {
         fn_name,
@@ -836,7 +974,7 @@ fn extract_param_name(pat_type: &PatType) -> Result<Ident, IdlGenError> {
     }
 }
 
-fn is_context_type(ty: &Type) -> bool {
+pub(crate) fn is_context_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "ProgramContext";
@@ -845,7 +983,7 @@ fn is_context_type(ty: &Type) -> bool {
     false
 }
 
-fn is_account_type(ty: &Type) -> bool {
+pub(crate) fn is_account_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             return segment.ident == "AccountWithMetadata";
@@ -854,7 +992,7 @@ fn is_account_type(ty: &Type) -> bool {
     false
 }
 
-fn is_vec_account_type(ty: &Type) -> bool {
+pub(crate) fn is_vec_account_type(ty: &Type) -> bool {
     if let Type::Path(type_path) = ty {
         if let Some(segment) = type_path.path.segments.last() {
             if segment.ident == "Vec" {
@@ -1116,6 +1254,24 @@ pub struct Hidden { pub x: u8 }
         assert!(warnings.is_empty(), "no skip, no warning: {warnings:?}");
         assert!(!items.is_empty(), "the file must be harvested");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    // A def a default build never compiles must not answer a
+    // reference: the lookup screens cfg-gated items like the walks do.
+    #[test]
+    fn unowned_lookup_skips_cfg_gated_defs() {
+        let tmp = crate::test_utils::TempDir::new("unowned-cfg-gated");
+        tmp.write(
+            "un/src/lib.rs",
+            "#[cfg(test)]\npub struct Ghost { pub v: u64 }\npub struct Real { pub v: u64 }",
+        );
+        let mut defs = UnownedTypeDefs::new(vec![tmp.path().join("un")]);
+        use crate::account_types::TypeDefSource;
+        assert!(
+            defs.find("Ghost").is_none(),
+            "a test-gated def must not answer a reference"
+        );
+        assert!(defs.find("Real").is_some(), "the ungated def answers");
     }
 
     fn ok(src: &str) -> SpelIdl {

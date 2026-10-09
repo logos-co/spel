@@ -2,14 +2,17 @@
 //! discovery.
 //!
 //! [`resolve_dep_graph`] resolves a crate's dependencies in one pass and
-//! returns a [`DepGraph`] with two lists of deliberately different reach:
+//! returns a [`DepGraph`] with three lists of deliberately different
+//! reach:
 //!
-//! - `transitive_dirs`: types referenced by a program's instructions may
-//!   come through any runtime dependency, so IDL type collection follows
-//!   the whole graph.
+//! - `transitive_dirs`: a referenced type may live anywhere in the
+//!   runtime graph, so on-demand type resolution may reach any of it.
 //! - `direct_dirs`: extension discovery must never pick up a dependency
 //!   of a dependency (trust model's two-action rule), so it stops at the
 //!   consumer's own `Cargo.toml`.
+//! - `owned_dirs`: an `#[account_type]` counts as the program's own
+//!   layout only in code the author path-linked, so the annotation scan
+//!   stops there.
 //!
 //! Both lists merge two sources: a manifest walk for path dependencies
 //! (fast, no subprocess) and a single shared `cargo metadata` call for
@@ -40,6 +43,47 @@ pub struct DepGraph {
     /// Callers with extension marker treat `Some` as a hard error: a
     /// git or registry extension may be silently missing.
     pub metadata_failure: Option<String>,
+    /// Local path dependencies, transitively, and nothing else. The crates
+    /// the program's author linked by hand, so an `#[account_type]` in one
+    /// is the program's own account layout.
+    pub owned_dirs: Vec<PathBuf>,
+}
+
+/// The `[dependencies]` entries carrying a `path`, as directories.
+///
+/// An entry pointing somewhere that is not a directory warns and is
+/// dropped, so both walks agree on what counts as a usable path dep.
+fn path_dep_dirs_of<F: FnMut(String)>(
+    value: &toml::Value,
+    manifest_dir: &Path,
+    on_warning: &mut F,
+) -> Vec<PathBuf> {
+    let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) else {
+        return Vec::new();
+    };
+    let mut dirs = Vec::new();
+    for (name, dep) in table {
+        let Some(rel) = dep.get("path").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let dir = manifest_dir.join(rel);
+        if dir.is_dir() {
+            dirs.push(dir);
+        } else {
+            on_warning(format!(
+                "path dependency '{name}' points to non-existent directory: {}",
+                dir.display()
+            ));
+        }
+    }
+    dirs
+}
+
+/// A path in canonical form, or unchanged when it cannot be resolved.
+/// Used as the dedup key throughout the walk, and by callers that merge
+/// dir lists this module produced.
+pub(crate) fn canonical_key(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// Parsed and validated `Cargo.toml`, or `None` after warning.
@@ -88,6 +132,7 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         transitive_dirs: Vec::new(),
         direct_dirs: Vec::new(),
         metadata_failure: with_cargo_metadata.then_some(reason),
+        owned_dirs: Vec::new(),
     };
 
     let Some(manifest) = find_crate_manifest(start, on_warning) else {
@@ -126,28 +171,21 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
 
     // Transitive path walk. `visited` also excludes the crate itself from
     // the metadata merge below.
-    let mut transitive_dirs = Vec::new();
     let mut visited = HashSet::new();
-    resolve_path_deps_recursive(&manifest, &mut transitive_dirs, &mut visited, on_warning);
+    // The path walk's own output. Everything the metadata layer adds
+    // below lands in `transitive_dirs` only, so what the author
+    // path-linked stays separable from what cargo resolved for them.
+    let owned_dirs = {
+        let mut dirs = Vec::new();
+        resolve_path_deps_recursive(&manifest, &mut dirs, &mut visited, on_warning);
+        dirs
+    };
+    // Taken before the metadata merge below: what the author path-linked
+    // is what the program owns.
+    let mut transitive_dirs = owned_dirs.clone();
 
     // Direct path deps straight from the [dependencies] table.
-    let mut direct_dirs = Vec::new();
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dir = manifest_dir.join(rel);
-                if dir.is_dir() {
-                    direct_dirs.push(dir);
-                } else {
-                    on_warning(format!(
-                        "path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dir.display()
-                    ));
-                }
-            }
-        }
-    }
+    let mut direct_dirs = path_dep_dirs_of(&value, &manifest_dir, on_warning);
 
     // One subprocess feeds both merges.
     let mut metadata_failure = None;
@@ -155,17 +193,15 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         match cargo_metadata_json(&manifest, on_warning) {
             Some(meta) => {
                 for dir in find_dep_dirs_via_cargo_metadata(&meta, &manifest) {
-                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    let canonical = canonical_key(&dir);
                     if visited.insert(canonical) {
                         transitive_dirs.push(dir);
                     }
                 }
-                let mut seen: HashSet<PathBuf> = direct_dirs
-                    .iter()
-                    .map(|d| d.canonicalize().unwrap_or_else(|_| d.clone()))
-                    .collect();
+                let mut seen: HashSet<PathBuf> =
+                    direct_dirs.iter().map(|d| canonical_key(d)).collect();
                 for dir in direct_normal_dep_dirs(&meta, &manifest) {
-                    let canonical = dir.canonicalize().unwrap_or_else(|_| dir.clone());
+                    let canonical = canonical_key(&dir);
                     if seen.insert(canonical) {
                         direct_dirs.push(dir);
                     }
@@ -181,6 +217,7 @@ pub fn resolve_dep_graph<F: FnMut(String)>(
         transitive_dirs,
         direct_dirs,
         metadata_failure,
+        owned_dirs,
     }
 }
 
@@ -329,36 +366,12 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
         None => return,
     };
 
-    // Deduplicate by canonical path.
-    let canonical = match &manifest_dir.canonicalize() {
-        Ok(c) => c.clone(),
-        Err(_) => manifest_dir.clone(),
-    };
-    if !visited.insert(canonical) {
+    if !visited.insert(canonical_key(&manifest_dir)) {
         return; // already processed — cycle or duplicate
     }
 
-    let content = match std::fs::read_to_string(manifest) {
-        Ok(c) => c,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  could not read manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
-    };
-    let value: toml::Value = match toml::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            on_warning(format!(
-                "⚠️  failed to parse manifest '{}': {}",
-                manifest.display(),
-                e
-            ));
-            return;
-        },
+    let Some(value) = read_manifest_toml(manifest, on_warning) else {
+        return;
     };
 
     // Skip workspace roots — they have no [dependencies].
@@ -366,34 +379,16 @@ fn resolve_path_deps_recursive<F: FnMut(String)>(
         return;
     }
 
-    if let Some(table) = value.get("dependencies").and_then(|v| v.as_table()) {
-        for (name, dep) in table {
-            if let Some(rel) = dep.get("path").and_then(|v| v.as_str()) {
-                let dep_dir = manifest_dir.join(rel);
-                if !dep_dir.is_dir() {
-                    on_warning(format!(
-                        "⚠️  path dependency '{}' points to non-existent directory: {}",
-                        name,
-                        dep_dir.display()
-                    ));
-                    continue;
-                }
-                // Deduplicate by canonical path.
-                let canonical = match &dep_dir.canonicalize() {
-                    Ok(c) => c.clone(),
-                    Err(_) => dep_dir.clone(),
-                };
-                if visited.contains(&canonical) {
-                    continue;
-                }
-                dirs.push(dep_dir.clone());
+    for dep_dir in path_dep_dirs_of(&value, &manifest_dir, on_warning) {
+        if visited.contains(&canonical_key(&dep_dir)) {
+            continue;
+        }
+        dirs.push(dep_dir.clone());
 
-                // Recurse into the dependency's own Cargo.toml for transitive deps.
-                let dep_manifest = dep_dir.join("Cargo.toml");
-                if dep_manifest.exists() {
-                    resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
-                }
-            }
+        // Recurse into the dependency's own Cargo.toml for transitive deps.
+        let dep_manifest = dep_dir.join("Cargo.toml");
+        if dep_manifest.exists() {
+            resolve_path_deps_recursive(&dep_manifest, dirs, visited, on_warning);
         }
     }
 }
@@ -673,7 +668,7 @@ mod tests {
         .unwrap();
 
         let dirs = path_dep_dirs(&a.join("Cargo.toml"));
-        let has = |needle: &std::path::Path| {
+        let has = |needle: &Path| {
             let n = needle.canonicalize().unwrap();
             dirs.iter()
                 .any(|d| d.canonicalize().map(|x| x == n).unwrap_or(false))
@@ -685,6 +680,55 @@ mod tests {
 
     use super::*;
     use crate::test_utils::TempDir;
+
+    // `owned_dirs` is the path walk and nothing else, which is what makes
+    // an `#[account_type]` in one of them the program's own account
+    // layout. It is the path walk's own output, taken before the metadata
+    // layer merges git and registry crates in, so it equals what a
+    // metadata-free resolution returns.
+    #[test]
+    fn owned_dirs_are_the_path_walk_without_the_metadata_layer() {
+        let tmp = TempDir::new("owned-dirs");
+
+        tmp.write(
+            "core/Cargo.toml",
+            r#"
+[package]
+name = "token_core"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        tmp.write("core/src/lib.rs", "");
+
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            r#"
+[package]
+name = "token-guest"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+token_core = { path = "../../core" }
+"#,
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let with_metadata = resolve_dep_graph(&program, true, &mut |_| {});
+        let path_only = resolve_dep_graph(&program, false, &mut |_| {});
+
+        assert_eq!(
+            with_metadata.owned_dirs, path_only.transitive_dirs,
+            "owned_dirs must not pick up anything the metadata layer contributed"
+        );
+        assert_eq!(with_metadata.owned_dirs.len(), 1);
+        assert!(
+            with_metadata.owned_dirs[0].ends_with("core"),
+            "expected the path dependency, got {:?}",
+            with_metadata.owned_dirs[0]
+        );
+    }
 
     #[test]
     fn resolve_dep_graph_returns_local_path_deps() {

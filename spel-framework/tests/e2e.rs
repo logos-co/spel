@@ -323,6 +323,147 @@ fn e2e_test() {
 }
 
 // ---------------------------------------------------------------------------
+// Derived offsets — a marker without an offset kwarg builds end to end
+// ---------------------------------------------------------------------------
+
+/// The positive derive-mode proof: one `#[mini_slot]` carrier, a marker
+/// naming only its embedding account, and the offset resolved entirely
+/// from the field marker's derived const. A clean build means the
+/// resolution pass ran, the const path parsed at every consumer, and
+/// rustc accepted it.
+#[test]
+fn e2e_derived_offset_builds() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/derived_offset_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        output.status.success(),
+        "derived-offset fixture failed to build:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Derived offsets — a carrier in a path dependency, and an IDL that
+// needs no carrier at all
+// ---------------------------------------------------------------------------
+
+fn path_dep_carrier_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/path_dep_carrier_program")
+}
+
+/// The shared-core layout: the `#[mini_slot]` carrier lives in a local
+/// path dependency, not the program's entry file. Only the dispatcher
+/// resolves derivations, and its binding scan has to reach through the
+/// path dep to find the carrier. A clean build is that proof.
+#[test]
+fn e2e_path_dep_carrier_builds() {
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(path_dep_carrier_dir().join("Cargo.toml"))
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        output.status.success(),
+        "path-dep carrier fixture failed to build:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// The same program through the CLI's IDL entry point. The IDL carries
+/// no offset, so its producers resolve no carrier, and a carrier living
+/// in a path dependency is none of their business.
+///
+/// The assertion is producer agreement, the invariant the shared gate
+/// pass exists for: the IDL the dispatcher emitted from inside the
+/// consumer's crate and the IDL the CLI derives from its source must be
+/// the same document, including the account the gate injected into
+/// `bump`. Carrier resolution on the CLI path turns this into the
+/// missing-carrier error instead.
+#[test]
+fn e2e_path_dep_carrier_producers_agree() {
+    let output = Command::new("cargo")
+        .args(["run", "--quiet", "--manifest-path"])
+        .arg(path_dep_carrier_dir().join("Cargo.toml"))
+        .output()
+        .expect("Failed to run fixture binary");
+    assert!(
+        output.status.success(),
+        "cargo run failed:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let dispatcher_idl: serde_json::Value =
+        serde_json::from_str(String::from_utf8(output.stdout).unwrap().trim())
+            .expect("the dispatcher's IDL JSON is valid");
+
+    let cli_idl = spel_framework_core::idl_gen::generate_idl_from_file(
+        &path_dep_carrier_dir().join("src/lib.rs"),
+    )
+    .expect("IDL generation must not need a slot carrier");
+    let cli_idl = serde_json::to_value(&cli_idl).expect("the CLI's IDL serializes");
+
+    // Instructions are the gate pass's output and the thing the drift
+    // broke. The account-type section is a separate subsystem whose
+    // contents depend on which dependency dirs the caller hands in, so
+    // it is not part of this comparison.
+    assert_eq!(
+        cli_idl["instructions"], dispatcher_idl["instructions"],
+        "the CLI and the dispatcher must agree on every instruction"
+    );
+
+    let bump = cli_idl["instructions"]
+        .as_array()
+        .expect("instructions is an array")
+        .iter()
+        .find(|i| i["name"] == "bump")
+        .expect("the gated instruction reaches the IDL");
+    assert!(
+        bump["accounts"]
+            .as_array()
+            .expect("accounts is an array")
+            .iter()
+            .any(|a| a["name"] == "config"),
+        "the gate's injected account must be listed with the offset \
+         never resolved: {bump}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Derived offsets — a derivation with no carrier must not build
+// ---------------------------------------------------------------------------
+
+/// The negative derive-mode case: the marker omits the offset but no
+/// struct carries the slot field marker. The build must refuse with the
+/// missing-carrier error that names the fix, mark the field or declare
+/// the offset.
+#[test]
+fn e2e_no_carrier_refuses_to_compile() {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tests/e2e/no_carrier_program/Cargo.toml");
+    let output = Command::new("cargo")
+        .args(["build", "--manifest-path"])
+        .arg(&manifest)
+        .output()
+        .expect("Failed to run cargo build");
+
+    assert!(
+        !output.status.success(),
+        "a derivation without a carrier must fail the build, but it succeeded"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("mark the embedded field or declare"),
+        "the build failed without the missing-carrier error:\n{stderr}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Slot binding ambiguity — two carriers of one slot attribute must not build
 // ---------------------------------------------------------------------------
 
