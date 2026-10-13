@@ -15,10 +15,8 @@ mod treasury {
     /// Initialize the treasury state.
     #[instruction]
     pub fn initialize(
-        #[account(init, pda = literal("treasury_state"))]
-        state: AccountWithMetadata,
-        #[account(signer)]
-        authority: AccountWithMetadata,
+        #[account(init, pda = literal("treasury_state"))] state: AccountWithMetadata,
+        #[account(signer)] authority: AccountWithMetadata,
         threshold: u64,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![state, authority], vec![]))
@@ -27,10 +25,8 @@ mod treasury {
     /// Create a user vault (PDA from arg seed).
     #[instruction]
     pub fn create_vault(
-        #[account(init, pda = arg("owner_key"))]
-        vault: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
+        #[account(init, pda = arg("owner_key"))] vault: AccountWithMetadata,
+        #[account(signer)] owner: AccountWithMetadata,
         owner_key: [u8; 32],
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![vault, owner], vec![]))
@@ -39,10 +35,8 @@ mod treasury {
     /// Create a user config (PDA from literal + arg multi-seed).
     #[instruction]
     pub fn create_config(
-        #[account(init, pda = [literal("config"), arg("user_id")])]
-        config: AccountWithMetadata,
-        #[account(signer)]
-        admin: AccountWithMetadata,
+        #[account(init, pda = [literal("config"), arg("user_id")])] config: AccountWithMetadata,
+        #[account(signer)] admin: AccountWithMetadata,
         user_id: [u8; 32],
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![config, admin], vec![]))
@@ -53,8 +47,7 @@ mod treasury {
     pub fn create_ledger(
         #[account(init, pda = [literal("ledger"), arg("user_id"), arg("seq")])]
         ledger: AccountWithMetadata,
-        #[account(signer)]
-        authority: AccountWithMetadata,
+        #[account(signer)] authority: AccountWithMetadata,
         user_id: u64,
         seq: u32,
     ) -> SpelResult {
@@ -64,10 +57,8 @@ mod treasury {
     /// Register a named entity (PDA from arg + arg with String type).
     #[instruction]
     pub fn register_entity(
-        #[account(init, pda = [arg("domain"), arg("name")])]
-        entity: AccountWithMetadata,
-        #[account(signer)]
-        registrar: AccountWithMetadata,
+        #[account(init, pda = [arg("domain"), arg("name")])] entity: AccountWithMetadata,
+        #[account(signer)] registrar: AccountWithMetadata,
         domain: String,
         name: String,
     ) -> SpelResult {
@@ -77,12 +68,9 @@ mod treasury {
     /// Transfer funds.
     #[instruction]
     pub fn transfer(
-        #[account(mut)]
-        from: AccountWithMetadata,
-        #[account(mut)]
-        to: AccountWithMetadata,
-        #[account(signer)]
-        signer: AccountWithMetadata,
+        #[account(mut)] from: AccountWithMetadata,
+        #[account(mut)] to: AccountWithMetadata,
+        #[account(signer)] signer: AccountWithMetadata,
         amount: u64,
         memo: String,
     ) -> SpelResult {
@@ -94,10 +82,8 @@ mod treasury {
     /// and validation.
     #[instruction]
     pub fn create_record(
-        #[account(init, pda = account("owner"))]
-        record: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
+        #[account(init, pda = account("owner"))] record: AccountWithMetadata,
+        #[account(signer)] owner: AccountWithMetadata,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![record, owner], vec![]))
     }
@@ -112,10 +98,8 @@ mod treasury {
     /// authorized set rather than from a flag on a cloned pre-state.
     #[instruction]
     pub fn delegate_to_program(
-        #[account(mut, pda = literal("treasury_state"))]
-        state: AccountWithMetadata,
-        #[account(signer)]
-        authority: AccountWithMetadata,
+        #[account(mut, pda = literal("treasury_state"))] state: AccountWithMetadata,
+        #[account(signer)] authority: AccountWithMetadata,
         target: AccountWithMetadata,
         target_program_account_id: AccountId,
     ) -> SpelResult {
@@ -139,8 +123,7 @@ mod treasury {
     pub fn init_private_account(
         #[account(init, private_pda, pda = literal("private_vault"), npk = arg("user_npk"), vpk = arg("user_vpk"))]
         account: AccountWithMetadata,
-        #[account(signer)]
-        authority: AccountWithMetadata,
+        #[account(signer)] authority: AccountWithMetadata,
         user_npk: nssa_core::NullifierPublicKey,
         user_vpk: nssa_core::encryption::ViewingPublicKey,
     ) -> SpelResult {
@@ -150,10 +133,8 @@ mod treasury {
     /// Batch update: one fixed authority + variable-length list of target accounts.
     #[instruction]
     pub fn batch_update(
-        #[account(signer)]
-        authority: AccountWithMetadata,
-        #[account(mut)]
-        targets: Vec<AccountWithMetadata>,
+        #[account(signer)] authority: AccountWithMetadata,
+        #[account(mut)] targets: Vec<AccountWithMetadata>,
         value: u64,
     ) -> SpelResult {
         let mut accounts = vec![authority];
@@ -166,10 +147,8 @@ mod treasury {
     #[instruction]
     pub fn initialize_holding(
         ctx: ProgramContext,
-        #[account(owner = self_account_id)]
-        definition: AccountWithMetadata,
-        #[account(init, signer)]
-        holding: AccountWithMetadata,
+        #[account(owner = self_account_id)] definition: AccountWithMetadata,
+        #[account(init, signer)] holding: AccountWithMetadata,
     ) -> SpelResult {
         // ctx.self_account_id and ctx.caller_account_id are available here
         let _ = ctx; // suppress unused warning in this example
@@ -179,10 +158,7 @@ mod treasury {
     /// Demonstrate a validity window on the program output.
     /// The returned SpelOutput restricts the transaction to a specific block range.
     #[instruction]
-    pub fn emit_with_window(
-        #[account(signer)]
-        authority: AccountWithMetadata,
-    ) -> SpelResult {
+    pub fn emit_with_window(#[account(signer)] authority: AccountWithMetadata) -> SpelResult {
         Ok(SpelOutput::execute(vec![authority], vec![])
             .try_with_block_validity_window(100u64..200)
             .expect("100..200 is a valid range"))
@@ -249,7 +225,11 @@ mod tests {
             AccountId::new([42u8; 32]),
         )
         .unwrap();
-        assert_eq!(out.state_diffs.len(), 3, "every declared account is reported");
+        assert_eq!(
+            out.state_diffs.len(),
+            3,
+            "every declared account is reported"
+        );
         let target_diff = &out.state_diffs[2];
         assert_eq!(target_diff.pre_state.account_id, target.account_id);
         assert_eq!(
@@ -313,7 +293,7 @@ mod tests {
         assert_eq!(ix.accounts.len(), 3);
         assert!(ix.accounts[0].writable); // from: mut
         assert!(ix.accounts[1].writable); // to: mut
-        assert!(ix.accounts[2].signer);   // signer
+        assert!(ix.accounts[2].signer); // signer
         assert_eq!(ix.args.len(), 2);
         assert_eq!(ix.args[0].name, "amount");
         assert_eq!(ix.args[1].name, "memo");
@@ -417,15 +397,11 @@ mod tests {
 
         let accounts = vec![
             make_account_with_id(wrong_id, false), // vault — wrong address
-            make_account_with_id([2u8; 32], true),  // owner — signer
+            make_account_with_id([2u8; 32], true), // owner — signer
         ];
 
-        let result = treasury::__validate_create_vault(
-            &accounts,
-            &program_id,
-            &empty_ix_data(),
-            &owner_key,
-        );
+        let result =
+            treasury::__validate_create_vault(&accounts, &program_id, &empty_ix_data(), &owner_key);
         let err = result.expect_err("should reject wrong PDA");
         assert!(
             matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
@@ -441,15 +417,11 @@ mod tests {
 
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // vault — correct PDA
-            make_account_with_id([2u8; 32], true),             // owner — signer
+            make_account_with_id([2u8; 32], true),            // owner — signer
         ];
 
-        let result = treasury::__validate_create_vault(
-            &accounts,
-            &program_id,
-            &empty_ix_data(),
-            &owner_key,
-        );
+        let result =
+            treasury::__validate_create_vault(&accounts, &program_id, &empty_ix_data(), &owner_key);
         assert!(result.is_ok(), "correct PDA should pass: {result:?}");
     }
 
@@ -461,8 +433,7 @@ mod tests {
         let user_id = [99u8; 32];
         let config_seed = spel_framework::pda::seed_from_str("config");
 
-        let correct_id =
-            spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
+        let correct_id = spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
         let wrong_id = [0xAAu8; 32];
         assert_ne!(
             nssa_core::account::AccountId::new(wrong_id),
@@ -472,15 +443,11 @@ mod tests {
 
         let accounts = vec![
             make_account_with_id(wrong_id, false), // config — wrong address
-            make_account_with_id([2u8; 32], true),  // admin — signer
+            make_account_with_id([2u8; 32], true), // admin — signer
         ];
 
-        let result = treasury::__validate_create_config(
-            &accounts,
-            &program_id,
-            &empty_ix_data(),
-            &user_id,
-        );
+        let result =
+            treasury::__validate_create_config(&accounts, &program_id, &empty_ix_data(), &user_id);
         let err = result.expect_err("should reject wrong PDA");
         assert!(
             matches!(err, spel_framework::error::SpelError::PdaMismatch { .. }),
@@ -494,20 +461,15 @@ mod tests {
         let user_id = [99u8; 32];
         let config_seed = spel_framework::pda::seed_from_str("config");
 
-        let correct_id =
-            spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
+        let correct_id = spel_framework::pda::compute_pda(&program_id, &[&config_seed, &user_id]);
 
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // config — correct PDA
-            make_account_with_id([2u8; 32], true),             // admin — signer
+            make_account_with_id([2u8; 32], true),            // admin — signer
         ];
 
-        let result = treasury::__validate_create_config(
-            &accounts,
-            &program_id,
-            &empty_ix_data(),
-            &user_id,
-        );
+        let result =
+            treasury::__validate_create_config(&accounts, &program_id, &empty_ix_data(), &user_id);
         assert!(result.is_ok(), "correct PDA should pass: {result:?}");
     }
 
@@ -521,15 +483,10 @@ mod tests {
         let user_id: u64 = 42;
         let seq: u32 = 7;
 
-        let correct_id = spel_framework::pda::compute_pda_multi(
-            &program_id,
-            &[&"ledger", &user_id, &seq],
-        );
+        let correct_id =
+            spel_framework::pda::compute_pda_multi(&program_id, &[&"ledger", &user_id, &seq]);
         let wrong_id = [0xBBu8; 32];
-        assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
-            correct_id,
-        );
+        assert_ne!(nssa_core::account::AccountId::new(wrong_id), correct_id,);
 
         let accounts = vec![
             make_account_with_id(wrong_id, false),
@@ -558,10 +515,8 @@ mod tests {
         let user_id: u64 = 42;
         let seq: u32 = 7;
 
-        let correct_id = spel_framework::pda::compute_pda_multi(
-            &program_id,
-            &[&"ledger", &user_id, &seq],
-        );
+        let correct_id =
+            spel_framework::pda::compute_pda_multi(&program_id, &[&"ledger", &user_id, &seq]);
 
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false),
@@ -588,15 +543,9 @@ mod tests {
         let domain = String::from("gaming");
         let name = String::from("player1");
 
-        let correct_id = spel_framework::pda::compute_pda_multi(
-            &program_id,
-            &[&domain, &name],
-        );
+        let correct_id = spel_framework::pda::compute_pda_multi(&program_id, &[&domain, &name]);
         let wrong_id = [0xCCu8; 32];
-        assert_ne!(
-            nssa_core::account::AccountId::new(wrong_id),
-            correct_id,
-        );
+        assert_ne!(nssa_core::account::AccountId::new(wrong_id), correct_id,);
 
         let accounts = vec![
             make_account_with_id(wrong_id, false),
@@ -625,10 +574,7 @@ mod tests {
         let domain = String::from("gaming");
         let name = String::from("player1");
 
-        let correct_id = spel_framework::pda::compute_pda_multi(
-            &program_id,
-            &[&domain, &name],
-        );
+        let correct_id = spel_framework::pda::compute_pda_multi(&program_id, &[&domain, &name]);
 
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false),
@@ -662,7 +608,7 @@ mod tests {
 
         let accounts = vec![
             make_account_with_id(*correct_pda.value(), false), // record — correct PDA
-            make_account_with_id(owner_id, true),               // owner — signer
+            make_account_with_id(owner_id, true),              // owner — signer
         ];
 
         let result = treasury::__validate_create_record(&accounts, &program_id, &empty_ix_data());
@@ -676,7 +622,7 @@ mod tests {
 
         let accounts = vec![
             make_account_with_id([0xFFu8; 32], false), // record — wrong address
-            make_account_with_id(owner_id, true),       // owner — signer
+            make_account_with_id(owner_id, true),      // owner — signer
         ];
 
         let result = treasury::__validate_create_record(&accounts, &program_id, &empty_ix_data());
@@ -692,7 +638,11 @@ mod tests {
     #[test]
     fn handler_batch_update_callable() {
         let acc = make_account(true);
-        let targets = vec![make_account(false), make_account(false), make_account(false)];
+        let targets = vec![
+            make_account(false),
+            make_account(false),
+            make_account(false),
+        ];
         let result = treasury::batch_update(acc, targets, 42);
         assert!(result.is_ok());
     }
@@ -708,7 +658,10 @@ mod tests {
     #[test]
     fn idl_has_batch_update_instruction() {
         let idl = __program_idl();
-        let ix = idl.instructions.iter().find(|i| i.name == "batch_update")
+        let ix = idl
+            .instructions
+            .iter()
+            .find(|i| i.name == "batch_update")
             .expect("batch_update instruction should be in IDL");
         assert_eq!(ix.args.len(), 1);
         assert_eq!(ix.args[0].name, "value");
@@ -748,7 +701,7 @@ mod tests {
         );
         let accounts = vec![
             make_account_with_id(*correct_id.value(), false), // account — correct private PDA
-            make_account_with_id([2u8; 32], true),             // authority — signer
+            make_account_with_id([2u8; 32], true),            // authority — signer
         ];
         let result = treasury::__validate_init_private_account(
             &accounts,
@@ -757,7 +710,10 @@ mod tests {
             &npk,
             &vpk,
         );
-        assert!(result.is_ok(), "correct private PDA should pass: {result:?}");
+        assert!(
+            result.is_ok(),
+            "correct private PDA should pass: {result:?}"
+        );
     }
 
     #[test]
@@ -822,13 +778,18 @@ mod tests {
     #[test]
     fn idl_init_private_account_marks_pda_as_private() {
         let idl = __program_idl();
-        let ix = idl.instructions.iter()
+        let ix = idl
+            .instructions
+            .iter()
             .find(|i| i.name == "init_private_account")
             .expect("init_private_account must be in IDL");
         let acc = &ix.accounts[0];
         let pda = acc.pda.as_ref().expect("account must have PDA definition");
         assert!(pda.private, "IDL PDA must be marked private");
-        assert!(acc.visibility.iter().any(|v| v == "private"), "visibility must include 'private'");
+        assert!(
+            acc.visibility.iter().any(|v| v == "private"),
+            "visibility must include 'private'"
+        );
     }
 
     // ── output filtering ─────────────────────────────────────────────────────
@@ -839,7 +800,11 @@ mod tests {
 
     // ── ProgramContext + owner constraint tests ──────────────────────────────
 
-    fn make_account_with_owner(id: [u8; 32], owner: AccountId, authorized: bool) -> AccountWithMetadata {
+    fn make_account_with_owner(
+        id: [u8; 32],
+        owner: AccountId,
+        authorized: bool,
+    ) -> AccountWithMetadata {
         let mut account = nssa_core::account::Account::default();
         account.program_owner = owner;
         AccountWithMetadata {
@@ -852,7 +817,10 @@ mod tests {
     #[test]
     fn idl_excludes_context_from_initialize_holding() {
         let idl = __program_idl();
-        let ix = idl.instructions.iter().find(|i| i.name == "initialize_holding")
+        let ix = idl
+            .instructions
+            .iter()
+            .find(|i| i.name == "initialize_holding")
             .expect("initialize_holding must be in IDL");
         // Context must NOT appear in IDL accounts or args
         assert!(!ix.accounts.iter().any(|a| a.name == "ctx"));
@@ -863,7 +831,10 @@ mod tests {
     #[test]
     fn idl_owner_constraint_reflected() {
         let idl = __program_idl();
-        let ix = idl.instructions.iter().find(|i| i.name == "initialize_holding")
+        let ix = idl
+            .instructions
+            .iter()
+            .find(|i| i.name == "initialize_holding")
             .expect("initialize_holding must be in IDL");
         // definition account has #[account(owner = self_account_id)]
         assert_eq!(ix.accounts[0].owner, Some("self_account_id".to_string()));
@@ -886,7 +857,10 @@ mod tests {
         let definition = make_account_with_owner([3u8; 32], program_id, false);
         let holding = make_account(true); // init + signer
         let result = treasury::initialize_holding(ctx, definition, holding);
-        assert!(result.is_ok(), "handler should succeed with valid context and owner");
+        assert!(
+            result.is_ok(),
+            "handler should succeed with valid context and owner"
+        );
     }
 
     #[test]
@@ -895,13 +869,18 @@ mod tests {
         let other_program = AccountId::new([99u8; 32]);
         let accounts = vec![
             make_account_with_owner([3u8; 32], other_program, false), // definition — wrong owner
-            make_account_with_id([4u8; 32], true),                     // holding: init + signer (empty)
+            make_account_with_id([4u8; 32], true), // holding: init + signer (empty)
         ];
-        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        let result =
+            treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
         let err = result.expect_err("should reject account with wrong owner");
         assert!(
-            matches!(err, spel_framework::error::SpelError::AccountOwnerMismatch { .. }),
-            "expected AccountOwnerMismatch, got: {:?}", err
+            matches!(
+                err,
+                spel_framework::error::SpelError::AccountOwnerMismatch { .. }
+            ),
+            "expected AccountOwnerMismatch, got: {:?}",
+            err
         );
     }
 
@@ -921,12 +900,16 @@ mod tests {
                 is_authorized: false, // not authorized → signer violation
             },
         ];
-        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        let result =
+            treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
         match result.unwrap_err() {
             spel_framework::error::SpelError::AccountOwnerMismatch { account_name } => {
                 assert_eq!(account_name, "definition");
-            }
-            other => panic!("expected AccountOwnerMismatch (owner check runs first), got: {:?}", other),
+            },
+            other => panic!(
+                "expected AccountOwnerMismatch (owner check runs first), got: {:?}",
+                other
+            ),
         }
     }
 
@@ -937,7 +920,8 @@ mod tests {
             make_account_with_owner([3u8; 32], program_id, false), // definition — correct owner
             make_account_with_id([4u8; 32], true),                 // holding: init + signer (empty)
         ];
-        let result = treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
+        let result =
+            treasury::__validate_initialize_holding(&accounts, &program_id, &empty_ix_data());
         assert!(result.is_ok(), "correct owner should pass: {:?}", result);
     }
 }
