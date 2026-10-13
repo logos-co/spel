@@ -23,10 +23,8 @@ mod overlapping_windows {
 
     #[instruction]
     pub fn initialize(
-        #[account(init, pda = literal("cfg"))]
-        config: AccountWithMetadata,
-        #[account(signer)]
-        payer: AccountWithMetadata,
+        #[account(init, pda = literal("cfg"))] config: AccountWithMetadata,
+        #[account(signer)] payer: AccountWithMetadata,
     ) -> SpelResult {
         Ok(SpelOutput::execute(vec![config, payer], vec![]))
     }

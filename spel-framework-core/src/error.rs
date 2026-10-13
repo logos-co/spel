@@ -84,7 +84,7 @@ pub enum SpelError {
         actual: String,
     },
 
-    /// Account owner does not match the expected program (e.g. self_program_id).
+    /// Account owner does not match the expected program (e.g. self_account_id).
     #[error("Account '{account_name}' has wrong owner")]
     AccountOwnerMismatch { account_name: String },
 

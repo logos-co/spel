@@ -256,9 +256,17 @@ fi
 # ─── Step 6: Deploy program ──────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" \
-    > "$WORK_DIR/deploy.log" 2>&1 || { cat "$WORK_DIR/deploy.log"; fail "Deploy failed"; }
-log "  ✓ Program deployed"
+# LEZ v0.2.5 deploys through program_loader: `spel deploy` creates the header +
+# segment accounts and prints the program address, which the calls below pass
+# as -p. The new accounts (and the signer below) hold nothing, so the debug
+# genesis account pays every fee (scripts/lib/fee-payer.sh).
+source "$SCRIPT_DIR/lib/fee-payer.sh"
+FEE_PAYER="${FEE_PAYER:-$(lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")}"
+[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account as fee payer"
+log "  Fee payer: $FEE_PAYER"
+PROGRAM_ADDRESS=$("$SPEL_BIN" deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$WORK_DIR/deploy.log") \
+    || { cat "$WORK_DIR/deploy.log"; fail "Deploy failed"; }
+log "  ✓ Program deployed at $PROGRAM_ADDRESS"
 
 # ─── Step 7: Create signer account ───────────────────────────────────────
 
@@ -271,7 +279,7 @@ log "  Signer: ${SIGNER_ID:0:20}..."
 # ─── Step 8: Send initialize TX via spel CLI ─────────────────────────────
 
 log "Step 8: Sending initialize transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     initialize \
     --owner "$SIGNER_ID" \
     > "$WORK_DIR/initialize-tx.log" 2>&1 || { cat "$WORK_DIR/initialize-tx.log"; fail "Initialize TX failed"; }
@@ -280,7 +288,7 @@ log "  ✓ Initialize TX submitted and confirmed"
 # ─── Step 9: Send do_something TX via spel CLI ───────────────────────────
 
 log "Step 9: Sending do_something transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     do_something \
     --owner "$SIGNER_ID" \
     --amount 42 \
@@ -290,7 +298,7 @@ log "  ✓ do_something TX submitted and confirmed"
 # ─── Step 10: Verify --dry-run works ──────────────────────────────────────
 
 log "Step 10: Verifying --dry-run mode..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     --dry-run \
     do_something \
     --owner "$SIGNER_ID" \

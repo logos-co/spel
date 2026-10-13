@@ -31,6 +31,7 @@ pub enum IdlGenError {
     NoInstructions(String),
     MalformedExtensionMetadata(String),
     DuplicateInstruction(String),
+    InstructionEnumMismatch(String),
 }
 
 impl fmt::Display for IdlGenError {
@@ -49,6 +50,9 @@ impl fmt::Display for IdlGenError {
             },
             IdlGenError::DuplicateInstruction(e) => {
                 write!(f, "Duplicate instruction: '{e}'")
+            },
+            IdlGenError::InstructionEnumMismatch(e) => {
+                write!(f, "Instruction enum mismatch: {e}")
             },
         }
     }
@@ -108,6 +112,7 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
         &content,
         &source_path.display().to_string(),
         &extra_items,
+        dep_source_dirs,
         Some(source_path),
     )
 }
@@ -118,16 +123,18 @@ pub fn generate_idl_from_file_with_deps<F: FnMut(String)>(
 /// production code goes through `generate_idl_from_file_with_deps`.
 #[cfg(test)]
 fn generate_idl_from_str(content: &str, source_label: &str) -> Result<SpelIdl, IdlGenError> {
-    generate_idl_inner(content, source_label, &[], None)
+    generate_idl_inner(content, source_label, &[], &[], None)
 }
 
 /// Core IDL generation logic. `extra_items` are synthetic items collected from
 /// dependency crate sources and merged with the program file's own items before
-/// account-type scanning.
+/// account-type scanning. `dep_source_dirs` are the crate roots they came from,
+/// searched for an external `Instruction` enum.
 fn generate_idl_inner(
     content: &str,
     source_label: &str,
     extra_items: &[syn::Item],
+    dep_source_dirs: &[PathBuf],
     manifest_dir: Option<&Path>,
 ) -> Result<SpelIdl, IdlGenError> {
     let path_str = source_label.to_string();
@@ -262,6 +269,30 @@ fn generate_idl_inner(
             ext
         });
 
+    // An external enum's declaration order is the Borsh variant tag, and clients
+    // encode an instruction's position in the IDL as that tag. List instructions
+    // in enum order so the two agree whatever order the functions are written in.
+    if let Some(enum_path) = external_instruction.as_deref() {
+        let mut local_items = file.items.clone();
+        local_items.extend(items.iter().cloned());
+        match external_enum_variants(enum_path, &local_items, dep_source_dirs) {
+            Some(variants) => {
+                instructions = order_by_enum_variants(
+                    instructions,
+                    |ix| ix.fn_name.to_string(),
+                    &variants,
+                    enum_path,
+                )
+                .map_err(IdlGenError::InstructionEnumMismatch)?;
+            },
+            None => warn(format!(
+                "`{enum_path}` not found in the program source or its local \
+                 dependencies; instructions keep source order, which matches the \
+                 wire tags only if it matches the enum's variant order"
+            )),
+        }
+    }
+
     // Build the SpelIdl struct
     let idl_instructions: Vec<IdlInstruction> = instructions
         .iter()
@@ -338,6 +369,113 @@ fn generate_idl_inner(
         metadata: None,
         instruction_type: external_instruction,
     })
+}
+
+/// Variant names of the external instruction enum at `enum_path`, in
+/// declaration order. A path starting with a local dependency's crate name is
+/// looked up in that crate; a bare or `crate`/`self`/`super` path in
+/// `local_items`. `None` when the enum cannot be found.
+pub fn external_enum_variants(
+    enum_path: &str,
+    local_items: &[syn::Item],
+    dep_source_dirs: &[PathBuf],
+) -> Option<Vec<String>> {
+    let path: syn::Path = syn::parse_str(enum_path).ok()?;
+    let enum_name = path.segments.last()?.ident.to_string();
+    let first = path.segments.first()?.ident.to_string();
+
+    let dep_items;
+    let items = if path.segments.len() == 1 || matches!(first.as_str(), "crate" | "self" | "super")
+    {
+        local_items
+    } else {
+        let dir = dep_source_dirs
+            .iter()
+            .find(|dir| crate_name(dir).as_deref() == Some(first.as_str()))?;
+        dep_items = collect_items_from_crate_dirs(std::slice::from_ref(dir), |_| {}).0;
+        &dep_items
+    };
+
+    let item_enum = find_enum(items, &enum_name)?;
+    Some(
+        item_enum
+            .variants
+            .iter()
+            .map(|v| v.ident.to_string())
+            .collect(),
+    )
+}
+
+/// The crate name (`-` normalized to `_`) declared in `dir/Cargo.toml`.
+fn crate_name(dir: &Path) -> Option<String> {
+    let manifest = std::fs::read_to_string(dir.join("Cargo.toml")).ok()?;
+    let value: toml::Value = toml::from_str(&manifest).ok()?;
+    let name = value.get("package")?.get("name")?.as_str()?;
+    Some(name.replace('-', "_"))
+}
+
+/// First enum named `name` in `items`, preferring the top level over inline modules.
+fn find_enum<'a>(items: &'a [syn::Item], name: &str) -> Option<&'a syn::ItemEnum> {
+    items
+        .iter()
+        .find_map(|item| match item {
+            syn::Item::Enum(e) if e.ident == name => Some(e),
+            _ => None,
+        })
+        .or_else(|| {
+            items.iter().find_map(|item| match item {
+                syn::Item::Mod(m) => m
+                    .content
+                    .as_ref()
+                    .and_then(|(_, inner)| find_enum(inner, name)),
+                _ => None,
+            })
+        })
+}
+
+/// Reorder `instructions` to follow `variants`. Each variant must have exactly
+/// one instruction whose PascalCase `fn_name` matches it, as the
+/// `#[lez_program]` dispatch does.
+///
+/// # Errors
+///
+/// A variant without an instruction, or an instruction without a variant.
+pub fn order_by_enum_variants<T>(
+    mut instructions: Vec<T>,
+    fn_name: impl Fn(&T) -> String,
+    variants: &[String],
+    enum_path: &str,
+) -> Result<Vec<T>, String> {
+    let mut ordered = Vec::with_capacity(instructions.len());
+    for variant in variants {
+        let pos = instructions
+            .iter()
+            .position(|ix| to_pascal_case(&fn_name(ix)) == *variant)
+            .ok_or_else(|| {
+                format!("variant `{variant}` of `{enum_path}` has no #[instruction] function")
+            })?;
+        ordered.push(instructions.remove(pos));
+    }
+    if let Some(ix) = instructions.first() {
+        return Err(format!(
+            "#[instruction] `{}` has no variant in `{enum_path}`",
+            fn_name(ix)
+        ));
+    }
+    Ok(ordered)
+}
+
+/// `snake_case` to `PascalCase`, matching the `#[lez_program]` dispatch.
+fn to_pascal_case(s: &str) -> String {
+    s.split('_')
+        .map(|word| {
+            let mut chars = word.chars();
+            match chars.next() {
+                None => String::new(),
+                Some(c) => c.to_uppercase().collect::<String>() + chars.as_str(),
+            }
+        })
+        .collect()
 }
 
 // ─── Dependency source collection ────────────────────────────────────────
@@ -1184,6 +1322,99 @@ pub struct Hidden { pub x: u8 }
             idl.instruction_type.as_deref(),
             Some("my_core::Instruction")
         );
+    }
+
+    fn instruction_names(idl: &SpelIdl) -> Vec<&str> {
+        idl.instructions.iter().map(|i| i.name.as_str()).collect()
+    }
+
+    #[test]
+    fn external_enum_in_same_file_sets_instruction_order() {
+        let src = r#"
+            pub enum Instruction { First, Second { amount: u64 }, Third }
+
+            #[lez_program(instruction = "crate::Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn third(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn first(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn second(account: AccountWithMetadata, amount: u64) {}
+            }
+        "#;
+        assert_eq!(instruction_names(&ok(src)), ["first", "second", "third"]);
+    }
+
+    #[test]
+    fn external_enum_in_dependency_sets_instruction_order() {
+        let root = std::env::temp_dir().join("spel_external_enum_order_fixture");
+        let core = root.join("my-core");
+        std::fs::create_dir_all(core.join("src")).unwrap();
+        std::fs::write(
+            core.join("Cargo.toml"),
+            "[package]\nname = \"my-core\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            core.join("src/lib.rs"),
+            "pub enum Instruction { InitializeProgram, SetAdmin { admin: u64 }, Freeze }\n",
+        )
+        .unwrap();
+        let program = root.join("program.rs");
+        std::fs::write(
+            &program,
+            r#"
+            #[lez_program(instruction = "my_core::Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn freeze(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn set_admin(account: AccountWithMetadata, admin: u64) {}
+                #[instruction]
+                pub fn initialize_program(account: AccountWithMetadata) {}
+            }
+            "#,
+        )
+        .unwrap();
+
+        let idl = generate_idl_from_file_with_deps(&program, &[core], &mut |_| {}).unwrap();
+        std::fs::remove_dir_all(&root).ok();
+
+        assert_eq!(
+            instruction_names(&idl),
+            ["initialize_program", "set_admin", "freeze"]
+        );
+    }
+
+    #[test]
+    fn external_enum_variant_without_instruction_is_an_error() {
+        let src = r#"
+            pub enum Instruction { First, Second }
+
+            #[lez_program(instruction = "Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn first(account: AccountWithMetadata) {}
+            }
+        "#;
+        assert!(matches!(err(src), IdlGenError::InstructionEnumMismatch(_)));
+    }
+
+    #[test]
+    fn instruction_without_external_enum_variant_is_an_error() {
+        let src = r#"
+            pub enum Instruction { First }
+
+            #[lez_program(instruction = "Instruction")]
+            pub mod my_program {
+                #[instruction]
+                pub fn first(account: AccountWithMetadata) {}
+                #[instruction]
+                pub fn second(account: AccountWithMetadata) {}
+            }
+        "#;
+        assert!(matches!(err(src), IdlGenError::InstructionEnumMismatch(_)));
     }
 
     // ── Account constraints ───────────────────────────────────────────────────

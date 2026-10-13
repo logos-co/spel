@@ -168,10 +168,17 @@ fi
 export NSSA_WALLET_HOME_DIR="${NSSA_WALLET_HOME_DIR:-${LSSA_DIR}/wallet/configs/debug}"
 WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
 
-# Wallet needs password on stdin; first run creates storage
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" > "$LOG_DIR/deploy.log" 2>&1 \
+# LEZ v0.2.5 deploys through program_loader: `spel deploy` creates the header +
+# segment accounts and prints the program address. They hold nothing, so the
+# debug genesis account pays (scripts/lib/fee-payer.sh).
+export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
+source "$SCRIPT_DIR/lib/fee-payer.sh"
+FEE_PAYER="${FEE_PAYER:-$(lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")}"
+[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account as fee payer"
+log "  Fee payer: $FEE_PAYER"
+PROGRAM_ADDRESS=$(spel deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$LOG_DIR/deploy.log") \
     || fail "Deploy failed (see $LOG_DIR/deploy.log)"
-log "  ✅ Program deployed"
+log "  ✅ Program deployed at $PROGRAM_ADDRESS"
 
 # ─── Step 5: Submit a transaction ─────────────────────────────────────────
 
@@ -186,7 +193,7 @@ print(idl['instructions'][0]['name'])
 ")
 
 # Try submitting the first instruction (may fail if it needs specific args — that's OK)
-SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_FILE_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" spel --idl "$IDL_FILE_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
     "$FIRST_IX" > "$LOG_DIR/submit.log" 2>&1 \
     && log "  ✅ Transaction submitted" \
     || warn "Submit failed (may need args — see $LOG_DIR/submit.log). Deploy was successful."

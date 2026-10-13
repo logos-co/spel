@@ -204,13 +204,15 @@ mod tests {
         let key = PrivateKey::try_new([1; 32]).unwrap();
         let pubkey = PublicKey::new_from_private_key(&key);
         let account_id = AccountId::from(&pubkey);
-        let message = Message::try_new(
-            [0; 8],
+        // `new_preserialized` keeps the instruction bytes literal — these tests are
+        // about signing and tampering, not about instruction encoding.
+        let message = Message::new_preserialized(
+            AccountId::new([0; 32]),
             vec![account_id],
             vec![1_u128.into()],
             vec![1, 2, 3, 4],
-        )
-        .unwrap();
+            None,
+        );
         let bytes = borsh::to_vec(&message).unwrap();
 
         let id = format!("0x{}", hex_encode(account_id.value()));
@@ -293,13 +295,13 @@ mod tests {
         // longer matches what the witness signed, so verification must reject it.
         let pubkey = PublicKey::new_from_private_key(&key);
         let account_id = AccountId::from(&pubkey);
-        let tampered = Message::try_new(
-            [0; 8],
+        let tampered = Message::new_preserialized(
+            AccountId::new([0; 32]),
             vec![account_id],
             vec![1_u128.into()],
             vec![9, 9, 9, 9],
-        )
-        .unwrap();
+            None,
+        );
         blob.message_hex = hex_encode(&borsh::to_vec(&tampered).unwrap());
 
         let err = blob.verify_witnesses().unwrap_err();

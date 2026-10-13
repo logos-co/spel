@@ -4,7 +4,7 @@
 //! would generate for owner constraints.
 
 use nssa_core::account::{Account, AccountId, AccountWithMetadata};
-use nssa_core::program::ProgramId;
+
 use spel_framework_core::error::SpelError;
 
 /// Simulate the validation function that the macro would generate for:
@@ -20,10 +20,10 @@ use spel_framework_core::error::SpelError;
 /// ```
 fn __validate_initialize_holding(
     accounts: &[AccountWithMetadata],
-    self_program_id: &ProgramId,
+    self_account_id: &AccountId,
 ) -> Result<(), SpelError> {
     // Account index 0 has #[account(owner = self_program_id)]
-    if accounts[0].account.program_owner != *self_program_id {
+    if accounts[0].account.program_owner != *self_account_id {
         return Err(SpelError::AccountOwnerMismatch {
             account_name: "definition_account".to_string(),
         });
@@ -44,23 +44,14 @@ fn __validate_initialize_holding(
     Ok(())
 }
 
-/// ProgramId is `[u32; 8]` (64 bytes = 32 u8s).
-fn make_program_id(bytes: [u8; 32]) -> ProgramId {
-    let mut id = [0u32; 8];
-    for i in 0..8 {
-        id[i] = u32::from_le_bytes([
-            bytes[i * 4],
-            bytes[i * 4 + 1],
-            bytes[i * 4 + 2],
-            bytes[i * 4 + 3],
-        ]);
-    }
-    id
+/// Since LEZ v0.2.5 a program is identified by the `AccountId` of its header account.
+fn make_program_id(bytes: [u8; 32]) -> AccountId {
+    AccountId::new(bytes)
 }
 
 fn make_account_with_owner(
     id: [u8; 32],
-    owner: ProgramId,
+    owner: AccountId,
     authorized: bool,
 ) -> AccountWithMetadata {
     let mut account = Account::default();
@@ -74,7 +65,7 @@ fn make_account_with_owner(
 
 fn make_initialized_account_with_owner(
     id: [u8; 32],
-    owner: ProgramId,
+    owner: AccountId,
     data: Vec<u8>,
     authorized: bool,
 ) -> AccountWithMetadata {
@@ -95,7 +86,7 @@ fn test_owner_matches_self_program_id() {
         // definition_account owned by this program ✓
         make_account_with_owner([2u8; 32], program_id, false),
         // holding_account: init + signer (empty, authorized)
-        make_account_with_owner([3u8; 32], ProgramId::default(), true),
+        make_account_with_owner([3u8; 32], AccountId::default(), true),
     ];
     assert!(__validate_initialize_holding(&accounts, &program_id).is_ok());
 }
@@ -107,7 +98,7 @@ fn test_owner_mismatch_returns_error() {
     let accounts = vec![
         // definition_account owned by DIFFERENT program ✗
         make_account_with_owner([2u8; 32], other_program, false),
-        make_account_with_owner([3u8; 32], ProgramId::default(), true),
+        make_account_with_owner([3u8; 32], AccountId::default(), true),
     ];
     let result = __validate_initialize_holding(&accounts, &program_id);
     assert!(result.is_err());
@@ -129,7 +120,7 @@ fn test_owner_check_runs_before_init_and_signer() {
         // definition_account owned by DIFFERENT program ✗
         make_account_with_owner([2u8; 32], other_program, false),
         // holding_account: NOT empty (init violated) and NOT authorized (signer violated)
-        make_initialized_account_with_owner([3u8; 32], ProgramId::default(), vec![1u8; 32], false),
+        make_initialized_account_with_owner([3u8; 32], AccountId::default(), vec![1u8; 32], false),
     ];
     let result = __validate_initialize_holding(&accounts, &program_id);
     // Owner check runs first, so we should get AccountOwnerMismatch, not init/signer errors.

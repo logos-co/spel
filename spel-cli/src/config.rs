@@ -16,7 +16,15 @@ pub struct SpelConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ProgramConfig {
+    /// The deployed program's header account, base58 or hex.
+    ///
+    /// Since LEZ v0.2.5 this — not the image id — is what identifies a program on
+    /// chain, and it is chosen at deploy time rather than derived from the
+    /// binary, so it has to be recorded here per deployment.
+    pub address: Option<String>,
     pub idl: Option<String>,
+    /// The packaged program binary. Needed only for the privacy-preserving path,
+    /// which proves against the ELF; a public transaction needs just `address`.
     pub binary: Option<String>,
 }
 

@@ -3,7 +3,7 @@
 use base58::FromBase58;
 use nssa_core::account::AccountId;
 use nssa_core::encryption::ViewingPublicKey;
-use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::program::PdaSeed;
 use nssa_core::NullifierPublicKey;
 use sha2::{Digest, Sha256};
 
@@ -64,7 +64,8 @@ pub fn seed_from_str(s: &str) -> [u8; 32] {
     bytes
 }
 
-/// Derive a **public** PDA `AccountId` from a program ID and one or more 32-byte seeds.
+/// Derive a **public** PDA `AccountId` from a program's account ID and one or more
+/// 32-byte seeds.
 ///
 /// - Single seed: used directly as the PDA seed.
 /// - Multiple seeds: combined via SHA-256(seed1 || seed2 || ...) into a single
@@ -73,7 +74,7 @@ pub fn seed_from_str(s: &str) -> [u8; 32] {
 /// # Panics
 ///
 /// Panics if `seeds` is empty.
-pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
+pub fn compute_pda(account_id: &AccountId, seeds: &[&[u8; 32]]) -> AccountId {
     assert!(!seeds.is_empty(), "PDA requires at least one seed");
 
     let combined = if seeds.len() == 1 {
@@ -87,7 +88,7 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
     };
 
     let pda_seed = PdaSeed::new(combined);
-    AccountId::for_public_pda(program_id, &pda_seed)
+    AccountId::for_public_pda(account_id, &pda_seed)
 }
 
 /// The private-PDA `identifier` for single-purpose PDAs: `0`.
@@ -97,7 +98,7 @@ pub fn compute_pda(program_id: &ProgramId, seeds: &[&[u8; 32]]) -> AccountId {
 /// `#[account(private_pda, ...)]` validation uses this value.
 pub const DEFAULT_PRIVATE_PDA_IDENTIFIER: u128 = 0;
 
-/// Derive a **private** PDA `AccountId` from a program ID, one or more 32-byte seeds,
+/// Derive a **private** PDA `AccountId` from a program's account ID, one or more 32-byte seeds,
 /// a `NullifierPublicKey`, a `ViewingPublicKey`, and the `identifier`.
 ///
 /// The seed combining logic mirrors [`compute_pda`]; the difference is the final
@@ -107,13 +108,13 @@ pub const DEFAULT_PRIVATE_PDA_IDENTIFIER: u128 = 0;
 /// Pass [`DEFAULT_PRIVATE_PDA_IDENTIFIER`] for the single-address case.
 ///
 /// Since LEZ v0.2.1 the derivation formula is:
-/// `SHA256(prefix || program_id || seed || npk || vpk || identifier)`
+/// `SHA256(prefix || account_id || seed || npk || vpk || identifier)`
 ///
 /// # Panics
 ///
 /// Panics if `seeds` is empty.
 pub fn compute_private_pda(
-    program_id: &ProgramId,
+    account_id: &AccountId,
     seeds: &[&[u8; 32]],
     npk: &NullifierPublicKey,
     vpk: &ViewingPublicKey,
@@ -132,10 +133,10 @@ pub fn compute_private_pda(
     };
 
     let pda_seed = PdaSeed::new(combined);
-    AccountId::for_private_pda(program_id, &pda_seed, npk, vpk, identifier)
+    AccountId::for_private_pda(account_id, &pda_seed, npk, vpk, identifier)
 }
 
-/// Compute a PDA from a program ID and multiple [`ToSeed`] values.
+/// Compute a PDA from a program's account ID and multiple [`ToSeed`] values.
 ///
 /// This is a convenience wrapper around [`compute_pda`] that accepts any
 /// mix of types implementing `ToSeed` (e.g. `u64`, `u32`, `String`, `[u8; 32]`).
@@ -143,17 +144,18 @@ pub fn compute_private_pda(
 /// # Panics
 ///
 /// Panics if `seeds` is empty.
-pub fn compute_pda_multi(program_id: &ProgramId, seeds: &[&dyn ToSeed]) -> AccountId {
+pub fn compute_pda_multi(account_id: &AccountId, seeds: &[&dyn ToSeed]) -> AccountId {
     let converted: Vec<[u8; 32]> = seeds.iter().map(|s| s.to_seed()).collect();
     let refs: Vec<&[u8; 32]> = converted.iter().collect();
-    compute_pda(program_id, &refs)
+    compute_pda(account_id, &refs)
 }
 
-/// Derive a PDA from a program ID and raw byte-slice seeds (variable length, ≤ 32 bytes each).
+/// Derive a PDA from a program's account ID and raw byte-slice seeds (variable length,
+/// ≤ 32 bytes each).
 ///
 /// Pads each seed to 32 bytes and then delegates to [`compute_pda`]. This is the variant
 /// used by generated FFI code where seeds arrive as `&[u8]` rather than `&[u8; 32]`.
-pub fn compute_pda_raw(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<AccountId, String> {
+pub fn compute_pda_raw(account_id: &AccountId, seeds: &[&[u8]]) -> Result<AccountId, String> {
     if seeds.is_empty() {
         return Err("PDA requires at least one seed".into());
     }
@@ -168,7 +170,7 @@ pub fn compute_pda_raw(program_id: &ProgramId, seeds: &[&[u8]]) -> Result<Accoun
         arrays.push(padded);
     }
     let refs: Vec<&[u8; 32]> = arrays.iter().collect();
-    Ok(compute_pda(program_id, &refs))
+    Ok(compute_pda(account_id, &refs))
 }
 
 /// Decode a 32-byte value from a base58 or hex string.
@@ -257,7 +259,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_single_seed() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let seed = seed_from_str("test_seed");
         let account = compute_pda(&program_id, &[&seed]);
 
@@ -268,7 +270,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_seed() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let seed1 = seed_from_str("prefix");
         let seed2 = [42u8; 32];
         let account = compute_pda(&program_id, &[&seed1, &seed2]);
@@ -279,8 +281,8 @@ mod tests {
 
     #[test]
     fn test_compute_pda_different_programs() {
-        let prog_a: ProgramId = [1u32; 8];
-        let prog_b: ProgramId = [2u32; 8];
+        let prog_a: AccountId = AccountId::new([1u8; 32]);
+        let prog_b: AccountId = AccountId::new([2u8; 32]);
         let seed = seed_from_str("same_seed");
 
         let a = compute_pda(&prog_a, &[&seed]);
@@ -290,7 +292,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_seed_order_matters() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let a = [0x01u8; 32];
         let b = [0x02u8; 32];
 
@@ -301,7 +303,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_no_self_cancellation() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let a = [0xFFu8; 32];
 
         let single = compute_pda(&program_id, &[&a]);
@@ -311,7 +313,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_vs_single() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let seed = seed_from_str("test");
 
         let single = compute_pda(&program_id, &[&seed]);
@@ -322,7 +324,7 @@ mod tests {
     #[test]
     #[should_panic(expected = "at least one seed")]
     fn test_compute_pda_empty_seeds() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         compute_pda(&program_id, &[]);
     }
 
@@ -376,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_matches_compute_pda() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let seed1 = seed_from_str("config");
         let seed2 = [99u8; 32];
 
@@ -387,7 +389,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_mixed_types() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let id: u64 = 42;
         let label = String::from("vault");
 
@@ -402,7 +404,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_single_u64() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let val: u64 = 1000;
         let pda = compute_pda_multi(&program_id, &[&val]);
 
@@ -413,7 +415,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_multi_three_seeds() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let prefix = "order";
         let user_id: u64 = 7;
         let seq: u32 = 100;
@@ -431,7 +433,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_raw_matches_compute_pda() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let seed = seed_from_str("test");
         let expected = compute_pda(&program_id, &[&seed]);
         let raw = compute_pda_raw(&program_id, &[b"test"]).unwrap();
@@ -440,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_compute_pda_raw_multi_seed() {
-        let program_id: ProgramId = [3u32; 8];
+        let program_id: AccountId = AccountId::new([3u8; 32]);
         let s1 = seed_from_str("prefix");
         let s2 = [0xabu8; 32];
         let expected = compute_pda(&program_id, &[&s1, &s2]);
@@ -450,13 +452,13 @@ mod tests {
 
     #[test]
     fn test_compute_pda_raw_empty_returns_err() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         assert!(compute_pda_raw(&program_id, &[]).is_err());
     }
 
     #[test]
     fn test_compute_pda_raw_seed_too_long() {
-        let program_id: ProgramId = [1u32; 8];
+        let program_id: AccountId = AccountId::new([1u8; 32]);
         let long = [0u8; 33];
         assert!(compute_pda_raw(&program_id, &[&long]).is_err());
     }
@@ -503,7 +505,7 @@ mod tests {
 
     #[test]
     fn test_compute_private_pda_matches_chain_derivation() {
-        let program_id: ProgramId = [7u32; 8];
+        let program_id: AccountId = AccountId::new([7u8; 32]);
         let seed = seed_from_str("vault");
         let npk = NullifierPublicKey([0xABu8; 32]);
         let vpk = ViewingPublicKey::from_seed(&[1u8; 32], &[2u8; 32]);
@@ -517,7 +519,7 @@ mod tests {
 
     #[test]
     fn test_compute_private_pda_identifier_changes_address() {
-        let program_id: ProgramId = [7u32; 8];
+        let program_id: AccountId = AccountId::new([7u8; 32]);
         let seed = seed_from_str("vault");
         let npk = NullifierPublicKey([0xABu8; 32]);
         let vpk = ViewingPublicKey::from_seed(&[1u8; 32], &[2u8; 32]);
@@ -537,7 +539,7 @@ mod tests {
 
     #[test]
     fn test_compute_private_pda_multi_seed_hashes_seeds() {
-        let program_id: ProgramId = [7u32; 8];
+        let program_id: AccountId = AccountId::new([7u8; 32]);
         let s1 = seed_from_str("vault");
         let s2 = seed_from_str("user");
         let npk = NullifierPublicKey([0xABu8; 32]);

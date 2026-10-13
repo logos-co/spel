@@ -15,13 +15,13 @@ fn sign_prompt_decodes_operative_content_from_the_bytes() {
     let key = PrivateKey::try_new([1; 32]).unwrap();
     let pubkey = PublicKey::new_from_private_key(&key);
     let account_id = AccountId::from(&pubkey);
-    let message = Message::try_new(
-        [0; 8],
+    let message = Message::new_preserialized(
+        AccountId::new([0; 32]),
         vec![account_id],
         vec![1_u128.into()],
         vec![1, 2, 3, 4],
-    )
-    .unwrap();
+        None,
+    );
     let bytes = borsh::to_vec(&message).unwrap();
 
     let id = format!("0x{}", hex_encode(account_id.value()));
@@ -60,11 +60,11 @@ fn sign_prompt_decodes_operative_content_from_the_bytes() {
         stdout.contains("=== Decoded from message bytes ==="),
         "prompt lost its decode section:\n{stdout}"
     );
-    // The payload bytes 1,2,3,4 travel risc0-encoded, a length word then
-    // one word per byte. The prompt renders the field exactly as the
-    // capture writer does.
+    // Instruction data is a borsh byte string since LEZ v0.2.5, so the payload
+    // bytes 1,2,3,4 render as themselves rather than as risc0 u32 words. The
+    // prompt renders the field exactly as the capture writer does.
     assert!(
-        stdout.contains("Instruction data: 0x0400000001000000020000000300000004000000"),
+        stdout.contains("Instruction data: 0x01020304"),
         "prompt must show the instruction data bytes:\n{stdout}"
     );
 }

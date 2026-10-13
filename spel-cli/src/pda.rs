@@ -3,7 +3,7 @@
 use crate::parse::ParsedValue;
 use nssa::AccountId;
 use nssa_core::encryption::ViewingPublicKey;
-use nssa_core::program::{PdaSeed, ProgramId};
+use nssa_core::program::PdaSeed;
 use nssa_core::NullifierPublicKey;
 use spel_framework_core::idl::IdlSeed;
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ use std::collections::HashMap;
 /// Resolve a single seed to 32 bytes.
 fn resolve_seed(
     seed: &IdlSeed,
-    _program_id: &ProgramId,
+    _program_account_id: &AccountId,
     account_map: &HashMap<String, AccountId>,
     parsed_args: &HashMap<String, ParsedValue>,
 ) -> Result<[u8; 32], String> {
@@ -105,7 +105,7 @@ fn hash_seeds(seeds: &[[u8; 32]]) -> [u8; 32] {
 /// `npk = None`; `identifier` is then ignored, it is not part of public derivation.
 pub fn compute_pda_from_seeds(
     seeds: &[IdlSeed],
-    program_id: &ProgramId,
+    program_account_id: &AccountId,
     account_map: &HashMap<String, AccountId>,
     parsed_args: &HashMap<String, ParsedValue>,
     npk: Option<&NullifierPublicKey>,
@@ -119,7 +119,7 @@ pub fn compute_pda_from_seeds(
     // Resolve all seeds to bytes
     let resolved: Vec<[u8; 32]> = seeds
         .iter()
-        .map(|s| resolve_seed(s, program_id, account_map, parsed_args))
+        .map(|s| resolve_seed(s, program_account_id, account_map, parsed_args))
         .collect::<Result<Vec<_>, _>>()?;
 
     // Single seed: use directly. Multi-seed: SHA-256(seed1 || seed2 || ...)
@@ -134,10 +134,14 @@ pub fn compute_pda_from_seeds(
     if let Some(npk) = npk {
         let vpk = vpk.ok_or_else(|| "Private PDA requires a ViewingPublicKey (vpk)".to_string())?;
         Ok(AccountId::for_private_pda(
-            program_id, &pda_seed, npk, vpk, identifier,
+            program_account_id,
+            &pda_seed,
+            npk,
+            vpk,
+            identifier,
         ))
     } else {
-        Ok(AccountId::for_public_pda(program_id, &pda_seed))
+        Ok(AccountId::for_public_pda(program_account_id, &pda_seed))
     }
 }
 
@@ -150,7 +154,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "test_seed".to_string(),
         }];
-        let program_id: ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let result = compute_pda_from_seeds(
             &seeds,
             &program_id,
@@ -173,7 +177,7 @@ mod tests {
                 path: "create_key".to_string(),
             },
         ];
-        let program_id: ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let mut args = HashMap::new();
         args.insert(
             "create_key".to_string(),
@@ -194,7 +198,7 @@ mod tests {
                 path: "index".to_string(),
             },
         ];
-        let program_id: ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let mut args = HashMap::new();
         args.insert("index".to_string(), ParsedValue::U64(5));
         let result =
@@ -207,7 +211,7 @@ mod tests {
         let seeds = vec![IdlSeed::Arg {
             path: "missing".to_string(),
         }];
-        let program_id: ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let result = compute_pda_from_seeds(
             &seeds,
             &program_id,
@@ -223,7 +227,6 @@ mod tests {
 
     #[test]
     fn test_hash_seeds_not_commutative() {
-        use risc0_zkvm::sha::{Impl, Sha256};
         // SHA-256(A || B) != SHA-256(B || A) for A != B
         let a = [0x01u8; 32];
         let b = [0x02u8; 32];
@@ -245,7 +248,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "vault".to_string(),
         }];
-        let program_id: ProgramId = [2u32; 8];
+        let program_id = AccountId::new([2u8; 32]);
         let npk = NullifierPublicKey([0xABu8; 32]);
 
         let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
@@ -285,7 +288,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "vault".to_string(),
         }];
-        let program_id: ProgramId = [2u32; 8];
+        let program_id = AccountId::new([2u8; 32]);
         let npk1 = NullifierPublicKey([0x01u8; 32]);
         let npk2 = NullifierPublicKey([0x02u8; 32]);
 
@@ -330,7 +333,7 @@ mod tests {
         let seeds_single = vec![IdlSeed::Const {
             value: "test".to_string(),
         }];
-        let program_id: ProgramId = [1u32; 8];
+        let program_id = AccountId::new([1u8; 32]);
         let mut args = HashMap::new();
         args.insert("key".to_string(), ParsedValue::ByteArray(vec![0u8; 32]));
 
@@ -364,7 +367,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "vault".to_string(),
         }];
-        let program_id: ProgramId = [2u32; 8];
+        let program_id = AccountId::new([2u8; 32]);
         let npk = NullifierPublicKey([0xABu8; 32]);
         let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
         let identifier: u128 = 7;
@@ -400,7 +403,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "vault".to_string(),
         }];
-        let program_id: ProgramId = [2u32; 8];
+        let program_id = AccountId::new([2u8; 32]);
         let npk = NullifierPublicKey([0xABu8; 32]);
         let vpk = ViewingPublicKey::from_seed(&[0u8; 32], &[0u8; 32]);
 
@@ -428,7 +431,7 @@ mod tests {
         let seeds = vec![IdlSeed::Const {
             value: "vault".to_string(),
         }];
-        let program_id: ProgramId = [2u32; 8];
+        let program_id = AccountId::new([2u8; 32]);
         let derive = |identifier: u128| {
             compute_pda_from_seeds(
                 &seeds,

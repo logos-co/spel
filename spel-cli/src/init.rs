@@ -4,7 +4,12 @@ use std::fs;
 use std::path::Path;
 
 /// LEZ tag a scaffold pins when neither `--lez-tag` nor `--lez-rev` is given.
-pub const DEFAULT_LEZ_TAG: &str = "v0.2.4";
+///
+/// Must equal the tag the framework crates pin: a scaffold's guest depends on
+/// both `spel-framework` and LEZ directly, so a different tag puts two
+/// `lee_core` versions in its graph and `#[lez_program]` fails to compile.
+/// `default_lez_tag_matches_framework` guards it.
+pub const DEFAULT_LEZ_TAG: &str = "v0.2.5-rc2";
 
 /// Framework branch a scaffold pins when neither `--spel-tag` nor `--spel-rev`
 /// is given.
@@ -425,10 +430,14 @@ idl: ## Generate IDL JSON from program source
 cli: ## Run the IDL-driven CLI (ARGS="...")
 	cargo run --bin {snake_name}_cli -- $(ARGS)
 
-deploy: ## Deploy program to sequencer
+deploy: ## Deploy program to sequencer (FEE_PAYER=<funded account>)
 	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
-	wallet deploy-program $(PROGRAM_BIN)
-	@echo "✅ Program deployed"
+	@test -n "$(FEE_PAYER)" || (echo "ERROR: set FEE_PAYER=<funded account id>. The program's new header and segment accounts hold nothing to pay fees with."; exit 1)
+	$(eval PROGRAM_ADDRESS := $(shell cargo run -q --bin {snake_name}_cli -- deploy $(PROGRAM_BIN) --fee-payer $(FEE_PAYER)))
+	@test -n "$(PROGRAM_ADDRESS)" || (echo "ERROR: deploy failed"; exit 1)
+	$(call save_var,PROGRAM_ADDRESS,$(PROGRAM_ADDRESS))
+	@echo "✅ Program deployed at $(PROGRAM_ADDRESS)"
+	@echo "   Add address = \"$(PROGRAM_ADDRESS)\" to [program] in spel.toml"
 
 inspect: ## Show ProgramId for built binary
 	cargo run --bin {snake_name}_cli -- inspect $(PROGRAM_BIN)
@@ -569,13 +578,14 @@ make build
 # 2. Generate the IDL (auto-extracts from #[lez_program] annotations)
 make idl
 
-# 3. Deploy to sequencer
-make deploy
+# 3. Deploy to sequencer. The fee payer is a funded account in your wallet;
+#    deploy prints the program address: add it to spel.toml as `address`.
+make deploy FEE_PAYER=<account-id>
 
 # 4. See available commands (auto-generated from your program)
 make cli ARGS="--help"
 
-# 5. Run an instruction (spel.toml provides IDL and binary paths)
+# 5. Run an instruction (spel.toml provides the IDL and program address)
 make cli ARGS="<command> --arg1 value1 --arg2 value2"
 
 # Dry run (no submission):
@@ -590,7 +600,7 @@ make cli ARGS="--dry-run -- <command> --arg1 value1"
 | `make build` | Build the guest binary (risc0) |
 | `make idl` | Generate IDL JSON from program source |
 | `make cli ARGS="..."` | Run the IDL-driven CLI |
-| `make deploy` | Deploy program to sequencer |
+| `make deploy FEE_PAYER=<id>` | Deploy program to sequencer, print its address |
 | `make inspect` | Show ProgramId for built binary |
 | `make setup` | Create accounts via wallet |
 | `make status` | Show saved state and binary info |
@@ -919,4 +929,24 @@ fn write_file(root: &Path, rel_path: &str, content: &str) {
         eprintln!("❌ Failed to write {}: {}", path.display(), e);
         std::process::exit(1);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The scaffold's default LEZ tag has to be the one spel-framework-core
+    /// is built against; see `DEFAULT_LEZ_TAG`.
+    #[test]
+    fn default_lez_tag_matches_framework() {
+        let manifest = include_str!("../../spel-framework-core/Cargo.toml");
+        let pin = manifest
+            .lines()
+            .find(|l| l.trim_start().starts_with("nssa_core") && l.contains("logos-execution-zone"))
+            .expect("spel-framework-core/Cargo.toml has no LEZ nssa_core dependency");
+        assert!(
+            pin.contains(&format!("tag = \"{DEFAULT_LEZ_TAG}\"")),
+            "DEFAULT_LEZ_TAG ({DEFAULT_LEZ_TAG}) differs from spel-framework-core's LEZ pin: {pin}"
+        );
+    }
 }

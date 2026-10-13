@@ -18,13 +18,13 @@ fn signed_blob() -> (TxBlob, PrivateKey) {
     let key = PrivateKey::try_new([1; 32]).unwrap();
     let pubkey = PublicKey::new_from_private_key(&key);
     let account_id = AccountId::from(&pubkey);
-    let message = Message::try_new(
-        [0; 8],
+    let message = Message::new_preserialized(
+        AccountId::new([0; 32]),
         vec![account_id],
         vec![1_u128.into()],
         vec![1, 2, 3, 4],
-    )
-    .unwrap();
+        None,
+    );
     let bytes = borsh::to_vec(&message).unwrap();
 
     let id = format!("0x{}", hex_encode(account_id.value()));
@@ -83,13 +83,13 @@ fn submit_rejects_tampered_message() {
     let (mut blob, key) = signed_blob();
     let pubkey = PublicKey::new_from_private_key(&key);
     let account_id = AccountId::from(&pubkey);
-    let tampered = Message::try_new(
-        [0; 8],
+    let tampered = Message::new_preserialized(
+        AccountId::new([0; 32]),
         vec![account_id],
         vec![1_u128.into()],
         vec![9, 9, 9, 9],
-    )
-    .unwrap();
+        None,
+    );
     blob.message_hex = hex_encode(&borsh::to_vec(&tampered).unwrap());
 
     let dir = tempfile::tempdir().unwrap();
@@ -113,13 +113,13 @@ fn sign_rejects_tampered_message() {
     let (mut blob, key) = signed_blob();
     let pubkey = PublicKey::new_from_private_key(&key);
     let account_id = AccountId::from(&pubkey);
-    let tampered = Message::try_new(
-        [0; 8],
+    let tampered = Message::new_preserialized(
+        AccountId::new([0; 32]),
         vec![account_id],
         vec![1_u128.into()],
         vec![9, 9, 9, 9],
-    )
-    .unwrap();
+        None,
+    );
     blob.message_hex = hex_encode(&borsh::to_vec(&tampered).unwrap());
 
     let dir = tempfile::tempdir().unwrap();

@@ -1,136 +1,56 @@
-//! Auto-claim logic for `SpelOutput::execute()`.
+//! State-diff plumbing for `SpelOutput::execute()`.
 //!
-//! [`AutoClaim`] wraps `nssa_core::program::Claim` with a `None` variant for
-//! accounts that don't need claiming. [`SpelOutput::execute`] turns
-//! `(Account, AutoClaim)` pairs into the correct `AccountPostState` values.
+//! [`IntoStateDiff`] turns what a handler returns into the
+//! `nssa_core::program::AccountStateDiff` values LEZ expects.
+//!
+//! # Where the claims went
+//!
+//! Up to LEZ v0.2.4 a program declared ownership explicitly, via
+//! `Claim::Authorized` / `Claim::Pda(seed)` attached to each post-state, and this
+//! module wrapped that in an `AutoClaim` enum driven by the `#[account(...)]`
+//! constraints. v0.2.5 removed `Claim` entirely: writing data to a default-owned
+//! account *is* the claim, applied by `acquire_ownership_on_data_write` during
+//! validation. So `#[account(init)]`, `#[account(init, signer)]` and
+//! `#[account(init, pda = ...)]` have nothing left to emit here.
+//!
+//! The PDA *address* guarantee is unaffected — it never came from the claim. The
+//! generated per-instruction validation still checks each `pda`-constrained
+//! account against [`crate::pda::compute_pda`], which is what actually proves the
+//! account sits at the derived address.
 
-use nssa_core::account::Account;
-use nssa_core::program::{AccountPostState, ChainedCall, Claim, PdaSeed, ValidityWindow};
-use nssa_core::NullifierPublicKey;
+use nssa_core::account::AccountWithMetadata;
+use nssa_core::program::{AccountStateDiff, ChainedCall, ValidityWindow};
 
-use crate::types::{IntoPostState, SpelOutput};
+use crate::types::{IntoStateDiff, SpelOutput};
 
-/// Describes the claim disposition for an account in a post-state.
-///
-/// Wraps `nssa_core::program::Claim` with an additional `None` variant for
-/// accounts that are mutable or read-only (no ownership claim).
-///
-/// # Auto-claim rules (from `#[account(...)]` constraints)
-///
-/// | Constraint                          | AutoClaim variant          |
-/// |-------------------------------------|----------------------------|
-/// | `#[account(init, pda = ...)]`       | `AutoClaim::Claimed(Claim::Pda(seed))` |
-/// | `#[account(init, signer)]`          | `AutoClaim::Claimed(Claim::Authorized)` |
-/// | `#[account(init)]` (no pda/signer)  | `AutoClaim::Claimed(Claim::Authorized)` |
-/// | `#[account(mut)]`                   | `AutoClaim::None`          |
-/// | `#[account]` (read-only)            | `AutoClaim::None`          |
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum AutoClaim {
-    /// The account should be claimed with the given [`Claim`] type.
-    Claimed(Claim),
-    /// The account should be claimed only when it is still owned by the default
-    /// program — the shape LEZ's own reference programs use for an authorizing
-    /// account. A user account that no program has claimed yet is default-owned;
-    /// once it has transacted its pre-state is no longer `Account::default()`, and
-    /// LEZ rule 7 rejects any output that returns it still default-owned. Claiming
-    /// it the first time a program touches it keeps it valid from then on.
-    ClaimedIfDefault(Claim),
-    /// The account is mutable or read-only — no claim is requested.
-    None,
-}
+// ── IntoStateDiff implementations ───────────────────────────────────────
 
-impl AutoClaim {
-    /// Returns `true` if this will result in `AccountPostState::new_claimed`.
-    #[must_use]
-    pub fn is_claimed(&self) -> bool {
-        matches!(self, AutoClaim::Claimed(_) | AutoClaim::ClaimedIfDefault(_))
-    }
-
-    /// Convert an account and this auto-claim into an `AccountPostState`.
-    #[must_use]
-    pub fn to_post_state(&self, account: Account) -> AccountPostState {
-        match self {
-            AutoClaim::Claimed(claim) => AccountPostState::new_claimed(account, *claim),
-            AutoClaim::ClaimedIfDefault(claim) => {
-                AccountPostState::new_claimed_if_default(account, *claim)
-            },
-            AutoClaim::None => AccountPostState::new(account),
-        }
-    }
-
-    /// Create an `AutoClaim` for a PDA-initialized account from raw seed bytes.
-    ///
-    /// The seed bytes are zero-padded to 32 bytes and wrapped in a `PdaSeed`.
-    pub fn pda_from_seeds(seeds: &[&[u8]]) -> Self {
-        // Combine seeds into a single PdaSeed using the same logic as compute_pda
-        let combined = if seeds.len() == 1 {
-            // Single seed: use raw 32 bytes (no padding), consistent with compute_pda
-            assert!(
-                seeds[0].len() == 32,
-                "pda_from_seeds: single seed must be 32 bytes"
-            );
-            let mut buf = [0u8; 32];
-            buf.copy_from_slice(seeds[0]);
-            buf
-        } else {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            for seed in seeds {
-                hasher.update(seed);
-            }
-            hasher.finalize().into()
-        };
-        AutoClaim::Claimed(Claim::Pda(PdaSeed::new(combined)))
-    }
-
-    /// Create an `AutoClaim` for a private PDA-initialized account from raw seed bytes.
-    ///
-    /// Identical to [`pda_from_seeds`] in terms of the emitted claim — the circuit
-    /// reuses `Claim::Pda(seed)` for private PDAs and derives the address via
-    /// `AccountId::for_private_pda` using the `npk` it receives separately through
-    /// `PrivacyPreservingCircuitInput.private_account_keys`.
-    ///
-    /// The `npk` parameter is accepted for documentation clarity; it is not encoded
-    /// into the claim itself.
-    pub fn private_pda_from_seeds(seeds: &[&[u8]], _npk: &NullifierPublicKey) -> Self {
-        Self::pda_from_seeds(seeds)
-    }
-}
-
-// ── IntoPostState implementations ───────────────────────────────────────
-
-impl IntoPostState for (Account, AutoClaim) {
-    fn into_post_state(self) -> AccountPostState {
-        self.1.to_post_state(self.0)
-    }
-}
-
-impl IntoPostState for (Account, &AutoClaim) {
-    fn into_post_state(self) -> AccountPostState {
-        self.1.to_post_state(self.0)
-    }
-}
-
-impl IntoPostState for AccountPostState {
-    fn into_post_state(self) -> AccountPostState {
+impl IntoStateDiff for AccountStateDiff {
+    fn into_state_diff(self) -> AccountStateDiff {
         self
     }
 }
 
-impl IntoPostState for Account {
-    fn into_post_state(self) -> AccountPostState {
-        AccountPostState::new(self)
+impl IntoStateDiff for AccountWithMetadata {
+    /// An account handed back untouched: no balance delta, no data change.
+    fn into_state_diff(self) -> AccountStateDiff {
+        AccountStateDiff::unchanged(self)
     }
 }
 
 // ── SpelOutput::execute ─────────────────────────────────────────────────
 
 impl SpelOutput {
-    /// Build a `SpelOutput` from accounts paired with auto-claim metadata.
+    /// Build a `SpelOutput` from per-account state diffs.
     ///
-    /// Each item is converted to an `AccountPostState` via [`IntoPostState`].
-    /// Accepts `Vec<(Account, AutoClaim)>`, `Vec<AccountPostState>`, or any
-    /// iterator of `impl IntoPostState`.
+    /// Each item is converted via [`IntoStateDiff`], so this accepts
+    /// `Vec<AccountStateDiff>` or `Vec<AccountWithMetadata>` (the latter meaning
+    /// "returned unchanged"), or any iterator mixing the two.
+    ///
+    /// Every account the transaction declared must appear in the output — LEZ
+    /// v0.2.5 rejects a diff that omits one with
+    /// `DeclaredAccountMissingFromOutput`. Return read-only accounts as
+    /// `AccountStateDiff::unchanged`, never by dropping them.
     ///
     /// # Examples
     ///
@@ -138,55 +58,22 @@ impl SpelOutput {
     /// // Inside a handler generated by #[lez_program]:
     /// Ok(SpelOutput::execute(
     ///     vec![
-    ///         (state.account.clone(), AutoClaim::Claimed(Claim::Authorized)),
-    ///         (authority.account.clone(), AutoClaim::None),
+    ///         AccountStateDiff::new(state, BalanceDiff::Add(0), new_data),
+    ///         AccountStateDiff::unchanged(authority),
     ///     ],
     ///     vec![],  // chained calls
     /// ))
     /// ```
     pub fn execute(
-        accounts: impl IntoIterator<Item = impl IntoPostState>,
+        diffs: impl IntoIterator<Item = impl IntoStateDiff>,
         calls: Vec<ChainedCall>,
     ) -> Self {
-        let post_states = accounts
+        let state_diffs = diffs
             .into_iter()
-            .map(IntoPostState::into_post_state)
+            .map(IntoStateDiff::into_state_diff)
             .collect();
         Self {
-            post_states,
-            chained_calls: calls,
-            block_validity_window: ValidityWindow::new_unbounded(),
-            timestamp_validity_window: ValidityWindow::new_unbounded(),
-        }
-    }
-
-    /// Build a `SpelOutput` by zipping a list of accounts with a matching
-    /// list of auto-claims.
-    ///
-    /// This is the primary method used by macro-generated `__claims_*()` helpers.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `accounts` and `claims` have different lengths.
-    pub fn execute_with_claims(
-        accounts: &[Account],
-        claims: &[AutoClaim],
-        calls: Vec<ChainedCall>,
-    ) -> Self {
-        assert_eq!(
-            accounts.len(),
-            claims.len(),
-            "execute_with_claims: accounts.len() ({}) != claims.len() ({})",
-            accounts.len(),
-            claims.len(),
-        );
-        let post_states = accounts
-            .iter()
-            .zip(claims.iter())
-            .map(|(acc, claim)| claim.to_post_state(acc.clone()))
-            .collect();
-        Self {
-            post_states,
+            state_diffs,
             chained_calls: calls,
             block_validity_window: ValidityWindow::new_unbounded(),
             timestamp_validity_window: ValidityWindow::new_unbounded(),
@@ -196,295 +83,84 @@ impl SpelOutput {
 
 #[cfg(test)]
 mod tests {
+    use nssa_core::account::{Account, AccountId, BalanceDiff, Data};
+
     use super::*;
 
-    #[test]
-    fn auto_claim_is_claimed() {
-        assert!(AutoClaim::Claimed(Claim::Authorized).is_claimed());
-        assert!(AutoClaim::Claimed(Claim::Pda(PdaSeed::new([0; 32]))).is_claimed());
-        assert!(!AutoClaim::None.is_claimed());
+    fn account(id: u8) -> AccountWithMetadata {
+        AccountWithMetadata {
+            account: Account::default(),
+            account_id: AccountId::new([id; 32]),
+            is_authorized: false,
+        }
     }
 
-    /// A chained call to `program_id`, carrying one pre-state marked authorized.
+    /// A chained call to `program`, naming one pre-state by id.
     ///
     /// Mirrors how a real caller delegates: the account is returned unchanged in
-    /// the caller's own post-states while the mutation is handed to the callee,
-    /// which executes as `executing_program_id` and so may act on accounts it owns.
-    fn call_to(program_id: u32, authorized: bool) -> ChainedCall {
-        let mut pre = nssa_core::account::AccountWithMetadata {
-            account: Account::default(),
-            account_id: nssa_core::account::AccountId::new([program_id as u8; 32]),
-            is_authorized: false,
-        };
-        pre.is_authorized = authorized;
+    /// the caller's own diffs while the mutation is handed to the callee, which
+    /// executes as that program and so may act on accounts it owns.
+    fn call_to(program: u8) -> ChainedCall {
         ChainedCall {
-            program_id: [program_id; 8],
+            program_account_id: AccountId::new([program; 32]),
             instruction_data: vec![],
-            pre_states: vec![pre],
+            pre_state_ids: vec![AccountId::new([program; 32])],
             pda_seeds: vec![],
         }
     }
 
     #[test]
     fn execute_carries_chained_calls() {
-        let output = SpelOutput::execute(vec![Account::default()], vec![call_to(7, false)]);
-        assert_eq!(output.post_states.len(), 1);
+        let output = SpelOutput::execute(vec![account(1)], vec![call_to(7)]);
+        assert_eq!(output.state_diffs.len(), 1);
         assert_eq!(
             output.chained_calls.len(),
             1,
             "the call must reach the output"
         );
-        assert_eq!(output.chained_calls[0].program_id, [7; 8]);
-    }
-
-    #[test]
-    fn execute_preserves_chained_call_order() {
-        // Order is the execution order downstream, so it must not be reshuffled.
-        let output = SpelOutput::execute(
-            vec![Account::default()],
-            vec![call_to(1, false), call_to(2, false), call_to(3, false)],
-        );
-        let ids: Vec<u32> = output
-            .chained_calls
-            .iter()
-            .map(|c| c.program_id[0])
-            .collect();
-        assert_eq!(ids, vec![1, 2, 3]);
-    }
-
-    #[test]
-    fn execute_with_claims_carries_chained_calls() {
-        let output = SpelOutput::execute_with_claims(
-            &[Account::default()],
-            &[AutoClaim::Claimed(Claim::Authorized)],
-            vec![call_to(9, false)],
-        );
-        assert_eq!(output.post_states.len(), 1);
-        assert!(output.post_states[0].required_claim().is_some());
-        assert_eq!(output.chained_calls.len(), 1);
-        assert_eq!(output.chained_calls[0].program_id, [9; 8]);
-    }
-
-    #[test]
-    fn chained_call_pre_state_authorization_is_preserved() {
-        // LEZ grants the callee authority over accounts flagged `is_authorized`
-        // in the caller's output, so the flag must survive untouched.
-        let output = SpelOutput::execute(vec![Account::default()], vec![call_to(4, true)]);
-        assert!(
-            output.chained_calls[0].pre_states[0].is_authorized,
-            "authorization must reach the callee"
-        );
-    }
-
-    /// Convenience helper: returns a `SpelOutput` with no accounts or calls.
-    /// Reduces boilerplate in validity-window tests below.
-    fn empty_output() -> SpelOutput {
-        SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
-    }
-
-    #[test]
-    fn execute_auto_claims() {
-        let account_a = Account::default();
-        let account_b = Account::default();
-
-        let output = SpelOutput::execute(
-            vec![
-                (account_a.clone(), AutoClaim::Claimed(Claim::Authorized)),
-                (account_b.clone(), AutoClaim::None),
-            ],
-            vec![],
-        );
-
-        assert_eq!(output.post_states.len(), 2);
-        assert!(output.post_states[0].required_claim().is_some());
-        assert!(output.post_states[1].required_claim().is_none());
-        assert!(output.chained_calls.is_empty());
-    }
-
-    #[test]
-    fn execute_with_claims_zips_correctly() {
-        let accounts = vec![Account::default(), Account::default(), Account::default()];
-        let claims = vec![
-            AutoClaim::Claimed(Claim::Pda(PdaSeed::new([0; 32]))),
-            AutoClaim::Claimed(Claim::Authorized),
-            AutoClaim::None,
-        ];
-
-        let output = SpelOutput::execute_with_claims(&accounts, &claims, vec![]);
-
-        assert_eq!(output.post_states.len(), 3);
-        assert!(output.post_states[0].required_claim().is_some());
-        assert!(output.post_states[1].required_claim().is_some());
-        assert!(output.post_states[2].required_claim().is_none());
-    }
-
-    #[test]
-    fn execute_empty() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![]);
-        assert!(output.post_states.is_empty());
-        assert!(output.chained_calls.is_empty());
-    }
-
-    #[test]
-    #[should_panic(expected = "accounts.len()")]
-    fn execute_with_claims_panics_on_mismatch() {
-        SpelOutput::execute_with_claims(
-            &[Account::default()],
-            &[AutoClaim::None, AutoClaim::None],
-            vec![],
-        );
-    }
-
-    #[test]
-    fn execute_accepts_raw_post_states() {
-        let ps = AccountPostState::new(Account::default());
-        let output = SpelOutput::execute(vec![ps], vec![]);
-        assert_eq!(output.post_states.len(), 1);
-        assert!(output.post_states[0].required_claim().is_none());
-    }
-
-    #[test]
-    fn pda_from_seeds_single() {
-        let claim = AutoClaim::pda_from_seeds(&[&[0u8; 32]]);
-        assert!(claim.is_claimed());
-    }
-
-    #[test]
-    fn pda_from_seeds_multi() {
-        let claim = AutoClaim::pda_from_seeds(&[&[1u8; 32], &[2u8; 32]]);
-        assert!(claim.is_claimed());
-    }
-
-    // ── Validity window tests ────────────────────────────────────────────
-
-    /// Existing programs that don't call any validity window builder get unbounded
-    /// windows, which matches the prior hard-coded behavior.
-    #[test]
-    fn default_output_has_unbounded_windows() {
-        let output = empty_output();
-        assert_eq!(output.block_validity_window.start(), None);
-        assert_eq!(output.block_validity_window.end(), None);
-        assert_eq!(output.timestamp_validity_window.start(), None);
-        assert_eq!(output.timestamp_validity_window.end(), None);
-    }
-
-    #[test]
-    fn execute_with_claims_default_windows_unbounded() {
-        let output = SpelOutput::execute_with_claims(&[], &[], vec![]);
-        assert_eq!(output.block_validity_window.start(), None);
-        assert_eq!(output.block_validity_window.end(), None);
-    }
-
-    #[test]
-    fn with_block_validity_window_range_from() {
-        let output = empty_output().with_block_validity_window(42u64..);
-        assert_eq!(output.block_validity_window.start(), Some(42));
-        assert_eq!(output.block_validity_window.end(), None);
-    }
-
-    #[test]
-    fn with_block_validity_window_range_to() {
-        let output = empty_output().with_block_validity_window(..100u64);
-        assert_eq!(output.block_validity_window.start(), None);
-        assert_eq!(output.block_validity_window.end(), Some(100));
-    }
-
-    #[test]
-    fn with_block_validity_window_unbounded() {
-        let output = empty_output().with_block_validity_window(..);
-        assert_eq!(output.block_validity_window.start(), None);
-        assert_eq!(output.block_validity_window.end(), None);
-    }
-
-    #[test]
-    fn try_with_block_validity_window_valid_range() {
-        let output = empty_output()
-            .try_with_block_validity_window(10u64..20)
-            .expect("10..20 is a valid range");
-        assert_eq!(output.block_validity_window.start(), Some(10));
-        assert_eq!(output.block_validity_window.end(), Some(20));
-    }
-
-    #[test]
-    fn try_with_block_validity_window_empty_range_errors() {
-        let result = empty_output().try_with_block_validity_window(5u64..5);
-        assert!(result.is_err(), "empty range should return Err");
-    }
-
-    #[test]
-    #[allow(clippy::reversed_empty_ranges)]
-    fn try_with_block_validity_window_inverted_range_errors() {
-        let result = empty_output().try_with_block_validity_window(10u64..5);
-        assert!(result.is_err(), "inverted range should return Err");
-    }
-
-    /// RangeFull (`..`) is an infallible conversion — use the infallible
-    /// `with_block_validity_window` variant, not `try_with_*`.
-    #[test]
-    fn with_block_validity_window_range_full_succeeds() {
-        let output = empty_output().with_block_validity_window(..);
-        assert_eq!(output.block_validity_window.start(), None);
-        assert_eq!(output.block_validity_window.end(), None);
-    }
-
-    /// RangeFull (`..`) is an infallible conversion — use the infallible
-    /// `with_timestamp_validity_window` variant, not `try_with_*`.
-    #[test]
-    fn with_timestamp_validity_window_range_full_succeeds() {
-        let output = empty_output().with_timestamp_validity_window(..);
-        assert_eq!(output.timestamp_validity_window.start(), None);
-        assert_eq!(output.timestamp_validity_window.end(), None);
-    }
-
-    #[test]
-    fn with_timestamp_validity_window_range_from() {
-        let output = empty_output().with_timestamp_validity_window(1_700_000_000u64..);
         assert_eq!(
-            output.timestamp_validity_window.start(),
-            Some(1_700_000_000)
+            output.chained_calls[0].program_account_id,
+            AccountId::new([7; 32])
         );
-        assert_eq!(output.timestamp_validity_window.end(), None);
     }
 
     #[test]
-    fn try_with_timestamp_validity_window_valid_range() {
-        let output = empty_output()
-            .try_with_timestamp_validity_window(1_000u64..2_000)
-            .expect("1000..2000 is a valid range");
-        assert_eq!(output.timestamp_validity_window.start(), Some(1_000));
-        assert_eq!(output.timestamp_validity_window.end(), Some(2_000));
+    fn bare_account_becomes_an_unchanged_diff() {
+        let output = SpelOutput::execute(vec![account(1)], vec![]);
+        let diff = &output.state_diffs[0];
+        assert_eq!(
+            diff.post_data, None,
+            "an untouched account must report no data change"
+        );
+        assert_eq!(diff.post_balance_diff, BalanceDiff::Add(0));
     }
 
     #[test]
-    fn try_with_timestamp_validity_window_empty_range_errors() {
-        let result = empty_output().try_with_timestamp_validity_window(99u64..99);
-        assert!(result.is_err());
+    fn explicit_diffs_pass_through_unchanged() {
+        let pre = account(2);
+        let data = Data::try_from(vec![1, 2, 3]).expect("fits under DATA_MAX_LENGTH");
+        let output = SpelOutput::execute(
+            vec![AccountStateDiff::new(
+                pre.clone(),
+                BalanceDiff::Sub(5),
+                data.clone(),
+            )],
+            vec![],
+        );
+        let diff = &output.state_diffs[0];
+        assert_eq!(diff.pre_state.account_id, pre.account_id);
+        assert_eq!(diff.post_balance_diff, BalanceDiff::Sub(5));
+        assert_eq!(
+            diff.post_data.as_ref(),
+            Some(&data),
+            "data differing from the pre-state must survive as a change"
+        );
     }
 
     #[test]
-    #[allow(clippy::reversed_empty_ranges)]
-    fn try_with_timestamp_validity_window_inverted_range_errors() {
-        let result = empty_output().try_with_timestamp_validity_window(2_000u64..1_000);
-        assert!(result.is_err(), "inverted range should return Err");
-    }
-
-    #[test]
-    fn into_parts_returns_all_fields() {
-        let output = SpelOutput::execute(Vec::<(Account, AutoClaim)>::new(), vec![])
-            .with_block_validity_window(5u64..)
-            .try_with_timestamp_validity_window(100u64..200)
-            .unwrap();
-
-        let parts = output.into_parts();
-        let post_states = parts.post_states;
-        let chained_calls = parts.chained_calls;
-        let block_window = parts.block_validity_window;
-        let ts_window = parts.timestamp_validity_window;
-        assert!(post_states.is_empty());
-        assert!(chained_calls.is_empty());
-        assert_eq!(block_window.start(), Some(5));
-        assert_eq!(block_window.end(), None);
-        assert_eq!(ts_window.start(), Some(100));
-        assert_eq!(ts_window.end(), Some(200));
+    fn execute_accepts_an_empty_output() {
+        let output = SpelOutput::execute(Vec::<AccountStateDiff>::new(), vec![]);
+        assert!(output.state_diffs.is_empty());
+        assert!(output.chained_calls.is_empty());
     }
 }

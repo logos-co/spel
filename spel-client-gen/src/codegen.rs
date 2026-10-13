@@ -29,7 +29,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     // Imports
     writeln!(out, "use sequencer_service_rpc::RpcClient as _;").unwrap();
     writeln!(out, "use nssa::{{").unwrap();
-    writeln!(out, "    AccountId, ProgramId, PublicTransaction,").unwrap();
+    writeln!(out, "    AccountId, PublicTransaction,").unwrap();
     writeln!(out, "    public_transaction::{{Message, WitnessSet}},").unwrap();
     writeln!(out, "}};").unwrap();
     writeln!(out, "use borsh::BorshDeserialize;").unwrap();
@@ -40,36 +40,21 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     // Parse helpers
     writeln!(
         out,
-        "/// Parse a hex string into ProgramId [u32; 8] (little-endian byte order)."
+        "/// Parse a program's deployed account address (base58 or 64-char hex)."
+    )
+    .unwrap();
+    // Since LEZ v0.2.5 a program is identified by the account its header was deployed
+    // to, so this parses an address (base58 or hex), not a 32-byte image id.
+    writeln!(
+        out,
+        "pub fn parse_program_id_hex(s: &str) -> Result<AccountId, String> {{"
     )
     .unwrap();
     writeln!(
         out,
-        "pub fn parse_program_id_hex(s: &str) -> Result<ProgramId, String> {{"
+        "    spel_framework_core::pda::parse_bytes32(s).map(AccountId::new)"
     )
     .unwrap();
-    writeln!(out, "    let s = s.trim_start_matches(\"0x\");").unwrap();
-    writeln!(out, "    if s.len() != 64 {{").unwrap();
-    writeln!(
-        out,
-        "        return Err(format!(\"program_id hex must be 64 chars, got {{}}\", s.len()));"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(
-        out,
-        "    let bytes = hex::decode(s).map_err(|e| format!(\"invalid hex: {{}}\", e))?;"
-    )
-    .unwrap();
-    writeln!(out, "    let mut pid = [0u32; 8];").unwrap();
-    writeln!(out, "    for (i, chunk) in bytes.chunks(4).enumerate() {{").unwrap();
-    writeln!(
-        out,
-        "        pid[i] = u32::from_le_bytes(chunk.try_into().unwrap());"
-    )
-    .unwrap();
-    writeln!(out, "    }}").unwrap();
-    writeln!(out, "    Ok(pid)").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
@@ -84,7 +69,7 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
         .unwrap();
         write!(
             out,
-            "pub fn compute_{}_pda(program_id: &ProgramId",
+            "pub fn compute_{}_pda(program_id: &AccountId",
             helper.account_name
         )
         .unwrap();
@@ -150,14 +135,14 @@ pub fn generate_client(idl: &SpelIdl) -> Result<String, String> {
     // Client struct
     writeln!(out, "pub struct {program_pascal}Client<'w> {{").unwrap();
     writeln!(out, "    pub wallet: &'w WalletCore,").unwrap();
-    writeln!(out, "    pub program_id: ProgramId,").unwrap();
+    writeln!(out, "    pub program_id: AccountId,").unwrap();
     writeln!(out, "}}").unwrap();
     writeln!(out).unwrap();
 
     writeln!(out, "impl<'w> {program_pascal}Client<'w> {{").unwrap();
     writeln!(
         out,
-        "    pub fn new(wallet: &'w WalletCore, program_id: ProgramId) -> Self {{"
+        "    pub fn new(wallet: &'w WalletCore, program_id: AccountId) -> Self {{"
     )
     .unwrap();
     writeln!(out, "        Self {{ wallet, program_id }}").unwrap();
@@ -411,8 +396,15 @@ fn seed_arg_codegen(name: &str, rust_type: &str) -> (String, Option<String>, Str
             None,
             name.to_string(),
         ),
-        "ProgramId" | "[u32; 8]" | "[u32;8]" => (
-            "&ProgramId".to_string(),
+        // A program reference is a 32-byte account address now; a literal [u32; 8]
+        // still means eight words.
+        "ProgramId" => (
+            "&AccountId".to_string(),
+            None,
+            format!("{name}.as_ref()"),
+        ),
+        "[u32; 8]" | "[u32;8]" => (
+            "&[u32; 8]".to_string(),
             Some(format!("let {name}_seed: [u8; 32] = {name}.iter().flat_map(|w| w.to_le_bytes()).collect::<Vec<_>>().try_into().unwrap();")),
             format!("&{name}_seed"),
         ),

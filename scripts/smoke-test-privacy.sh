@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # SPEL Privacy Smoke Test
 # Verifies both public and Private/ prefixed transactions work end-to-end
-# including auth-transfer init for the private account.
+# The private account starts fresh; the greet claims it (LEZ v0.2.5).
 #
 # Usage: ./smoke-test-privacy.sh [WORK_DIR]
 #
@@ -201,19 +201,22 @@ mod privacy_test {
         account: AccountWithMetadata,
         greeting: Vec<u8>,
     ) -> SpelResult {
-        let acc = account.account.clone();
-
-        let post = if acc.program_owner == nssa_core::program::DEFAULT_PROGRAM_ID {
-            // Unclaimed account: claim it and write greeting
-            let mut acc = acc;
-            let mut data: Vec<u8> = acc.data.into();
+        let post = if account.account.program_owner == nssa_core::program::DEFAULT_PROGRAM_OWNER {
+            // Unclaimed account: write the greeting. Since LEZ v0.2.5 there is
+            // no explicit Claim: writing data to a default-owned account is
+            // what claims it.
+            let mut data: Vec<u8> = account.account.data.clone().into();
             data.extend_from_slice(&greeting);
-            acc.data = Data::try_from(data)
+            let data = Data::try_from(data)
                 .map_err(|_| SpelError::custom(999, "data too big"))?;
-            AccountPostState::new_claimed(acc, Claim::Authorized)
+            nssa_core::program::AccountStateDiff::new(
+                account,
+                nssa_core::account::BalanceDiff::Add(0),
+                data,
+            )
         } else {
             // Already owned (e.g. by auth-transfer): return unchanged
-            AccountPostState::new(acc)
+            nssa_core::program::AccountStateDiff::unchanged(account)
         };
 
         Ok(SpelOutput::execute(vec![post], vec![]))
@@ -316,9 +319,28 @@ done
 # ─── Step 6: Deploy ───────────────────────────────────────────────────────
 
 log "Step 6: Deploying program..."
-printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN deploy-program "$GUEST_BIN_ABS" \
-    > "$LOG_DIR/deploy.log" 2>&1 || fail "Deploy failed"
-log "  ✓ Program deployed"
+# LEZ v0.2.5 deploys through program_loader: `spel deploy` creates the header +
+# segment accounts and prints the program address. They hold nothing, so the
+# debug genesis account pays (scripts/lib/fee-payer.sh).
+source "$SCRIPT_DIR/lib/fee-payer.sh"
+FEE_PAYER="${FEE_PAYER:-$(lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")}"
+[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account as fee payer"
+log "  Fee payer: $FEE_PAYER"
+PROGRAM_ADDRESS=$("$SPEL_BIN" deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$LOG_DIR/deploy.log") \
+    || { cat "$LOG_DIR/deploy.log"; fail "Deploy failed"; }
+log "  ✓ Program deployed at $PROGRAM_ADDRESS"
+
+# The privacy-preserving path proves against the binary and addresses the program
+# by its header account, so the calls below need both: record them in the
+# project's spel.toml [program] entry, which spel reads when -p is not given.
+python3 - "spel.toml" "$PROGRAM_ADDRESS" "$GUEST_BIN_ABS" <<'PY' || fail "Could not record the program in spel.toml"
+import re, sys
+path, address, binary = sys.argv[1:]
+text = open(path).read()
+text = re.sub(r'(?m)^(address|binary)\s*=.*\n', '', text)
+text = text.replace("[program]\n", f'[program]\naddress = "{address}"\nbinary = "{binary}"\n', 1)
+open(path, "w").write(text)
+PY
 
 # ─── Step 7: Generate test accounts ───────────────────────────────────────
 
@@ -340,7 +362,8 @@ FRESH_ACCOUNT=$(echo "$WALLET_PASSWORD" | $WALLET_BIN account new public 2>&1 | 
 [ -n "$FRESH_ACCOUNT" ] || fail "Could not create public account from wallet"
 log "  Fresh account: ${FRESH_ACCOUNT:0:20}..."
 
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+# The fresh account holds nothing, so the genesis account pays the fee.
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" --fee-payer "$FEE_PAYER" \
     greet \
     --account "$FRESH_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,117,98,108,105,99" \
@@ -348,21 +371,16 @@ SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" 
 
 log "  ✓ Public TX submitted and confirmed"
 
-# ─── Step 9: Init auth-transfer for private account ─────────────────────
-
-log "Step 9: Initializing auth-transfer for private account..."
-echo "$WALLET_PASSWORD" | $WALLET_BIN auth-transfer init --account-id "$PRIVATE_ACCOUNT" \
-    > "$LOG_DIR/auth-transfer.log" 2>&1 || fail "auth-transfer init failed (see $LOG_DIR/auth-transfer.log)"
-log "  ✓ auth-transfer initialized"
-
-# Wait for auth-transfer TX to be included in a block
-log "  Waiting for auth-transfer to be confirmed..."
-sleep 20
+# ─── Step 9: (no auth-transfer init) ────────────────────────────────────
+# Up to LEZ v0.2.4 the private account was first claimed through
+# `wallet auth-transfer init`. v0.2.5 removed that subcommand: an account is
+# claimed by the first program that writes data to it, so the greet below runs
+# against the fresh private account and claims it itself.
 
 # ─── Step 10: Test PRIVACY-PRESERVING transaction ───────────────────────
 
 log "Step 10: Testing PRIVACY-PRESERVING transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$GUEST_BIN_ABS" \
+SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" \
     greet \
     --account "$PRIVATE_ACCOUNT" \
     --greeting "72,101,108,108,111,32,80,114,105,118,97,116,101" \
@@ -375,6 +393,5 @@ log "  ✓ Privacy-preserving TX submitted and confirmed"
 log ""
 log "🎉 Privacy smoke test PASSED!"
 log "  Public TX:       $LOG_DIR/public-tx.log"
-log "  Auth-transfer:   $LOG_DIR/auth-transfer.log"
 log "  Private TX:      $LOG_DIR/private-tx.log"
 log "  Sequencer:       $LOG_DIR/sequencer.log"
