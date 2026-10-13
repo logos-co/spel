@@ -12,11 +12,13 @@
 //!   consumer's own `Cargo.toml`.
 //!
 //! Both lists merge two sources: a manifest walk for path dependencies
-//! (fast, no subprocess) and a single shared `cargo metadata` call for
-//! git and registry dependencies, filtered to normal-kind resolve edges
-//! so dev- and build-deps stay out. All failures here are environmental
-//! and go through the `on_warning` channel; `cargo metadata` being
-//! unavailable degrades to path-only results so expansion stays
+//! (fast, no subprocess) and a shared `cargo metadata` step for git and
+//! registry dependencies, filtered to normal-kind resolve edges so dev-
+//! and build-deps stay out. That step tries `--offline` and retries once
+//! with `--locked`, so a failed offline attempt may download. The frozen
+//! lockfile keeps the retry deterministic. All failures here are
+//! environmental and go through the `on_warning` channel; `cargo metadata`
+//! being unavailable degrades to path-only results so expansion stays
 //! deterministic. Every degradation that loses coverage is additionally
 //! recorded in [`DepGraph::metadata_failure`] so callers with extension
 //! markers can refuse to compile instead of silently dropping a git or
@@ -24,9 +26,11 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::process::Output;
 
 /// Everything the framework needs to know about a crate's dependency
-/// graph, resolved in one pass with one `cargo metadata` invocation.
+/// graph, resolved in one pass with at most two `cargo metadata`
+/// invocations, `--offline` and then a `--locked` retry.
 #[derive(Debug, Default)]
 pub struct DepGraph {
     /// Transitive runtime dependency dirs. Feeds IDL type collection:
@@ -76,9 +80,12 @@ fn read_manifest_toml<F: FnMut(String)>(
 ///
 /// Resolution: nearest `Cargo.toml`, with workspace roots resolved to the
 /// member manifest containing `start`. Path dependencies come from a
-/// manifest walk (no subprocess); git and registry dependencies from a
-/// single `cargo metadata --offline` call shared by both result lists.
-/// If `cargo metadata` fails, both lists degrade to path-only results.
+/// manifest walk with no subprocess. When `with_cargo_metadata` is set,
+/// git and registry dependencies come from `cargo metadata`, shared by
+/// both result lists. It tries `--offline` first and retries once with
+/// `--locked` when that fails, which may download what the lockfile
+/// pins. If both attempts fail, both lists degrade to path-only results
+/// and [`DepGraph::metadata_failure`] records why.
 pub fn resolve_dep_graph<F: FnMut(String)>(
     start: &Path,
     with_cargo_metadata: bool,
@@ -415,35 +422,61 @@ pub fn path_dep_dirs(manifest: &Path) -> Vec<PathBuf> {
 /// `None` after warning when cargo is unavailable, fails, or emits
 /// unparseable output.
 ///
-/// Runs `--offline`: this executes inside macro expansion, which must
-/// never hit the network. By the time rustc expands the consumer crate,
-/// cargo has already fetched its dependencies, so offline resolution
-/// succeeds; where it cannot, callers degrade to path-only results.
+/// Tries `--offline` first: this executes inside macro expansion, and a
+/// normal host build has already fetched everything, so offline
+/// resolution succeeds without touching the network. That assumption
+/// breaks inside the risc0 docker builder, whose Dockerfile fetches with
+/// `--target riscv32im-risc0-zkvm-elf`: metadata resolves the full graph
+/// and needs manifests of host-only crates the filtered fetch skipped.
+/// On offline failure, retry with `--locked` and downloads allowed. The
+/// lockfile keeps the retry deterministic, cargo only fills in missing
+/// manifests. Where both fail, for example with no network, callers
+/// degrade to path-only results. Setting `CARGO_NET_OFFLINE=true` keeps
+/// the retry offline too, for builds that must never download during
+/// expansion.
 fn cargo_metadata_json<F: FnMut(String)>(
     manifest: &Path,
     on_warning: &mut F,
 ) -> Option<serde_json::Value> {
-    let output = match std::process::Command::new("cargo")
-        .args([
-            "metadata",
-            "--format-version",
-            "1",
-            "--offline",
-            "--manifest-path",
-        ])
-        .arg(manifest)
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => {
-            on_warning(format!("could not run `cargo metadata`: {e}"));
-            return None;
-        },
+    let run = |on_warning: &mut F, mode_flag: &str| -> Option<Output> {
+        let result = std::process::Command::new("cargo")
+            .args([
+                "metadata",
+                "--format-version",
+                "1",
+                mode_flag,
+                "--manifest-path",
+            ])
+            .arg(manifest)
+            .output();
+        match result {
+            Ok(o) => Some(o),
+            Err(e) => {
+                on_warning(format!("could not run `cargo metadata`: {e}"));
+                None
+            },
+        }
+    };
+    let output = run(on_warning, "--offline")?;
+
+    let output = if output.status.success() {
+        output
+    } else {
+        on_warning(format!(
+            "`cargo metadata --offline` failed ({}), retrying with `--locked`, which may \
+             download. Expected inside the risc0 docker guest builder, whose fetch is \
+             target filtered.",
+            stderr_headline(&output.stderr)
+        ));
+        run(on_warning, "--locked")?
     };
 
+    // Reached with a failure only after the `--locked` retry ran, since a
+    // successful offline attempt skips it. Full stderr here, the reason
+    // the retry could not reach the network sits in cargo's detail lines.
     if !output.status.success() {
         on_warning(format!(
-            "`cargo metadata` failed: {}",
+            "`cargo metadata --locked` also failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         ));
         return None;
@@ -455,6 +488,19 @@ fn cargo_metadata_json<F: FnMut(String)>(
             None
         },
     }
+}
+
+/// The line of cargo's stderr that names a failure: the first `error`
+/// line, else the first non-empty one. Cargo follows it with `Caused by:`
+/// detail, which would spill a multi-line block into a one-line warning.
+fn stderr_headline(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let non_empty = || text.lines().map(str::trim).filter(|l| !l.is_empty());
+    non_empty()
+        .find(|l| l.starts_with("error"))
+        .or_else(|| non_empty().next())
+        .unwrap_or("no output")
+        .to_string()
 }
 
 /// Transitive runtime (normal-kind) dependency dirs from parsed metadata,
@@ -726,11 +772,11 @@ token_core = { path = "../../core" }
 
     #[test]
     fn resolve_dep_graph_falls_back_to_path_only_when_metadata_fails() {
-        // The fake `https://example.com/repo.git` URL makes `cargo metadata`
-        // fail (cannot resolve the git dep). The registry version dep on
-        // `serde` also fails because the temporary workspace has no
-        // Cargo.lock. `resolve_dep_graph` should degrade gracefully and
-        // still return the path-dep, proving the fallback path works.
+        // The git dep's URL is one cargo rejects while parsing the manifest,
+        // so `cargo metadata` fails in both the offline and the locked
+        // attempt without touching the network. `resolve_dep_graph` should
+        // degrade gracefully and still return the path dep, proving the
+        // fallback path works.
         let tmp = TempDir::new("find-path-deps-filter");
 
         tmp.write(
@@ -755,7 +801,7 @@ edition = "2021"
 [dependencies]
 token_core = { path = "../../core" }
 serde = { version = "1.0" }
-nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
+nssa_core = { git = "not-a-url", tag = "v1.0" }
 "#,
         );
         let program = tmp.write("methods/guest/src/bin/token.rs", "");
@@ -763,6 +809,69 @@ nssa_core = { git = "https://example.com/repo.git", tag = "v1.0" }
         let dirs = resolve_dep_graph(&program, true, &mut |_| {}).transitive_dirs;
         assert_eq!(dirs.len(), 1);
         assert!(dirs[0].ends_with("core"));
+    }
+
+    #[test]
+    fn metadata_offline_failure_warns_then_retries_with_locked() {
+        // Same unparseable git URL, so both attempts fail without network.
+        // Pins the retry's warning pair and its order: dropping the retry
+        // loses the first warning. Both attempts fail with the same cargo
+        // error here, so this cannot tell whether the second invocation ran.
+        let tmp = TempDir::new("metadata-retry");
+        tmp.write(
+            "core/Cargo.toml",
+            "[package]\nname = \"token_core\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        tmp.write("core/src/lib.rs", "");
+        tmp.write(
+            "methods/guest/Cargo.toml",
+            "[package]\nname = \"token-guest\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\n\
+             token_core = { path = \"../../core\" }\n\
+             nssa_core = { git = \"not-a-url\", tag = \"v1.0\" }\n",
+        );
+        let program = tmp.write("methods/guest/src/bin/token.rs", "");
+
+        let mut warnings = Vec::new();
+        let graph = resolve_dep_graph(&program, true, &mut |w| warnings.push(w));
+
+        let retry = warnings
+            .iter()
+            .position(|w| w.contains("retrying with `--locked`"))
+            .unwrap_or_else(|| panic!("offline failure must warn and retry: {warnings:?}"));
+        let failed = warnings
+            .iter()
+            .position(|w| w.contains("`cargo metadata --locked` also failed"))
+            .unwrap_or_else(|| panic!("the failed retry must warn: {warnings:?}"));
+        assert!(
+            retry < failed,
+            "retry must precede its failure: {warnings:?}"
+        );
+        assert!(
+            !warnings[retry].contains('\n'),
+            "the retry warning carries one stderr line: {:?}",
+            warnings[retry]
+        );
+        assert!(graph.metadata_failure.is_some());
+        assert_eq!(graph.transitive_dirs.len(), 1);
+        assert!(graph.transitive_dirs[0].ends_with("core"));
+    }
+
+    #[test]
+    fn stderr_headline_prefers_the_error_line() {
+        let stderr = b"warning: unused manifest key\n\
+                       error: failed to download `aho-corasick v1.1.5`\n\
+                       \n\
+                       Caused by:\n  attempting to make an HTTP request\n";
+        assert_eq!(
+            stderr_headline(stderr),
+            "error: failed to download `aho-corasick v1.1.5`"
+        );
+        assert_eq!(
+            stderr_headline(b"\n  something odd\nmore\n"),
+            "something odd"
+        );
+        assert_eq!(stderr_headline(b""), "no output");
     }
 
     #[test]

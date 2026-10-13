@@ -30,5 +30,5 @@ Duplicate instruction names across user fns and extensions (or two extensions) a
 
 - A consumer cannot be extended by anything they did not name in their own manifest. Reviewing a program's extension surface means reading its Cargo.toml and its module attrs, nothing else.
 - Extensions must be direct dependencies. A meta-crate re-exporting a bundle of extensions does not activate them; consumers list each one.
-- Registry and git dependencies are currently out of discovery scope (path dependencies only). When that widens, the same two-action rule and package-name identity apply to the new transports unchanged.
+- Discovery covers path, git, and registry direct dependencies. Path dependencies come from a manifest walk and git and registry ones from `cargo metadata`, with the same two-action rule and package-name identity for all three. A marker that matches no direct dependency is a compile error, including when `cargo metadata` cannot resolve the graph, so a program never builds silently without a git or registry extension.
 - Considered and rejected: an explicit allow-list on the module (`#[lez_program(extensions = [...])]`) duplicates information the dependency list already carries; binding to name-plus-version adds friction without adding trust, since the consumer's lockfile already pins versions.
