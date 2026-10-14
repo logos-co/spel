@@ -4,6 +4,7 @@
 
 use std::collections::HashMap;
 
+use syn::ext::IdentExt;
 use syn::{parse_quote, Attribute, FnArg, ItemFn};
 
 use super::{InjectAccount, InjectSeed, InjectSpec, WrapInstructions};
@@ -50,7 +51,7 @@ pub fn active_wraps(wraps: &[(String, WrapInstructions)]) -> Vec<WrapInstruction
 /// Propagates `inject_gate_params` errors and fails when a declared
 /// wrapper path is not a valid Rust attribute path and when a
 /// consumer-authored gate attr carries a location kwarg in embedded
-/// mode.
+/// mode, or when a param a gate reads lacks its spec account's `pda`.
 pub fn apply_wrap_and_inject(
     func: &mut ItemFn,
     active_wraps: &[WrapInstructions],
@@ -113,7 +114,169 @@ pub fn apply_wrap_and_inject(
 
     stamp_authored_gates(func, inject_specs, &remap, &offset_by_source);
 
+    check_gate_reads_pinned(func, inject_specs, &remap)?;
+
     Ok(injected)
+}
+
+/// Gates trust every non-signer account they read, so each must carry its spec's pin.
+fn check_gate_reads_pinned(
+    func: &ItemFn,
+    specs: &[InjectSpec],
+    remap: &HashMap<String, String>,
+) -> Result<(), String> {
+    reject_gates_in_cfg_attr(func, specs)?;
+    for attr in &func.attrs {
+        let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
+            continue;
+        };
+        if !specs.iter().any(|s| s.wrapper == last) {
+            continue;
+        }
+        let Some(kwargs) = gate_kwargs(attr) else {
+            continue;
+        };
+        for spec in specs.iter().filter(|s| s.wrapper == last) {
+            let resolve = |name: &str| -> String {
+                spec.accounts
+                    .iter()
+                    .find(|a| a.name == name)
+                    .and_then(|a| kwargs.get(&a.role).cloned())
+                    .or_else(|| remap.get(name).cloned())
+                    .unwrap_or_else(|| name.to_string())
+            };
+            for acc in &spec.accounts {
+                if acc.signer || acc.seeds.is_empty() {
+                    continue;
+                }
+                // Gate macros default each kwarg to the role name.
+                let read = kwargs.get(&acc.role).unwrap_or(&acc.role);
+                let Some((_, pt)) =
+                    typed_params(func).find(|(pi, _)| pi.ident.unraw() == read.as_str())
+                else {
+                    return Err(format!(
+                        "instruction `{}`: #[{}] reads parameter `{read}` as its `{}` \
+                        account, but the instruction has no parameter named `{read}`",
+                        func.sig.ident, spec.wrapper, acc.role,
+                    ));
+                };
+                if !is_account_type(&pt.ty) {
+                    return Err(format!(
+                        "instruction `{}`: #[{}] reads parameter `{read}` as its `{}` \
+                        account, so `{read}` must be typed AccountWithMetadata for its \
+                        #[account(pda = ...)] to be enforced",
+                        func.sig.ident, spec.wrapper, acc.role,
+                    ));
+                }
+                let expected: Vec<InjectSeed> = acc
+                    .seeds
+                    .iter()
+                    .map(|s| match s {
+                        InjectSeed::Const(v) => InjectSeed::Const(v.clone()),
+                        InjectSeed::Account(v) => InjectSeed::Account(resolve(v)),
+                    })
+                    .collect();
+                let declared = param_pda_seeds(pt);
+                if declared.as_deref() == Some(expected.as_slice()) {
+                    continue;
+                }
+                let found = match &declared {
+                    Some(seeds) => format!("found pda = {}", render_seeds(seeds)),
+                    None => "found no pda constraint it can verify".to_string(),
+                };
+                return Err(format!(
+                    "instruction `{}`: #[{}] reads parameter `{read}` as its `{}` \
+                    account, so `{read}` must be declared with \
+                    #[account(pda = {})], {found}",
+                    func.sig.ident,
+                    spec.wrapper,
+                    acc.role,
+                    render_seeds(&expected),
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+// The dispatcher treats any other spelling as an instruction arg and drops its pda.
+fn is_account_type(ty: &syn::Type) -> bool {
+    matches!(ty, syn::Type::Path(p)
+        if p.path.segments.last().is_some_and(|s| s.ident == "AccountWithMetadata"))
+}
+
+// A gate inside cfg_attr expands after this pass, unseen by injection and the pin check.
+fn reject_gates_in_cfg_attr(func: &ItemFn, specs: &[InjectSpec]) -> Result<(), String> {
+    for attr in &func.attrs {
+        if let Some(wrapper) = gate_in_cfg_attr(&attr.meta, specs) {
+            return Err(format!(
+                "instruction `{}`: #[{wrapper}] inside cfg_attr is not supported, \
+                apply the gate directly",
+                func.sig.ident
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn gate_in_cfg_attr(meta: &syn::Meta, specs: &[InjectSpec]) -> Option<String> {
+    let syn::Meta::List(list) = meta else {
+        return None;
+    };
+    if !list.path.is_ident("cfg_attr") {
+        return None;
+    }
+    let metas = list
+        .parse_args_with(syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated)
+        .ok()?;
+    metas.iter().skip(1).find_map(|m| {
+        let last = m.path().segments.last()?.ident.to_string();
+        if specs.iter().any(|s| s.wrapper == last) {
+            Some(last)
+        } else {
+            gate_in_cfg_attr(m, specs)
+        }
+    })
+}
+
+// `None` for shapes the gate macros reject anyway.
+fn gate_kwargs(attr: &Attribute) -> Option<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    match &attr.meta {
+        syn::Meta::Path(_) => {},
+        syn::Meta::List(_) => {
+            let pairs = attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated,
+                )
+                .ok()?;
+            for pair in pairs {
+                let (Some(key), syn::Expr::Path(p)) = (pair.path.get_ident(), &pair.value) else {
+                    continue;
+                };
+                if let Some(val) = p.path.get_ident() {
+                    out.insert(key.unraw().to_string(), val.unraw().to_string());
+                }
+            }
+        },
+        syn::Meta::NameValue(_) => return None,
+    }
+    Some(out)
+}
+
+// Seeds in the `pda = ...` surface syntax, for error messages.
+fn render_seeds(seeds: &[InjectSeed]) -> String {
+    let parts: Vec<String> = seeds
+        .iter()
+        .map(|s| match s {
+            InjectSeed::Const(v) => format!("literal({v:?})"),
+            InjectSeed::Account(v) => format!("account({v:?})"),
+        })
+        .collect();
+    match parts.as_slice() {
+        [single] => single.clone(),
+        multi => format!("[{}]", multi.join(", ")),
+    }
 }
 
 /// Resolve the canonical PDA constraint for an embedded-mode account.
@@ -376,7 +539,7 @@ fn inject_gate_params(func: &mut ItemFn, specs: &[InjectSpec]) -> Result<Vec<Str
                 ));
             }
             if has_param_named(func, &effective) {
-                continue; // consumer declared it: declared win
+                continue; // declared wins, check_gate_reads_pinned vets its pin
             }
             func.sig.inputs.insert(pos, build_inject_param(acc, &remap));
             pos += 1;
@@ -514,12 +677,11 @@ fn seed_call_to_seed(expr: &syn::Expr) -> Option<InjectSeed> {
     let syn::Lit::Str(s) = &lit_expr.lit else {
         return None;
     };
-    if p.path.is_ident("literal") {
-        Some(InjectSeed::Const(s.value()))
-    } else if p.path.is_ident("account") {
-        Some(InjectSeed::Account(s.value()))
-    } else {
-        None
+    // Mirrors the dispatcher's const aliases so one address compares equal.
+    match p.path.get_ident()?.to_string().as_str() {
+        "literal" | "const" | "r#const" | "seed_const" => Some(InjectSeed::Const(s.value())),
+        "account" => Some(InjectSeed::Account(s.value())),
+        _ => None,
     }
 }
 
@@ -601,7 +763,7 @@ fn spec_gate_args(
     args
 }
 
-// Rewrite consumer-authored bare gate attrs to carry the framework's
+// Rewrite consumer-authored gate attrs to carry the framework's
 // location kwargs. Embedded mode is the only writer of those kwargs
 // and stamps every gate. Runs after the injection pass so the
 // bare-attr-activates-injection rule saw the authored form.
@@ -612,9 +774,16 @@ fn stamp_authored_gates(
     offset_by_source: &HashMap<&str, usize>,
 ) {
     for attr in func.attrs.iter_mut() {
-        if !matches!(attr.meta, syn::Meta::Path(_)) {
-            continue;
-        }
+        let authored: Vec<syn::MetaNameValue> = match &attr.meta {
+            syn::Meta::Path(_) => Vec::new(),
+            syn::Meta::List(_) => match attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated,
+            ) {
+                Ok(pairs) => pairs.into_iter().collect(),
+                Err(_) => continue,
+            },
+            syn::Meta::NameValue(_) => continue,
+        };
         let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
             continue;
         };
@@ -625,7 +794,17 @@ fn stamp_authored_gates(
             let Some(off) = offset_by_source.get(spec.source.as_str()) else {
                 continue;
             };
-            let args = spec_gate_args(spec, remap, Some(*off));
+            let mut args = spec_gate_args(spec, remap, Some(*off));
+            // The location check already refused every authored kwarg except signer roles.
+            for arg in &mut args {
+                let key = arg.path.get_ident().map(ToString::to_string);
+                if let Some(own) = authored
+                    .iter()
+                    .find(|a| a.path.get_ident().map(|i| i.unraw().to_string()) == key)
+                {
+                    arg.value = own.value.clone();
+                }
+            }
             let path = attr.path().clone();
             *attr = parse_quote! { #[#path(#(#args),*)] };
         }
@@ -643,26 +822,31 @@ fn typed_params(func: &ItemFn) -> impl Iterator<Item = (&syn::PatIdent, &syn::Pa
     })
 }
 
-// The declared pda seeds of a param, when its `#[account]` attr
-// carries a pda constraint in the literal()/account() grammar.
+// Last `pda` wins, as in the dispatcher's parser.
 fn param_pda_seeds(pt: &syn::PatType) -> Option<Vec<InjectSeed>> {
+    let mut pda: Option<syn::Expr> = None;
+    let mut private = false;
     for attr in &pt.attrs {
         if !attr.path().is_ident("account") {
             continue;
         }
-        let mut pda: Option<syn::Expr> = None;
         attr.parse_nested_meta(|meta| {
             if meta.path.is_ident("pda") {
                 pda = Some(meta.value()?.parse()?);
+            } else if meta.path.is_ident("private_pda") {
+                private = true;
+            } else if meta.input.peek(syn::Token![=]) {
+                let _: syn::Expr = meta.value()?.parse()?;
             }
             Ok(())
         })
         .ok();
-        if let Some(expr) = pda {
-            return expr_to_seeds(&expr);
-        }
     }
-    None
+    // A private_pda address hashes a caller-supplied key, so it pins nothing.
+    if private {
+        return None;
+    }
+    expr_to_seeds(&pda?)
 }
 
 // True when the param's `#[account]` attr carries `init`.
@@ -1037,7 +1221,10 @@ mod tests {
         let (specs, _) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(gate_config = my_own, offset = 64)]
-            pub fn update(value: u64) -> SpelResult {
+            pub fn update(
+                #[account(pda = literal("prog_config"))] my_own: AccountWithMetadata,
+                value: u64,
+            ) -> SpelResult {
                 todo!()
             }
         );
@@ -1799,5 +1986,494 @@ mod tests {
         // Distinct offsets on the same account are the goal layout.
         rewrite_embedded_roles(&mut specs, &embeds(64), std::slice::from_ref(&consumer))
             .expect("distinct offsets must pass");
+    }
+
+    fn compound_specs() -> Vec<InjectSpec> {
+        vec![InjectSpec {
+            wrapper: "my_gate".to_string(),
+            source: "ext-f".into(),
+            accounts: vec![
+                InjectAccount {
+                    name: "gate_config".into(),
+                    role: "gate_config".into(),
+                    seeds: vec![InjectSeed::Const("gate_config".into())],
+                    signer: false,
+                    embedded: false,
+                },
+                InjectAccount {
+                    name: "gate_account".into(),
+                    role: "gate_account".into(),
+                    seeds: vec![
+                        InjectSeed::Const("frozen".into()),
+                        InjectSeed::Account("caller".into()),
+                    ],
+                    signer: false,
+                    embedded: false,
+                },
+                InjectAccount {
+                    name: "caller".into(),
+                    role: "caller".into(),
+                    seeds: vec![],
+                    signer: true,
+                    embedded: false,
+                },
+            ],
+        }]
+    }
+
+    fn gate_wrap() -> Vec<WrapInstructions> {
+        vec![WrapInstructions {
+            wrapper: "my_ext_macros::my_gate".to_string(),
+            skip: None,
+            self_exempt_marker: "my_exempt".to_string(),
+            exempt: vec![],
+        }]
+    }
+
+    fn param_names(func: &ItemFn) -> Vec<String> {
+        typed_params(func)
+            .map(|(pi, _)| pi.ident.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn declared_gate_param_without_pda_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(gate_config: AccountWithMetadata, v: u64) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`update_value`")
+                && err.contains("`gate_config`")
+                && err.contains(r#"#[account(pda = literal("gate_config"))]"#)
+                && err.contains("found no pda"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn raw_identifiers_match_by_name() {
+        let mut kwarg: ItemFn = parse_quote! {
+            #[my_gate(gate_config = r#gate_config)]
+            pub fn update_value(gate_config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut kwarg, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("found no pda"), "got: {err}");
+
+        let mut param: ItemFn = parse_quote! {
+            #[my_gate(gate_config = my_cfg)]
+            pub fn update_value(r#my_cfg: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut param, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`my_cfg`") && err.contains("found no pda"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn gate_reading_a_missing_param_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(gate_config = nowhere)]
+            pub fn update_value(v: u64) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("no parameter named `nowhere`"), "got: {err}");
+    }
+
+    #[test]
+    fn pinned_param_not_typed_as_an_account_is_error() {
+        let funcs: [ItemFn; 2] = [
+            parse_quote! {
+                #[my_gate]
+                pub fn update_value(
+                    #[account(pda = literal("gate_config"))] gate_config: Cfg,
+                ) -> SpelResult { todo!() }
+            },
+            parse_quote! {
+                #[my_gate]
+                pub fn update_value(
+                    #[account(pda = literal("gate_config"))] gate_config: (AccountWithMetadata),
+                ) -> SpelResult { todo!() }
+            },
+        ];
+        for mut func in funcs {
+            let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+            assert!(
+                err.contains("must be typed AccountWithMetadata"),
+                "got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_inside_cfg_attr_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[cfg_attr(feature = "gated", my_ext_macros::my_gate)]
+            pub fn update_value(gate_config: AccountWithMetadata) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("#[my_gate] inside cfg_attr"), "got: {err}");
+    }
+
+    #[test]
+    fn declared_gate_param_without_pda_under_auto_wrap_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            pub fn update_value(
+                #[account(mut)] gate_config: AccountWithMetadata,
+                v: u64,
+            ) -> SpelResult { todo!() }
+        };
+        let err =
+            apply_wrap_and_inject(&mut func, &gate_wrap(), &gate_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`update_value`") && err.contains("`gate_config`"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn declared_gate_param_with_other_literal_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(pda = literal("mine"))] gate_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains(r#"found pda = literal("mine")"#), "got: {err}");
+    }
+
+    #[test]
+    fn declared_gate_param_with_matching_pda_is_kept_not_injected() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(mut, pda = literal("gate_config"))] gate_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let injected = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap();
+        assert_eq!(injected, vec!["caller".to_string()]);
+        assert_eq!(param_names(&func), vec!["caller", "gate_config"]);
+    }
+
+    #[test]
+    fn declared_const_alias_matches_literal_spec() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(owner = PROGRAM, pda = seed_const("gate_config"))]
+                gate_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None)
+            .expect("seed_const is the dispatcher's alias of literal");
+    }
+
+    #[test]
+    fn declared_gate_param_last_pda_wins() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(pda = literal("gate_config"))]
+                #[account(pda = literal("mine"))]
+                gate_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains(r#"literal("mine")"#), "got: {err}");
+    }
+
+    #[test]
+    fn declared_private_pda_does_not_pin_a_gate_param() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(private_pda, pda = literal("gate_config"), npk = arg("n"), vpk = arg("v"))]
+                gate_config: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("`gate_config`"), "got: {err}");
+    }
+
+    #[test]
+    fn declared_compound_with_other_account_seed_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn withdraw(
+                #[account(pda = [literal("frozen"), account("someone")])]
+                gate_account: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+                someone: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &compound_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`gate_account`")
+                && err.contains(r#"[literal("frozen"), account("caller")]"#),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn declared_compound_with_other_literal_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn withdraw(
+                #[account(pda = [literal("thawed"), account("caller")])]
+                gate_account: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &compound_specs(), &[], None).unwrap_err();
+        assert!(err.contains("`gate_account`"), "got: {err}");
+    }
+
+    #[test]
+    fn declared_compound_with_matching_seeds_is_kept() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn withdraw(
+                #[account(pda = literal("gate_config"))] gate_config: AccountWithMetadata,
+                #[account(pda = [literal("frozen"), account("caller")])]
+                gate_account: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let injected = apply_wrap_and_inject(&mut func, &[], &compound_specs(), &[], None).unwrap();
+        assert!(injected.is_empty(), "injected: {injected:?}");
+    }
+
+    // A look-alike compound bound to another account must not stand in for the pinned one.
+    #[test]
+    fn role_match_compares_compound_seeds_not_shape() {
+        let mut func: ItemFn = parse_quote! {
+            pub fn withdraw(
+                #[account(pda = [literal("frozen"), account("someone")])]
+                my_frozen: AccountWithMetadata,
+                #[account(signer)] sender: AccountWithMetadata,
+                someone: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let injected =
+            apply_wrap_and_inject(&mut func, &gate_wrap(), &compound_specs(), &[], None).unwrap();
+        assert_eq!(injected, vec!["gate_config", "gate_account"]);
+        let syn::Meta::List(stamped) = &func.attrs[0].meta else {
+            panic!("the wrap must stamp kwargs");
+        };
+        let stamped = stamped.tokens.to_string();
+        assert!(
+            stamped.contains("gate_account = gate_account") && stamped.contains("caller = sender"),
+            "the gate must read the injected account: {stamped}"
+        );
+        let FnArg::Typed(pt) = &func.sig.inputs[1] else {
+            panic!("expected typed param");
+        };
+        assert_eq!(
+            param_pda_seeds(pt),
+            Some(vec![
+                InjectSeed::Const("frozen".into()),
+                InjectSeed::Account("sender".into())
+            ]),
+            "the injected account is pinned to the remapped signer"
+        );
+    }
+
+    #[test]
+    fn role_matched_params_under_auto_wrap_are_accepted() {
+        let mut func: ItemFn = parse_quote! {
+            pub fn withdraw(
+                #[account(pda = literal("gate_config"))] my_cfg: AccountWithMetadata,
+                #[account(pda = [literal("frozen"), account("sender")])]
+                my_frozen: AccountWithMetadata,
+                #[account(signer)] sender: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let injected =
+            apply_wrap_and_inject(&mut func, &gate_wrap(), &compound_specs(), &[], None).unwrap();
+        assert!(injected.is_empty(), "injected: {injected:?}");
+    }
+
+    // An authored bare gate reads the default name whatever the remap found.
+    #[test]
+    fn default_name_beside_a_role_matched_param_is_still_checked() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn update_value(
+                #[account(pda = literal("gate_config"))] my_cfg: AccountWithMetadata,
+                gate_config: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("`gate_config`"), "got: {err}");
+    }
+
+    #[test]
+    fn kwarg_named_param_without_pda_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(gate_config = my_cfg, caller = owner)]
+            pub fn update_value(
+                my_cfg: AccountWithMetadata,
+                #[account(signer)] owner: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`my_cfg`") && err.contains("`gate_config` account"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn kwarg_named_param_with_other_literal_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(gate_config = my_cfg)]
+            pub fn update_value(
+                #[account(pda = literal("mine"))] my_cfg: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap_err();
+        assert!(err.contains("`my_cfg`"), "got: {err}");
+    }
+
+    #[test]
+    fn kwarg_named_param_with_matching_pda_is_accepted() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(gate_config = my_cfg, caller = owner)]
+            pub fn update_value(
+                #[account(pda = literal("gate_config"))] my_cfg: AccountWithMetadata,
+                #[account(signer)] owner: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let injected = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], None).unwrap();
+        assert!(injected.is_empty(), "injected: {injected:?}");
+    }
+
+    // Two signers leave the remap empty, so only the kwarg names the caller.
+    #[test]
+    fn compound_seed_resolves_through_the_caller_kwarg() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(caller = owner)]
+            pub fn withdraw(
+                #[account(signer)] owner: AccountWithMetadata,
+                #[account(signer)] payer: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &compound_specs(), &[], None).unwrap_err();
+        assert!(
+            err.contains("`gate_account`") && err.contains(r#"account("owner")"#),
+            "got: {err}"
+        );
+
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate(caller = owner)]
+            pub fn withdraw(
+                #[account(pda = [literal("frozen"), account("owner")])]
+                gate_account: AccountWithMetadata,
+                #[account(signer)] owner: AccountWithMetadata,
+                #[account(signer)] payer: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        apply_wrap_and_inject(&mut func, &[], &compound_specs(), &[], None)
+            .expect("a record bound to the kwarg's caller is accepted");
+    }
+
+    #[test]
+    fn embedded_gated_fn_declaring_the_embedding_account_without_pda_is_error() {
+        let (mut specs, embeds) = embedded_fixture();
+        let create: ItemFn = parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let mut gated: ItemFn = parse_quote!(
+            #[my_gate]
+            pub fn update(
+                #[account(mut)] prog_config: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create, gated.clone()])
+            .expect("a pda-less declaration is not compared by the canonical check");
+        let err = apply_wrap_and_inject(&mut gated, &[], &specs, &embeds, None).unwrap_err();
+        assert!(
+            err.contains("`update`")
+                && err.contains("`prog_config`")
+                && err.contains(r#"literal("prog_config")"#),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn embedded_gated_fn_with_canonical_pda_is_accepted() {
+        let (mut specs, embeds) = embedded_fixture();
+        let create: ItemFn = parse_quote!(
+            pub fn create(
+                #[account(init, pda = [literal("cfg"), account("owner")])]
+                prog_config: AccountWithMetadata,
+                owner: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create]).unwrap();
+        let mut gated: ItemFn = parse_quote!(
+            #[my_gate]
+            pub fn update(
+                #[account(mut, pda = [literal("cfg"), account("owner")])]
+                prog_config: AccountWithMetadata,
+                owner: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        let injected = apply_wrap_and_inject(&mut gated, &[], &specs, &embeds, None).unwrap();
+        assert!(injected.is_empty(), "injected: {injected:?}");
+    }
+
+    #[test]
+    fn embedded_gate_with_signer_kwarg_is_stamped() {
+        let (mut specs, embeds) = embedded_fixture();
+        let create: ItemFn = parse_quote!(
+            pub fn create(
+                #[account(init, pda = literal("prog_config"))] prog_config: AccountWithMetadata,
+            ) -> SpelResult {
+                todo!()
+            }
+        );
+        rewrite_embedded_roles(&mut specs, &embeds, &[create]).unwrap();
+        let mut gated: ItemFn = parse_quote!(
+            #[my_gate(caller = owner)]
+            pub fn update(#[account(signer)] owner: AccountWithMetadata) -> SpelResult {
+                todo!()
+            }
+        );
+        apply_wrap_and_inject(&mut gated, &[], &specs, &embeds, None).unwrap();
+        let expected: Attribute =
+            parse_quote!(#[my_gate(gate_config = prog_config, caller = owner, offset = 32)]);
+        assert_eq!(gated.attrs.first(), Some(&expected));
+    }
+
+    #[test]
+    fn discovered_extension_fn_reading_an_unpinned_param_is_error() {
+        let mut func: ItemFn = parse_quote! {
+            #[my_gate]
+            pub fn ext_op(
+                gate_config: AccountWithMetadata,
+                #[account(signer)] caller: AccountWithMetadata,
+            ) -> SpelResult { todo!() }
+        };
+        let err = apply_wrap_and_inject(&mut func, &[], &gate_specs(), &[], Some("ext_a::ext_op"))
+            .unwrap_err();
+        assert!(err.contains("`ext_op`"), "got: {err}");
     }
 }
