@@ -763,7 +763,7 @@ fn spec_gate_args(
     args
 }
 
-// Rewrite consumer-authored bare gate attrs to carry the framework's
+// Rewrite consumer-authored gate attrs to carry the framework's
 // location kwargs. Embedded mode is the only writer of those kwargs
 // and stamps every gate. Runs after the injection pass so the
 // bare-attr-activates-injection rule saw the authored form.
@@ -774,9 +774,16 @@ fn stamp_authored_gates(
     offset_by_source: &HashMap<&str, usize>,
 ) {
     for attr in func.attrs.iter_mut() {
-        if !matches!(attr.meta, syn::Meta::Path(_)) {
-            continue;
-        }
+        let authored: Vec<syn::MetaNameValue> = match &attr.meta {
+            syn::Meta::Path(_) => Vec::new(),
+            syn::Meta::List(_) => match attr.parse_args_with(
+                syn::punctuated::Punctuated::<syn::MetaNameValue, syn::Token![,]>::parse_terminated,
+            ) {
+                Ok(pairs) => pairs.into_iter().collect(),
+                Err(_) => continue,
+            },
+            syn::Meta::NameValue(_) => continue,
+        };
         let Some(last) = attr.path().segments.last().map(|s| s.ident.to_string()) else {
             continue;
         };
@@ -787,7 +794,17 @@ fn stamp_authored_gates(
             let Some(off) = offset_by_source.get(spec.source.as_str()) else {
                 continue;
             };
-            let args = spec_gate_args(spec, remap, Some(*off));
+            let mut args = spec_gate_args(spec, remap, Some(*off));
+            // The location check already refused every authored kwarg except signer roles.
+            for arg in &mut args {
+                let key = arg.path.get_ident().map(ToString::to_string);
+                if let Some(own) = authored
+                    .iter()
+                    .find(|a| a.path.get_ident().map(|i| i.unraw().to_string()) == key)
+                {
+                    arg.value = own.value.clone();
+                }
+            }
             let path = attr.path().clone();
             *attr = parse_quote! { #[#path(#(#args),*)] };
         }
@@ -1184,7 +1201,7 @@ mod tests {
     }
 
     #[test]
-    fn signer_kwarg_passes_the_embedded_lockdown() {
+    fn signer_kwarg_stays_allowed_in_embedded_mode() {
         let (specs, embeds) = embedded_fixture();
         let mut func: ItemFn = syn::parse_quote!(
             #[my_gate(caller = my_signer)]
@@ -1195,12 +1212,8 @@ mod tests {
                 todo!()
             }
         );
-        // The unstamped gate reads its default name, which no param carries.
-        let err = apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None).unwrap_err();
-        assert!(
-            err.contains("no parameter named `gate_config`"),
-            "got: {err}"
-        );
+        apply_wrap_and_inject(&mut func, &[], &specs, &embeds, None)
+            .expect("signer naming is orthogonal to slot location");
     }
 
     #[test]
@@ -2427,9 +2440,8 @@ mod tests {
         assert!(injected.is_empty(), "injected: {injected:?}");
     }
 
-    // Signer kwargs leave an authored embedded gate unstamped, so it reads the default name.
     #[test]
-    fn embedded_gate_with_signer_kwarg_checks_the_default_name() {
+    fn embedded_gate_with_signer_kwarg_is_stamped() {
         let (mut specs, embeds) = embedded_fixture();
         let create: ItemFn = parse_quote!(
             pub fn create(
@@ -2441,18 +2453,14 @@ mod tests {
         rewrite_embedded_roles(&mut specs, &embeds, &[create]).unwrap();
         let mut gated: ItemFn = parse_quote!(
             #[my_gate(caller = owner)]
-            pub fn update(
-                gate_config: AccountWithMetadata,
-                #[account(signer)] owner: AccountWithMetadata,
-            ) -> SpelResult {
+            pub fn update(#[account(signer)] owner: AccountWithMetadata) -> SpelResult {
                 todo!()
             }
         );
-        let err = apply_wrap_and_inject(&mut gated, &[], &specs, &embeds, None).unwrap_err();
-        assert!(
-            err.contains("`gate_config`") && err.contains(r#"literal("prog_config")"#),
-            "got: {err}"
-        );
+        apply_wrap_and_inject(&mut gated, &[], &specs, &embeds, None).unwrap();
+        let expected: Attribute =
+            parse_quote!(#[my_gate(gate_config = prog_config, caller = owner, offset = 32)]);
+        assert_eq!(gated.attrs.first(), Some(&expected));
     }
 
     #[test]
