@@ -246,6 +246,25 @@ and shows up on programs that use none.)
 Instruction names must be unique across the consumer and every active
 extension; a collision is a compile error naming both sources.
 
+### Declaring a gate account yourself
+
+An instruction can declare an account its gate reads instead of having it
+injected: under the account's name, under a name passed to the gate
+(`#[require_not_paused(pause_config = cfg)]`), or as a parameter the framework
+matches by its seeds. Gates trust the accounts they read, so a declared one must
+carry the inject spec's `#[account(pda = …)]` with the same seeds and be typed
+`AccountWithMetadata`. In embedded mode the expected `pda` is the embedding
+account's canonical one. Otherwise `#[lez_program]` fails to compile with an
+error naming the instruction, the parameter and the expected constraint:
+
+```text
+instruction `do_something`: #[require_not_paused] reads parameter `pause_config` as its `pause_config` account, so `pause_config` must be declared with #[account(pda = literal("pause_config"))], found no pda constraint it can verify
+```
+
+Apply a gate under its own name and not inside `cfg_attr`. A module without the
+extension's marker gets neither injection nor this check, so it must pin the
+accounts its gates read itself.
+
 ---
 
 ## Gotchas
