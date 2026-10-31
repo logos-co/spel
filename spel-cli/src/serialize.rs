@@ -118,11 +118,22 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
         },
         (IdlType::Vec { vec }, ParsedValue::Raw(s)) if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "u32") =>
         {
-            // Fallback: parse CSV of u32 values (e.g. "0,200,0,0,0")
-            let vals: Vec<u32> = s
-                .split(',')
-                .filter_map(|x| x.trim().parse::<u32>().ok())
-                .collect();
+            // Fallback: parse CSV of u32 values (e.g. "0,200,0,0,0"). An entry that
+            // is not a u32 fails the whole value instead of being left out of it.
+            let vals: Vec<u32> = if s.trim().is_empty() {
+                Vec::new()
+            } else {
+                s.split(',')
+                    .map(|x| {
+                        x.trim()
+                            .parse::<u32>()
+                            .map_err(|_| SerializeError::TypeMismatch {
+                                expected: "u32".to_string(),
+                                got: format!("{:?}", x.trim()),
+                            })
+                    })
+                    .collect::<Result<_, _>>()?
+            };
             Ok(DynamicValue::Seq(
                 vals.iter().map(|v| DynamicValue::U32(*v)).collect(),
             ))
@@ -634,6 +645,37 @@ mod tests {
                 amount: 250,
                 memo: "rent".to_string()
             }
+        );
+    }
+
+    /// A `Vec<u32>` argument with an entry that is not a u32 is refused, as a
+    /// `Vec<u64>` one is, instead of being sent with that entry left out.
+    #[test]
+    fn vec_u32_with_an_entry_that_is_not_a_u32_is_refused() {
+        let ty = IdlType::Vec {
+            vec: Box::new(prim("u32")),
+        };
+
+        for raw in ["5,abc,7", "1,4294967296", "-1,2", "1,,2"] {
+            let encoded = parse_value(raw, &ty, &[])
+                .map_err(|e| e.to_string())
+                .and_then(|parsed| {
+                    serialize_to_borsh(0, &[(&ty, &parsed)]).map_err(|e| e.to_string())
+                });
+            assert!(
+                encoded.is_err(),
+                "'{raw}' must not encode, got {:?}",
+                encoded.map(|bytes| Vec::<u32>::try_from_slice(&bytes[1..]))
+            );
+        }
+
+        assert_eq!(
+            Vec::<u32>::try_from_slice(&encode_one(&ty, "5, 6 ,7")).unwrap(),
+            vec![5, 6, 7]
+        );
+        assert_eq!(
+            Vec::<u32>::try_from_slice(&encode_one(&ty, "")).unwrap(),
+            Vec::<u32>::new()
         );
     }
 }
