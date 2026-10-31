@@ -418,14 +418,21 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
                 Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
             }
         },
-        // Vec<u32> — comma-separated decimal values
+        // Vec<u32> — comma-separated decimal values. An empty (or whitespace-only)
+        // string is an empty list; an element that is not a u32 is an error, as it
+        // is for Vec<u64>, rather than being dropped when the list is encoded.
         IdlType::Primitive(p) if p == "u32" => {
-            let vals: Result<Vec<u32>, _> =
-                raw.split(',').map(|s| s.trim().parse::<u32>()).collect();
-            match vals {
-                Ok(v) => Ok(ParsedValue::U32Array(v)),
-                Err(_) => Ok(ParsedValue::Raw(raw.to_string())),
+            if raw.trim().is_empty() {
+                return Ok(ParsedValue::U32Array(Vec::new()));
             }
+            let mut vals = Vec::new();
+            for (i, part) in raw.split(',').map(str::trim).enumerate() {
+                let val = part
+                    .parse::<u32>()
+                    .map_err(|e| format!("Element [{}]: Invalid u32 '{}': {}", i, part, e))?;
+                vals.push(val);
+            }
+            Ok(ParsedValue::U32Array(vals))
         },
         // Vec<u64> / Vec<u128> / Vec<bool> — comma-separated values, parsed element by
         // element with the primitive parser. An empty (or whitespace-only) string is an
