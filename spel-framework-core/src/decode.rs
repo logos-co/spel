@@ -119,6 +119,7 @@ fn decode_borsh_value(cursor: &mut &[u8], ty: &IdlType, idl: &SpelIdl) -> Result
         },
         IdlType::Vec { vec: inner } => {
             let len = read_u32(cursor)? as usize;
+            check_len(len, cursor.len(), "Vec")?;
             if matches!(inner.as_ref(), IdlType::Primitive(s) if s == "u8") {
                 let mut buf = vec![0u8; len];
                 read_exact(cursor, &mut buf)?;
@@ -161,6 +162,7 @@ fn decode_primitive(cursor: &mut &[u8], name: &str) -> Result<Value, String> {
         "bool" => Ok(json!(read_u8(cursor)? != 0)),
         "string" => {
             let len = read_u32(cursor)? as usize;
+            check_len(len, cursor.len(), "string")?;
             let mut buf = vec![0u8; len];
             read_exact(cursor, &mut buf)?;
             String::from_utf8(buf)
@@ -182,6 +184,22 @@ fn decode_primitive(cursor: &mut &[u8], name: &str) -> Result<Value, String> {
 }
 
 // ── cursor helpers ────────────────────────────────────────────────────────────
+
+/// Rejects a length prefix that cannot fit in the remaining input, so a layout
+/// that does not match the data fails with an error instead of a huge allocation
+/// (`decode_account_data_try_all` tries every account type against the same bytes).
+///
+/// Every byte of a string and every element of a Borsh `Vec` takes at least one
+/// byte, so `len > remaining` is never valid. Zero-sized element types (an empty
+/// struct, `[T; 0]`) are not supported by this check.
+fn check_len(len: usize, remaining: usize, what: &str) -> Result<(), String> {
+    if len > remaining {
+        return Err(format!(
+            "{what} length {len} exceeds {remaining} remaining bytes"
+        ));
+    }
+    Ok(())
+}
 
 fn read_exact(cursor: &mut &[u8], buf: &mut [u8]) -> Result<(), String> {
     if cursor.len() < buf.len() {
@@ -232,4 +250,113 @@ fn account_id_encode(bytes: &[u8]) -> String {
 
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn idl(accounts: Value) -> SpelIdl {
+        serde_json::from_value(json!({
+            "version": "0.1.0",
+            "name": "decode-tests",
+            "instructions": [],
+            "accounts": accounts
+        }))
+        .expect("test IDL must deserialize")
+    }
+
+    fn account(name: &str, fields: Value) -> Value {
+        json!({ "name": name, "type": { "kind": "struct", "fields": fields } })
+    }
+
+    fn blob_idl() -> SpelIdl {
+        idl(json!([account(
+            "Blob",
+            json!([{ "name": "data", "type": { "vec": "u8" } }])
+        )]))
+    }
+
+    fn keys_idl() -> SpelIdl {
+        idl(json!([account(
+            "Keys",
+            json!([{ "name": "devices", "type": { "vec": { "array": ["u8", 32] } } }])
+        )]))
+    }
+
+    fn with_len_prefix(len: u32, rest: &[u8]) -> Vec<u8> {
+        let mut data = len.to_le_bytes().to_vec();
+        data.extend_from_slice(rest);
+        data
+    }
+
+    // The assertions look for "exceeds" because a Vec<u8> / string that is too
+    // long already fails later with "unexpected end of data"; what these tests
+    // pin is that the length is rejected before anything is allocated for it.
+
+    #[test]
+    fn vec_u8_length_beyond_input_is_rejected() {
+        let data = with_len_prefix(u32::MAX, &[1, 2]);
+        let err = decode_account_data_exact(&data, "Blob", &blob_idl()).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn string_length_beyond_input_is_rejected() {
+        let idl = idl(json!([account(
+            "Text",
+            json!([{ "name": "s", "type": "string" }])
+        )]));
+        let data = with_len_prefix(u32::MAX, b"hi");
+        let err = decode_account_data_exact(&data, "Text", &idl).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn vec_of_arrays_length_beyond_input_is_rejected() {
+        let data = with_len_prefix(u32::MAX, &[0u8; 8]);
+        let err = decode_account_data_exact(&data, "Keys", &keys_idl()).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+    }
+
+    #[test]
+    fn try_all_skips_a_candidate_with_an_impossible_length() {
+        // A 64-byte `Entry`. Read as `Membership`, bytes 32..36 become the
+        // length of `devices`.
+        let idl = idl(json!([
+            account(
+                "Membership",
+                json!([
+                    { "name": "key", "type": { "array": ["u8", 32] } },
+                    { "name": "devices", "type": { "vec": { "array": ["u8", 32] } } }
+                ])
+            ),
+            account(
+                "Entry",
+                json!([
+                    { "name": "owner", "type": { "array": ["u8", 32] } },
+                    { "name": "membership", "type": { "array": ["u8", 32] } }
+                ])
+            )
+        ]));
+        let mut data = vec![1u8; 32];
+        data.extend_from_slice(&[0xFF; 32]);
+        let (name, _) = decode_account_data_try_all(&data, &idl).expect("Entry must decode");
+        assert_eq!(name, "Entry");
+    }
+
+    #[test]
+    fn lengths_that_fit_still_decode() {
+        let exact = decode_account_data_exact(&with_len_prefix(3, &[1, 2, 3]), "Blob", &blob_idl());
+        assert!(exact.is_ok(), "{exact:?}");
+
+        let one_too_many = with_len_prefix(4, &[1, 2, 3]);
+        let err = decode_account_data_exact(&one_too_many, "Blob", &blob_idl()).unwrap_err();
+        assert!(err.contains("exceeds"), "{err}");
+
+        let two = decode_account_data_exact(&with_len_prefix(2, &[7u8; 64]), "Keys", &keys_idl())
+            .expect("two 32-byte elements fit");
+        assert_eq!(two["devices"].as_array().map(Vec::len), Some(2));
+    }
 }
