@@ -7,8 +7,8 @@
 //! - Binary inspection (ProgramId extraction)
 //! - Program deployment
 //!
-//! Sending messages is being ported to LEZ's actor model (`spel send`); until then an
-//! instruction name after `--` reports that.
+//! Sending messages is being ported to LEZ's actor model (`spel send`); until then a
+//! message name after `--` reports that, and `encode` prints a message's bytes.
 //!
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
@@ -22,7 +22,7 @@ pub mod inspect;
 pub mod parse;
 pub mod serialize;
 
-use cli::{print_help, snake_to_kebab};
+use cli::{encode_message, parse_message_args, print_help};
 use config::SpelConfig;
 use inspect::inspect_binaries;
 use spel_framework_core::idl::SpelIdl;
@@ -200,93 +200,33 @@ pub async fn run() {
                     eprintln!("Account inspection requires --idl <IDL_FILE>");
                     process::exit(1);
                 }
-                if type_name.is_none() {
-                    eprintln!("Account inspection requires --type <TypeName>");
-                    process::exit(1);
-                }
                 let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                    eprintln!("{}", account_inspect::USAGE);
                     process::exit(1);
                 });
-                let idl_content = match fs::read_to_string(&idl_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Error reading IDL '{}': {}", idl_path, e);
-                        process::exit(1);
-                    },
-                };
-                let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
-                    eprintln!("Error parsing IDL: {}", e);
-                    process::exit(1);
-                });
+                let idl = load_idl(&idl_path);
                 account_inspect::inspect_account(
                     account_id,
                     &idl,
-                    type_name.as_ref().unwrap(),
+                    type_name.as_deref(),
                     data_hex.as_deref(),
                 )
                 .await;
                 return;
             },
             "generate-idl" => {
-                use generate_idl::{discover_sources, find_path_dep_dirs};
-                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
-
-                let arg = remaining_args.get(2).map(|s| s.as_str());
-                let sources = discover_sources(arg).unwrap_or_else(|e| {
-                    eprintln!("Error: {}", e);
+                let options = generate_idl::parse_args(&remaining_args[2..]).unwrap_or_else(|e| {
+                    eprintln!("❌ {e}");
+                    eprintln!("{}", generate_idl::USAGE);
                     process::exit(1);
                 });
-
-                if sources.len() == 1 {
-                    let dep_result = find_path_dep_dirs(&sources[0]);
-                    for w in &dep_result.warnings {
-                        eprintln!("{}", w);
-                    }
-                    match generate_idl_from_file_with_deps(
-                        &sources[0],
-                        &dep_result.dirs,
-                        &mut |w| eprintln!("{w}"),
-                    ) {
-                        Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            process::exit(1);
-                        },
-                    }
-                } else {
-                    // Multiple programs: write <name>-idl.json for each
-                    let mut had_error = false;
-                    for source in &sources {
-                        let dep_result = find_path_dep_dirs(source);
-                        for w in &dep_result.warnings {
-                            eprintln!("{}", w);
-                        }
-                        match generate_idl_from_file_with_deps(source, &dep_result.dirs, &mut |w| {
-                            eprintln!("{w}")
-                        }) {
-                            Ok(idl) => {
-                                let out_name = format!("{}-idl.json", idl.name);
-                                match fs::write(
-                                    &out_name,
-                                    serde_json::to_string_pretty(&idl).unwrap(),
-                                ) {
-                                    Ok(_) => eprintln!("✅ {}", out_name),
-                                    Err(e) => {
-                                        eprintln!("Error writing {}: {}", out_name, e);
-                                        had_error = true;
-                                    },
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("Error processing {}: {}", source.display(), e);
-                                had_error = true;
-                            },
-                        }
-                    }
-                    if had_error {
+                match spel_framework_core::idl_gen::generate_idl(&options, |w| eprintln!("⚠️  {w}"))
+                {
+                    Ok(idl) => println!("{}", idl.to_json_pretty().unwrap()),
+                    Err(e) => {
+                        eprintln!("❌ {e}");
                         process::exit(1);
-                    }
+                    },
                 }
                 return;
             },
@@ -360,25 +300,20 @@ pub async fn run() {
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
         );
-        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data");
-        eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
+        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --data <HEX> [--type <TYPE>]");
+        eprintln!("                           Decode actor state");
+        eprintln!(
+            "  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]"
+        );
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
-        eprintln!("For all other commands, provide an IDL file via --idl or spel.toml.");
+        eprintln!(
+            "encode and idl need an IDL: pass --idl or name a spel.toml program with --program."
+        );
         process::exit(1);
     }
 
-    let idl_content = match fs::read_to_string(&idl_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading IDL '{}': {}", idl_path, e);
-            process::exit(1);
-        },
-    };
-    let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
-        eprintln!("Error parsing IDL: {}", e);
-        process::exit(1);
-    });
+    let idl = load_idl(&idl_path);
 
     let subcmd = remaining_args.get(1).map(|s| s.as_str());
     let binary_name = std::path::Path::new(&args[0])
@@ -391,58 +326,64 @@ pub async fn run() {
             print_help(&idl, &binary_name);
         },
         Some("idl") => {
-            println!("{}", serde_json::to_string_pretty(&idl).unwrap());
+            println!("{}", idl.to_json_pretty().unwrap());
         },
         Some("program-id") => {
             inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
         },
-        Some("inspect") => {
-            let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                eprintln!(
-                    "Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]",
-                    args[0]
-                );
+        Some("encode") => {
+            let name = remaining_args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: {} encode <MESSAGE> [--field value ...]", args[0]);
                 process::exit(1);
             });
-            account_inspect::inspect_account(
-                account_id,
-                &idl,
-                type_name.as_ref().unwrap(),
-                data_hex.as_deref(),
-            )
-            .await;
+            let message = idl.message(name).unwrap_or_else(|| {
+                eprintln!("❌ No message '{}' in the IDL", name);
+                print_help(&idl, &binary_name);
+                process::exit(1);
+            });
+            let values = parse_message_args(&remaining_args[3..], message);
+            match encode_message(&idl, message, &values) {
+                Ok(bytes) => println!("{}", hex::hex_encode(&bytes)),
+                Err(e) => {
+                    eprintln!("❌ {e}");
+                    process::exit(1);
+                },
+            }
         },
         Some("pda") => {
             eprintln!("❌ spel pda derives from raw seeds and needs the program's address:");
             eprintln!("   spel --program <address> pda <seed1> [seed2] ...");
             process::exit(1);
         },
-        Some(cmd) => {
-            let instruction = idl
-                .instructions
-                .iter()
-                .find(|ix| snake_to_kebab(&ix.name) == cmd || ix.name == cmd);
-
-            match instruction {
-                Some(ix) => {
-                    eprintln!(
-                        "❌ Cannot send '{}': sending messages is being ported to LEZ's actor model.",
-                        ix.name
-                    );
-                    eprintln!(
-                        "   `spel send` replaces instruction calls; until it lands, use the wallet"
-                    );
-                    eprintln!("   or a program-specific client.");
-                    process::exit(1);
-                },
-                None => {
-                    eprintln!("Unknown command: {}", cmd);
-                    print_help(&idl, &binary_name);
-                    process::exit(1);
-                },
-            }
+        Some(cmd) => match idl.message(cmd) {
+            Some(message) => {
+                parse_message_args(&remaining_args[2..], message);
+                eprintln!(
+                    "❌ Cannot send '{}': sending messages is being ported to LEZ's actor model.",
+                    message.name
+                );
+                eprintln!("   `spel encode` prints the message's bytes.");
+                process::exit(1);
+            },
+            None => {
+                eprintln!("Unknown command: {}", cmd);
+                print_help(&idl, &binary_name);
+                process::exit(1);
+            },
         },
     }
+}
+
+/// Read and parse an IDL file, exiting with a message on failure.
+fn load_idl(path: &str) -> SpelIdl {
+    let content = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error reading IDL '{}': {}", path, e);
+        process::exit(1);
+    });
+    SpelIdl::from_json(&content).unwrap_or_else(|e| {
+        eprintln!("❌ {e}");
+        process::exit(1);
+    })
 }
 
 /// Compute an arbitrary PDA from a program ID and raw seeds — no IDL required.

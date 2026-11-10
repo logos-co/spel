@@ -1,5 +1,5 @@
-//! Account data inspection: borsh-decode account data using IDL types and pretty-print it
-//! as JSON.
+//! Actor state inspection: Borsh-decode an actor's state with the IDL and pretty-print it as
+//! JSON.
 
 use spel_framework_core::decode;
 use spel_framework_core::idl::SpelIdl;
@@ -7,32 +7,30 @@ use std::process;
 
 use crate::hex::{decode_bytes_32, hex_decode, hex_encode};
 
-/// Inspect an on-chain account: fetch its data, borsh-decode it using the IDL
-/// type definition, and print the result as JSON.
+pub const USAGE: &str = "Usage: spel inspect <ACCOUNT-ID> --idl <IDL> --data <HEX> [--type <TYPE>]";
+
+/// Inspect an actor's state: Borsh-decode it as `type_name`, or as the IDL's state type when
+/// none is given, and print the result as JSON.
 pub async fn inspect_account(
     account_id_str: &str,
     idl: &SpelIdl,
-    type_name: &str,
+    type_name: Option<&str>,
     data_hex: Option<&str>,
 ) {
-    // Parse account ID (base58 or hex)
-    let account_bytes = decode_bytes_32(account_id_str).unwrap_or_else(|e| {
-        eprintln!("Invalid account ID '{}': {}", account_id_str, e);
-        process::exit(1);
-    });
-    let account_id = lee::AccountId::new(account_bytes);
-
-    // Get raw account data: from --data flag or from sequencer
+    // --data decodes offline, whatever the account.
     let data = if let Some(hex) = data_hex {
         hex_decode(hex).unwrap_or_else(|e| {
             eprintln!("Invalid --data hex: {}", e);
             process::exit(1);
         })
     } else {
-        fetch_account_data(account_id).await
+        let account_bytes = decode_bytes_32(account_id_str).unwrap_or_else(|e| {
+            eprintln!("Invalid account ID '{}': {}", account_id_str, e);
+            process::exit(1);
+        });
+        fetch_account_data(lee::AccountId::new(account_bytes)).await
     };
 
-    eprintln!("Account: {}", account_id);
     eprintln!("Data:    {} bytes", data.len());
     eprintln!("Hex:     {}", hex_encode(&data));
     eprintln!();
@@ -42,21 +40,20 @@ pub async fn inspect_account(
         process::exit(1);
     }
 
-    // Borsh decode via shared library
-    match decode::decode_account_data(&data, type_name, idl) {
+    let decoded = match type_name {
+        Some(name) => decode::decode_named(&data, name, idl),
+        None => decode::decode_state(&data, idl),
+    };
+    match decoded {
         Ok(value) => {
             println!("{}", serde_json::to_string_pretty(&value).unwrap());
         },
-        Err(e) if e.contains("not found in IDL") => {
-            eprintln!("Type '{}' not found in IDL.", type_name);
-            eprintln!("Available account types:");
-            for acc in &idl.accounts {
-                eprintln!("  {}", acc.name);
-            }
-            process::exit(1);
-        },
         Err(e) => {
             eprintln!("Borsh decode failed: {}", e);
+            if let Some(name) = type_name.filter(|name| idl.type_def(name).is_none()) {
+                let names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
+                eprintln!("'{name}' is not in the IDL. Types: {}", names.join(", "));
+            }
             process::exit(1);
         },
     }

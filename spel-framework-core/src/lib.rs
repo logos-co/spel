@@ -12,11 +12,9 @@ pub mod idl;
 pub mod pda;
 
 #[cfg(feature = "idl-gen")]
-pub mod account_types;
-#[cfg(feature = "idl-gen")]
-pub mod extension;
-#[cfg(feature = "idl-gen")]
 pub mod idl_gen;
+#[cfg(feature = "idl-gen")]
+pub mod source;
 
 #[cfg(feature = "idl-gen")]
 pub mod dep_walk;
