@@ -1,5 +1,5 @@
-//! Account data inspection: fetch from sequencer, borsh-decode using IDL types,
-//! and pretty-print as JSON.
+//! Account data inspection: borsh-decode account data using IDL types and pretty-print it
+//! as JSON.
 
 use spel_framework_core::decode;
 use spel_framework_core::idl::SpelIdl;
@@ -20,7 +20,7 @@ pub async fn inspect_account(
         eprintln!("Invalid account ID '{}': {}", account_id_str, e);
         process::exit(1);
     });
-    let account_id = nssa::AccountId::new(account_bytes);
+    let account_id = lee::AccountId::new(account_bytes);
 
     // Get raw account data: from --data flag or from sequencer
     let data = if let Some(hex) = data_hex {
@@ -62,20 +62,12 @@ pub async fn inspect_account(
     }
 }
 
-async fn fetch_account_data(account_id: nssa::AccountId) -> Vec<u8> {
-    let wallet_core = wallet::WalletCore::from_env().await.unwrap_or_else(|e| {
-        eprintln!("Failed to initialize wallet: {:?}", e);
-        eprintln!("Set LEE_WALLET_HOME_DIR or use --data <hex>");
-        process::exit(1);
-    });
-
-    let account = wallet_core
-        .get_account_public(account_id)
-        .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to fetch account {}: {:?}", account_id, e);
-            process::exit(1);
-        });
-
-    account.data.to_vec()
+// An account holds one state per program under LEZ's actor model, so fetching needs the
+// program as well; `spel inspect ACCOUNT@PROGRAM` lands with the actor-model port.
+async fn fetch_account_data(account_id: lee::AccountId) -> Vec<u8> {
+    eprintln!(
+        "Fetching {account_id} from the sequencer is being ported to LEZ's actor model, where an"
+    );
+    eprintln!("account holds one state per program. Decode offline with --data <hex> meanwhile.");
+    process::exit(1);
 }

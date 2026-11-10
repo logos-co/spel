@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::process;
 
-use nssa::AccountId;
+use lee::AccountId;
 use program_loader_core::{MAX_PROGRAM_SEGMENTS, MAX_SEGMENT_DATA_LEN};
 use wallet::program_facades::program_loader::ProgramLoader;
 use wallet::WalletCore;
@@ -74,7 +74,7 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
     // but the address printed at the end.
     let quiet = StdoutToStderr::new();
 
-    let mut wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
+    let mut wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
