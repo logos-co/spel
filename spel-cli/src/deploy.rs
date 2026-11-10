@@ -117,13 +117,13 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
 
 /// Points file descriptor 1 at stderr until dropped, then restores it.
 /// A no-op where that isn't possible (non-Unix, or dup failing).
-struct StdoutToStderr {
+pub(crate) struct StdoutToStderr {
     #[cfg(unix)]
     saved: Option<i32>,
 }
 
 impl StdoutToStderr {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         use std::io::Write as _;
         let _ = std::io::stdout().flush();
         #[cfg(unix)]

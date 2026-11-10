@@ -7,8 +7,7 @@
 //! - Binary inspection (ProgramId extraction)
 //! - Program deployment
 //!
-//! Sending messages is being ported to LEZ's actor model (`spel send`); until then a
-//! message name after `--` reports that, and `encode` prints a message's bytes.
+//! `spel send` delivers a message to an actor; `encode` prints a message's bytes.
 //!
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
@@ -20,6 +19,7 @@ pub mod generate_idl;
 pub mod hex;
 pub mod inspect;
 pub mod parse;
+pub mod send;
 pub mod serialize;
 
 use cli::{encode_message, parse_message_args, print_help};
@@ -115,6 +115,9 @@ pub async fn run() {
         i += 1;
     }
 
+    // An --idl given on the command line wins over spel.toml.
+    let idl_explicit = !idl_path.is_empty();
+
     // Load spel.toml config
     let config = env::current_dir()
         .ok()
@@ -196,21 +199,29 @@ pub async fn run() {
                 return;
             },
             "inspect" => {
-                if idl_path.is_empty() {
-                    eprintln!("Account inspection requires --idl <IDL_FILE>");
-                    process::exit(1);
-                }
-                let account_id = remaining_args.get(2).unwrap_or_else(|| {
+                let target = remaining_args.get(2).unwrap_or_else(|| {
                     eprintln!("{}", account_inspect::USAGE);
                     process::exit(1);
                 });
-                let idl = load_idl(&idl_path);
-                account_inspect::inspect_account(
-                    account_id,
-                    &idl,
-                    type_name.as_deref(),
-                    data_hex.as_deref(),
-                )
+                // `ACCOUNT@NAME` with a spel.toml program brings that program's IDL.
+                let named_idl = send::split_actor(target)
+                    .1
+                    .filter(|_| !idl_explicit)
+                    .and_then(|name| {
+                        let (path, cfg) = config.as_ref()?;
+                        let idl = cfg.programs.as_ref()?.get(name)?.idl.as_ref()?;
+                        Some(path.parent()?.join(idl).to_string_lossy().to_string())
+                    });
+                let idl_path = named_idl.unwrap_or(idl_path);
+                let idl = (!idl_path.is_empty()).then(|| load_idl(&idl_path));
+                account_inspect::inspect_command(account_inspect::InspectArgs {
+                    target,
+                    idl: idl.as_ref(),
+                    type_name: type_name.as_deref(),
+                    data_hex: data_hex.as_deref(),
+                    default_program: program_address.as_deref(),
+                    programs: config_programs(config.as_ref().map(|(_, cfg)| cfg)),
+                })
                 .await;
                 return;
             },
@@ -300,16 +311,14 @@ pub async fn run() {
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
         );
-        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --data <HEX> [--type <TYPE>]");
-        eprintln!("                           Decode actor state");
+        eprintln!("  inspect <ACCOUNT>[@<PROGRAM>] [--idl <IDL>] [--type <TYPE>] [--data <HEX>]");
+        eprintln!("                           Read and decode an actor's state");
         eprintln!(
             "  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]"
         );
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
-        eprintln!(
-            "encode and idl need an IDL: pass --idl or name a spel.toml program with --program."
-        );
+        eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");
         process::exit(1);
     }
 
@@ -330,6 +339,17 @@ pub async fn run() {
         },
         Some("program-id") => {
             inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
+        },
+        Some("send") => {
+            let programs = config_programs(config.as_ref().map(|(_, cfg)| cfg));
+            send::send_command(
+                &remaining_args[2..],
+                &idl,
+                program_address.as_deref(),
+                fee_payer.as_deref(),
+                programs,
+            )
+            .await;
         },
         Some("encode") => {
             let name = remaining_args.get(2).unwrap_or_else(|| {
@@ -358,11 +378,8 @@ pub async fn run() {
         Some(cmd) => match idl.message(cmd) {
             Some(message) => {
                 parse_message_args(&remaining_args[2..], message);
-                eprintln!(
-                    "❌ Cannot send '{}': sending messages is being ported to LEZ's actor model.",
-                    message.name
-                );
-                eprintln!("   `spel encode` prints the message's bytes.");
+                eprintln!("❌ Messages are sent with `spel send`:");
+                eprintln!("   {}", send::USAGE);
                 process::exit(1);
             },
             None => {
@@ -372,6 +389,26 @@ pub async fn run() {
             },
         },
     }
+}
+
+/// `[programs.<name>] address = …` entries of spel.toml, for `NAME` in `ACCOUNT@NAME`.
+fn config_programs(config: Option<&SpelConfig>) -> Vec<(String, lee::AccountId)> {
+    let Some(programs) = config.and_then(|cfg| cfg.programs.as_ref()) else {
+        return Vec::new();
+    };
+    programs
+        .iter()
+        .filter_map(|(name, program)| {
+            let address = program.address.as_deref()?;
+            match hex::decode_bytes_32(address) {
+                Ok(bytes) => Some((name.clone(), lee::AccountId::new(bytes))),
+                Err(e) => {
+                    eprintln!("⚠️  spel.toml [programs.{name}] address '{address}': {e}");
+                    None
+                },
+            }
+        })
+        .collect()
 }
 
 /// Read and parse an IDL file, exiting with a message on failure.

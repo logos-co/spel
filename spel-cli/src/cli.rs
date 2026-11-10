@@ -26,8 +26,16 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!();
     println!("COMMANDS:");
     println!("  program-id <FILE> [--format hex|json]  Extract the ImageID from program binaries");
-    println!("  inspect <ACCOUNT-ID> --data <HEX> [--type <TYPE>]");
-    println!("                             Decode actor state (the IDL's state type by default)");
+    println!("  inspect <ACCOUNT>[@<PROGRAM>] [--type <TYPE>] [--data <HEX>]");
+    println!("                             Read and decode an actor's state (the IDL's state type");
+    println!(
+        "                             by default); without a program, list the account's states"
+    );
+    println!(
+        "  send --root <ACCOUNT>[@<PROGRAM>] [--actor A[@P]]... [--signer A]... [--no-auto-actors]"
+    );
+    println!("       [--fee-payer A] [--gas-limit N] [--dry-run[=json]] -- <MESSAGE> [ARGS]");
+    println!("                             Send a message; prints the transaction hash");
     println!("  encode <MESSAGE> [ARGS]    Print a message's Borsh encoding as hex");
     println!("  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]");
     println!("  idl                        Print the IDL");
