@@ -89,6 +89,9 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
         return;
     };
 
+    if let Some(idl) = args.idl {
+        check_idl_matches(idl, program, &names);
+    }
     let view = wallet
         .get_account_view(Actor::new(account, program))
         .await
@@ -109,7 +112,6 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
     eprintln!("{actor}: {} bytes", state.len());
     match args.idl {
         Some(idl) => {
-            check_idl_matches(idl, program, &names);
             let value = decode(&state, idl, args.type_name).unwrap_or_else(|e| {
                 eprintln!("Hex: {}", hex_encode(&state));
                 fail(format!("Borsh decode failed: {e}"))
