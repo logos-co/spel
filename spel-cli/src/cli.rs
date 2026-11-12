@@ -1,11 +1,13 @@
-//! CLI helpers: help text, argument parsing, string utilities.
+//! CLI helpers: help text, message argument parsing and encoding.
 
-use spel_framework_core::idl::{IdlInstruction, IdlType, SpelIdl};
+use crate::parse::{parse_string_vec, parse_value, ParsedValue};
+use crate::serialize::serialize_to_borsh;
+use spel_framework_core::idl::{to_kebab, IdlMessage, IdlType, SpelIdl};
 use std::collections::HashMap;
 
 /// Print help for all commands derived from the IDL.
 pub fn print_help(idl: &SpelIdl, binary_name: &str) {
-    println!("🔧 {} v{} — IDL-driven CLI", idl.name, idl.version);
+    println!("🔧 {} — IDL v{}", idl.name, idl.version);
     println!();
     println!("USAGE:");
     println!(
@@ -19,144 +21,103 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!();
     println!("OPTIONS:");
     println!("  -i, --idl <FILE>           IDL JSON file (or set in spel.toml)");
-    println!("  -p, --program <NAME|HEX|FILE>");
-    println!("                             Program name from spel.toml, 64-char hex program ID,");
-    println!("                             or path to program binary (or set in spel.toml)");
-    println!("  --dry-run[=text|json]      Resolve & print transaction without submitting (text default)");
-    println!(
-        "  --bin-<NAME> <FILE>        Additional program binary (auto-fills --<NAME>-program-id)"
-    );
+    println!("  -p, --program <NAME|ADDRESS>");
+    println!("                             Program name from spel.toml or its address");
     println!();
     println!("COMMANDS:");
-    println!("  program-id <FILE> [--format hex|json]  Extract ProgramId from ELF binary(ies)");
-    println!("  inspect <ACCOUNT-ID> --type <TYPE>     Decode account data");
-    println!("  generate-idl [PATH]        Generate IDL JSON (auto-detects methods/guest/src/bin/ if no path given)");
-    println!("  idl                        Print IDL information");
-
-    for ix in &idl.instructions {
-        let cmd = snake_to_kebab(&ix.name);
-        let args_desc: Vec<String> = ix
-            .args
+    println!("  program-id <FILE> [--format hex|json]  Extract the ImageID from program binaries");
+    println!("  inspect <ACCOUNT>[@<PROGRAM>] [--type <TYPE>] [--data <HEX>]");
+    println!("                             Read and decode an actor's state (the IDL's state type");
+    println!(
+        "                             by default); without a program, list the account's states"
+    );
+    println!(
+        "  send --root <ACCOUNT>[@<PROGRAM>] [--actor A[@P]]... [--signer A]... [--no-auto-actors]"
+    );
+    println!("       [--fee-payer A] [--gas-limit N] [--dry-run[=json]] -- <MESSAGE> [ARGS]");
+    println!("                             Send a message; prints the transaction hash");
+    println!("  encode <MESSAGE> [ARGS]    Print a message's Borsh encoding as hex");
+    println!("  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]");
+    println!("  idl                        Print the IDL");
+    println!();
+    println!("MESSAGES:");
+    for message in &idl.messages {
+        let fields: Vec<String> = message
+            .fields
             .iter()
-            .map(|a| {
-                format!(
-                    "--{} <{}>",
-                    snake_to_kebab(&a.name),
-                    idl_type_hint(&a.type_)
-                )
-            })
+            .map(|f| format!("--{} <{}>", field_flag(&f.name), idl_type_hint(&f.type_)))
             .collect();
-        let acct_desc: Vec<String> = ix
-            .accounts
-            .iter()
-            .filter(|a| a.pda.is_none())
-            .map(|a| format!("--{} <BASE58|HEX>", snake_to_kebab(&a.name)))
-            .collect();
-        let all_args: Vec<String> = args_desc.into_iter().chain(acct_desc).collect();
-        println!("  {:<20} {}", cmd, all_args.join(" "));
+        println!("  {:<20} {}", to_kebab(&message.name), fields.join(" "));
     }
     println!();
     println!("TYPE FORMATS:");
     println!("  u128, u64, u32, u8    Decimal number");
+    println!("  account_id            Base58 or 64-char hex");
     println!("  [u8; N]               Hex string (2*N hex chars) or UTF-8 string (≤N chars, right-padded)");
-    println!("  [u32; 8] / program_id Comma-separated u32s: \"0,0,0,0,0,0,0,0\"");
-    println!("  Vec<[u8; 32]>         Comma-separated hex strings: \"aabb...00,ccdd...00\"");
-    println!("  Vec<String>           Repeat the flag, one element per occurrence: --foo a --foo b --foo c");
-    println!();
-    println!("CONFIG:");
-    println!("  Create a spel.toml in your project root to avoid passing --idl and --program:");
-    println!("    [program]");
-    println!("    idl = \"my-project-idl.json\"");
-    println!("    binary = \"path/to/program.bin\"");
-    println!();
-    println!("Auto-generated from IDL. Accounts marked as PDA are computed automatically.");
-}
-
-/// Print detailed help for a single instruction.
-pub fn print_instruction_help(ix: &IdlInstruction) {
+    println!("  Option<T>             The value, or `none`");
+    println!("  struct                JSON object keyed by field name");
+    println!("  enum                  Variant name, or {{\"Variant\": {{ ...fields }}}}");
     println!(
-        "📋 {} — {} account(s), {} arg(s)",
-        ix.name,
-        ix.accounts.len(),
-        ix.args.len()
+        "  Vec<String>           Repeat the flag, one element per occurrence: --foo a --foo b"
     );
-    println!();
-    println!("ACCOUNTS:");
-    for acc in &ix.accounts {
-        let mut flags = vec![];
-        if acc.writable {
-            flags.push("mut");
+}
+
+/// Print detailed help for a single message.
+pub fn print_message_help(message: &IdlMessage) {
+    println!(
+        "📋 {} (tag {}) — {} field(s)",
+        message.name,
+        message.tag,
+        message.fields.len()
+    );
+    if let Some(docs) = &message.docs {
+        println!();
+        for line in docs.lines() {
+            println!("  {line}");
         }
-        if acc.signer {
-            flags.push("signer");
-        }
-        if acc.init {
-            flags.push("init");
-        }
-        let flags_str = if flags.is_empty() {
-            String::new()
-        } else {
-            format!(" [{}]", flags.join(", "))
-        };
-        let pda_note = if acc.pda.is_some() {
-            " (PDA — auto-computed)"
-        } else {
-            ""
-        };
-        println!("  {}{}{}", acc.name, flags_str, pda_note);
+    }
+    if message.fields.is_empty() {
+        return;
     }
     println!();
-    println!("ARGS:");
-    for arg in &ix.args {
+    println!("FIELDS:");
+    for field in &message.fields {
         println!(
-            "  --{:<25} {} ({}) — format: {}",
-            snake_to_kebab(&arg.name),
-            arg.name,
-            idl_type_display(&arg.type_),
-            idl_type_hint(&arg.type_)
+            "  --{:<25} {} — format: {}",
+            field_flag(&field.name),
+            idl_type_display(&field.type_),
+            idl_type_hint(&field.type_)
         );
-    }
-    for acc in &ix.accounts {
-        if acc.pda.is_none() {
-            println!(
-                "  --{:<25} Account ID for '{}'",
-                snake_to_kebab(&acc.name),
-                acc.name
-            );
+        if let Some(docs) = &field.docs {
+            println!("  {:<27} {}", "", docs.replace('\n', " "));
         }
     }
 }
 
-/// Parse CLI args for an instruction into a key → list-of-values map.
+/// Parse CLI args for a message into a key → list-of-values map.
 ///
 /// Each `--key value` occurrence is appended to the entry for `key`, so a
-/// flag may be repeated.  Scalar args take the last value; `Vec<String>`
-/// args consume every value supplied.  A bare `--flag` with no value is
-/// only legal for boolean args (per the IDL) or the universal `--help`/
-/// `-h`; for anything else we exit with a `missing value` error so a
-/// missing CLI value can't be silently stored as the literal "true".
+/// flag may be repeated.  Scalar fields take the last value; `Vec<String>`
+/// fields consume every value supplied.  A bare `--flag` with no value is
+/// only legal for boolean fields or the universal `--help`/`-h`; for
+/// anything else we exit with a `missing value` error so a missing CLI
+/// value can't be silently stored as the literal "true".
 ///
-/// Keys outside the instruction's vocabulary exit with an error before
-/// any transaction is built: a global flag like `--export` misplaced
-/// after the `--` separator must not fall through to a live submission.
-pub fn parse_instruction_args(
-    args: &[String],
-    ix: &IdlInstruction,
-) -> HashMap<String, Vec<String>> {
+/// Keys outside the message's fields exit with an error: a global flag
+/// misplaced after the `--` separator must not fall through.
+pub fn parse_message_args(args: &[String], message: &IdlMessage) -> HashMap<String, Vec<String>> {
     let mut map: HashMap<String, Vec<String>> = HashMap::new();
     let mut i = 0;
     while i < args.len() {
-        if args[i].starts_with("--") {
-            let key = args[i][2..].to_string();
+        if let Some(key) = args[i].strip_prefix("--") {
+            let key = key.to_string();
             if i + 1 < args.len() && !args[i + 1].starts_with("--") {
                 map.entry(key).or_default().push(args[i + 1].clone());
                 i += 2;
             } else {
-                // Bare flag (no value follows).  Only valid for bool args
-                // or --help/-h; everything else is a user error.
-                let is_bool = ix.args.iter().any(|a| {
-                    snake_to_kebab(&a.name) == key
-                        && matches!(&a.type_, IdlType::Primitive(p) if p == "bool")
+                let is_bool = message.fields.iter().any(|f| {
+                    field_flag(&f.name) == key
+                        && matches!(&f.type_, IdlType::Primitive(p) if p == "bool")
                 });
                 let is_help = key == "help" || key == "h";
                 if is_bool || is_help {
@@ -173,10 +134,10 @@ pub fn parse_instruction_args(
     }
 
     if map.contains_key("help") || map.contains_key("h") {
-        print_instruction_help(ix);
+        print_message_help(message);
         std::process::exit(0);
     }
-    if let Err(msg) = reject_unknown_keys(&map, ix) {
+    if let Err(msg) = reject_unknown_keys(&map, message) {
         eprintln!("{msg}");
         std::process::exit(1);
     }
@@ -184,22 +145,42 @@ pub fn parse_instruction_args(
     map
 }
 
-// ─── String utilities ────────────────────────────────────────────
-
-pub fn snake_to_kebab(s: &str) -> String {
-    s.replace('_', "-")
+/// Encode `message` with the field values in `args` (from [`parse_message_args`]): the tag,
+/// then each field in declaration order, as the program's Borsh `Message` enum.
+///
+/// # Errors
+/// A missing field or a value that doesn't parse as its type.
+pub fn encode_message(
+    idl: &SpelIdl,
+    message: &IdlMessage,
+    args: &HashMap<String, Vec<String>>,
+) -> Result<Vec<u8>, String> {
+    let mut parsed: Vec<(&IdlType, ParsedValue)> = Vec::with_capacity(message.fields.len());
+    for field in &message.fields {
+        let flag = field_flag(&field.name);
+        let values = args.get(&flag).map(Vec::as_slice).unwrap_or_default();
+        let Some(last) = values.last() else {
+            return Err(format!(
+                "missing --{flag} ({})",
+                idl_type_display(&field.type_)
+            ));
+        };
+        let is_string_vec = matches!(&field.type_, IdlType::Vec { vec }
+            if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "string"));
+        let value = if is_string_vec {
+            parse_string_vec(values)
+        } else {
+            parse_value(last, &field.type_, &idl.types).map_err(|e| format!("--{flag}: {e}"))?
+        };
+        parsed.push((&field.type_, value));
+    }
+    let refs: Vec<(&IdlType, &ParsedValue)> = parsed.iter().map(|(t, v)| (*t, v)).collect();
+    serialize_to_borsh(u32::from(message.tag), &refs).map_err(|e| e.to_string())
 }
 
-pub fn to_pascal_case(s: &str) -> String {
-    s.split('_')
-        .map(|w| {
-            let mut c = w.chars();
-            match c.next() {
-                None => String::new(),
-                Some(ch) => ch.to_uppercase().collect::<String>() + c.as_str(),
-            }
-        })
-        .collect()
+/// The CLI flag for a field: `total_supply` → `total-supply`.
+pub fn field_flag(name: &str) -> String {
+    name.replace('_', "-")
 }
 
 pub fn idl_type_display(ty: &IdlType) -> String {
@@ -236,29 +217,19 @@ pub fn idl_type_hint(ty: &IdlType) -> String {
     }
 }
 
-/// Rejects any `--key` outside this instruction's vocabulary: its IDL
-/// args and its non-pda accounts, kebab-case. A miss is a typo or a
-/// misplaced global flag, and either must stop the run before a
-/// transaction is built.
+/// Rejects any `--key` that isn't one of the message's fields, kebab-case.
+/// A miss is a typo or a misplaced global flag, and either must stop the run.
 fn reject_unknown_keys(
     map: &HashMap<String, Vec<String>>,
-    ix: &IdlInstruction,
+    message: &IdlMessage,
 ) -> Result<(), String> {
-    let known: std::collections::HashSet<String> = ix
-        .args
-        .iter()
-        .map(|a| snake_to_kebab(&a.name))
-        .chain(
-            ix.accounts
-                .iter()
-                .filter(|a| a.pda.is_none())
-                .map(|a| snake_to_kebab(&a.name)),
-        )
-        .collect();
+    let known: std::collections::HashSet<String> =
+        message.fields.iter().map(|f| field_flag(&f.name)).collect();
     match map.keys().find(|k| !known.contains(*k)) {
         Some(key) => Err(format!(
-            "❌ --{key}: unknown argument for this instruction\n   \
-            Flow flags like --export and --co-signer are global: put them before the '--' separator."
+            "❌ --{key}: unknown argument for '{}'\n   \
+            Global flags go before the '--' separator.",
+            to_kebab(&message.name)
         )),
         None => Ok(()),
     }
@@ -268,54 +239,95 @@ fn reject_unknown_keys(
 mod tests {
     use super::*;
 
-    /// One arg, one plain signer account, one PDA account: the smallest
-    /// instruction exercising every vocabulary rule.
-    fn fixture_ix() -> IdlInstruction {
-        serde_json::from_value(serde_json::json!({
-            "name": "do_thing",
-            "accounts": [
-                {
-                    "name": "config",
-                    "pda": { "seeds": [ { "kind": "const", "value": "config" } ] }
-                },
-                { "name": "caller", "signer": true }
-            ],
-            "args": [ { "name": "new_value", "type": "u64" } ]
-        }))
-        .expect("fixture deserializes")
+    fn fixture_idl() -> SpelIdl {
+        SpelIdl::from_json(
+            &serde_json::json!({
+                "version": "2",
+                "name": "t",
+                "messages": [
+                    { "name": "Transfer", "tag": 0, "fields": [
+                        { "name": "to", "type": "account_id" },
+                        { "name": "amount", "type": "u128" }
+                    ] },
+                    { "name": "SetMeta", "tag": 1, "fields": [
+                        { "name": "meta", "type": { "defined": "Meta" } },
+                        { "name": "owner", "type": { "option": "account_id" } }
+                    ] }
+                ],
+                "types": [
+                    { "name": "Kind", "kind": "enum", "variants": [ { "name": "A" }, { "name": "B" } ] },
+                    { "name": "Meta", "kind": "struct", "fields": [
+                        { "name": "kind", "type": { "defined": "Kind" } },
+                        { "name": "uri", "type": "string" }
+                    ] }
+                ]
+            })
+            .to_string(),
+        )
+        .expect("fixture parses")
     }
 
-    fn map_of(keys: &[&str]) -> std::collections::HashMap<String, Vec<String>> {
-        keys.iter()
-            .map(|k| ((*k).to_string(), vec!["x".to_string()]))
+    fn map_of(pairs: &[(&str, &str)]) -> HashMap<String, Vec<String>> {
+        pairs
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), vec![(*v).to_string()]))
             .collect()
     }
 
     #[test]
-    fn full_legal_vocabulary_is_accepted() {
-        let ix = fixture_ix();
-        assert!(reject_unknown_keys(&map_of(&["new-value", "caller"]), &ix).is_ok());
+    fn fields_are_the_vocabulary() {
+        let idl = fixture_idl();
+        let transfer = idl.message("transfer").unwrap();
+        assert!(reject_unknown_keys(&map_of(&[("to", "x"), ("amount", "1")]), transfer).is_ok());
+        let err =
+            reject_unknown_keys(&map_of(&[("to", "x"), ("export", "y")]), transfer).unwrap_err();
+        assert!(err.contains("--export"), "{err}");
     }
 
-    // Live-round regression (2026-08-09): --export placed after the '--'
-    // separator was silently dropped and the transaction submitted
-    // instead of exporting.
     #[test]
-    fn misplaced_global_flag_is_rejected() {
-        let ix = fixture_ix();
-        let err = reject_unknown_keys(&map_of(&["caller", "export"]), &ix).unwrap_err();
-        assert!(err.contains("--export"), "error names the key: {err}");
-        assert!(
-            err.contains("before the '--' separator"),
-            "error points at the fix: {err}"
-        );
+    fn encodes_tag_then_fields() {
+        let idl = fixture_idl();
+        let to = "ab".repeat(32);
+        let bytes = encode_message(
+            &idl,
+            idl.message("transfer").unwrap(),
+            &map_of(&[("to", &to), ("amount", "300")]),
+        )
+        .unwrap();
+        let mut expected = vec![0u8];
+        expected.extend([0xab; 32]);
+        expected.extend(300u128.to_le_bytes());
+        assert_eq!(bytes, expected);
     }
 
-    // PDA accounts are derived, never passed as flags, so their names are
-    // not part of the vocabulary either.
     #[test]
-    fn pda_account_name_is_not_a_flag() {
-        let ix = fixture_ix();
-        assert!(reject_unknown_keys(&map_of(&["config"]), &ix).is_err());
+    fn encodes_struct_and_option_fields() {
+        let idl = fixture_idl();
+        let bytes = encode_message(
+            &idl,
+            idl.message("set-meta").unwrap(),
+            &map_of(&[
+                ("meta", r#"{"kind":"B","uri":"ipfs://x"}"#),
+                ("owner", "none"),
+            ]),
+        )
+        .unwrap();
+        let mut expected = vec![1u8, 1u8];
+        expected.extend(8u32.to_le_bytes());
+        expected.extend(b"ipfs://x");
+        expected.push(0);
+        assert_eq!(bytes, expected);
+    }
+
+    #[test]
+    fn missing_field_is_named() {
+        let idl = fixture_idl();
+        let err = encode_message(
+            &idl,
+            idl.message("transfer").unwrap(),
+            &map_of(&[("amount", "1")]),
+        )
+        .unwrap_err();
+        assert!(err.contains("--to"), "{err}");
     }
 }

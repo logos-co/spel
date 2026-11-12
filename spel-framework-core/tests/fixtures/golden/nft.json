@@ -1,0 +1,335 @@
+{
+  "version": "2",
+  "name": "nft",
+  "messages": [
+    {
+      "name": "NewDefinition",
+      "tag": 0,
+      "docs": "Create an NFT with `printable_supply` units, all on the master.\n\nSent to the empty definition actor, which must be authorized. The master must be\nempty and authorized too.",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "printable_supply",
+          "type": "u128"
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "defined": "NftMetadata"
+          }
+        },
+        {
+          "name": "master",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "InitializeHolding",
+      "tag": 1,
+      "docs": "Create a holding of `definition` that holds nothing; it can then receive a master or\na copy.\n\nSent to the empty, authorized holding actor, which asks the definition to\ninitialize it. A holding of the same definition makes this a no-op.",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "Transfer",
+      "tag": 2,
+      "docs": "Move the receiving holding's whole value (authorized) to the holding at `to`, which\nmust be a holding of the same definition that holds nothing.",
+      "fields": [
+        {
+          "name": "to",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "PrintNft",
+      "tag": 3,
+      "docs": "Print one copy from the receiving master (authorized) to the holding at `to`, which\nmust be a holding of the same definition that holds nothing.",
+      "fields": [
+        {
+          "name": "to",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "Burn",
+      "tag": 4,
+      "docs": "Destroy `amount` from the receiving holding (authorized): up to the print balance of\na master, exactly 1 of an owned copy.",
+      "fields": [
+        {
+          "name": "amount",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "ReadState",
+      "tag": 5,
+      "docs": "Reply to the sender with this actor's state, as a `lee_core::program::StateReply`."
+    }
+  ],
+  "state": {
+    "defined": "NftState"
+  },
+  "events": [
+    {
+      "name": "NewDefinition",
+      "selector": "b04d0a62a9b5157d",
+      "type": {
+        "defined": "NewDefinition"
+      }
+    },
+    {
+      "name": "Transferred",
+      "selector": "c325789d966e489b",
+      "type": {
+        "defined": "Transferred"
+      }
+    },
+    {
+      "name": "Printed",
+      "selector": "f3917c5562073218",
+      "type": {
+        "defined": "Printed"
+      }
+    },
+    {
+      "name": "Burned",
+      "selector": "366b3b28b6af24ab",
+      "type": {
+        "defined": "Burned"
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "Burned",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "account_id"
+        },
+        {
+          "name": "holding",
+          "type": "account_id"
+        },
+        {
+          "name": "amount",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "MetadataStandard",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Simple"
+        },
+        {
+          "name": "Expanded"
+        }
+      ]
+    },
+    {
+      "name": "NewDefinition",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "account_id"
+        },
+        {
+          "name": "master",
+          "type": "account_id"
+        },
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "printable_supply",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "NftCopy",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition_id",
+          "type": "account_id"
+        },
+        {
+          "name": "owned",
+          "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "NftDefinition",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "name",
+          "type": "string"
+        },
+        {
+          "name": "printable_supply",
+          "type": "u128",
+          "docs": "The master's print rights plus the owned copies. Fixed at creation; only burns lower it."
+        },
+        {
+          "name": "metadata",
+          "type": {
+            "defined": "NftMetadata"
+          }
+        }
+      ]
+    },
+    {
+      "name": "NftMaster",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition_id",
+          "type": "account_id"
+        },
+        {
+          "name": "print_balance",
+          "type": "u128"
+        }
+      ]
+    },
+    {
+      "name": "NftMetadata",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "standard",
+          "type": {
+            "defined": "MetadataStandard"
+          }
+        },
+        {
+          "name": "uri",
+          "type": "string"
+        },
+        {
+          "name": "creators",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "NftState",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Definition",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "NftDefinition"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Master",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "NftMaster"
+              }
+            }
+          ]
+        },
+        {
+          "name": "Copy",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "NftCopy"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "NftValue",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Master",
+          "fields": [
+            {
+              "name": "0",
+              "type": "u128"
+            }
+          ]
+        },
+        {
+          "name": "Copy"
+        }
+      ]
+    },
+    {
+      "name": "Printed",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "account_id"
+        },
+        {
+          "name": "master",
+          "type": "account_id"
+        },
+        {
+          "name": "to",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "Transferred",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "definition",
+          "type": "account_id"
+        },
+        {
+          "name": "from",
+          "type": "account_id"
+        },
+        {
+          "name": "to",
+          "type": "account_id"
+        },
+        {
+          "name": "value",
+          "type": {
+            "defined": "NftValue"
+          }
+        }
+      ]
+    }
+  ]
+}

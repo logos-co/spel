@@ -1,81 +1,158 @@
-//! Account data inspection: fetch from sequencer, borsh-decode using IDL types,
-//! and pretty-print as JSON.
+//! `spel inspect ACCOUNT[@PROGRAM]`: read an actor's state and decode it with the IDL.
+//!
+//! An account holds one state per program. With a program (`@PROGRAM`, `--program`, or the
+//! `spel.toml` program named like the IDL) the actor's state is decoded as the IDL's state
+//! type, or as `--type`. Without one, every program holding state on the account is listed.
+//! `--data HEX` decodes offline.
 
-use spel_framework_core::decode;
-use spel_framework_core::idl::SpelIdl;
 use std::process;
 
-use crate::hex::{decode_bytes_32, hex_decode, hex_encode};
+use lee::AccountId;
+use lee_core::account::Actor;
+use serde_json::{json, Map, Value};
+use spel_framework_core::decode;
+use spel_framework_core::idl::SpelIdl;
 
-/// Inspect an on-chain account: fetch its data, borsh-decode it using the IDL
-/// type definition, and print the result as JSON.
-pub async fn inspect_account(
-    account_id_str: &str,
-    idl: &SpelIdl,
-    type_name: &str,
-    data_hex: Option<&str>,
-) {
-    // Parse account ID (base58 or hex)
-    let account_bytes = decode_bytes_32(account_id_str).unwrap_or_else(|e| {
-        eprintln!("Invalid account ID '{}': {}", account_id_str, e);
-        process::exit(1);
-    });
-    let account_id = nssa::AccountId::new(account_bytes);
+use crate::hex::{hex_decode, hex_encode};
+use crate::send::{open_wallet, split_actor, Names};
 
-    // Get raw account data: from --data flag or from sequencer
-    let data = if let Some(hex) = data_hex {
-        hex_decode(hex).unwrap_or_else(|e| {
-            eprintln!("Invalid --data hex: {}", e);
-            process::exit(1);
-        })
-    } else {
-        fetch_account_data(account_id).await
-    };
+pub const USAGE: &str =
+    "Usage: spel inspect <ACCOUNT>[@<PROGRAM>] [--idl <IDL>] [--type <TYPE>] [--data <HEX>]";
 
-    eprintln!("Account: {}", account_id);
-    eprintln!("Data:    {} bytes", data.len());
-    eprintln!("Hex:     {}", hex_encode(&data));
-    eprintln!();
+/// What to inspect, resolved from the command line.
+pub struct InspectArgs<'a> {
+    pub target: &'a str,
+    pub idl: Option<&'a SpelIdl>,
+    pub type_name: Option<&'a str>,
+    pub data_hex: Option<&'a str>,
+    pub default_program: Option<&'a str>,
+    pub programs: Vec<(String, AccountId)>,
+}
 
-    if data.is_empty() {
-        eprintln!("Account data is empty (account may not exist or has no data).");
-        process::exit(1);
-    }
+fn fail(msg: impl std::fmt::Display) -> ! {
+    eprintln!("❌ {msg}");
+    process::exit(1);
+}
 
-    // Borsh decode via shared library
-    match decode::decode_account_data(&data, type_name, idl) {
-        Ok(value) => {
-            println!("{}", serde_json::to_string_pretty(&value).unwrap());
-        },
-        Err(e) if e.contains("not found in IDL") => {
-            eprintln!("Type '{}' not found in IDL.", type_name);
-            eprintln!("Available account types:");
-            for acc in &idl.accounts {
-                eprintln!("  {}", acc.name);
+/// Decode `data` as `type_name`, or as the IDL's state type.
+fn decode(data: &[u8], idl: &SpelIdl, type_name: Option<&str>) -> Result<Value, String> {
+    match type_name {
+        Some(name) => decode::decode_named(data, name, idl).map_err(|e| {
+            if idl.type_def(name).is_none() {
+                let names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
+                format!("{e}. Types in the IDL: {}", names.join(", "))
+            } else {
+                e
             }
-            process::exit(1);
-        },
-        Err(e) => {
-            eprintln!("Borsh decode failed: {}", e);
-            process::exit(1);
-        },
+        }),
+        None => decode::decode_state(data, idl),
     }
 }
 
-async fn fetch_account_data(account_id: nssa::AccountId) -> Vec<u8> {
-    let wallet_core = wallet::WalletCore::from_env().await.unwrap_or_else(|e| {
-        eprintln!("Failed to initialize wallet: {:?}", e);
-        eprintln!("Set LEE_WALLET_HOME_DIR or use --data <hex>");
-        process::exit(1);
+fn print_json(value: &Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|e| fail(e))
+    );
+}
+
+pub async fn inspect_command(args: InspectArgs<'_>) {
+    if let Some(hex) = args.data_hex {
+        let idl = args
+            .idl
+            .unwrap_or_else(|| fail("decoding --data needs --idl <IDL>"));
+        let data = hex_decode(hex).unwrap_or_else(|e| fail(format!("--data: {e}")));
+        let value = decode(&data, idl, args.type_name)
+            .unwrap_or_else(|e| fail(format!("Borsh decode failed: {e}")));
+        print_json(&value);
+        return;
+    }
+
+    let wallet = open_wallet(None).unwrap_or_else(|e| {
+        fail(format!(
+            "Failed to open the wallet: {e}\n   Set LEE_WALLET_HOME_DIR"
+        ))
     });
+    let names = Names {
+        wallet: Some(&wallet),
+        programs: args.programs,
+    };
+    let (account, program) = split_actor(args.target);
+    let account = names.account(account).unwrap_or_else(|e| fail(e));
+    let program = program
+        .or(args.default_program)
+        .map(|p| names.program(p).unwrap_or_else(|e| fail(e)))
+        .or_else(|| args.idl.and_then(|idl| names.program(&idl.name).ok()));
 
-    let account = wallet_core
-        .get_account_public(account_id)
+    let Some(program) = program else {
+        list_actor_states(&wallet, &names, account).await;
+        return;
+    };
+
+    if let Some(idl) = args.idl {
+        check_idl_matches(idl, program, &names);
+    }
+    let view = wallet
+        .get_account_view(Actor::new(account, program))
         .await
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to fetch account {}: {:?}", account_id, e);
-            process::exit(1);
-        });
+        .unwrap_or_else(|e| fail(format!("reading {account}: {e:#}")));
+    let state = view
+        .map(|a| a.data.actor_state(program).to_vec())
+        .unwrap_or_default();
+    let actor = format!(
+        "({}, {})",
+        names.account_name(account),
+        names.program_name(program)
+    );
+    if state.is_empty() {
+        eprintln!("{actor}: no state");
+        println!("null");
+        return;
+    }
+    eprintln!("{actor}: {} bytes", state.len());
+    match args.idl {
+        Some(idl) => {
+            let value = decode(&state, idl, args.type_name).unwrap_or_else(|e| {
+                eprintln!("Hex: {}", hex_encode(&state));
+                fail(format!("Borsh decode failed: {e}"))
+            });
+            print_json(&value);
+        },
+        None => println!("{}", hex_encode(&state)),
+    }
+}
 
-    account.data.to_vec()
+/// Refuse to decode one program's state with another program's IDL: layouts can line up
+/// and decode to plausible nonsense. Only checkable when spel.toml names the program.
+fn check_idl_matches(idl: &SpelIdl, program: AccountId, names: &Names<'_>) {
+    let program_name = names.program_name(program);
+    let named = names.programs.iter().any(|(name, _)| *name == program_name);
+    if named && program_name != idl.name {
+        fail(format!(
+            "the '{}' IDL doesn't describe the '{program_name}' program; pass the {program_name} IDL",
+            idl.name
+        ));
+    }
+}
+
+/// Every program holding state on `account`, with the state as hex.
+async fn list_actor_states(wallet: &wallet::WalletCore, names: &Names<'_>, account: AccountId) {
+    let found = wallet
+        .get_account_public(account)
+        .await
+        .unwrap_or_else(|e| fail(format!("reading {account}: {e:#}")));
+    let mut states = Map::new();
+    if let Some(found) = found {
+        for (program, state) in &found.data.actor_states {
+            if !state.is_empty() {
+                states.insert(names.program_name(*program), json!(hex_encode(state)));
+            }
+        }
+    }
+    eprintln!(
+        "{}: state under {} program(s). Name one (ACCOUNT@PROGRAM) to decode it.",
+        names.account_name(account),
+        states.len()
+    );
+    print_json(&Value::Object(states));
 }

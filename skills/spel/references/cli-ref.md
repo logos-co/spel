@@ -1,257 +1,108 @@
 # CLI Reference
 
-Condensed cheatsheet for `spel` and `spel-client-gen`.
+Condensed cheatsheet for `spel`. The full reference is `docs/reference/cli.md`.
 
----
+## Invocation
 
-## Invocation syntax
-
-```
-spel <COMMAND> [ARGS]                  (with spel.toml)
-spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
+```bash
+spel [GLOBAL OPTIONS] <COMMAND> [ARGS]
+spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]     # `--` keeps message fields apart from global options
 ```
 
-The `--` separator is required whenever global `OPTIONS` are mixed with a command that has its own `--flags`.
+| global option | meaning |
+| --- | --- |
+| `-i, --idl <FILE>` | IDL v2 file (overrides spel.toml) |
+| `-p, --program <NAME\|ADDRESS>` | spel.toml program (also loads its IDL) or a program address |
+| `--fee-payer <ACCOUNT>` | pays fees (`send`, `deploy`); may be outside the access list |
+| `-t, --type <TYPE>` | `inspect`: decode as this type |
+| `-d, --data <HEX>` | `inspect`: decode offline |
+| `--format text\|hex\|json` | `program-id` output |
 
-## spel.toml (optional)
+Accounts: base58, hex, `Public/<id>`, or a wallet label. Programs: an address or a spel.toml
+name. Actors: `ACCOUNT@PROGRAM`.
 
-Place in project root to skip `--idl`/`--program` flags. Discovered by walking up from CWD.
+## spel.toml
 
 ```toml
-[program]                 # single-program
-idl    = "my-idl.json"
-binary = "target/prog.bin"
-
-# or
-
-[programs.game]           # multi-program; select with `--program game`
-idl    = "game-idl.json"
-binary = "target/game.bin"
-[programs.nft]
-idl    = "nft-idl.json"
-binary = "target/nft.bin"
+[programs.token]
+address = "<header account from spel deploy>"
+idl     = "artifacts/token-idl.json"
+binary  = "target/guest/token.bin"      # optional: default for `spel deploy`
 ```
 
-Paths resolve relative to the `spel.toml` itself. `[program]` and `[programs]` are mutually exclusive.
-
-## Global Options
-
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--idl <FILE>` | `-i` | IDL JSON file path (required if not in `spel.toml`) |
-| `--program <NAME\|HEX\|FILE>` | `-p` | Name from `spel.toml`, 64-char hex program ID, or path to ELF binary |
-| `--dry-run[=text\|json]` | | Resolve PDAs/accounts/nonces/ix-data and print without submitting (`text` default) |
-| `--bin-<NAME> <FILE>` | | Additional binary; auto-fills `--<NAME>-program-id` |
-| `--program-id <HEX>` | | Deprecated — use `--program <HEX>` |
-
----
+One `[programs.x]` (or an unnamed `[program]`) is selected automatically; with several, pass
+`--program <name>`. `inspect ACCOUNT@<name>` loads that program's IDL unless `--idl` is given.
 
 ## Commands
 
-### init — Scaffold New Project
+### send
 
 ```bash
-spel init <project-name>
+spel --program token send --root alice --signer alice -- transfer --to bob --amount 300
+spel --program token send --root bob --signer bob --actor usdc -- burn --amount 20
+spel --program token send --root alice --signer alice --dry-run=json -- transfer --to bob --amount 1
 ```
 
-No `--idl` required. Creates full workspace with Makefile, core crate, guest binary, IDL generator, and CLI wrapper.
+| flag | meaning |
+| --- | --- |
+| `--root A[@P]` | receiving actor (required). Program: `@P`, else `--program`, else the spel.toml program named like the IDL |
+| `--actor A[@P]` | declare another actor (repeatable); replaces the field default for that account |
+| `--signer A` | sign (repeatable); the wallet must hold the key |
+| `--no-auto-actors` | no actors from message fields |
+| `--gas-limit N` | gas limit for this call |
+| `--dry-run[=json]` | print, don't send (works without a wallet on raw ids) |
 
-### inspect — Print ProgramId
+Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
+unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
+
+Exit codes: `0` included and changed; `2` included, nothing changed (refused or no-op); `1`
+error or not included. stdout: the transaction hash only.
+
+### inspect
 
 ```bash
-spel inspect <FILE> [FILE...]
+spel inspect alice@token                       # decoded state, or null
+spel --program token inspect alice             # same
+spel inspect alice                             # every program with state on alice, hex
+spel --idl token.json inspect x --data <hex>   # offline
+spel inspect usdc@token --type TokenDefinition
 ```
 
-No `--idl` required. Outputs decimal, hex, and ImageID formats for each binary.
-
-```
-ProgramId (decimal): 12345,67890,...
-ProgramId (hex):     00003039,000109b2,...
-ImageID (hex bytes): 393000009b210100...    ← pass to `--program <HEX>`
-```
-
-### idl — Print IDL
+### encode
 
 ```bash
-spel -i <IDL_FILE> idl
+spel --idl token.json encode transfer --to <id> --amount 300    # Borsh hex, no chain
 ```
 
-Pretty-prints the loaded IDL JSON.
-
-### pda (IDL mode) — Compute PDA from IDL Seeds
+### generate-idl
 
 ```bash
-spel -i <IDL> -p <NAME|HEX|BIN> pda <ACCOUNT_NAME> [--<seed-arg> <value>]
+spel generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>] [--namespace <NAME>]
 ```
 
-Looks up account in IDL, resolves seeds, prints base58 address. (Dry-run / transaction output echoes the seed inputs on separate lines; the standalone `pda` subcommand does not.)
+### deploy, program-id, pda, idl
 
 ```bash
-# With spel.toml
-spel pda counter
-spel pda multisig_state --create-key 0a1b2c...
-
-# Without spel.toml
-spel -i idl.json -p abc...def pda counter
-spel -i idl.json -p abc...def pda vault --user-account EjR7...
-
-# List all PDAs
-spel -i idl.json pda
+ADDR=$(spel deploy target/guest/token.bin --fee-payer <funded> [--immutable])
+spel program-id target/guest/token.bin --format hex        # ImageID, not the address
+spel --program <ADDRESS> pda vault <64-hex-seed>           # public PDA from raw seeds
+spel --idl token.json idl                                  # print the IDL
+spel --idl token.json                                      # help with the IDL's messages
 ```
 
-### pda (raw mode) — Compute PDA Without IDL
+## Value formats
 
-```bash
-spel --program <64-CHAR-HEX> pda <SEED1> [SEED2] ...
-```
+| type | value |
+| --- | --- |
+| integers | decimal |
+| `bool` | `true`/`false`; a bare flag is `true` |
+| `account_id` | base58/hex; label in `send` |
+| `Option<T>` | value or `none` |
+| `[u8; N]` | hex (2N chars) or a string ≤ N bytes |
+| `Vec<u8\|u32\|u64\|u128\|bool>` | `1,2,3` |
+| `Vec<[u8; 32]>` | comma-separated ids |
+| `Vec<string>` | repeat the flag |
+| struct | JSON object: `'{"standard":"Simple","uri":"ipfs://x","creators":"me"}'` |
+| enum | `Variant` or `{"Variant": {…}}` |
 
-No `--idl` required. Each seed: 64-char hex → 32 raw bytes; otherwise UTF-8 zero-padded to 32 bytes. Multi-seed: `SHA-256(seed1 || seed2 || ...)`.
-
-```bash
-spel --program abc...def pda my_state
-spel --program abc...def pda multisig_vault__ 0a1b2c3d...
-```
-
-### Instruction Execution
-
-```bash
-# With spel.toml
-spel <INSTRUCTION> [--<arg> <val>] [--<account> <id>]
-
-# Without spel.toml (`--` is REQUIRED when mixing global flags with instruction flags)
-spel -i <IDL> -p <NAME|HEX|BIN> -- <INSTRUCTION> [--<arg> <val>] [--<account> <id>]
-```
-
-- Instruction names: `snake_case` → `kebab-case` (`create_proposal` → `create-proposal`)
-- PDA accounts: auto-computed, not passed as arguments
-- Account IDs: base58 or 64-char hex (with optional `0x` prefix)
-- Rest accounts: comma-separated list
-
-```bash
-# Execute instruction (with spel.toml)
-spel create --create-key 0a1b... --threshold 2 \
-  --members "aa...00,bb...00" --creator EjR7...
-
-# Same, without spel.toml
-spel -i idl.json -p prog.bin -- create --create-key 0a1b... --threshold 2 \
-  --members "aa...00,bb...00" --creator EjR7...
-
-# Dry run (text, default)
-spel --dry-run approve --proposal-id 5 --member cc...00
-
-# Dry run (JSON — pipe through jq in CI)
-spel --dry-run=json approve --proposal-id 5 --member cc...00 | jq .
-
-# Cross-program binary reference
-spel -i treasury-idl.json -p treasury.bin --bin-token token.bin -- \
-  transfer --amount 100 --from aa...00 --to bb...00
-
-# Per-instruction help
-spel <INSTRUCTION> --help
-```
-
----
-
-### Multi-signature — export, sign, submit
-
-```bash
-spel --export tx.json --co-signer <SIGNER_B> transfer --owner <SIGNER_A> --amount 10
-spel sign tx.json      # a second wallet adds its witness
-spel submit tx.json    # broadcast once complete
-```
-
-`--export` writes the partial transaction instead of submitting (cannot combine
-with `--dry-run`); `--co-signer` may repeat. `submit` refuses a blob with a
-missing witness, or one whose message was altered after signing.
-
-### program-id — Print ProgramId
-
-```bash
-spel program-id <BINARY> [--format text|hex|json]
-```
-
-Current name for `inspect <FILE>`; `inspect` still works and also decodes account
-data.
-
-### Private PDAs
-
-```bash
-spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex>
-```
-
-Required for `#[account(private_pda, …)]`. Both keys come from
-`wallet account show-keys`.
-
-## Type Format Table
-
-| IDL Type | CLI Format | Example |
-|----------|-----------|---------|
-| `u8` | Decimal | `255` |
-| `u32` | Decimal | `1000000` |
-| `u64` | Decimal | `1000000000` |
-| `u128` | Decimal | `340282366920938463...` |
-| `bool` | `true`/`false`/`1`/`0`/`yes`/`no` | `true` |
-| `string` | Plain text | `"hello"` |
-| `[u8; N]` | Hex (`2*N` chars) or UTF-8 (≤N chars, zero-padded) | `0a1b2c...` or `my_str` |
-| `[u32; 8]` / `program_id` | 8 comma-separated u32 or 64-char hex | `abc123...def` |
-| `Vec<[u8; 32]>` | Comma-separated hex strings | `"aa...00,bb...00"` |
-| `Vec<u8>` | Comma-separated decimal bytes | `1,2,3,4,5` |
-| `Vec<u32>` | Comma-separated u32 values | `100,200,300` |
-| `Vec<String>` | Repeat the flag | `--tag a --tag b` |
-| `Option<T>` | `none`/`null` for None; otherwise inner type | `none` or `42` |
-| Account IDs | Base58 or 64-char hex (optional `0x`) | `EjR7...` or `0xaa...00` |
-
----
-
-## spel-client-gen
-
-Generate typed Rust client + C FFI + C header from IDL:
-
-```bash
-spel-client-gen --idl <IDL_FILE> --out-dir <DIR>
-```
-
-| Option | Required | Description |
-|--------|----------|-------------|
-| `--idl <path>` | Yes | IDL JSON file |
-| `--out-dir <dir>` | Yes | Output directory (created if needed) |
-
-Output files:
-
-```
-<out-dir>/
-├── <program>_client.rs    # typed async Rust client with PDA helpers
-├── <program>_ffi.rs       # extern "C" functions accepting JSON
-└── <program>.h            # C header
-```
-
-Build FFI as shared library:
-
-```toml
-# Cargo.toml
-[lib]
-name = "my_program_ffi"
-crate-type = ["cdylib"]
-```
-
-```rust
-// src/lib.rs
-include!("../generated/my_program_ffi.rs");
-```
-
-```bash
-cargo build --release --lib
-# → target/release/libmy_program_ffi.so
-```
-
-FFI JSON fields (every call):
-
-| Field | Type | Description |
-|-------|------|-------------|
-| `wallet_path` | `string` | Path to NSSA wallet directory |
-| `sequencer_url` | `string` | Sequencer URL (e.g., `http://127.0.0.1:3040`) |
-| `program_id_hex` | `string` | 64-char hex program ID |
-
-Plus instruction-specific account and argument fields.
-
-Return format: `{ "success": true, "tx_hash": "..." }` or `{ "success": false, "error": "..." }`.
+`inspect` JSON: u64/u128 as strings, account ids base58, byte arrays hex, enums `{"Variant": …}`.

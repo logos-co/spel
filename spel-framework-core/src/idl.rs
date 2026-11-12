@@ -1,136 +1,62 @@
-//! IDL (Interface Definition Language) types for SPEL programs.
+//! IDL (Interface Definition Language) types for programs on LEZ's actor model.
 //!
-//! The proc-macro generates an IDL JSON file at compile time that
-//! describes the program's interface. This module defines the
-//! serializable IDL format.
+//! An actor program has three things a client needs to know: the messages it accepts (one
+//! Borsh enum, the variant index is the tag), the state an actor of it holds, and the events
+//! it emits. Who receives a message, who signs and which actors a conversation reaches are the
+//! caller's business, not the program's, so the IDL says nothing about them.
 //!
-//! ## LSSA-lang compatibility
-//!
-//! This IDL format is a superset of the lssa-lang IDL spec. Fields like
-//! `discriminator`, `execution`, and `visibility` are included for
-//! compatibility with lssa-lang tooling. All new fields are optional
-//! and backward-compatible with existing SPEL programs.
+//! The format is version 2. Version 1 described instructions with account lists for the
+//! retired `#[lez_program]` framework; [`SpelIdl::from_json`] refuses it with a clear error.
 
 use serde::{Deserialize, Serialize};
 
-/// Top-level IDL for an SPEL program.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// The IDL format version this crate reads and writes.
+pub const IDL_VERSION: &str = "2";
+
+/// Top-level IDL for a program.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SpelIdl {
+    /// Always [`IDL_VERSION`].
     pub version: String,
+    /// The program's name, also its event namespace (`token` for `token_core`).
     pub name: String,
-    pub instructions: Vec<IdlInstruction>,
+    /// The external message enum's variants, in enum order.
+    pub messages: Vec<IdlMessage>,
+    /// The type of an actor's state, if the program declares one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<IdlType>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub accounts: Vec<IdlAccountType>,
+    pub events: Vec<IdlEvent>,
+    /// Every struct and enum the messages, state and events reference, sorted by name.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub types: Vec<IdlTypeDef>,
+}
+
+/// One variant of the message enum.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdlMessage {
+    /// The variant name, e.g. `Transfer`.
+    pub name: String,
+    /// The Borsh tag: the variant's index in the enum.
+    pub tag: u8,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub errors: Vec<IdlError>,
-    /// IDL spec identifier (lssa-lang compat).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub spec: Option<String>,
-    /// Program metadata (lssa-lang compat).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<IdlMetadata>,
-    /// Optional fully-qualified Rust path to the program's instruction enum.
-    /// When set, generated FFI imports this type instead of generating a local enum.
-    /// Example: "multisig_core::Instruction"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub instruction_type: Option<String>,
+    pub fields: Vec<IdlField>,
 }
 
-/// Program metadata (lssa-lang compat).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlMetadata {
+/// An event a program emits, identified on chain by its selector.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IdlEvent {
     pub name: String,
-    pub version: String,
-}
-
-/// Execution mode for an instruction (lssa-lang compat).
-///
-/// Maps to lssa-lang's `Execution` type which has `public` and `private_owned` flags.
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
-pub struct IdlExecution {
-    #[serde(default)]
-    pub public: bool,
-    #[serde(default)]
-    pub private_owned: bool,
-}
-
-/// An instruction in the IDL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlInstruction {
-    pub name: String,
-    pub accounts: Vec<IdlAccountItem>,
-    pub args: Vec<IdlArg>,
-    /// SHA256("global:{name}")[..8] discriminator (lssa-lang compat).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub discriminator: Option<Vec<u8>>,
-    /// Execution mode (lssa-lang compat). Defaults to public.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub execution: Option<IdlExecution>,
-    /// Variant name in PascalCase (lssa-lang compat).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub variant: Option<String>,
-}
-
-/// An account expected by an instruction.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlAccountItem {
-    pub name: String,
-    #[serde(default)]
-    pub writable: bool,
-    #[serde(default)]
-    pub signer: bool,
-    #[serde(default)]
-    pub init: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub owner: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pda: Option<IdlPda>,
-    /// If true, this account represents a variable-length trailing list.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub rest: bool,
-    /// Visibility tags (lssa-lang compat). e.g. ["public"].
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub visibility: Vec<String>,
-}
-
-fn is_false(v: &bool) -> bool {
-    !v
-}
-
-/// PDA derivation specification.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlPda {
-    pub seeds: Vec<IdlSeed>,
-    /// If true, this is a private PDA — address includes the caller's NullifierPublicKey.
-    /// Callers must supply `--npk <hex>` to derive the address.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub private: bool,
-}
-
-/// A seed component for PDA derivation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(tag = "kind")]
-pub enum IdlSeed {
-    #[serde(rename = "const")]
-    Const { value: String },
-    #[serde(rename = "account")]
-    Account { path: String },
-    #[serde(rename = "arg")]
-    Arg { path: String },
-}
-
-/// An instruction argument.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlArg {
-    pub name: String,
+    /// `sha256("<namespace>::<name>")[..8]`, hex.
+    pub selector: String,
     #[serde(rename = "type")]
     pub type_: IdlType,
 }
 
 /// Type representation in the IDL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum IdlType {
     Primitive(String),
@@ -140,25 +66,11 @@ pub enum IdlType {
     Array { array: (Box<IdlType>, usize) },
 }
 
-/// Account type definition in the IDL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlAccountType {
-    pub name: String,
-    #[serde(rename = "type")]
-    pub type_: IdlTypeDef,
-}
-
-/// Type definition (struct or enum).
-///
-/// When stored in [`SpelIdl::types`] the `name` field identifies the type so
-/// the decoder can resolve `Defined { name }` references. When embedded inside
-/// [`IdlAccountType`] the name is redundant (already on the wrapper) and is
-/// left empty / skipped during serialisation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A struct or enum definition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdlTypeDef {
-    /// Type name. Required when stored in `SpelIdl::types`; empty otherwise.
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
+    /// `"struct"` or `"enum"`.
     pub kind: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<IdlField>,
@@ -166,60 +78,147 @@ pub struct IdlTypeDef {
     pub variants: Vec<IdlEnumVariant>,
 }
 
-/// A field in a struct type.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// A field of a struct, an enum variant or a message. Positional (tuple) fields are named by
+/// their index: `"0"`, `"1"`, ….
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdlField {
     pub name: String,
     #[serde(rename = "type")]
     pub type_: IdlType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub docs: Option<String>,
+}
+
+impl IdlField {
+    /// Whether this is a tuple field, named by its position.
+    pub fn is_positional(&self) -> bool {
+        self.name.bytes().all(|b| b.is_ascii_digit())
+    }
 }
 
 /// An enum variant.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IdlEnumVariant {
     pub name: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fields: Vec<IdlField>,
 }
 
-/// Error definition in the IDL.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IdlError {
-    pub code: u32,
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub msg: Option<String>,
-}
-
-/// Compute the lssa-lang discriminator for an instruction name.
-///
-/// This is SHA256("global:{name}")[..8], matching lssa-lang's convention.
-pub fn compute_discriminator(name: &str) -> Vec<u8> {
-    use sha2::{Digest, Sha256};
-    let mut hasher = Sha256::new();
-    hasher.update(format!("global:{name}").as_bytes());
-    let result = hasher.finalize();
-    result[..8].to_vec()
-}
-
 impl SpelIdl {
-    /// Create a new IDL with the given program name.
-    pub fn new(name: impl Into<String>) -> Self {
-        Self {
-            version: "0.1.0".to_string(),
-            name: name.into(),
-            instructions: vec![],
-            accounts: vec![],
-            types: vec![],
-            errors: vec![],
-            spec: None,
-            metadata: None,
-            instruction_type: None,
+    /// Parse an IDL, refusing any version other than [`IDL_VERSION`].
+    ///
+    /// # Errors
+    /// If the JSON is malformed or the IDL is of another version.
+    pub fn from_json(json: &str) -> Result<Self, String> {
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|e| format!("invalid IDL JSON: {e}"))?;
+        let version = value.get("version").and_then(|v| v.as_str()).unwrap_or("");
+        if version != IDL_VERSION {
+            return Err(format!(
+                "IDL version '{version}' is not supported: this spel reads version \
+                 {IDL_VERSION} (actor programs). Regenerate the IDL with \
+                 `spel generate-idl <core-crate> --message <Enum>`."
+            ));
         }
+        serde_json::from_value(value).map_err(|e| format!("invalid IDL: {e}"))
     }
 
     /// Serialize the IDL to pretty-printed JSON.
+    ///
+    /// # Errors
+    /// Never in practice: every IDL type serializes.
     pub fn to_json_pretty(&self) -> Result<String, serde_json::Error> {
         serde_json::to_string_pretty(self)
+    }
+
+    /// The message named `name`, by variant name or its kebab/snake form (`InitializeHolding`,
+    /// `initialize-holding`, `initialize_holding`).
+    pub fn message(&self, name: &str) -> Option<&IdlMessage> {
+        self.messages.iter().find(|m| {
+            let kebab = to_kebab(&m.name);
+            m.name == name || kebab == name || kebab.replace('-', "_") == name
+        })
+    }
+
+    /// The definition of the struct or enum named `name`.
+    pub fn type_def(&self, name: &str) -> Option<&IdlTypeDef> {
+        self.types.iter().find(|t| t.name == name)
+    }
+}
+
+/// `InitializeHolding` → `initialize-holding`.
+pub fn to_kebab(pascal: &str) -> String {
+    let mut out = String::with_capacity(pascal.len() + 4);
+    for (i, c) in pascal.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else if c == '_' {
+            out.push('-');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// `sha256("<namespace>::<name>")[..8]`, the LEZ event selector convention, as hex.
+pub fn event_selector(namespace: &str, name: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("{namespace}::{name}").as_bytes());
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn kebab_splits_on_capitals() {
+        assert_eq!(to_kebab("InitializeHolding"), "initialize-holding");
+        assert_eq!(to_kebab("ReadState"), "read-state");
+        assert_eq!(to_kebab("Burn"), "burn");
+    }
+
+    #[test]
+    fn version_one_is_refused() {
+        let err = SpelIdl::from_json(r#"{"version":"0.1.0","name":"t","instructions":[]}"#)
+            .unwrap_err();
+        assert!(err.contains("version '0.1.0' is not supported"), "{err}");
+    }
+
+    #[test]
+    fn version_two_round_trips() {
+        let idl = SpelIdl {
+            version: IDL_VERSION.into(),
+            name: "t".into(),
+            messages: vec![IdlMessage {
+                name: "InitializeHolding".into(),
+                tag: 0,
+                docs: None,
+                fields: vec![IdlField {
+                    name: "definition".into(),
+                    type_: IdlType::Primitive("account_id".into()),
+                    docs: None,
+                }],
+            }],
+            state: None,
+            events: vec![],
+            types: vec![],
+        };
+        let parsed = SpelIdl::from_json(&idl.to_json_pretty().unwrap()).unwrap();
+        assert_eq!(parsed, idl);
+        assert_eq!(parsed.message("initialize-holding").map(|m| m.tag), Some(0));
+        assert_eq!(parsed.message("initialize_holding").map(|m| m.tag), Some(0));
+    }
+
+    #[test]
+    fn selector_depends_on_namespace_and_name() {
+        let selector = event_selector("token", "Transferred");
+        assert_eq!(selector.len(), 16);
+        assert_ne!(selector, event_selector("nft", "Transferred"));
+        assert_ne!(selector, event_selector("token", "Burned"));
     }
 }

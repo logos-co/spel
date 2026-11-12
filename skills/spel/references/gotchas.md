@@ -1,248 +1,113 @@
 # Gotchas and Common Mistakes
 
-Hard-won lessons from building SPEL programs. Read this before writing or debugging.
+Lessons from using SPEL against LEZ's actor model. Read before scripting or debugging.
 
 ---
 
-## Account Handling
+## Outcomes
 
-### Return ALL accounts in the `execute(vec![…])` list
+### Inclusion is not success
 
-Every account passed to a handler must appear in the vector you return via `SpelOutput::execute(…)` — even if you didn't mutate it. Dropping an account from the list is a runtime error.
+LEZ includes a refused transaction in a block, changes nothing, and reports no outcome or
+error. `spel send` compares every declared actor before and after: exit `2` ("included, but no
+declared actor changed") is how a refusal looks. Scripts must check the exit code; "included in
+block N" alone means nothing. Some messages are legitimate no-ops (a second
+`initialize-holding`), which also exit `2`.
 
-```rust
-// WRONG — forgot to include owner
-Ok(SpelOutput::execute(vec![state], vec![]))
+### Why was it refused?
 
-// RIGHT — every handler parameter (except `Vec<AccountWithMetadata>` rest lists,
-// which you extend into the vec) must appear once.
-Ok(SpelOutput::execute(vec![state, owner], vec![]))
-```
+SPEL can't tell you; LEZ doesn't say. The usual causes, in order:
 
-### Let the macro derive claims — don't write `AccountPostState` by hand
+1. an actor the conversation reaches isn't declared (see below);
+2. a needed signature is missing (`--signer`);
+3. the program's own checks (balance, authority, wrong state);
+4. a message to a fresh account that neither signs nor is otherwise admitted.
 
-`SpelOutput::execute(vec![a, b, c], vec![])` passes each `AccountWithMetadata` ident through. The `#[lez_program]` macro reads each parameter's `#[account(init/mut/…)]` constraints and emits the correct `AutoClaim` automatically:
+`--dry-run` shows exactly what was declared and who signs.
 
-- `#[account(init, …)]` → `AutoClaim::Claimed(Claim::Authorized)` for non-PDA, `Claim::Pda(seed)` for PDAs (one `PdaSeed`, never a `Vec`).
-- `#[account(signer)]` → `AutoClaim::ClaimedIfDefault(Claim::Authorized)` (see
-  [Rule 7](#rule-7-a-returned-account-must-not-be-default-owned-once-it-has-state)).
-- `#[account(mut, …)]` without `init` or `signer` → `AutoClaim::None`.
-- Read-only accounts → `AutoClaim::None`.
+## Access lists
 
-The legacy `SpelOutput::states_only(…)` / `SpelOutput::with_chained_calls(…)` constructors plus hand-built `AccountPostState::new_claimed(acc, Claim::Authorized)` / `AccountPostState::new(acc)` still compile but carry a `#[deprecated]` note. Use them only when you need a shape `execute` can't produce (which is rare).
+### Actors reached through state need `--actor`
 
-### Account ownership rules
+`send` declares the root, each `--actor`, an actor on the root's program for each
+`account_id` / `Option<account_id>` message field, and each signer. It can't see accounts a
+program finds in state. Token `burn` reaches the holding's definition: without
+`--actor <definition>` it is refused and burns nothing.
 
-Only the program that owns an account can **decrease** its balance or modify its
-data. This is enforced by LEZ, not by SPEL. Any program can increase a balance.
-Violating it is a runtime rejection — `UnauthorizedBalanceDecrease` or
-`UnauthorizedDataModification` — and the transaction is dropped at block
-creation, so the CLI just reports "not confirmed".
+### Actors on another program need `@PROGRAM`
 
-**To act on an account you do not own, delegate.** Return the account unchanged,
-mark it `is_authorized = true`, and emit a `ChainedCall` to the owning program.
-The callee executes as the executing program, so its ownership applies. Do not
-work around a rejection by editing the account directly.
+Field defaults are always on the root's program. An AMM message that reaches a token holding
+needs `--actor <holding>@token`.
 
-### Rule 7: a returned account must not be default-owned once it has state
+### Ids inside structs or vectors add no actors
 
-LEZ rejects any output returning a **non-default** account still owned by
-`DEFAULT_PROGRAM_ID` (`NonDefaultAccountWithDefaultOwner`). This is why
-`#[account(signer)]` emits `AutoClaim::ClaimedIfDefault` — the first program a
-user transacts with claims their account while it is still default, and every
-later transaction is then fine.
+Only top-level account fields do. Declare the rest with `--actor`.
 
-**Initialise a wallet account before signing with it.** That claim has a
-consequence: in LEZ only the owning program may decrease an account's balance
-(rule 5), and ownership never changes once set (rule 4). Native transfers run
-through the `authenticated_transfer` program, so the sender must be owned by it.
-`wallet account new public` does *not* initialise an account, so if a brand-new
-account signs for a SPEL program first, that program owns it for good — it can
-still **receive** tokens but can never **send** them
-(`UnauthorizedBalanceDecrease`). Run
+### Over-declaring is harmless
 
-```bash
-wallet auth-transfer init --account-id <id>
-```
+An actor nothing reaches is accepted. When in doubt, declare it.
 
-before using an account as a signer, and the claim becomes a no-op. (Sending
-*to* an uninitialised account fails the same way, with
-`ClaimedUnauthorizedAccount` — recipients need `init` too.) Verified on LEZ
-v0.2.4; LEZ's own `hello_world_with_authorization` claims signers identically.
+## Signers
 
-Two related rejections, both raised at execution rather than compile time:
+### A signature authorizes an account, not an actor
 
-- `ClaimedNonDefaultAccount` — you claimed an already-initialised account. A
-  `mut` instruction on an account the program owns must emit `AutoClaim::None`.
-- `AccountAlreadyInitialized` — `#[account(init, …)]` on an instruction that runs
-  more than once. Only the creating instruction carries `init`.
+Every actor of a signing account in the access list is authorized, under every program, for
+every message in the transaction. The guardrail `send` prints lists them; read it when an
+account has actors under several programs.
 
-### When a transaction is "not confirmed", read the sequencer log
+### Signers are never inferred
 
-The CLI can only report that a transaction never landed. The reason lives in the
-sequencer's log as a `failed execution check` line naming the exact rule. Without
-it you are guessing.
+A missing signer fails in the program (silently, exit `2`); an extra one lends authority. `send`
+refuses a `--signer` whose key the wallet lacks before sending.
 
-### init implies mut
+### The fee payer can be anyone in the wallet
 
-Do not write `#[account(init, mut)]` — `init` already implies `mut`. Just use `#[account(init)]`.
+`--fee-payer` may be outside the access list. Accounts created by `spel deploy` (headers,
+segments) are in the wallet but hold nothing.
 
-## PDA Derivation
+## Programs and IDLs
 
-### PDA accounts are never passed as CLI arguments
+### A program is its address, not its ImageID
 
-The CLI auto-computes PDA addresses from seeds + program ID. If you see an "unknown argument" error for a PDA account, something is wrong with the IDL or seed definition.
+`spel deploy` prints the header account; that is the program id for `--program`, `@PROGRAM`,
+spel.toml and PDA derivation. `spel program-id` prints the ImageID, which only identifies the
+code. Every deploy gets a new address: update spel.toml, and don't mix ids across deployments.
 
-### Seeds are zero-padded to 32 bytes
+### Use the IDL of the program you address
 
-String seeds (`literal("x")`) are UTF-8 encoded and zero-padded to exactly 32 bytes. Strings longer than 32 bytes will be truncated. Keep seed strings short.
+Different programs' state layouts can decode into each other (an NFT master "decodes" as a
+token holding). `send` and `inspect` refuse an IDL whose `name` differs from the program's
+spel.toml name; with a raw program id SPEL can't check, so pass the right `--idl`.
+`inspect ACCOUNT@name` loads that program's IDL from spel.toml unless `--idl` is given.
 
-### Multi-seed derivation uses SHA-256
+### Never edit an IDL by hand
 
-When using multiple seeds (`pda = [literal("a"), account("b")]`), they are combined via `SHA-256(seed1_32 || seed2_32 || ...)` into a single 32-byte seed. This is not simple concatenation.
+Regenerate it with `spel generate-idl`. Message tags are variant positions, so message enums are
+append-only: inserting a variant changes every later tag, and deployed programs keep decoding
+the old ones.
 
-### Program ID is [u32; 8], not [u8; 32]
+### Version 1 IDLs are refused
 
-The Program ID is the RISC Zero ImageID — an array of 8 u32 values. When converting from hex, use `from_le_bytes` for each u32 chunk (little-endian byte order). The 64-char hex ImageID from `spel inspect` is the little-endian byte representation.
+IDLs from the retired `#[lez_program]` framework (with `instructions`) are not readable;
+regenerate from the core crate.
 
-### bytemuck for raw PDA mode
+### Generation fails loudly on purpose
 
-When computing PDAs outside the framework (raw mode), use `bytemuck` for safe casting between `[u32; 8]` and byte slices. Do not manually reinterpret memory.
+A `--message`, `--state` or `--events` name that doesn't exist, or a referenced type outside
+the crate and its path dependencies, fails the run. Fix the name rather than dropping the flag.
 
-## IDL Generation
+## Values
 
-### Never edit IDL JSON by hand
+### Wide integers are strings in `inspect` output
 
-The IDL is generated by the `generate_idl!` macro. Any manual edits will be overwritten on the next `make idl`. If the IDL is wrong, fix the program source and regenerate.
+`"balance": "700"`, not `700`: u64/u128 keep their precision in any JSON reader.
 
-### generate_idl! path resolution, and why `examples/` must stay in the workspace
+### Message fields: labels, `none`, JSON
 
-The path in `generate_idl!("../methods/guest/src/bin/my_program.rs")` is tried
-**as-is first**, relative to rustc's working directory (the *workspace root*),
-and only then against `CARGO_MANIFEST_DIR` — the crate containing the macro
-invocation, typically `examples/`.
+Account fields take wallet labels in `send` (not in `encode`). `Option` fields take `none`.
+Structs and enum payloads take JSON objects; quote them for the shell.
 
-The scaffold keeps `examples/` inside the parent workspace, so the as-is attempt
-misses, the manifest-relative attempt wins, and the absolute path it produces is
-what the macro embeds in its cargo-tracking `include_str!`.
+### Global options vs message fields
 
-Give `examples/` its own `[workspace]` and that inverts: the as-is attempt now
-resolves, so the macro keeps the *relative* path — and `include_str!` resolves
-relative to the **source file**, not the manifest:
-
-```text
-error: couldn't read `src/bin/../methods/guest/src/bin/my_program.rs`:
-       No such file or directory (os error 2)
-```
-
-The IDL itself generated fine; only the change-tracking line fails. If you hit
-this, either drop the `[workspace]` from `examples/` or pass an absolute path.
-
-### generate_idl! must find exactly one #[lez_program] module
-
-The source file passed to `generate_idl!` must contain exactly one `#[lez_program]` module. Multiple modules or zero modules will cause a compile error.
-
-## Macro and Code Generation
-
-### Account parameters must come before instruction arguments
-
-In `#[instruction]` function signatures, all `AccountWithMetadata` / `Vec<AccountWithMetadata>` parameters must come before any instruction argument parameters. The macro relies on this ordering.
-
-```rust
-// WRONG — argument before account
-#[instruction]
-pub fn bad(amount: u64, #[account(signer)] user: AccountWithMetadata) -> SpelResult { ... }
-
-// RIGHT — accounts first, then arguments
-#[instruction]
-pub fn good(#[account(signer)] user: AccountWithMetadata, amount: u64) -> SpelResult { ... }
-```
-
-### Vec<AccountWithMetadata> must be the last account parameter
-
-Variable-length (rest) accounts consume all remaining accounts in the pre_states array. There can be at most one, and it must be the last account parameter.
-
-### Instruction functions cannot have self
-
-All `#[instruction]` functions must be free functions (no `self`, `&self`, or `&mut self`).
-
-### External instruction enum must derive BorshSerialize + BorshDeserialize
-
-When using `#[lez_program(instruction = "my_core::Instruction")]`, the external enum must derive both `Serialize`/`Deserialize` (serde) AND `BorshSerialize`/`BorshDeserialize` for correct zkVM serialization.
-
-## CLI Usage
-
-### Instruction names accept either snake_case or kebab-case
-
-`create_proposal` in Rust can be invoked as either `create-proposal` or
-`create_proposal` — the CLI matches on both forms.
-
-### Account flags are just `--{name}`
-
-An account parameter named `owner` is passed as `--owner <ACCOUNT_ID>`. There is
-no `-account` suffix.
-
-```bash
-spel initialize --owner Public/5ig8kHkv...
-```
-
-### `--program` accepts name, hex, or file path
-
-`--program <value>` resolves in three ways:
-1. If `<value>` matches a name in `spel.toml`'s `[programs.<name>]`, the IDL and binary are loaded from that entry.
-2. Else, if `<value>` is a 64-character hex string, it's used directly as the program ID (no binary load).
-3. Else, `<value>` is treated as a file path to the ELF binary.
-
-The hex form replaces the deprecated `--program-id <HEX>`. The 64-char hex comes from `spel inspect` (ImageID hex bytes row), not the decimal or comma-separated format.
-
-### Mix global and instruction flags with `--`
-
-Without a `spel.toml`, global options (`--idl`, `--program`, `--dry-run`) come before a `--` separator; the instruction and its `--arg` flags come after. Without `--`, the first instruction `--flag` is swallowed by the global parser and the command errors out.
-
-```bash
-spel -i idl.json -p prog.bin -- increment --amount 5 --owner <BASE58>
-```
-
-With `spel.toml` there are no global flags in play, so `--` is not needed.
-
-### `--dry-run` has two formats
-
-`--dry-run` and `--dry-run=text` print a human-readable summary (accounts, arguments, instruction data, signer nonces). `--dry-run=json` emits a JSON document with the same data — in JSON mode, all human output is suppressed so the result is pipeable to `jq`. Numeric values over 53 bits (`u128`, nonces) are emitted as decimal strings to avoid precision loss.
-
-### Account IDs accept both base58 and hex
-
-When passing account IDs, both base58 strings and 64-char hex strings (with optional `0x` prefix) are accepted.
-
-## Build and Deploy
-
-### Rust nightly toolchain required
-
-SPEL programs compile for the RISC Zero zkVM, which requires the nightly Rust toolchain. Ensure `rustup install nightly` has been run.
-
-### Binary path for deployed programs
-
-The compiled binary lives at `methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{name}.bin`. This path is used with `-p` flag or in the Makefile.
-
-### NSSA_WALLET_HOME_DIR environment variable
-
-The CLI reads the wallet from the `NSSA_WALLET_HOME_DIR` environment variable. Ensure it is set before running transactions.
-
-## Testing
-
-### main() is cfg-gated for tests
-
-The generated `main()` is wrapped in `#[cfg(not(test))]`, so instruction handler functions are directly callable in host-side unit tests without zkVM.
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_handler() {
-        let acc = AccountWithMetadata { /* ... */ };
-        let result = my_program::my_instruction(acc);
-        assert!(result.is_ok());
-    }
-}
-```
+Options like `--type`, `--data`, `--program` and `--idl` are read anywhere before `--`. Put the
+message after `--` so a field with one of those names isn't taken as a global option.

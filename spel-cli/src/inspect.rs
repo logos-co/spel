@@ -1,7 +1,7 @@
 //! Binary inspection — extract ProgramId from program binaries.
 
 use crate::hex::hex_encode;
-use nssa::program::Program;
+use lee::program::Program;
 use std::fs;
 
 /// Magic bytes of a raw RISC-V ELF as produced by

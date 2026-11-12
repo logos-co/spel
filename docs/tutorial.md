@@ -1,805 +1,243 @@
-# Zero to Hero: Building Your First LEZ Program with SPEL
+# Tutorial: A token program with SPEL
 
-This tutorial walks you through building a **counter program** from scratch using the SPEL framework. By the end, you'll have a deployed on-chain program with increment and get_count instructions, and understand the full build-deploy-transact lifecycle.
+This walks through using SPEL with a program on LEZ's actor model, from its core crate to
+messages on a local sequencer. The example is the token program from
+[lez-programs](https://github.com/logos-co/lez-programs) (`programs/token`); any actor program
+with a core crate works the same way.
 
-We reference [logos-co/lez-multisig](https://github.com/logos-co/lez-multisig) as a real-world example throughout.
+SPEL is the client side. The program itself is written against `lee_core`; see the LEZ guide
+(`docs/lez-guide` in the LEZ repository) for writing actor programs.
 
-## Table of Contents
+## Contents
 
-- [Prerequisites](#prerequisites)
-- [Step 1: Scaffold the Project](#step-1-scaffold-the-project)
-- [Step 2: Write the Program](#step-2-write-the-program)
-- [Step 3: Set Up the CLI Wrapper](#step-3-set-up-the-cli-wrapper)
-- [Step 4: Build and Generate IDL](#step-4-build-and-generate-idl)
-- [Step 5: Deploy](#step-5-deploy)
-- [Step 6: Interact with Your Program](#step-6-interact-with-your-program)
-- [Step 7: Register in SPELbook](#step-7-register-in-spelbook)
-- [Concepts Deep Dive](#concepts-deep-dive)
-  - [How the Macro Works](#how-the-macro-works)
-  - [Account Validation](#account-validation)
-  - [PDA Derivation](#pda-derivation)
-  - [External Instruction Enums](#external-instruction-enums)
-  - [Variable-Length Accounts](#variable-length-accounts)
-  - [Chained Calls](#chained-calls)
-  - [Client Code Generation](#client-code-generation)
-- [Next Steps](#next-steps)
+1. [Prerequisites](#1-prerequisites)
+2. [The core crate](#2-the-core-crate)
+3. [Generate the IDL](#3-generate-the-idl)
+4. [Deploy](#4-deploy)
+5. [Name things: `spel.toml` and wallet labels](#5-name-things-speltoml-and-wallet-labels)
+6. [Send messages](#6-send-messages)
+7. [Read state](#7-read-state)
+8. [When a message is refused](#8-when-a-message-is-refused)
+9. [Actors the defaults miss](#9-actors-the-defaults-miss)
 
 ---
 
-## Prerequisites
+## 1. Prerequisites
 
-Before you begin, make sure you have:
+- `spel`: `cargo install --path spel-cli` from this repository.
+- A LEZ sequencer and wallet at the LEZ version SPEL is pinned to. In a LEZ checkout, run the
+  standalone sequencer (`sequencer_service setup` once, then `start`) and set up a wallet.
+- `LEE_WALLET_HOME_DIR` pointing at the wallet, with one funded account to pay fees. Below it
+  is `$PAYER`.
+- The program's guest binary, e.g. `target/guest/token.bin` from lez-programs'
+  `make build-programs`.
 
-- **Rust** with the nightly toolchain (`rustup install nightly`)
-- **RISC Zero toolchain** — [install instructions](https://dev.risczero.com/api/zkvm/install)
-- **NSSA wallet CLI** (`wallet` binary) — for account creation and transaction signing
-- A **running sequencer** — the network node that accepts transactions
-- **spel** installed:
+## 2. The core crate
 
-```bash
-# From the SPEL repo
-cargo install --path spel-cli   # installs as the `spel` binary
-```
-
----
-
-## Step 1: Scaffold the Project
-
-Use `spel init` to create a new project:
-
-```bash
-spel init my-counter
-cd my-counter
-```
-
-This generates:
-
-```
-my-counter/
-├── Cargo.toml                      # Workspace
-├── Makefile                        # build, idl, cli, deploy targets
-├── spel.toml                       # [program] config — spel auto-discovers idl/binary
-├── .gitignore
-├── README.md
-├── my_counter_core/                # (optional) shared host-side types
-│   ├── Cargo.toml
-│   └── src/lib.rs
-├── methods/
-│   ├── Cargo.toml
-│   ├── build.rs
-│   ├── src/lib.rs
-│   └── guest/                      # On-chain program
-│       ├── Cargo.toml
-│       └── src/bin/my_counter.rs   # ← Your program logic goes here
-└── examples/
-    ├── Cargo.toml
-    └── src/bin/
-        ├── generate_idl.rs         # IDL generator (one-liner)
-        └── my_counter_cli.rs       # CLI wrapper (three lines)
-```
-
-The scaffold includes a working example with placeholder `initialize` and `do_something` instructions. We'll replace these with our counter logic.
-
-The `spel.toml` is the reason you'll be able to call `spel initialize …` later without `-i`/`-p` flags — `spel` walks up from the current directory until it finds one, then reads `[program].idl` and `[program].binary`. See the [CLI reference](reference/cli.md#configuration-speltoml) for the full format.
-
-> **Real-world example:** The [lez-multisig](https://github.com/logos-co/lez-multisig) program follows this structure, with a `multisig_core` crate for genuinely-shared types (an instruction enum consumed by FFI clients) and a guest binary for the on-chain program.
-
----
-
-## Step 2: Write the Program
-
-The counter's state and instructions all live in one file: `methods/guest/src/bin/my_counter.rs`. The state struct carries `#[account_type]` so `spel inspect` can later decode it, and every handler returns `SpelOutput::execute(…)` — the macro reads the `#[account(…)]` constraints and generates the correct claim metadata for you.
-
-Replace the scaffold's contents with:
+An actor program keeps its client-facing types in a core crate: the messages it accepts, the
+state its actors hold, and its events. From `programs/token/core/src/lib.rs`, shortened:
 
 ```rust
-#![no_main]
-
-use spel_framework::prelude::*;
-
-risc0_zkvm::guest::entry!(main);
-
-/// The counter state stored on-chain.
-///
-/// `#[account_type]` registers this in the IDL so `spel inspect <PDA> --type CounterState`
-/// can decode raw account bytes into readable JSON.
-#[account_type]
-#[derive(Debug, Clone, Default, BorshSerialize, BorshDeserialize)]
-pub struct CounterState {
-    /// The current count value.
-    pub count: u64,
-    /// The owner who can increment.
-    pub owner: [u8; 32],
+/// External messages.
+pub enum Message {
+    /// Create a fungible token. …
+    NewDefinition { name: String, total_supply: u128, mint_authority: Option<AccountId>, holding: AccountId },
+    /// Create a zero holding of `definition`. …
+    InitializeHolding { definition: AccountId },
+    /// Move `amount` from the receiving holding (authorized) to the holding at `to`. …
+    Transfer { to: AccountId, amount: u128 },
+    Burn { amount: u128 },
+    Mint { definition: AccountId, to: AccountId, amount: u128 },
+    SetAuthority { definition: AccountId, new_authority: Option<AccountId> },
+    ReadState,
 }
 
-#[lez_program]
-mod my_counter {
-    #[allow(unused_imports)]
-    use super::*;
-
-    /// Initialize the counter with an owner.
-    ///
-    /// Creates a new PDA account derived from the literal seed "counter".
-    /// The owner is the signer who can later increment the counter.
-    #[instruction]
-    pub fn initialize(
-        #[account(init, pda = literal("counter"))]
-        mut counter: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
-    ) -> SpelResult {
-        let state = CounterState {
-            count: 0,
-            owner: *owner.account_id.value(),
-        };
-        let bytes = borsh::to_vec(&state).map_err(|e| SpelError::SerializationError {
-            message: e.to_string(),
-        })?;
-        counter.account.data = bytes.try_into().unwrap();
-
-        Ok(SpelOutput::execute(vec![counter, owner], vec![]))
-    }
-
-    /// Increment the counter by a given amount. Only the owner can increment.
-    #[instruction]
-    pub fn increment(
-        #[account(mut, pda = literal("counter"))]
-        mut counter: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
-        amount: u64,
-    ) -> SpelResult {
-        let data: Vec<u8> = counter.account.data.clone().into();
-        let mut state: CounterState = borsh::from_slice(&data).map_err(|e| {
-            SpelError::DeserializationError {
-                account_index: 0,
-                message: e.to_string(),
-            }
-        })?;
-
-        if *owner.account_id.value() != state.owner {
-            return Err(SpelError::Unauthorized {
-                message: "Only the owner can increment".to_string(),
-            });
-        }
-
-        state.count = state.count.checked_add(amount).ok_or(SpelError::Overflow {
-            operation: "counter increment".to_string(),
-        })?;
-
-        let bytes = borsh::to_vec(&state).map_err(|e| SpelError::SerializationError {
-            message: e.to_string(),
-        })?;
-        counter.account.data = bytes.try_into().unwrap();
-
-        Ok(SpelOutput::execute(vec![counter, owner], vec![]))
-    }
-
-    /// Get the current count value (read-only).
-    ///
-    /// The caller inspects the counter account after the transaction to read the count —
-    /// see Step 6 for the `spel inspect … --type CounterState` flow.
-    #[instruction]
-    pub fn get_count(
-        #[account(pda = literal("counter"))]
-        counter: AccountWithMetadata,
-    ) -> SpelResult {
-        Ok(SpelOutput::execute(vec![counter], vec![]))
-    }
+/// What a token actor holds.
+pub enum TokenState {
+    Definition(TokenDefinition),
+    Holding(TokenHolding),
 }
 ```
 
-A few things to note about this file:
+and events in `src/event.rs`, each `impl TokenEvent for Transferred { const NAME: &str = "Transferred"; }`.
 
-- **`use spel_framework::prelude::*;`** is the only import. The prelude brings in `AccountWithMetadata`, `SpelResult`, `SpelError`, `SpelOutput`, `Claim`, `AccountPostState`, `AutoClaim`, and the Borsh derives. You don't need any `nssa_core::…` imports.
-- **`#[account_type]` must live at file top level**, not inside `mod my_counter { … }`. The IDL generator only scans top-level items for this marker.
-- **`mut counter: AccountWithMetadata`** — handlers that write to `counter.account.data` need `mut` on the parameter. Handlers that only read (like `get_count`) don't.
-- **`SpelOutput::execute(vec![accounts], vec![chained_calls])`** is the idiomatic return. The macro inspects each account's `#[account(…)]` attributes and generates the correct claim — you never manually construct `AccountPostState::new_claimed(…, Claim::Authorized)` (that API is still available but deprecated, and it's noisier).
-- The `my_counter_core/` crate ships empty in this tutorial. It exists for types that need to be *literally shared* across crates (e.g. an external `Instruction` enum consumed by an FFI client generated with `spel-client-gen`) — which our counter doesn't need.
+The guest decodes `Message` with Borsh, so the variant order is the wire format: the index is
+the tag byte.
 
-Let's break down what's happening:
-
-### Key concepts
-
-1. **`#[lez_program]`** — wraps your module and generates the guest `main()`, instruction dispatch, validation helpers, and an IDL constant.
-
-2. **`#[instruction]`** — marks each function as an on-chain instruction. The function name becomes a CLI subcommand (e.g., `increment` → `spel increment`).
-
-3. **`#[account(init, pda = literal("counter"))]`** — the counter account is a PDA (Program Derived Address) derived from the string `"counter"` and the program ID. The `init` constraint means this account must not already exist yet, and implies writable.
-
-4. **`#[account(signer)]`** — the owner must sign the transaction. The framework automatically checks `is_authorized` before your handler runs.
-
-5. **`#[account(mut, pda = literal("counter"))]`** — the counter account is writable (its state will change) and is a PDA.
-
-6. **`#[account_type]`** — placed on structs/enums stored in account `data`, this registers them in the IDL so `spel inspect --type …` can decode raw bytes. Must live at the **top level of the guest file**, not inside `mod my_counter { … }`.
-
-7. **`SpelOutput::execute(vec![accounts], vec![chained_calls])`** — the idiomatic return from a handler. The macro derives the correct claim for each account from its `#[account(…)]` attributes, so you never write `AccountPostState::new_claimed(…, Claim::Authorized)` by hand.
-
-> **Real-world example:** The lez-multisig program has instructions like `create` (with `init` + multi-seed PDA), `create_proposal`, and `approve` (with signer checks for members).
-
----
-
-## Step 3: Set Up the CLI Wrapper
-
-The scaffold already created `examples/src/bin/my_counter_cli.rs`:
-
-```rust
-#[tokio::main]
-async fn main() {
-    spel::run().await;
-}
-```
-
-That's it — three lines. The CLI reads the IDL at runtime and auto-generates subcommands for every instruction in your program. (The crate/binary is named `spel`, so the lib module is `spel::`, not `spel_cli::`.)
-
----
-
-## Step 4: Build and Generate IDL
+## 3. Generate the IDL
 
 ```bash
-# Build the guest binary (compiles for RISC Zero zkVM)
-make build
+spel generate-idl programs/token/core --message Message --state TokenState --events event \
+  > artifacts/token-idl.json
 ```
 
-Then generate the IDL. Either `spel generate-idl` or the scaffold's `make idl` works — both emit the same instructions and the same `#[account_type]` structs:
+No annotations are needed: the generator reads the named enum, state type and events module,
+plus every type they reference (following path dependencies), and takes doc comments as help
+text. A name that doesn't exist fails the run, so a rename can't silently drop a type. The
+format is described in [reference/idl.md](reference/idl.md).
+
+The IDL already drives help:
 
 ```bash
-spel generate-idl methods/guest/src/bin/my_counter.rs > my-counter-idl.json
+$ spel --idl artifacts/token-idl.json
+…
+MESSAGES:
+  new-definition       --name <STRING> --total-supply <NUMBER> --mint-authority <OPT<ACCOUNT_ID>> --holding <ACCOUNT_ID>
+  initialize-holding   --definition <ACCOUNT_ID>
+  transfer             --to <ACCOUNT_ID> --amount <NUMBER>
+  …
+$ spel --idl artifacts/token-idl.json -- transfer --help
 ```
 
-> **Why two paths exist:** `make idl` runs a host-side `generate_idl` binary built from the `generate_idl!` proc macro, while `spel generate-idl` is a CLI subcommand reading the same source. They agree; use whichever fits your workflow. `make idl` writes to the path in `spel.toml`, which is why the scaffold uses it.
->
-> One caveat: the guest and the `examples/` crate that runs `make idl` are separate crates with separate lockfiles. If they ever resolve *different* framework versions, the IDL is generated by a different version than the one that built your guest — see [#269](https://github.com/logos-co/spel/issues/269).
+and encoding, with no chain involved:
 
-Let's look at what the generator writes to `my-counter-idl.json`:
+```bash
+$ spel --idl artifacts/token-idl.json encode burn --amount 20
+0314000000000000000000000000000000
+```
 
-```json
+## 4. Deploy
+
+```bash
+TOKEN=$(spel deploy target/guest/token.bin --fee-payer $PAYER)
+echo $TOKEN
+```
+
+`spel deploy` creates a header account and the segment accounts the binary needs, uploads it
+through LEZ's program loader, and prints the program's address: the header account. That
+address, not the ImageID (`spel program-id`), is how the program is named from now on. Every
+deploy gets a new one.
+
+## 5. Name things: `spel.toml` and wallet labels
+
+A `spel.toml` maps a name to the deployment and its IDL:
+
+```toml
+[programs.token]
+address = "<the address from step 4>"
+idl = "artifacts/token-idl.json"
+```
+
+Accounts can carry wallet labels:
+
+```bash
+for name in usdc alice bob; do wallet account new public --label $name; done
+```
+
+Now `--program token` selects the program and its IDL, `alice@token` names alice's token actor,
+and labels work anywhere an account is expected, including message fields.
+
+## 6. Send messages
+
+Create a token whose definition lives on `usdc`, with the supply minted to `alice`:
+
+```bash
+spel --program token --fee-payer $PAYER send --root usdc --signer usdc --signer alice -- \
+  new-definition --name USDC --total-supply 1000 --mint-authority usdc --holding alice
+```
+
+Before sending, SPEL prints the transaction:
+
+```text
+new-definition (tag 0, 90 bytes) to (usdc (2hiv…), token)
+Access list:
+  (usdc (2hiv…), token)    root, signs
+  (alice (J3q2…), token)   field `holding`, signs
+usdc (2hiv…) signs. In this transaction that authorizes:
+  (usdc (2hiv…), token)    root
+alice (J3q2…) signs. In this transaction that authorizes:
+  (alice (J3q2…), token)   reachable: any program in the conversation can send it owner messages
+```
+
+- `--root` is the actor that receives the message.
+- The **access list** is every actor the transaction may touch; LEZ refuses messages to anything
+  undeclared. SPEL added alice because `holding` is an account field; `mint_authority` names
+  usdc, which is already the root.
+- **Signers** are explicit. A signature authorizes every actor of that account in the
+  transaction, which is why SPEL lists them.
+
+After inclusion it prints what changed:
+
+```text
+Included in block 352. Changed:
+  (usdc (2hiv…), token)
+    before: none
+    after:  {"Definition":{"authority":"2hiv…","name":"USDC","total_supply":"1000"}}
+  (alice (J3q2…), token)
+    before: none
+    after:  {"Holding":{"balance":"1000","definition_id":"2hiv…"}}
+```
+
+Give bob a holding, then transfer and mint to it:
+
+```bash
+spel --program token send --root bob --signer bob -- initialize-holding --definition usdc
+spel --program token send --root alice --signer alice -- transfer --to bob --amount 300
+spel --program token send --root usdc --signer usdc -- mint --definition usdc --to bob --amount 50
+```
+
+`--dry-run` prints the transaction without sending it; `--dry-run=json` does so as JSON.
+
+## 7. Read state
+
+```bash
+$ spel inspect alice@token
 {
-  "version": "0.1.0",
-  "name": "my_counter",
-  "instructions": [
-    {
-      "name": "initialize",
-      "accounts": [
-        {
-          "name": "counter",
-          "writable": true,
-          "signer": false,
-          "init": true,
-          "pda": { "seeds": [{ "kind": "const", "value": "counter" }] }
-        },
-        { "name": "owner", "writable": false, "signer": true, "init": false }
-      ],
-      "args": []
-    },
-    {
-      "name": "increment",
-      "accounts": [
-        {
-          "name": "counter",
-          "writable": true,
-          "signer": false,
-          "init": false,
-          "pda": { "seeds": [{ "kind": "const", "value": "counter" }] }
-        },
-        { "name": "owner", "writable": false, "signer": true, "init": false }
-      ],
-      "args": [{ "name": "amount", "type": "u64" }]
-    },
-    {
-      "name": "get_count",
-      "accounts": [
-        {
-          "name": "counter",
-          "writable": false,
-          "signer": false,
-          "init": false,
-          "pda": { "seeds": [{ "kind": "const", "value": "counter" }] }
-        }
-      ],
-      "args": []
-    }
-  ],
-  "accounts": [
-    {
-      "name": "CounterState",
-      "type": {
-        "kind": "struct",
-        "fields": [
-          { "name": "count", "type": "u64" },
-          { "name": "owner", "type": { "array": ["u8", 32] } }
-        ]
-      }
-    }
-  ],
-  "errors": [],
-  "types": []
+  "Holding": {
+    "balance": "700",
+    "definition_id": "2hivK471mcXpSnfRiKDhKjEKCqsD4wQ88BpBLoZyy3Xn"
+  }
 }
 ```
 
-Notice:
-- The `counter` account has `"pda"` with a `"const"` seed — the CLI will compute this automatically.
-- The `owner` account has `"signer": true` — the CLI will handle wallet signing.
-- `init: true` on the first instruction's counter account — the CLI knows this is a new account.
-- `amount` is the only instruction argument — everything else is an account.
-- `accounts` at the top level lists every `#[account_type]` struct with its field schema. `spel inspect --type <Name>` uses this to decode raw account bytes.
-
----
-
-## Step 5: Deploy
-
-First, set up your accounts and deploy the program:
+An account holds one state per program. Without a program, `inspect` lists them:
 
 ```bash
-# Create a signer account in your wallet
-make setup
-
-# Initialise it for the transfer program, before it signs anything (see below).
-# Account ids carry a privacy prefix here: pass `Public/<id>`, not the bare id
-# `make setup` prints — a bare id fails with "No account found for label".
-wallet auth-transfer init --account-id Public/<SIGNER_FROM_make_setup>
-
-# Deploy the program binary to the sequencer
-make deploy
-
-# Verify the deployment — prints the ProgramId
-make inspect
-```
-
-> **Initialise the signer first.** `#[account(signer)]` claims an account that no
-> program owns yet — LEZ rejects a returned account that has state but no owner, so
-> the claim is required. It also means the first program a brand-new account signs
-> for owns it permanently, and only an account's owner may move its balance. An
-> account that goes straight to a SPEL program can still receive tokens but can
-> never send them. `wallet auth-transfer init` hands ownership to the transfer
-> program first, after which the claim does nothing. `make setup` does not do this
-> for you. See [Claims](reference/macros.md#claims).
-
-The `make inspect` command shows your program's ID:
-
-```
-📦 methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_counter.bin
-   ProgramId (decimal): 12345,67890,...
-   ProgramId (hex):     00003039,00010932,...
-   ImageID (hex bytes): 3930000032920100...
-```
-
-Save the hex ImageID — you'll need it for CLI commands.
-
----
-
-## Step 6: Interact with Your Program
-
-All commands below assume you're inside the project directory, so `spel` picks up `spel.toml` and resolves the IDL and binary automatically. Without `spel.toml` you'd need to pass `-i <IDL> -p <BIN> --` before the instruction — see [Without `spel.toml`](#without-speltoml) below.
-
-### See available commands
-
-```bash
-spel --help
-```
-
-Output:
-
-```
-🔧 my_counter v0.1.0 — IDL-driven CLI
-
-USAGE:
-  spel <COMMAND> [ARGS]                  (with spel.toml)
-  spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
-
-COMMANDS:
-  program-id <FILE> [FILE...]  Extract ProgramId from a program .bin (R0BF)
-  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data
-  generate-idl [PATH]        Generate IDL JSON
-  idl                        Print the loaded IDL
-  initialize           --owner <BASE58|HEX>
-  increment            --amount <NUMBER> --owner <BASE58|HEX>
-  get-count
-```
-
-Notice how the CLI auto-generated commands from your IDL:
-- PDA accounts (`counter`) are not listed as arguments — they're computed automatically.
-- Instruction arguments (`amount`) are typed.
-- Account arguments get a flag named after the account itself (`owner` → `--owner`). Account flags expect base58 or 64-character hex.
-
-### Initialize the counter
-
-```bash
-spel initialize --owner <YOUR_SIGNER_BASE58>
-```
-
-The CLI will:
-1. Resolve the program binary from `spel.toml` and derive the ProgramId.
-2. Compute the `counter` PDA from the seed `"counter"` + ProgramId.
-3. Fetch the nonce for the signer account from your wallet.
-4. Build, sign, and submit the transaction.
-5. Wait for confirmation.
-
-### Increment the counter
-
-```bash
-spel increment --amount 5 --owner <YOUR_SIGNER_BASE58>
-```
-
-### Read the count back
-
-The counter's state lives in the PDA's account data. Compute the PDA address and decode it with `spel inspect --type`:
-
-```bash
-COUNTER_PDA=$(spel pda counter)
-spel inspect "$COUNTER_PDA" --type CounterState
-```
-
-Typical output:
-
-```
-Account: DzEcGdM7RqkGpG6QtQhoVhMmiSoVrqB4pL3AzZCtoMvZ
-Data:    40 bytes
-Hex:     0500000000000000cdc32169...b905ded1c169a66aca040a277584bdbf13
-
+$ spel inspect alice
 {
-  "count": "5",
-  "owner": "cdc32169ea799edca123080eb858b4b905ded1c169a66aca040a277584bdbf13"
+  "token": "01194a…"
 }
 ```
 
-The decode works because `CounterState` is annotated with `#[account_type]` in your program source, which puts its field schema in the IDL. The annotation works whether the struct sits at file level or inside the `#[lez_program]` module, and both IDL generators pick it up.
+Wide integers are strings in the JSON so they survive any JSON reader.
 
-> **Note:** `inspect` decodes account data only, and requires both `--idl` and
-> `--type`. To read a ProgramId out of a built binary use `spel program-id
-> <FILE>` — pointing `inspect` at a file reports `Account inspection requires
-> --idl <IDL_FILE>`.
-
-### Dry run (no submission)
-
-`--dry-run` resolves the whole transaction (PDAs, accounts, signer nonces, serialized data) and prints it without submitting:
+## 8. When a message is refused
 
 ```bash
-spel --dry-run increment --amount 5 --owner <BASE58>
+$ spel --program token send --root alice --signer alice -- transfer --to bob --amount 5000
+…
+⚠️  Included in block 362, but no declared actor changed: the program probably refused the message (LEZ reports no outcome), or it is a no-op.
+$ echo $?
+2
 ```
 
-Typical text output:
+LEZ includes a refused transaction in a block and changes nothing, without reporting why. SPEL
+compares every declared actor before and after: exit `0` means something changed, `2` means
+nothing did, `1` means it wasn't sent or included. Scripts should check the exit code, not
+inclusion.
 
-```
-=== Dry Run ===
-Program ID: 3930000032920100...
-Instruction: increment
+## 9. Actors the defaults miss
 
-Accounts:
-  PDA counter → 4Lp3gkH... [writable]
-    seeds: [program_id, "counter"]
-  owner → 0xccdd...00 [signer]
-
-Arguments:
-  --amount 5
-
-Instruction data: 0x010000000500000000000000
-
-Signers:
-  owner: nonce=42
-================
-Dry run complete — not submitted.
-```
-
-The `seeds: […]` line is rendered during PDA resolution and is only shown in dry-run and live-transaction output — not by the standalone `spel pda` subcommand, which prints only the address.
-
-For machine-readable output (e.g. in CI golden tests or `jq` pipelines), use `--dry-run=json`:
+`burn` reaches the holding's definition, but the definition isn't a message field, so SPEL
+can't know to declare it:
 
 ```bash
-spel --dry-run=json increment --amount 5 --owner <BASE58> | jq .
+$ spel --program token send --root bob --signer bob -- burn --amount 20
+⚠️  Included in block 364, but no declared actor changed: …
 ```
 
-In JSON mode all human preamble is suppressed — only the JSON document goes to stdout.
-
-### Pass a raw program ID instead of a binary
-
-`--program` accepts three forms: a name from `spel.toml`, a 64-character hex program ID, or a file path to the ELF binary. Using the hex ID skips loading the binary and is faster:
+Declare it with `--actor`:
 
 ```bash
-spel --idl my-counter-idl.json --program <64-CHAR-HEX> -- \
-  increment --amount 10 --owner <YOUR_SIGNER_BASE58>
+$ spel --program token send --root bob --signer bob --actor usdc -- burn --amount 20
+Included in block 366. Changed:
+  (bob (rdey…), token)       … "balance":"330" …
+  (usdc (2hiv…), token)      … "total_supply":"1030" …
 ```
 
-### Compute the counter PDA manually
-
-```bash
-spel pda counter                                      # with spel.toml
-spel --idl my-counter-idl.json --program <HEX> pda counter
-```
-
-This prints the base58 AccountId of the counter PDA and nothing else. If you want to see the seed inputs that were used, run the same instruction in `--dry-run` mode (see above).
-
-### Without `spel.toml`
-
-When invoking `spel` from a directory without a `spel.toml`, global options (`--idl`, `--program`, `--dry-run`) come **before** a `--` separator; the instruction and its `--arg` flags go after:
-
-```bash
-spel --idl my-counter-idl.json --program ./my_counter.bin -- \
-  increment --amount 5 --owner <BASE58>
-```
-
-Without the `--`, the first `--amount` would be swallowed by the global-flag parser and the command would error out. The `spel.toml`-based invocations above don't need the separator because no global flags are in play.
+`--actor` also declares actors on other programs: `--actor vault@token` while sending to an AMM.
+`--no-auto-actors` turns the field-based defaults off entirely.
 
 ---
 
-## Step 7: Register in SPELbook
-
-TODO: verify — SPELbook registration process is not yet documented in the codebase.
-
-Once your program is deployed and working, you can register it in SPELbook to make it discoverable by other developers and programs.
-
----
-
-## Concepts Deep Dive
-
-### How the Macro Works
-
-The `#[lez_program]` macro transforms your module at compile time. Here's what it generates for our counter program:
-
-**1. Instruction Enum**
-
-```rust
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub enum Instruction {
-    Initialize,
-    Increment { amount: u64 },
-    GetCount,
-}
-```
-
-Variant names are PascalCase conversions of function names. Only non-account parameters become fields.
-
-**2. Main Function** (cfg-gated: only in zkVM guest builds, not in tests)
-
-```rust
-fn main() {
-    // Read inputs from zkVM host
-    let (ProgramInput { pre_states, instruction }, instruction_words)
-        = read_nssa_inputs::<Instruction>();
-
-    // Dispatch to handler
-    let result = match instruction {
-        Instruction::Initialize => {
-            let [counter, owner] = ...;  // destructure pre_states
-            my_counter::__validate_initialize(&[counter.clone(), owner.clone()])?;
-            my_counter::initialize(counter, owner)
-        }
-        Instruction::Increment { amount } => {
-            let [counter, owner] = ...;
-            my_counter::__validate_increment(&[counter.clone(), owner.clone()])?;
-            my_counter::increment(counter, owner, amount)
-        }
-        Instruction::GetCount => {
-            let [counter] = ...;
-            my_counter::get_count(counter)
-        }
-    };
-
-    // Write outputs
-    write_nssa_outputs_with_chained_call(...);
-}
-```
-
-**3. Validation Functions**
-
-```rust
-pub fn __validate_initialize(accounts: &[AccountWithMetadata]) -> Result<(), SpelError> {
-    // init check: counter must be default
-    if accounts[0].account != Account::default() {
-        return Err(SpelError::AccountAlreadyInitialized { account_index: 0 });
-    }
-    // signer check: owner must be authorized
-    if !accounts[1].is_authorized {
-        return Err(SpelError::Unauthorized {
-            message: "Account 'owner' (index 1) must be a signer".to_string(),
-        });
-    }
-    Ok(())
-}
-```
-
-**4. IDL Constants**
-
-```rust
-pub const PROGRAM_IDL_JSON: &str = r#"{"version":"0.1.0","name":"my_counter",...}"#;
-pub fn __program_idl() -> SpelIdl { ... }
-```
-
-### Account Validation
-
-The framework generates automatic validation checks that run before your handler:
-
-| Attribute | Check | Error |
-|-----------|-------|-------|
-| `signer` | `is_authorized == true` | `SpelError::Unauthorized` |
-| `init` | `account == Account::default()` | `SpelError::AccountAlreadyInitialized` |
-
-These checks are generated per-instruction. If an instruction has no `signer` or `init` accounts, no validation function is generated.
-
-Validation runs in declaration order: if both `init` and `signer` checks fail, the `init` check (which comes first in the generated code) will be the reported error.
-
-### PDA Derivation
-
-PDAs (Program Derived Addresses) are deterministic account addresses computed from a program ID and seeds. They allow programs to "own" accounts without needing a private key.
-
-**How it works:**
-
-1. Each seed is converted to 32 bytes (zero-padded for strings)
-2. Single seed: used directly as `PdaSeed`
-3. Multiple seeds: combined via `SHA-256(seed1_32 || seed2_32 || ...)`
-4. Final address: `AccountId::from((program_id, &PdaSeed::new(combined)))`
-
-**Seed types:**
-
-```rust
-// Constant string — always the same
-#[account(pda = literal("counter"))]
-
-// Another account's ID — PDA depends on which account is passed
-#[account(pda = account("user"))]
-
-// Instruction argument — PDA depends on the argument value
-#[account(pda = arg("create_key"))]
-
-// Multiple seeds — combined via SHA-256
-#[account(pda = [literal("vault"), account("user")])]
-#[account(pda = [literal("proposal"), arg("proposal_index")])]
-```
-
-> **Real-world example:** In lez-multisig, the multisig state PDA uses two seeds:
-> ```rust
-> #[account(init, pda = [literal("multisig_state__"), arg("create_key")])]
-> ```
-> This allows multiple independent multisig instances, each with a unique `create_key`.
-
-### External Instruction Enums
-
-For programs where the `Instruction` enum needs to be shared between the on-chain guest and off-chain tools (e.g., for FFI code generation with correct borsh serialization), you can define it in a shared core crate:
-
-```rust
-// In multisig_core/src/lib.rs
-#[derive(Debug, Clone, Serialize, Deserialize, BorshSerialize, BorshDeserialize)]
-pub enum Instruction {
-    Create { create_key: [u8; 32], threshold: u64, members: Vec<[u8; 32]> },
-    Approve { proposal_id: u64 },
-    // ...
-}
-```
-
-Then reference it in the program:
-
-```rust
-#[lez_program(instruction = "multisig_core::Instruction")]
-mod multisig {
-    // The macro uses multisig_core::Instruction instead of generating one
-    // ...
-}
-```
-
-The IDL will include `"instruction_type": "multisig_core::Instruction"`, which tells `spel-client-gen` to import and use the shared type in generated FFI code.
-
-### Variable-Length Accounts
-
-Some instructions need a variable number of accounts. Use `Vec<AccountWithMetadata>`:
-
-```rust
-#[instruction]
-pub fn multi_approve(
-    #[account(mut, pda = literal("state"))]
-    state: AccountWithMetadata,
-    #[account(signer)]
-    members: Vec<AccountWithMetadata>,
-) -> SpelResult {
-    // members can contain 0, 1, 2, ... accounts
-    for member in &members {
-        // validate each member
-    }
-    // ...
-}
-```
-
-In the CLI, pass rest accounts as a comma-separated list:
-
-```bash
-spel multi-approve --members "addr1,addr2,addr3"
-```
-
-Rest accounts are always optional (0 entries is valid). The macro splits `pre_states` into fixed accounts (before the rest) and the variadic tail.
-
-### Chained Calls
-
-Instructions can trigger calls to other programs by returning `ChainedCall`s. The second argument to `SpelOutput::execute(…)` is a `Vec<ChainedCall>`:
-
-```rust
-#[instruction]
-pub fn transfer_and_notify(
-    #[account(mut)]
-    from: AccountWithMetadata,
-    #[account(mut)]
-    to: AccountWithMetadata,
-    #[account(signer)]
-    signer: AccountWithMetadata,
-    amount: u64,
-) -> SpelResult {
-    // ... transfer logic (mutate from.account.data / to.account.data) ...
-
-    let chained_call = ChainedCall {
-        // ... target program and instruction data ...
-    };
-
-    Ok(SpelOutput::execute(vec![from, to, signer], vec![chained_call]))
-}
-```
-
-### Client Code Generation
-
-For integrating LEZ programs into applications (e.g., a C++/Qt desktop app), use `spel-client-gen` to generate typed bindings:
-
-```bash
-spel-client-gen --idl my-counter-idl.json --out-dir generated/
-```
-
-This produces three files:
-
-1. **`my_counter_client.rs`** — Async Rust client with typed methods
-2. **`my_counter_ffi.rs`** — C FFI (`extern "C"` functions accepting JSON)
-3. **`my_counter.h`** — C header file
-
-**Using the C FFI from C++/Qt:**
-
-```cpp
-#include "my_counter.h"
-#include <QJsonDocument>
-#include <QJsonObject>
-
-// Call the increment instruction
-QJsonObject args;
-args["wallet_path"] = "/path/to/wallet";
-args["program_id_hex"] = "abc123...";
-args["amount"] = 5;
-args["owner"] = "base58-account-id";
-
-QByteArray json = QJsonDocument(args).toJson();
-char* result = my_counter_increment(json.constData());
-
-// Parse result
-QJsonDocument resultDoc = QJsonDocument::fromJson(result);
-bool success = resultDoc.object()["success"].toBool();
-QString txHash = resultDoc.object()["tx_hash"].toString();
-
-my_counter_free_string(result);
-```
-
-Build the FFI as a shared library:
-
-```bash
-cargo build --release --lib
-# Produces libmy_counter.so / libmy_counter.dylib
-```
-
----
-
-## Next Steps
-
-- **Read the [Reference](reference/README.md)** for complete API documentation
-- **Study [lez-multisig](https://github.com/logos-co/lez-multisig)** for a production-quality example with multi-seed PDAs, variable-length accounts, and external instruction enums
-- **Generate client code** with `spel-client-gen` for integrating your program into applications
-- **Write tests** — the `#[cfg(not(test))]` gate on `main()` means your handlers are directly callable in host-side tests:
-
-```rust
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_initialize() {
-        let acc = AccountWithMetadata {
-            account_id: AccountId::new([0u8; 32]),
-            account: Account::default(),
-            is_authorized: true,
-        };
-        let result = my_counter::initialize(acc.clone(), acc.clone());
-        assert!(result.is_ok());
-    }
-}
-```
+Next: the [CLI reference](reference/cli.md) for every command and flag.

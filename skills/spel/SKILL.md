@@ -1,90 +1,51 @@
 ---
 name: spel
-description: "Build, deploy, and interact with LEZ on-chain programs using the SPEL framework (logos-co/spel). Use when: (1) creating a new LEZ program or SPEL project, (2) writing #[lez_program] instructions with account constraints, PDA derivation, or signer checks, (3) generating IDL from program source, (4) using spel to deploy, inspect, call instructions, or compute PDAs, (5) generating typed Rust/C FFI client code with spel-client-gen, (6) debugging SPEL macro output, account validation, or PDA mismatches, (7) registering a program in SPELbook, or (8) any mention of spel, spel_framework, spel-client-gen, #[lez_program], #[instruction], SpelOutput, SpelError, SpelResult, generate_idl!, AccountPostState, PdaSeed, or RISC Zero zkVM guest programs in the LEZ/NSSA ecosystem."
+description: "Use the SPEL CLI (logos-co/spel) with programs on LEZ's actor model. Use when: (1) generating an IDL from a program's core crate (`spel generate-idl`), (2) sending messages to actors (`spel send`: --root, --actor, --signer, access lists, dry runs), (3) reading or decoding actor state (`spel inspect ACCOUNT@PROGRAM`), (4) deploying a program (`spel deploy`) or computing PDAs, (5) writing spel.toml, scripting spel against a sequencer, or interpreting its exit codes, or (6) any mention of spel, spel.toml, IDL v2, or spel-framework-core. Not for writing the program itself: actor programs are written against lee_core directly."
 ---
 
-# SPEL Framework
+# SPEL
 
-SPEL is a Rust framework for building on-chain programs that run on LEZ (the NSSA execution layer). It provides attribute macros (`#[lez_program]`, `#[instruction]`) that generate zkVM guest binaries, instruction dispatch, account validation, IDL, and CLI tooling from annotated Rust modules.
+SPEL is the client toolchain for programs on LEZ's actor model. An actor is an
+(account, program) pair; a program's handler receives one message for one actor. SPEL:
 
-Programs compile to RISC Zero zkVM guests. The framework auto-generates an `Instruction` enum, `main()` dispatch, validation functions, and a full IDL (JSON). The `spel` CLI reads the IDL at runtime to provide a complete CLI for any program — with a `spel.toml` in the project root, flags are optional and instructions can be invoked as bare subcommands (`spel initialize --owner …`).
+- generates an **IDL v2** (messages, state, events, types) from a program's **core crate**, with
+  no annotations in the program;
+- **sends** one message to an actor, declaring the actors the transaction may touch and the
+  accounts that sign, and reports what changed;
+- **reads** an actor's state and decodes it through the IDL;
+- **deploys** programs through LEZ's program loader.
+
+The old `#[lez_program]` guest framework, `spel init`, instruction calls and `sign`/`submit`
+are retired. Private sends and client generation (`spel-client-gen`) are not ported yet.
 
 ## References
 
-Read these files as needed:
+- **[references/quickstart.md](references/quickstart.md)** — generate, deploy, send, inspect, end to end. Read when setting up a program or recalling the sequence.
+- **[references/cli-ref.md](references/cli-ref.md)** — every command, flag, value format and exit code. Read when constructing commands.
+- **[references/gotchas.md](references/gotchas.md)** — access lists, signers, refusals, addresses vs ImageIDs. Read before scripting or debugging.
 
-- **[references/quickstart.md](references/quickstart.md)** — Full scaffold-to-deploy workflow with real commands. Read when building a new program or recalling the build/deploy/call sequence.
-- **[references/gotchas.md](references/gotchas.md)** — Hard-won lessons and common mistakes. Read before writing or debugging any SPEL program.
-- **[references/cli-ref.md](references/cli-ref.md)** — CLI cheatsheet for `spel` and `spel-client-gen`. Read when constructing CLI commands or checking flag names.
-- **[references/extensions.md](references/extensions.md)** — Extension libraries: activating one, declaring one, and the four authoring requirements. Read when a program uses an extension or you are writing one.
+## Core workflow
 
-## Core Workflow
+1. **IDL:** `spel generate-idl <core-crate> --message Message --state <StateType> --events event > <name>-idl.json`
+2. **Deploy:** `ADDR=$(spel deploy <guest>.bin --fee-payer <funded-account>)`; the address is the program's id from then on.
+3. **Name it:** `spel.toml` with `[programs.<name>] address = "$ADDR"`, `idl = "<name>-idl.json"`; wallet labels for accounts.
+4. **Send:** `spel --program <name> send --root <account> --signer <account> -- <message> --<field> <value>`
+5. **Read:** `spel inspect <account>@<name>`
 
-1. **Scaffold** — `spel init <name>` creates workspace with guest binary, core crate, IDL generator, CLI wrapper, and Makefile.
-2. **Define state** — Put shared types in `{name}_core/src/lib.rs` (must derive `Serialize`, `Deserialize`).
-3. **Write instructions** — In `methods/guest/src/bin/{name}.rs`, use `#[lez_program]` + `#[instruction]` with account constraints (`signer`, `init`, `mut`, `pda`, `owner`).
-4. **Build** — `make build` compiles the RISC Zero zkVM guest binary.
-5. **Generate IDL** — `make idl` runs `generate_idl!` macro to emit `{name}-idl.json`.
-6. **Deploy** — `make setup && make deploy` creates signer account and deploys binary.
-7. **Call instructions** — with `spel.toml` (scaffolded by default): `spel <instruction> --<arg> <value>`. Without: `spel [OPTIONS] -- <instruction> --<arg> <value>` (the `--` separates global flags from instruction flags). `--dry-run[=text|json]` previews the full resolved transaction without submitting.
-8. **Generate client code** — `spel-client-gen --idl <file> --out-dir <dir>` for Rust client + C FFI + C header.
+## Critical rules
 
-## Key Instruction Patterns
-
-### Account constraints
-
-```rust
-#[account(signer)]              // must sign transaction
-#[account(init)]                // new account, must be default — implies mut
-#[account(mut)]                 // writable
-#[account(pda = literal("x"))] // PDA from constant seed
-#[account(pda = account("u"))] // PDA from another account's ID
-#[account(pda = arg("key"))]   // PDA from instruction argument
-#[account(pda = [literal("vault"), account("user")])]  // multi-seed PDA
-#[account(owner = PROGRAM_ID)] // ownership check
-```
-
-### Return values
-
-```rust
-// Idiomatic: let the macro derive claims from #[account(…)] attributes.
-// Accounts passed to execute() must be AccountWithMetadata idents; mutate
-// `account.account.data` first if the handler writes state.
-Ok(SpelOutput::execute(vec![state, owner], vec![]))
-
-// With chained cross-program calls:
-Ok(SpelOutput::execute(vec![state, owner], vec![chained_call]))
-
-// Legacy API (deprecated, still compiles) — explicit AccountPostState values:
-// Ok(SpelOutput::states_only(vec![
-//     AccountPostState::new_claimed(state.account.clone(), Claim::Authorized),
-//     AccountPostState::new(owner.account.clone()),
-// ]))
-```
-
-### Variable-length accounts
-
-```rust
-#[account(signer)]
-members: Vec<AccountWithMetadata>  // variadic trailing accounts
-```
-
-### External instruction enum (for shared FFI types)
-
-```rust
-#[lez_program(instruction = "my_core::Instruction")]
-mod my_program { ... }
-```
-
-## Critical Rules
-
-1. **Never edit IDL JSON by hand** — always regenerate via `generate_idl!` / `make idl`.
-2. **PDA accounts are auto-computed** — never pass them as CLI arguments; the CLI derives them from seeds + program ID.
-3. **`init` implies `mut`** — do not add both; the macro emits an `AutoClaim::Claimed(Claim::Authorized)` (or `Claim::Pda(..)` for PDAs) automatically when you return `SpelOutput::execute(vec![account, …], vec![])`.
-4. **Account parameters must come before instruction arguments** in function signatures.
-5. **Return ALL accounts** in `post_states` — every account passed to the instruction must appear in the output (even unchanged ones).
-6. **Only the owning program can decrease an account's balance** — this is enforced by the runtime.
-7. **`generate_idl!` path is relative to `CARGO_MANIFEST_DIR`** — typically `"../methods/guest/src/bin/{name}.rs"`.
-8. **Instruction names**: `snake_case` in Rust, `kebab-case` in CLI, `PascalCase` in enum variants.
-9. **Program ID is the RISC Zero ImageID** — a `[u32; 8]` derived from the compiled guest binary.
-10. **State types need `Serialize` + `Deserialize`** (serde) for storage; instruction enum variants derive these automatically.
+- **The access list is explicit.** LEZ refuses a message to an undeclared actor. `send` declares
+  the root, each `--actor`, account-typed message fields (on the root's program) and signers.
+  Actors reached only through state need `--actor` (a token `burn` needs `--actor <definition>`);
+  actors on another program need `--actor ACCOUNT@PROGRAM`.
+- **Signers are never inferred.** One signature authorizes every actor of that account in the
+  transaction, under every program.
+- **Inclusion is not success.** A refused transaction is included with nothing changed. Check
+  `send`'s exit code: `0` changed, `2` included but nothing changed (refused), `1` error.
+- **A program is its address,** the header account `spel deploy` prints, not its ImageID
+  (`spel program-id`). Each deploy gets a new address; update `spel.toml`.
+- **Regenerate, never hand-edit, the IDL.** Message tags are variant positions; message enums
+  are append-only.
+- **Use a matching IDL.** `send`/`inspect` refuse an IDL whose `name` differs from the program's
+  `spel.toml` name; with a raw program id the IDL you pass is trusted.
+- `spel` needs `LEE_WALLET_HOME_DIR` (and `LEE_WALLET_PASSWORD` for an encrypted wallet).

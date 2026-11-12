@@ -1,14 +1,17 @@
-//! `spel pda` regression tests against the real binary: IDL-mode routing and
-//! the private-PDA `--identifier` flag.
+//! `spel pda` regression tests against the real binary: public PDAs from raw seeds.
 
-use nssa_core::account::AccountId;
-use nssa_core::encryption::ViewingPublicKey;
-use nssa_core::program::PdaSeed;
-use nssa_core::NullifierPublicKey;
+use lee_core::account::AccountId;
+use lee_core::program::PdaSeed;
+use sha2::{Digest, Sha256};
 use std::process::Command;
 
-fn spel(args: &[&str]) -> std::process::Output {
+const PROGRAM_ADDRESS_HEX: &str =
+    "abababababababababababababababababababababababababababababababab";
+
+fn spel_in_empty_dir(args: &[&str]) -> std::process::Output {
+    let dir = tempfile::tempdir().unwrap();
     Command::new(env!("CARGO_BIN_EXE_spel"))
+        .current_dir(dir.path())
         .args(args)
         .output()
         .expect("failed to run spel binary")
@@ -22,370 +25,47 @@ fn stderr_of(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
-/// One public PDA and one private PDA, both seeded by the constant "vault".
-fn write_fixture_idl(dir: &std::path::Path) -> std::path::PathBuf {
-    let idl = serde_json::json!({
-        "version": "0.1.0",
-        "name": "fixture",
-        "instructions": [{
-            "name": "init",
-            "accounts": [
-                { "name": "caller", "signer": true },
-                { "name": "public_vault", "init": true,
-                  "pda": { "seeds": [{ "kind": "const", "value": "vault" }] } },
-                { "name": "private_vault", "init": true,
-                  "pda": { "seeds": [{ "kind": "const", "value": "vault" }], "private": true } }
-            ],
-            "args": []
-        }]
-    });
-    let path = dir.join("fixture-idl.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&idl).unwrap()).unwrap();
-    path
-}
-
-const PROGRAM_ADDRESS_HEX: &str =
-    "abababababababababababababababababababababababababababababababab";
-const NPK_HEX: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
-
-/// The fixture program's account id as the CLI decodes it: 32 hex bytes.
-///
-/// A program is identified by its deployed header account since LEZ v0.2.5, so this
-/// is a plain 32-byte address rather than an image id packed into 8 u32 words.
-fn fixture_program_id() -> AccountId {
-    let bytes = hex::decode(PROGRAM_ADDRESS_HEX).expect("fixture program address is valid hex");
+fn program_id() -> AccountId {
+    let bytes = hex::decode(PROGRAM_ADDRESS_HEX).expect("valid hex");
     AccountId::new(bytes.try_into().expect("32 bytes"))
 }
 
-/// The IDL's const seed "vault", zero-padded to 32 bytes as the CLI does.
-fn vault_seed() -> [u8; 32] {
-    let mut seed = [0u8; 32];
-    seed[..b"vault".len()].copy_from_slice(b"vault");
-    seed
-}
-
-fn fixture_vpk() -> ViewingPublicKey {
-    ViewingPublicKey::from_seed(&[1u8; 32], &[2u8; 32])
-}
-
-fn expected_private_vault(identifier: u128) -> String {
-    let program_id = fixture_program_id();
-    let seed = vault_seed();
-    let npk_bytes: [u8; 32] = hex::decode(NPK_HEX)
-        .expect("fixture npk is valid hex")
-        .try_into()
-        .expect("fixture npk is 32 bytes");
-    let npk = NullifierPublicKey(npk_bytes);
-    AccountId::for_private_pda(
-        &program_id,
-        &PdaSeed::new(seed),
-        &npk,
-        &fixture_vpk(),
-        identifier,
-    )
-    .to_string()
-}
-
-fn private_pda_args<'a>(idl: &'a str, vpk_hex: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
-    let mut args = vec![
-        "--idl",
-        idl,
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "pda",
-        "private_vault",
-        "--npk",
-        NPK_HEX,
-        "--vpk",
-        vpk_hex,
-    ];
-    args.extend_from_slice(extra);
-    args
+/// A string seed, zero-padded to 32 bytes as the CLI does.
+fn padded(seed: &str) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes[..seed.len()].copy_from_slice(seed.as_bytes());
+    bytes
 }
 
 #[test]
-fn private_pda_without_identifier_derives_with_zero() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    let out = spel(&private_pda_args(idl.to_str().unwrap(), &vpk_hex, &[]));
+fn one_seed_is_used_as_is() {
+    let out = spel_in_empty_dir(&["--program", PROGRAM_ADDRESS_HEX, "pda", "vault"]);
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(stdout_of(&out), expected_private_vault(0));
+    let expected = AccountId::for_public_pda(&program_id(), &PdaSeed::new(padded("vault")));
+    assert_eq!(stdout_of(&out), expected.to_string());
 }
 
 #[test]
-fn private_pda_identifier_is_threaded_into_derivation() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    let out = spel(&private_pda_args(
-        idl.to_str().unwrap(),
-        &vpk_hex,
-        &["--identifier", "7"],
-    ));
+fn several_seeds_are_hashed_together() {
+    let user = "cd".repeat(32);
+    let out = spel_in_empty_dir(&["--program", PROGRAM_ADDRESS_HEX, "pda", "vault", &user]);
     assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(stdout_of(&out), expected_private_vault(7));
-    assert_ne!(stdout_of(&out), expected_private_vault(0));
+
+    let mut hasher = Sha256::new();
+    hasher.update(padded("vault"));
+    hasher.update([0xcdu8; 32]);
+    let combined: [u8; 32] = hasher.finalize().into();
+    let expected = AccountId::for_public_pda(&program_id(), &PdaSeed::new(combined));
+    assert_eq!(stdout_of(&out), expected.to_string());
 }
 
 #[test]
-fn private_pda_identifier_accepts_hex_and_u128_max() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    let out = spel(&private_pda_args(
-        idl.to_str().unwrap(),
-        &vpk_hex,
-        &["--identifier", "0xff"],
-    ));
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(stdout_of(&out), expected_private_vault(0xff));
-
-    let max = u128::MAX.to_string();
-    let out = spel(&private_pda_args(
-        idl.to_str().unwrap(),
-        &vpk_hex,
-        &["--identifier", &max],
-    ));
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(stdout_of(&out), expected_private_vault(u128::MAX));
-}
-
-#[test]
-fn private_pda_identifier_rejects_malformed_values() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    for bad in [
-        "-1",
-        "abc",
-        "1.5",
-        "340282366920938463463374607431768211456",
-    ] {
-        let out = spel(&private_pda_args(
-            idl.to_str().unwrap(),
-            &vpk_hex,
-            &["--identifier", bad],
-        ));
-        assert!(!out.status.success(), "'{bad}' must be rejected");
-        let err = stderr_of(&out);
-        assert!(
-            err.contains("Invalid --identifier") && err.contains(bad),
-            "stderr names the flag and the value for '{bad}': {err}"
-        );
-    }
-
-    // Flag given as the last token, no value.
-    let out = spel(&private_pda_args(
-        idl.to_str().unwrap(),
-        &vpk_hex,
-        &["--identifier"],
-    ));
+fn a_seed_longer_than_32_bytes_is_refused() {
+    let out = spel_in_empty_dir(&["--program", PROGRAM_ADDRESS_HEX, "pda", &"x".repeat(33)]);
     assert!(!out.status.success());
     assert!(
-        stderr_of(&out).contains("Missing value for --identifier"),
+        stderr_of(&out).contains("max 32"),
         "stderr: {}",
         stderr_of(&out)
-    );
-}
-
-#[test]
-fn public_pda_refuses_identifier() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-
-    let out = spel(&[
-        "--idl",
-        idl.to_str().unwrap(),
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "pda",
-        "public_vault",
-        "--identifier",
-        "7",
-    ]);
-    assert!(!out.status.success(), "public PDA must refuse --identifier");
-    let err = stderr_of(&out);
-    assert!(
-        err.contains("--identifier") && err.contains("public_vault"),
-        "stderr names the flag and the account: {err}"
-    );
-}
-
-fn expected_public_vault() -> String {
-    let program_id = fixture_program_id();
-    let seed = vault_seed();
-    AccountId::for_public_pda(&program_id, &PdaSeed::new(seed)).to_string()
-}
-
-// Half of #187 that stayed open: with `--idl` given, `--program <hex> pda <account>`
-// still routed into raw mode and hashed the account *name* as a seed, so the
-// documented `--idl ... --program <hex> pda vault` form derived the wrong address.
-#[test]
-fn idl_given_routes_pda_to_idl_mode_not_raw() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-
-    let out = spel(&[
-        "--idl",
-        idl.to_str().unwrap(),
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "pda",
-        "public_vault",
-    ]);
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(
-        stdout_of(&out),
-        expected_public_vault(),
-        "must derive from the IDL seed \"vault\", not from the raw token \"public_vault\""
-    );
-}
-
-// Raw mode is still reachable when no IDL is given.
-#[test]
-fn no_idl_keeps_raw_pda_mode() {
-    let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_spel"))
-        .current_dir(dir.path())
-        .args(["--program", PROGRAM_ADDRESS_HEX, "pda", "vault"])
-        .output()
-        .expect("failed to run spel binary");
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    assert_eq!(stdout_of(&out), expected_public_vault());
-}
-
-#[test]
-fn identifier_equals_form_is_named_in_the_error() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_fixture_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    let out = spel(&private_pda_args(
-        idl.to_str().unwrap(),
-        &vpk_hex,
-        &["--identifier=7"],
-    ));
-    assert!(!out.status.success());
-    let err = stderr_of(&out);
-    assert!(
-        err.contains("--key=value form is not supported") && err.contains("--identifier <value>"),
-        "stderr explains the form and the fix: {err}"
-    );
-}
-
-/// An instruction whose PDA is seeded by an arg literally named `identifier`.
-/// Before this flag existed, `--identifier` was that seed arg; it must stay so.
-fn write_identifier_seed_idl(dir: &std::path::Path) -> std::path::PathBuf {
-    let idl = serde_json::json!({
-        "version": "0.1.0",
-        "name": "fixture",
-        "instructions": [{
-            "name": "open",
-            "accounts": [
-                { "name": "slot", "init": true,
-                  "pda": { "seeds": [
-                      { "kind": "const", "value": "slot" },
-                      { "kind": "arg", "path": "identifier" }
-                  ] } },
-                { "name": "private_slot", "init": true,
-                  "pda": { "seeds": [
-                      { "kind": "const", "value": "slot" },
-                      { "kind": "arg", "path": "identifier" }
-                  ], "private": true } }
-            ],
-            "args": [{ "name": "identifier", "type": "u64" }]
-        }]
-    });
-    let path = dir.join("identifier-seed-idl.json");
-    std::fs::write(&path, serde_json::to_vec_pretty(&idl).unwrap()).unwrap();
-    path
-}
-
-fn expected_slot_seed(identifier_arg: u64) -> [u8; 32] {
-    // Mirrors the CLI: SHA-256(const_seed || arg_seed), u64 arg big-endian in the last 8 bytes.
-    use risc0_zkvm::sha::{Impl, Sha256};
-    let mut const_seed = [0u8; 32];
-    const_seed[..b"slot".len()].copy_from_slice(b"slot");
-    let mut arg_seed = [0u8; 32];
-    arg_seed[24..].copy_from_slice(&identifier_arg.to_be_bytes());
-    let mut input = Vec::with_capacity(64);
-    input.extend_from_slice(&const_seed);
-    input.extend_from_slice(&arg_seed);
-    Impl::hash_bytes(&input)
-        .as_bytes()
-        .try_into()
-        .expect("SHA-256 is 32 bytes")
-}
-
-#[test]
-fn seed_arg_named_identifier_keeps_its_meaning_on_public_pda() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_identifier_seed_idl(dir.path());
-
-    let out = spel(&[
-        "--idl",
-        idl.to_str().unwrap(),
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "pda",
-        "slot",
-        "--identifier",
-        "5",
-    ]);
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    let expected =
-        AccountId::for_public_pda(&fixture_program_id(), &PdaSeed::new(expected_slot_seed(5)))
-            .to_string();
-    assert_eq!(
-        stdout_of(&out),
-        expected,
-        "--identifier must be the seed arg here"
-    );
-}
-
-#[test]
-fn seed_arg_named_identifier_on_private_pda_uses_default_and_says_so() {
-    let dir = tempfile::tempdir().unwrap();
-    let idl = write_identifier_seed_idl(dir.path());
-    let vpk_hex = hex::encode(fixture_vpk().to_bytes());
-
-    let out = spel(&[
-        "--idl",
-        idl.to_str().unwrap(),
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "pda",
-        "private_slot",
-        "--npk",
-        NPK_HEX,
-        "--vpk",
-        &vpk_hex,
-        "--identifier",
-        "5",
-    ]);
-    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
-    let npk_bytes: [u8; 32] = hex::decode(NPK_HEX).unwrap().try_into().unwrap();
-    let expected = AccountId::for_private_pda(
-        &fixture_program_id(),
-        &PdaSeed::new(expected_slot_seed(5)),
-        &NullifierPublicKey(npk_bytes),
-        &fixture_vpk(),
-        0,
-    )
-    .to_string();
-    assert_eq!(
-        stdout_of(&out),
-        expected,
-        "seed arg consumed, private identifier 0"
-    );
-    let err = stderr_of(&out);
-    assert!(
-        err.contains("seed arg named 'identifier'") && err.contains("identifier 0"),
-        "stderr explains the shadowing: {err}"
     );
 }

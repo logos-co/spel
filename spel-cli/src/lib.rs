@@ -3,38 +3,30 @@
 //! Provides:
 //! - IDL parsing and type-aware argument handling
 //! - risc0-compatible serialization
-//! - Transaction building and submission
-//! - PDA computation from IDL seeds
+//! - PDA computation from raw seeds
 //! - Binary inspection (ProgramId extraction)
+//! - Program deployment
+//!
+//! `spel send` delivers a message to an actor; `encode` prints a message's bytes.
 //!
 //! Use `run()` for a complete CLI entry point, or import individual modules.
 
 pub mod account_inspect;
-pub mod blob;
 pub mod cli;
 pub mod config;
 pub mod deploy;
-pub mod exchange;
 pub mod generate_idl;
 pub mod hex;
-pub mod init;
 pub mod inspect;
 pub mod parse;
-pub mod pda;
+pub mod send;
 pub mod serialize;
-pub mod tx;
 
-use cli::{parse_instruction_args, print_help, snake_to_kebab};
+use cli::{encode_message, parse_message_args, print_help};
 use config::SpelConfig;
-use init::init_project;
 use inspect::inspect_binaries;
-use parse::ParsedValue;
-use pda::compute_pda_from_seeds;
-use spel_framework_core::idl::{IdlSeed, SpelIdl};
-use spel_framework_core::pda::DEFAULT_PRIVATE_PDA_IDENTIFIER;
-use std::collections::HashMap;
+use spel_framework_core::idl::SpelIdl;
 use std::{env, fs, process};
-use tx::execute_instruction;
 
 /// Run the generic IDL-driven CLI. Call this from your program's main():
 ///
@@ -49,24 +41,17 @@ pub async fn run() {
 
     let mut idl_path = String::new();
     let mut program_ref: Option<String> = None; // raw --program value
-    let mut dry_run: Option<tx::DryRunFormat> = None;
     let mut type_name: Option<String> = None;
     let mut data_hex: Option<String> = None;
     let mut inspect_format: Option<String> = None;
-    let mut extra_bins: HashMap<String, String> = HashMap::new();
-    let mut co_signers: Vec<String> = Vec::new();
     let mut fee_payer: Option<String> = None;
-    let mut gas_limit: Option<u64> = None;
-    let mut export_path: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
-    let mut used_separator = false;
     let mut i = 1;
 
     while i < args.len() {
         match args[i].as_str() {
             "--" => {
                 // Everything after `--` is passed through as instruction args
-                used_separator = true;
                 remaining_args.extend_from_slice(&args[i + 1..]);
                 break;
             },
@@ -101,22 +86,6 @@ pub async fn run() {
                     data_hex = Some(args[i].clone());
                 }
             },
-            "--dry-run" => {
-                dry_run = Some(tx::DryRunFormat::Text);
-            },
-            s if s.starts_with("--dry-run=") => {
-                dry_run = Some(match &s["--dry-run=".len()..] {
-                    "text" => tx::DryRunFormat::Text,
-                    "json" => tx::DryRunFormat::Json,
-                    other => {
-                        eprintln!(
-                            "❌ --dry-run=<fmt>: expected 'text' or 'json', got '{}'",
-                            other
-                        );
-                        process::exit(1);
-                    },
-                });
-            },
             "--format" => {
                 i += 1;
                 if i >= args.len() || args[i].starts_with('-') {
@@ -133,21 +102,6 @@ pub async fn run() {
                 }
                 inspect_format = Some(val.to_string());
             },
-            s if s.starts_with("--bin-") => {
-                let name = s.strip_prefix("--bin-").unwrap().to_string();
-                i += 1;
-                if i < args.len() {
-                    extra_bins.insert(format!("{}-program-id", name), args[i].clone());
-                }
-            },
-            "--co-signer" => {
-                i += 1;
-                if i >= args.len() || args[i].starts_with('-') {
-                    eprintln!("❌ --co-signer requires an account id");
-                    process::exit(1);
-                }
-                co_signers.push(args[i].clone());
-            },
             "--fee-payer" => {
                 i += 1;
                 if i >= args.len() || args[i].starts_with('-') {
@@ -156,50 +110,24 @@ pub async fn run() {
                 }
                 fee_payer = Some(args[i].clone());
             },
-            "--gas-limit" => {
-                i += 1;
-                if i >= args.len() || args[i].starts_with('-') {
-                    eprintln!("❌ --gas-limit requires a cycle count");
-                    process::exit(1);
-                }
-                gas_limit = Some(args[i].parse().unwrap_or_else(|_| {
-                    eprintln!("❌ --gas-limit '{}' is not a number", args[i]);
-                    process::exit(1);
-                }));
-            },
-            "--export" => {
-                i += 1;
-                if i >= args.len() || args[i].starts_with('-') {
-                    eprintln!("❌ --export requires a file path");
-                    process::exit(1);
-                }
-                if export_path.is_some() {
-                    eprintln!("❌ --export given twice");
-                    process::exit(1);
-                }
-                export_path = Some(args[i].clone());
-            },
             _ => remaining_args.push(args[i].clone()),
         }
         i += 1;
     }
 
-    if export_path.is_some() && dry_run.is_some() {
-        eprintln!("❌ --export and --dry-run cannot be combined");
-        process::exit(1);
-    }
+    // An --idl given on the command line wins over spel.toml.
+    let idl_explicit = !idl_path.is_empty();
 
     // Load spel.toml config
     let config = env::current_dir()
         .ok()
         .and_then(|cwd| SpelConfig::discover(&cwd));
-    let has_config = config.is_some();
 
     // Resolve --program value: config name → program account address.
     //
     // Since LEZ v0.2.5 a program is identified by its deployed header account, which
     // cannot be derived from the binary — so a path is no longer a way to name one.
-    // The binary is still resolved alongside, for the privacy-preserving path.
+    // The binary is still resolved alongside, as `spel deploy`'s default.
     let mut program_path: Option<String> = None;
     let mut program_address: Option<String> = None;
 
@@ -266,200 +194,54 @@ pub async fn run() {
     // Handle commands that don't need an IDL
     if let Some(cmd) = remaining_args.get(1).map(|s| s.as_str()) {
         match cmd {
-            "init" => {
-                // Check for help flag
-                if remaining_args.get(2) == Some(&"-h".to_string())
-                    || remaining_args.get(2) == Some(&"--help".to_string())
-                {
-                    println!("Usage: spel init [OPTIONS] <project-name>");
-                    println!();
-                    println!("Create a new SPEL project");
-                    println!();
-                    println!("Options:");
-                    println!(
-                        "  --lez-tag <TAG>     LEZ version tag (default: {})",
-                        init::DEFAULT_LEZ_TAG
-                    );
-                    println!(
-                        "  --spel-rev <REV>    SPEL revision (default: branch {})",
-                        init::DEFAULT_SPEL_BRANCH
-                    );
-                    println!("  --lez-rev <REV>     LEZ revision (alternative to --lez-tag)");
-                    println!("  --spel-tag <TAG>    SPEL tag (alternative to --spel-rev)");
-                    println!(
-                        "  --spel-git <URL>    SPEL git URL (default: https://github.com/logos-co/spel.git)"
-                    );
-                    println!();
-                    println!("Examples:");
-                    println!("  spel init my-project");
-                    println!(
-                        "  spel init --spel-tag v{} my-project",
-                        env!("CARGO_PKG_VERSION")
-                    );
-                    return;
-                }
-                let mut lez_tag: Option<String> = None;
-                let mut spel_tag: Option<String> = None;
-                let mut lez_rev: Option<String> = None;
-                let mut spel_rev: Option<String> = None;
-                let mut spel_git: Option<String> = None;
-                let mut name_arg_idx = 2;
-
-                while name_arg_idx < remaining_args.len() {
-                    let arg = &remaining_args[name_arg_idx];
-                    if arg == "--lez-tag" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            lez_tag = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-tag" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_tag = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--lez-rev" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            lez_rev = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-rev" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_rev = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-git" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_git = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else {
-                        break;
-                    }
-                    name_arg_idx += 1;
-                }
-
-                let name = remaining_args.get(name_arg_idx).unwrap_or_else(|| {
-                    eprintln!("Usage: {} init [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>] [--spel-git <url>] <project-name>", args[0]);
-                    process::exit(1);
-                });
-                init_project(
-                    name,
-                    lez_tag.as_deref(),
-                    spel_tag.as_deref(),
-                    lez_rev.as_deref(),
-                    spel_rev.as_deref(),
-                    spel_git.as_deref(),
-                );
-                return;
-            },
             "program-id" => {
                 inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
                 return;
             },
             "inspect" => {
-                if idl_path.is_empty() {
-                    eprintln!("Account inspection requires --idl <IDL_FILE>");
-                    process::exit(1);
-                }
-                if type_name.is_none() {
-                    eprintln!("Account inspection requires --type <TypeName>");
-                    process::exit(1);
-                }
-                let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]", args[0]);
+                let target = remaining_args.get(2).unwrap_or_else(|| {
+                    eprintln!("{}", account_inspect::USAGE);
                     process::exit(1);
                 });
-                let idl_content = match fs::read_to_string(&idl_path) {
-                    Ok(c) => c,
-                    Err(e) => {
-                        eprintln!("Error reading IDL '{}': {}", idl_path, e);
-                        process::exit(1);
-                    },
-                };
-                let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
-                    eprintln!("Error parsing IDL: {}", e);
-                    process::exit(1);
-                });
-                account_inspect::inspect_account(
-                    account_id,
-                    &idl,
-                    type_name.as_ref().unwrap(),
-                    data_hex.as_deref(),
-                )
+                // `ACCOUNT@NAME` with a spel.toml program brings that program's IDL.
+                let named_idl = send::split_actor(target)
+                    .1
+                    .filter(|_| !idl_explicit)
+                    .and_then(|name| {
+                        let (path, cfg) = config.as_ref()?;
+                        let idl = cfg.programs.as_ref()?.get(name)?.idl.as_ref()?;
+                        Some(path.parent()?.join(idl).to_string_lossy().to_string())
+                    });
+                let idl_path = named_idl.unwrap_or(idl_path);
+                let idl = (!idl_path.is_empty()).then(|| load_idl(&idl_path));
+                account_inspect::inspect_command(account_inspect::InspectArgs {
+                    target,
+                    idl: idl.as_ref(),
+                    type_name: type_name.as_deref(),
+                    data_hex: data_hex.as_deref(),
+                    default_program: program_address.as_deref(),
+                    programs: config_programs(config.as_ref().map(|(_, cfg)| cfg)),
+                })
                 .await;
                 return;
             },
             "generate-idl" => {
-                use generate_idl::{discover_sources, find_path_dep_dirs};
-                use spel_framework_core::idl_gen::generate_idl_from_file_with_deps;
-
-                let arg = remaining_args.get(2).map(|s| s.as_str());
-                let sources = discover_sources(arg).unwrap_or_else(|e| {
-                    eprintln!("Error: {}", e);
+                let options = generate_idl::parse_args(&remaining_args[2..]).unwrap_or_else(|e| {
+                    eprintln!("❌ {e}");
+                    eprintln!("{}", generate_idl::USAGE);
                     process::exit(1);
                 });
-
-                if sources.len() == 1 {
-                    let dep_result = find_path_dep_dirs(&sources[0]);
-                    for w in &dep_result.warnings {
-                        eprintln!("{}", w);
-                    }
-                    match generate_idl_from_file_with_deps(
-                        &sources[0],
-                        &dep_result.dirs,
-                        &mut |w| eprintln!("{w}"),
-                    ) {
-                        Ok(idl) => println!("{}", serde_json::to_string_pretty(&idl).unwrap()),
-                        Err(e) => {
-                            eprintln!("Error: {}", e);
-                            process::exit(1);
-                        },
-                    }
-                } else {
-                    // Multiple programs: write <name>-idl.json for each
-                    let mut had_error = false;
-                    for source in &sources {
-                        let dep_result = find_path_dep_dirs(source);
-                        for w in &dep_result.warnings {
-                            eprintln!("{}", w);
-                        }
-                        match generate_idl_from_file_with_deps(source, &dep_result.dirs, &mut |w| {
-                            eprintln!("{w}")
-                        }) {
-                            Ok(idl) => {
-                                let out_name = format!("{}-idl.json", idl.name);
-                                match fs::write(
-                                    &out_name,
-                                    serde_json::to_string_pretty(&idl).unwrap(),
-                                ) {
-                                    Ok(_) => eprintln!("✅ {}", out_name),
-                                    Err(e) => {
-                                        eprintln!("Error writing {}: {}", out_name, e);
-                                        had_error = true;
-                                    },
-                                }
-                            },
-                            Err(e) => {
-                                eprintln!("Error processing {}: {}", source.display(), e);
-                                had_error = true;
-                            },
-                        }
-                    }
-                    if had_error {
+                match spel_framework_core::idl_gen::generate_idl(&options, |w| eprintln!("⚠️  {w}"))
+                {
+                    Ok(idl) => println!("{}", idl.to_json_pretty().unwrap()),
+                    Err(e) => {
+                        eprintln!("❌ {e}");
                         process::exit(1);
-                    }
+                    },
                 }
                 return;
             },
-            "pda"
-                if idl_path.is_empty()
-                    && program_address.is_some()
-                    && remaining_args.get(2).is_some_and(|s| !s.starts_with("--")) =>
-            {
-                // Raw PDA mode: no IDL given, --program resolves to a program account.
-                // With --idl present, `pda <account-name>` is the IDL-defined derivation
-                // below (the documented `--idl ... --program <hex> pda vault` form), so
-                // raw mode must not shadow it.
+            "pda" if program_address.is_some() => {
                 // Usage: <bin> --program <address> pda <seed1> [seed2] ...
                 let mut raw_args =
                     vec!["--program-id".to_string(), program_address.clone().unwrap()];
@@ -513,22 +295,6 @@ pub async fn run() {
                 .await;
                 return;
             },
-            "sign" => {
-                let path = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} sign <blob-file>", args[0]);
-                    process::exit(1);
-                });
-                exchange::sign_command(path).await;
-                return;
-            },
-            "submit" => {
-                let path = remaining_args.get(2).unwrap_or_else(|| {
-                    eprintln!("Usage: {} submit <blob-file>", args[0]);
-                    process::exit(1);
-                });
-                exchange::submit_command(path).await;
-                return;
-            },
             _ => {},
         }
     }
@@ -541,32 +307,22 @@ pub async fn run() {
         );
         eprintln!();
         eprintln!("Commands that don't need --idl:");
-        eprintln!("  init <name>              Scaffold a new SPEL project");
         eprintln!("  deploy [BINARY] --fee-payer <ADDRESS>  Deploy a program, print its address");
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"
         );
-        eprintln!("  inspect <ACCOUNT-ID> --idl <IDL> --type <TYPE>   Decode account data");
-        eprintln!("  generate-idl [PATH]      Generate IDL JSON from a program source file or project directory");
+        eprintln!("  inspect <ACCOUNT>[@<PROGRAM>] [--idl <IDL>] [--type <TYPE>] [--data <HEX>]");
+        eprintln!("                           Read and decode an actor's state");
+        eprintln!(
+            "  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]"
+        );
         eprintln!();
-        eprintln!("  pda <ACCOUNT> [--seed-arg VALUE...]  Compute a PDA defined in the IDL");
-        eprintln!("      [--npk HEX --vpk HEX [--identifier U128]]  (private PDAs; identifier defaults to 0)");
-        eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute arbitrary PDA (no IDL needed)");
-        eprintln!("For all other commands, provide an IDL file via --idl or spel.toml.");
+        eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
+        eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");
         process::exit(1);
     }
 
-    let idl_content = match fs::read_to_string(&idl_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("Error reading IDL '{}': {}", idl_path, e);
-            process::exit(1);
-        },
-    };
-    let idl: SpelIdl = serde_json::from_str(&idl_content).unwrap_or_else(|e| {
-        eprintln!("Error parsing IDL: {}", e);
-        process::exit(1);
-    });
+    let idl = load_idl(&idl_path);
 
     let subcmd = remaining_args.get(1).map(|s| s.as_str());
     let binary_name = std::path::Path::new(&args[0])
@@ -579,393 +335,92 @@ pub async fn run() {
             print_help(&idl, &binary_name);
         },
         Some("idl") => {
-            println!("{}", serde_json::to_string_pretty(&idl).unwrap());
+            println!("{}", idl.to_json_pretty().unwrap());
         },
         Some("program-id") => {
             inspect_binaries(&remaining_args[2..], inspect_format.as_deref());
         },
-        Some("inspect") => {
-            let account_id = remaining_args.get(2).unwrap_or_else(|| {
-                eprintln!(
-                    "Usage: {} inspect <account-id> --idl <IDL> --type <TypeName> [--data <hex>]",
-                    args[0]
-                );
-                process::exit(1);
-            });
-            account_inspect::inspect_account(
-                account_id,
+        Some("send") => {
+            let programs = config_programs(config.as_ref().map(|(_, cfg)| cfg));
+            send::send_command(
+                &remaining_args[2..],
                 &idl,
-                type_name.as_ref().unwrap(),
-                data_hex.as_deref(),
+                program_address.as_deref(),
+                fee_payer.as_deref(),
+                programs,
             )
             .await;
         },
+        Some("encode") => {
+            let name = remaining_args.get(2).unwrap_or_else(|| {
+                eprintln!("Usage: {} encode <MESSAGE> [--field value ...]", args[0]);
+                process::exit(1);
+            });
+            let message = idl.message(name).unwrap_or_else(|| {
+                eprintln!("❌ No message '{}' in the IDL", name);
+                print_help(&idl, &binary_name);
+                process::exit(1);
+            });
+            let values = parse_message_args(&remaining_args[3..], message);
+            match encode_message(&idl, message, &values) {
+                Ok(bytes) => println!("{}", hex::hex_encode(&bytes)),
+                Err(e) => {
+                    eprintln!("❌ {e}");
+                    process::exit(1);
+                },
+            }
+        },
         Some("pda") => {
-            compute_pda_command(
-                &idl,
-                program_path.as_deref(),
-                program_address.as_deref(),
-                &remaining_args[2..],
-            );
+            eprintln!("❌ spel pda derives from raw seeds and needs the program's address:");
+            eprintln!("   spel --program <address> pda <seed1> [seed2] ...");
+            process::exit(1);
         },
-        Some(cmd) => {
-            let instruction = idl
-                .instructions
-                .iter()
-                .find(|ix| snake_to_kebab(&ix.name) == cmd || ix.name == cmd);
-
-            match instruction {
-                Some(ix) => {
-                    if !used_separator && !has_config {
-                        eprintln!("⚠️  Deprecation: mixing CLI and instruction args without '--' separator.");
-                        eprintln!("    Consider adding a spel.toml to your project, or use:");
-                        eprintln!("      spel --idl <FILE> -- <command> --arg1 value1");
-                        eprintln!();
-                    }
-                    let cli_args = parse_instruction_args(&remaining_args[2..], ix);
-                    execute_instruction(
-                        &idl,
-                        ix,
-                        &cli_args,
-                        program_path.as_deref(),
-                        program_address.as_deref(),
-                        dry_run,
-                        &extra_bins,
-                        &co_signers,
-                        fee_payer.as_deref(),
-                        gas_limit,
-                        export_path.as_deref(),
-                    )
-                    .await;
-                },
-                None => {
-                    eprintln!("Unknown command: {}", cmd);
-                    print_help(&idl, &binary_name);
-                    process::exit(1);
-                },
-            }
+        Some(cmd) => match idl.message(cmd) {
+            Some(message) => {
+                parse_message_args(&remaining_args[2..], message);
+                eprintln!("❌ Messages are sent with `spel send`:");
+                eprintln!("   {}", send::USAGE);
+                process::exit(1);
+            },
+            None => {
+                eprintln!("Unknown command: {}", cmd);
+                print_help(&idl, &binary_name);
+                process::exit(1);
+            },
         },
     }
 }
 
-/// Compute and print a PDA from the IDL definition.
-///
-/// Usage: <binary> --idl <IDL> pda <account-name> [--<seed-arg> <value> ...]
-///        [--npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]]
-///
-/// Looks up the named account across all instructions, finds its PDA seeds,
-/// resolves them using provided args, and prints the base58 AccountId.
-/// Private PDAs additionally take the controller's `--npk` and `--vpk`, plus an
-/// optional `--identifier` (decimal or `0x`-hex `u128`, default 0).
-fn compute_pda_command(
-    idl: &SpelIdl,
-    _program_path: Option<&str>,
-    program_address: Option<&str>,
-    args: &[String],
-) {
-    let account_name = match args.first() {
-        Some(n) => n.as_str(),
-        None => {
-            eprintln!("Usage: pda <account-name> [--<seed-arg> <value> ...]");
-            eprintln!("       [--npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]]");
-            eprintln!();
-            eprintln!("Available PDA accounts:");
-            for ix in &idl.instructions {
-                for acc in &ix.accounts {
-                    if acc.pda.is_some() {
-                        eprintln!("  {} (in instruction: {})", acc.name, ix.name);
-                    }
-                }
-            }
-            process::exit(1);
-        },
+/// `[programs.<name>] address = …` entries of spel.toml, for `NAME` in `ACCOUNT@NAME`.
+fn config_programs(config: Option<&SpelConfig>) -> Vec<(String, lee::AccountId)> {
+    let Some(programs) = config.and_then(|cfg| cfg.programs.as_ref()) else {
+        return Vec::new();
     };
-
-    // Find account definition with PDA seeds and its owning instruction
-    let found = idl.instructions.iter().find_map(|ix| {
-        ix.accounts
-            .iter()
-            .find(|acc| acc.name == account_name || snake_to_kebab(&acc.name) == account_name)
-            .and_then(|acc| acc.pda.as_ref().map(|pda| (ix, pda)))
-    });
-
-    let (owning_ix, pda_def) = match found {
-        Some(pair) => pair,
-        None => {
-            eprintln!("❌ No PDA account named '{}' found in IDL", account_name);
-            if program_address.is_some() {
-                eprintln!("   To derive from raw seeds instead of the IDL, omit --idl.");
-            }
-            eprintln!("   Available PDAs:");
-            for ix in &idl.instructions {
-                for acc in &ix.accounts {
-                    if acc.pda.is_some() {
-                        eprintln!("     {} ({})", acc.name, ix.name);
-                    }
-                }
-            }
-            process::exit(1);
-        },
-    };
-
-    // Build a map from arg name to IDL type using the owning instruction's args
-    let arg_types: HashMap<&str, &spel_framework_core::idl::IdlType> = owning_ix
-        .args
+    programs
         .iter()
-        .map(|a| (a.name.as_str(), &a.type_))
-        .collect();
-
-    // Parse --key value pairs from remaining args, using IDL types when available.
-    // --npk and --vpk are reserved for private PDA derivation and not treated as
-    // seed args. --identifier is reserved the same way unless the owning instruction
-    // declares an arg by that name, in which case it stays the seed arg it was before
-    // the flag existed and the private identifier falls back to the default.
-    let identifier_is_seed_arg = arg_types.contains_key("identifier");
-    let mut seed_args: HashMap<String, ParsedValue> = HashMap::new();
-    let mut npk_hex: Option<String> = None;
-    let mut vpk_hex: Option<String> = None;
-    let mut identifier_raw: Option<String> = None;
-    let mut i = 1;
-    while i < args.len() {
-        if let Some(key) = args[i].strip_prefix("--") {
-            if key.contains('=') {
-                eprintln!(
-                    "❌ --{}: the --key=value form is not supported here, use --{} <value>",
-                    key,
-                    key.split('=').next().unwrap_or(key)
-                );
-                process::exit(1);
+        .filter_map(|(name, program)| {
+            let address = program.address.as_deref()?;
+            match hex::decode_bytes_32(address) {
+                Ok(bytes) => Some((name.clone(), lee::AccountId::new(bytes))),
+                Err(e) => {
+                    eprintln!("⚠️  spel.toml [programs.{name}] address '{address}': {e}");
+                    None
+                },
             }
-            if i + 1 < args.len() {
-                let raw = &args[i + 1];
-                if key == "npk" {
-                    npk_hex = Some(raw.clone());
-                    i += 2;
-                    continue;
-                }
-                if key == "vpk" {
-                    vpk_hex = Some(raw.clone());
-                    i += 2;
-                    continue;
-                }
-                if key == "identifier" && !identifier_is_seed_arg {
-                    identifier_raw = Some(raw.clone());
-                    i += 2;
-                    continue;
-                }
-                let arg_name = key.replace('-', "_");
-                let parsed = if let Some(ty) = arg_types.get(arg_name.as_str()) {
-                    parse::parse_value(raw, ty, &idl.types).unwrap_or_else(|e| {
-                        eprintln!(
-                            "⚠️  Failed to parse --{} as {}: {}",
-                            key,
-                            format!("{:?}", ty),
-                            e
-                        );
-                        ParsedValue::Str(raw.clone())
-                    })
-                } else {
-                    ParsedValue::Str(raw.clone())
-                };
-                seed_args.insert(arg_name, parsed);
-                i += 2;
-            } else {
-                eprintln!("❌ Missing value for --{}", key);
-                process::exit(1);
-            }
-        } else {
-            i += 1;
-        }
-    }
+        })
+        .collect()
+}
 
-    // A PDA is derived from the program's *account* id since LEZ v0.2.5, so the
-    // binary no longer answers this — only the deployed address does.
-    let program_account_id: nssa::AccountId = if let Some(value) = program_address {
-        let bytes = spel_framework_core::pda::parse_bytes32(value).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid program address '{}': {}", value, e);
-            process::exit(1);
-        });
-        nssa::AccountId::new(bytes)
-    } else {
-        eprintln!("❌ Program account address required to compute PDA.");
-        eprintln!("   Pass --program <name>       (from spel.toml, needs `address`)");
-        eprintln!("   Or   --program <address>    (base58 or 64-char hex)");
-        eprintln!();
-        eprintln!("   A program's address is chosen when it is deployed and is not");
-        eprintln!("   derivable from its binary, so a path cannot be used here.");
+/// Read and parse an IDL file, exiting with a message on failure.
+fn load_idl(path: &str) -> SpelIdl {
+    let content = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error reading IDL '{}': {}", path, e);
         process::exit(1);
-    };
-
-    let identifier = resolve_private_pda_identifier(
-        account_name,
-        pda_def.private,
-        identifier_is_seed_arg,
-        identifier_raw.as_deref(),
-    );
-
-    // For private PDAs, parse and require --npk and --vpk
-    use nssa_core::encryption::ViewingPublicKey;
-    use nssa_core::NullifierPublicKey;
-    let (npk, vpk): (Option<NullifierPublicKey>, Option<ViewingPublicKey>) = if pda_def.private {
-        let n = match npk_hex {
-            Some(ref hex) => {
-                use crate::hex::decode_bytes_32;
-                let bytes = decode_bytes_32(hex).unwrap_or_else(|e| {
-                    eprintln!("❌ Invalid --npk '{}': {}", hex, e);
-                    process::exit(1);
-                });
-                NullifierPublicKey(bytes)
-            },
-            None => {
-                exit_missing_private_pda_keys(account_name);
-            },
-        };
-        let v = match vpk_hex {
-            Some(ref hex) => {
-                let bytes = ::hex::decode(hex).unwrap_or_else(|e| {
-                    eprintln!("❌ Invalid --vpk hex: {}", e);
-                    process::exit(1);
-                });
-                ViewingPublicKey::from_bytes(bytes).unwrap_or_else(|e| {
-                    eprintln!(
-                        "❌ Invalid --vpk (expected {} bytes, ML-KEM-768 encapsulation key): {:?}",
-                        ViewingPublicKey::LEN,
-                        e
-                    );
-                    process::exit(1);
-                })
-            },
-            None => {
-                exit_missing_private_pda_keys(account_name);
-            },
-        };
-        (Some(n), Some(v))
-    } else {
-        (None, None)
-    };
-
-    // Build account_map: parse --<account-name> <base58-id> for IdlSeed::Account seeds.
-    let mut account_map: HashMap<String, nssa::AccountId> = HashMap::new();
-    for seed in &pda_def.seeds {
-        if let IdlSeed::Account { path } = seed {
-            let kebab_key = format!("--{}", path.replace('_', "-"));
-            let snake_key = format!("--{}", path);
-            let mut j = 1;
-            while j < args.len() {
-                if args[j] == kebab_key || args[j] == snake_key {
-                    if j + 1 < args.len() {
-                        let raw = &args[j + 1];
-                        match raw.parse::<nssa::AccountId>() {
-                            Ok(id) => {
-                                account_map.insert(path.clone(), id);
-                            },
-                            Err(_) => {
-                                eprintln!("❌ '{}' is not a valid base58 account ID", raw);
-                                process::exit(1);
-                            },
-                        }
-                    }
-                    break;
-                }
-                j += 1;
-            }
-        }
-    }
-
-    // Compute PDA
-    match compute_pda_from_seeds(
-        &pda_def.seeds,
-        &program_account_id,
-        &account_map,
-        &seed_args,
-        npk.as_ref(),
-        vpk.as_ref(),
-        identifier,
-    ) {
-        Ok(account_id) => {
-            println!("{}", account_id);
-        },
-        Err(e) => {
-            eprintln!("❌ Failed to compute PDA: {}", e);
-            eprintln!();
-            eprintln!("Seeds for '{}':", account_name);
-            for seed in &pda_def.seeds {
-                match seed {
-                    IdlSeed::Const { value } => eprintln!("  const: {:?}", value),
-                    IdlSeed::Arg { path } => eprintln!("  arg: --{}", path.replace('_', "-")),
-                    IdlSeed::Account { path } => eprintln!(
-                        "  account: --{} <base58-account-id>",
-                        path.replace('_', "-")
-                    ),
-                }
-            }
-            process::exit(1);
-        },
-    }
-}
-
-/// Parse a private-PDA `identifier` from the CLI: decimal digits, or `0x`-prefixed hex.
-///
-/// Exactly those two forms: no sign, no surrounding whitespace, no separators.
-fn parse_private_pda_identifier(raw: &str) -> Result<u128, String> {
-    const EXPECTED: &str = "expected a u128 as decimal digits or 0x-prefixed hex";
-    let (digits, radix) = match raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")) {
-        Some(hex) => (hex, 16),
-        None => (raw, 10),
-    };
-    if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
-        return Err(EXPECTED.to_string());
-    }
-    u128::from_str_radix(digits, radix).map_err(|e| format!("{e}; {EXPECTED}"))
-}
-
-/// Resolve the identifier `spel pda` derives a private PDA with.
-///
-/// Public PDAs refuse `--identifier` outright rather than silently ignoring a value
-/// the caller expected to matter. When the owning instruction has a seed arg named
-/// `identifier`, the flag is that seed arg and the private identifier cannot be set
-/// from the CLI, so the default is used and the caller is told so.
-fn resolve_private_pda_identifier(
-    account_name: &str,
-    is_private: bool,
-    identifier_is_seed_arg: bool,
-    raw: Option<&str>,
-) -> u128 {
-    if !is_private {
-        if raw.is_some() {
-            eprintln!(
-                "❌ '{}' is a public PDA — --identifier only applies to private PDAs",
-                account_name
-            );
-            process::exit(1);
-        }
-        return DEFAULT_PRIVATE_PDA_IDENTIFIER;
-    }
-    if identifier_is_seed_arg {
-        eprintln!(
-            "⚠️  '{}': the instruction declares a seed arg named 'identifier', so --identifier is that seed; deriving with private-PDA identifier {}",
-            account_name, DEFAULT_PRIVATE_PDA_IDENTIFIER
-        );
-        return DEFAULT_PRIVATE_PDA_IDENTIFIER;
-    }
-    match raw {
-        Some(raw) => parse_private_pda_identifier(raw).unwrap_or_else(|e| {
-            eprintln!("❌ Invalid --identifier '{}': {}", raw, e);
-            process::exit(1);
-        }),
-        None => DEFAULT_PRIVATE_PDA_IDENTIFIER,
-    }
-}
-
-/// Exit with the usage message for a private PDA missing `--npk` / `--vpk`.
-fn exit_missing_private_pda_keys(account_name: &str) -> ! {
-    eprintln!(
-        "❌ '{}' is a private PDA — pass --npk <64-char-hex> and --vpk <2368-char-hex>",
-        account_name
-    );
-    eprintln!("   The NullifierPublicKey is the recipient's npk from their wallet key.");
-    eprintln!("   Add --identifier <u128> if the program derives it with a non-zero identifier.");
-    process::exit(1);
+    });
+    SpelIdl::from_json(&content).unwrap_or_else(|e| {
+        eprintln!("❌ {e}");
+        process::exit(1);
+    })
 }
 
 /// Compute an arbitrary PDA from a program ID and raw seeds — no IDL required.
@@ -982,8 +437,8 @@ fn exit_missing_private_pda_keys(account_name: &str) -> ! {
 ///   multisig --program-id abc123... pda multisig_vault__ <create_key_hex>
 fn compute_pda_raw(args: &[String]) {
     use crate::hex::decode_bytes_32;
-    use nssa::AccountId;
-    use nssa_core::program::PdaSeed;
+    use lee::AccountId;
+    use lee_core::program::PdaSeed;
 
     // Parse --program-id (the program's deployed account, since LEZ v0.2.5)
     let pid_hex = match args.windows(2).find(|w| w[0] == "--program-id") {

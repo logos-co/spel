@@ -1,5 +1,10 @@
 # spel-client-gen
 
+> **Parked.** `spel-client-gen` generates clients from version 1 (instruction-based) IDLs
+> of the retired `#[lez_program]` framework. It is excluded from the workspace and doesn't
+> build against the current LEZ; it returns once it is ported to IDL v2 and actor programs.
+> This page describes the old behaviour.
+
 Generate typed Rust client code and C FFI wrappers from SPEL program IDL JSON.
 
 ## Overview
