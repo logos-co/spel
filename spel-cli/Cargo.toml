@@ -10,11 +10,13 @@ path = "src/bin/main.rs"
 
 [dependencies]
 spel-framework-core = { path = "../spel-framework-core", features = ["idl-gen"] }
-# LEZ actor model (v0.4.0), pinned to `moudy/lez-books` until a release is tagged.
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "616256b9c9efd2c28d4f7683b7b5d2348df7314e", features = ["host"] }
-lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "616256b9c9efd2c28d4f7683b7b5d2348df7314e" }
-wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "616256b9c9efd2c28d4f7683b7b5d2348df7314e" }
-program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "616256b9c9efd2c28d4f7683b7b5d2348df7314e" }
+# LEZ actor model (v0.4.0).
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["host"] }
+lee = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+wallet = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+program_loader_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+# `wallet::WalletCore` is generic over its client; this is the RPC one `wallet` itself uses.
+sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["client"] }
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }

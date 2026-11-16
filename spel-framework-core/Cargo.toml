@@ -13,7 +13,7 @@ decode = ["dep:base58"]
 idl-gen = ["dep:syn", "dep:proc-macro2", "dep:quote", "dep:toml"]
 
 [dependencies]
-lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", rev = "616256b9c9efd2c28d4f7683b7b5d2348df7314e", features = ["host"] }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["host"] }
 borsh = { version = "1.0", features = ["derive"] }
 thiserror = "1.0"
 serde = { version = "1.0", features = ["derive"] }

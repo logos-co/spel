@@ -136,7 +136,7 @@ fn check_idl_matches(idl: &SpelIdl, program: AccountId, names: &Names<'_>) {
 }
 
 /// Every program holding state on `account`, with the state as hex.
-async fn list_actor_states(wallet: &wallet::WalletCore, names: &Names<'_>, account: AccountId) {
+async fn list_actor_states(wallet: &crate::send::Wallet, names: &Names<'_>, account: AccountId) {
     let found = wallet
         .get_account_public(account)
         .await

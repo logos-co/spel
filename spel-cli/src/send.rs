@@ -25,6 +25,9 @@ use wallet::account::{AccountIdWithPrivacy, Label};
 use wallet::config::WalletConfigOverrides;
 use wallet::{AccountIdentity, AccountMention, WalletCore};
 
+/// The wallet over the sequencer's RPC client.
+pub type Wallet = WalletCore<sequencer_service_rpc::SequencerClient>;
+
 use crate::cli::{encode_message, field_flag, parse_message_args};
 use crate::deploy::StdoutToStderr;
 use crate::hex::{decode_bytes_32, hex_encode};
@@ -114,7 +117,7 @@ pub fn split_actor(raw: &str) -> (&str, Option<&str>) {
 /// Turns names into ids and back: base58 or hex ids, wallet labels for accounts, `spel.toml`
 /// names for programs.
 pub struct Names<'a> {
-    pub wallet: Option<&'a WalletCore>,
+    pub wallet: Option<&'a Wallet>,
     pub programs: Vec<(String, AccountId)>,
 }
 
@@ -448,7 +451,7 @@ fn dry_run_json(prepared: &Prepared) -> Value {
     })
 }
 
-pub(crate) fn open_wallet(gas_limit: Option<u64>) -> Result<WalletCore, String> {
+pub(crate) fn open_wallet(gas_limit: Option<u64>) -> Result<Wallet, String> {
     let overrides = gas_limit.map(|gas_limit| WalletConfigOverrides {
         gas_limit: Some(gas_limit),
         ..Default::default()
@@ -457,11 +460,11 @@ pub(crate) fn open_wallet(gas_limit: Option<u64>) -> Result<WalletCore, String> 
     let storage_path =
         wallet::utils::fetch_persistent_storage_path().map_err(|e| format!("{e:#}"))?;
     let password = wallet::utils::read_password(&storage_path).map_err(|e| format!("{e:#}"))?;
-    WalletCore::new_update_chain(config_path, storage_path, overrides, &password)
+    Wallet::new_update_chain(config_path, storage_path, overrides, &password)
         .map_err(|e| format!("{e:#}"))
 }
 
-async fn read_states(wallet: &WalletCore, list: &[Planned]) -> Result<Vec<Vec<u8>>, String> {
+async fn read_states(wallet: &Wallet, list: &[Planned]) -> Result<Vec<Vec<u8>>, String> {
     let mut states = Vec::with_capacity(list.len());
     for planned in list {
         let view = wallet
