@@ -9,9 +9,10 @@
 //! A `--signer` authorizes every actor of its account in the transaction; the guardrail
 //! printed before sending lists them.
 //!
-//! LEZ includes a refused transaction in a block without reporting an outcome, so `send`
-//! reads every declared actor before and after and reports what changed. Inclusion with no
-//! change exits with [`EXIT_NO_CHANGE`].
+//! The wallet simulates the transaction first and doesn't send one that would be refused, by the
+//! program or by LEZ's rules; `send` prints the reason and exits with [`EXIT_NO_CHANGE`]. Otherwise it reads every
+//! declared actor before and after inclusion and reports what changed. Inclusion with no change
+//! (a no-op, or a refusal the simulation didn't foresee) also exits with [`EXIT_NO_CHANGE`].
 
 use std::collections::{BTreeSet, HashMap};
 use std::process;
@@ -23,7 +24,7 @@ use spel_framework_core::decode::decode_state;
 use spel_framework_core::idl::{to_kebab, IdlMessage, IdlType, SpelIdl};
 use wallet::account::{AccountIdWithPrivacy, Label};
 use wallet::config::WalletConfigOverrides;
-use wallet::{AccountIdentity, AccountMention, WalletCore};
+use wallet::{AccountIdentity, AccountMention, ExecutionFailureKind, WalletCore};
 
 /// The wallet over the sequencer's RPC client.
 pub type Wallet = WalletCore<sequencer_service_rpc::SequencerClient>;
@@ -32,8 +33,8 @@ use crate::cli::{encode_message, field_flag, parse_message_args};
 use crate::deploy::StdoutToStderr;
 use crate::hex::{decode_bytes_32, hex_encode};
 
-/// Exit code when the transaction was included but no declared actor changed: LEZ's sign of a
-/// refused message (or a message that is a no-op by design).
+/// Exit code when nothing changed: the message was refused in simulation (so it wasn't sent), or
+/// it was included and changed no declared actor (a no-op, or a late refusal).
 pub const EXIT_NO_CHANGE: i32 = 2;
 
 pub const USAGE: &str =
@@ -492,8 +493,8 @@ fn render_state(bytes: &[u8], program: AccountId, idl_program: AccountId, idl: &
     format!("{} bytes", bytes.len())
 }
 
-/// Run `spel send`. Exits non-zero on any error, and with [`EXIT_NO_CHANGE`] when the
-/// transaction was included but changed no declared actor.
+/// Run `spel send`. Exits non-zero on any error, and with [`EXIT_NO_CHANGE`] when the message
+/// was refused in simulation or the included transaction changed no declared actor.
 pub async fn send_command(
     args: &[String],
     idl: &SpelIdl,
@@ -581,10 +582,19 @@ pub async fn send_command(
     let (hash, block) = {
         // The wallet prints on stdout; keep stdout for the transaction hash.
         let _quiet = StdoutToStderr::new();
-        let hash = wallet
+        let hash = match wallet
             .send_pub_tx_paid_by(mentions, 0, prepared.bytes.clone(), prepared.fee_payer)
             .await
-            .unwrap_or_else(|e| fail(format!("send refused by the wallet: {e:#}")));
+        {
+            Ok(hash) => hash,
+            // The wallet simulates first and won't send a transaction that would be refused
+            // (by the program or LEZ's rules), since it would still pay its fee.
+            Err(ExecutionFailureKind::SimulatedRevert(reason)) => {
+                eprintln!("⚠️  Refused in simulation, so not sent: {reason}");
+                process::exit(EXIT_NO_CHANGE);
+            },
+            Err(e) => fail(format!("send refused by the wallet: {e:#}")),
+        };
         eprintln!("Submitted {hash}, waiting for a block...");
         let (_, block) = wallet
             .poll_transaction(hash)
@@ -606,8 +616,8 @@ pub async fn send_command(
         .collect();
     if changed.is_empty() {
         eprintln!(
-            "⚠️  Included in block {block}, but no declared actor changed: the program probably \
-             refused the message (LEZ reports no outcome), or it is a no-op."
+            "⚠️  Included in block {block}, but no declared actor changed: a no-op, or the \
+             program refused it after the simulation passed."
         );
         process::exit(EXIT_NO_CHANGE);
     }

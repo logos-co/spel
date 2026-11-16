@@ -206,15 +206,16 @@ Wide integers are strings in the JSON so they survive any JSON reader.
 ```bash
 $ spel --program token send --root alice --signer alice -- transfer --to bob --amount 5000
 …
-⚠️  Included in block 362, but no declared actor changed: the program probably refused the message (LEZ reports no outcome), or it is a no-op.
+⚠️  Refused in simulation, so not sent: Failed to execute program: Guest panicked: insufficient balance
 $ echo $?
 2
 ```
 
-LEZ includes a refused transaction in a block and changes nothing, without reporting why. SPEL
-compares every declared actor before and after: exit `0` means something changed, `2` means
-nothing did, `1` means it wasn't sent or included. Scripts should check the exit code, not
-inclusion.
+The wallet simulates every transaction before sending it, and doesn't send one that would be
+refused: it would still pay its fee. SPEL prints the reason. A transaction that is included but
+changes nothing (a no-op, like a second `initialize-holding`) exits `2` as well. Exit `0` means
+something changed, `2` means nothing did, `1` means it wasn't sent or included. Scripts should
+check the exit code, not inclusion.
 
 ## 9. Actors the defaults miss
 
@@ -223,7 +224,8 @@ can't know to declare it:
 
 ```bash
 $ spel --program token send --root bob --signer bob -- burn --amount 20
-⚠️  Included in block 364, but no declared actor changed: …
+…
+⚠️  Refused in simulation, so not sent: Program violated execution rules: A delivery named Actor { account_id: 2hiv…, … }, which is neither a declared public actor nor private
 ```
 
 Declare it with `--actor`:

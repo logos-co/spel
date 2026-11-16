@@ -6,21 +6,24 @@ Lessons from using SPEL against LEZ's actor model. Read before scripting or debu
 
 ## Outcomes
 
-### Inclusion is not success
+### Check the exit code
 
-LEZ includes a refused transaction in a block, changes nothing, and reports no outcome or
-error. `spel send` compares every declared actor before and after: exit `2` ("included, but no
-declared actor changed") is how a refusal looks. Scripts must check the exit code; "included in
-block N" alone means nothing. Some messages are legitimate no-ops (a second
-`initialize-holding`), which also exit `2`.
+The wallet simulates every send. A transaction that would be refused, by the program or by
+LEZ's rules, isn't sent (it would still pay its fee): `spel send` prints `Refused in
+simulation, so not sent: <reason>` and exits `2`. A transaction that is sent and included but
+changes no declared actor also exits `2`: a legitimate no-op (a second `initialize-holding`),
+or a refusal the simulation didn't foresee because state changed before inclusion. Scripts must
+check the exit code; "included in block N" alone means nothing.
 
 ### Why was it refused?
 
-SPEL can't tell you; LEZ doesn't say. The usual causes, in order:
+The reason after `Refused in simulation` says. The usual causes:
 
-1. an actor the conversation reaches isn't declared (see below);
+1. an actor the conversation reaches isn't declared (`… neither a declared public actor nor
+   private`; see below);
 2. a needed signature is missing (`--signer`);
-3. the program's own checks (balance, authority, wrong state);
+3. the program's own checks (`Guest panicked: insufficient balance`, wrong authority, wrong
+   state);
 4. a message to a fresh account that neither signs nor is otherwise admitted.
 
 `--dry-run` shows exactly what was declared and who signs.

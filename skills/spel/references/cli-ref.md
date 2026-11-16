@@ -55,8 +55,9 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
-Exit codes: `0` included and changed; `2` included, nothing changed (refused or no-op); `1`
-error or not included. stdout: the transaction hash only.
+Exit codes: `0` included and changed; `2` nothing changed (refused in simulation and not
+sent, reason printed; or included as a no-op); `1` error or not included.
+stdout: the transaction hash only.
 
 ### inspect
 

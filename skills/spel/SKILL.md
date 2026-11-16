@@ -40,8 +40,8 @@ are retired. Private sends and client generation (`spel-client-gen`) are not por
   actors on another program need `--actor ACCOUNT@PROGRAM`.
 - **Signers are never inferred.** One signature authorizes every actor of that account in the
   transaction, under every program.
-- **Inclusion is not success.** A refused transaction is included with nothing changed. Check
-  `send`'s exit code: `0` changed, `2` included but nothing changed (refused), `1` error.
+- **Check the exit code.** `send`'s exit code: `0` changed, `2` nothing changed (refused in
+  simulation, so not sent, with the reason printed; or a no-op), `1` error.
 - **A program is its address,** the header account `spel deploy` prints, not its ImageID
   (`spel program-id`). Each deploy gets a new address; update `spel.toml`.
 - **Regenerate, never hand-edit, the IDL.** Message tags are variant positions; message enums

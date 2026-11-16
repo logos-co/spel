@@ -152,9 +152,11 @@ it the wallet picks a funded signer.
 
 ### Outcome and exit codes
 
-LEZ includes a refused transaction in a block with state unchanged and reports no outcome.
-`send` therefore reads every declared actor before and after the transaction and prints the
-ones that changed, decoded through the IDL where it describes their program:
+The wallet simulates the transaction before sending it. If it would be refused, by the program
+or by LEZ's rules (an undeclared actor, say), the wallet doesn't send it, since a refused
+transaction still pays its fee, and `send` prints the reason and exits `2`. Otherwise `send` reads every declared actor before and after the
+transaction and prints the ones that changed, decoded through the IDL where it describes their
+program:
 
 ```text
 Submitted af5b…, waiting for a block...
@@ -170,7 +172,7 @@ Included in block 356. Changed:
 | exit | meaning |
 | --- | --- |
 | `0` | included; at least one declared actor changed |
-| `2` | included; no declared actor changed. The program probably refused the message (or it is a no-op, like a second `initialize-holding`). |
+| `2` | nothing changed: refused in simulation (not sent; the reason is printed), or it was included and changed no declared actor (a no-op, like a second `initialize-holding`) |
 | `1` | not sent or not included: bad arguments, unknown message or field, unresolvable account or program, a signer without a key in the wallet, an IDL that doesn't match the root's program, a wallet error, or a timeout |
 
 stdout carries only the transaction hash; the guardrail, progress and diff go to stderr.
@@ -214,7 +216,7 @@ spel --program nft send --root art --signer art --signer alice -- new-definition
 if TX=$(spel --program token send --root alice --signer alice -- transfer --to bob --amount 1); then
   echo "changed state in $TX"
 elif [ $? -eq 2 ]; then
-  echo "included but refused: $TX"
+  echo "refused or a no-op: nothing changed"
 fi
 ```
 

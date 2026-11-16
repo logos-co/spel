@@ -89,14 +89,14 @@ spel inspect alice@token
 - **Signers:** never inferred. One signature authorizes *every* actor of that account in the
   transaction, under every program; SPEL prints, per signer, the actors it authorizes before
   sending.
-- **Outcome:** LEZ includes a refused transaction in a block without reporting an outcome, so
-  SPEL reads every declared actor before and after and prints what changed. It never says
-  "confirmed".
+- **Outcome:** the wallet simulates every send and doesn't send one that would be refused (it
+  would still pay its fee); SPEL prints the reason. Otherwise SPEL reads every
+  declared actor before and after inclusion and prints what changed. It never says "confirmed".
 
 | exit | meaning |
 | --- | --- |
 | `0` | included, and at least one declared actor changed |
-| `2` | included, but nothing changed: probably refused (or a no-op) |
+| `2` | nothing changed: refused in simulation (not sent, reason printed), or included as a no-op |
 | `1` | error: bad arguments, a signer whose key the wallet lacks, an IDL that doesn't match the program, not included |
 
 The transaction hash goes to stdout, everything else to stderr, so `TX=$(spel … send …)`

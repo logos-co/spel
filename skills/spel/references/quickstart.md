@@ -57,7 +57,8 @@ spel --program token send --root bob --signer bob --actor usdc -- burn --amount 
 ```
 
 Each `send` prints the access list and what each signature authorizes, then the actors that
-changed. Check the exit code: `0` changed, `2` refused, `1` error.
+changed. Check the exit code: `0` changed, `2` refused (with the reason) or a no-op,
+`1` error.
 
 ## 5. Read
 
