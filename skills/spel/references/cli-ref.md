@@ -17,9 +17,10 @@ spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]     # `--` keeps message fields apart 
 | `-t, --type <TYPE>` | `inspect`: decode as this type |
 | `-d, --data <HEX>` | `inspect`: decode offline |
 | `--format text\|hex\|json` | `program-id` output |
+| `--binary <FILE>` | the program's `.bin`: proves private calls, gives `pda --group` its ImageID |
 
-Accounts: base58, hex, `Public/<id>`, or a wallet label. Programs: an address or a spel.toml
-name. Actors: `ACCOUNT@PROGRAM`.
+Accounts: base58, hex, `Public/<id>`, `Private/<id>`, or a wallet label. Programs: an address,
+a spel.toml name, or `native` (an account's balance). Actors: `ACCOUNT@PROGRAM`.
 
 ## spel.toml
 
@@ -53,16 +54,28 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 | --- | --- |
 | `--root A[@P]` | receiving actor (required). Program: `@P`, else `--program`, else the spel.toml program named like the IDL |
 | `--actor A[@P]` | declare another actor (repeatable); replaces the field default for that account |
-| `--signer A` | sign (repeatable); the wallet must hold the key |
-| `--no-auto-actors` | no actors from message fields |
+| `--signer A` | sign with a public account (repeatable); the wallet must hold the key |
+| `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private |
+| `--no-auto-actors` | no actors from message fields (public) or from simulation (private) |
 | `--gas-limit N` | gas limit for this call |
 | `--dry-run[=json]` | print, don't send (works without a wallet on raw ids) |
 
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
+Private calls (a private actor, `--seal` or `--recover`): proved with the binary; private
+accounts authorize through the wallet's keys; actors reached by sync messages are inferred from
+simulation (`+ … reached in simulation`); an async credit's destination is not (declare
+`ACCOUNT@native`, or `--seal`/`--recover`).
+
+```bash
+spel --program payroll send --root seat -- open --treasury treasury --period-ms 60000
+spel --program payroll send --root seat --seal emp1 -- pay --employee emp1
+spel --program payroll send --root seat --actor seat@native -- withdraw --amount 500
+```
+
 Exit codes: `0` included and changed; `2` nothing changed (refused in simulation and not
-sent, reason printed; or included as a no-op); `1` error or not included.
+sent, reason printed; reverted; or included as a no-op); `1` error or not included.
 stdout: the transaction hash only.
 
 ### inspect
@@ -73,6 +86,8 @@ spel --program token inspect alice             # same
 spel inspect alice                             # every program with state on alice, hex
 spel --idl token.json inspect x --data <hex>   # offline
 spel inspect usdc@token --type TokenDefinition
+spel --program payroll inspect treasury           # a private account: synced, then decrypted
+spel inspect seat@native                         # {"balance": "…"}
 ```
 
 ### encode
@@ -103,6 +118,10 @@ marked trait means no events.
 ADDR=$(spel deploy target/guest/token.bin --fee-payer <funded> [--immutable])
 spel program-id target/guest/token.bin --format hex        # ImageID, not the address
 spel --program <ADDRESS> pda vault <64-hex-seed>           # public PDA from raw seeds
+spel -p <P> pda account:seat --owner seat --register --label treasury       # private PDA, owner's keys
+spel -p <P> --binary <BIN> pda 0x<seed> --group g1 --register --label vault # private PDA, a group's keys
+spel blind <BASE> <FACTOR> [--hex]                         # AccountId::blinded; factor may be le64:N
+spel transfer --from seat --to treasury --amount 1000      # native balance, public or private
 spel --idl token.json idl                                  # print the IDL
 spel --idl token.json                                      # help with the IDL's messages
 ```
@@ -117,7 +136,7 @@ spel --idl token.json                                      # help with the IDL's
 | `Option<T>` | value or `none` |
 | `[u8; N]` | hex (2N chars) or a string ≤ N bytes |
 | `Vec<u8\|u32\|u64\|u128\|bool>` | `1,2,3` |
-| `Vec<[u8; 32]>` | comma-separated ids |
+| `Vec<[u8; 32]>`, `Vec<account_id>` | comma-separated ids |
 | `Vec<string>` | repeat the flag |
 | struct | JSON object: `'{"standard":"Simple","uri":"ipfs://x","creators":"me"}'` |
 | enum | `Variant` or `{"Variant": {…}}` |

@@ -26,7 +26,8 @@ option.
 | --- | --- |
 | `-i, --idl <FILE>` | the IDL (v2). Overrides a `spel.toml` IDL. |
 | `-p, --program <NAME\|ADDRESS>` | a `spel.toml` program name (also loads its IDL), or a program address in base58 or hex |
-| `--fee-payer <ACCOUNT>` | the account that pays the fee (`send`, `deploy`) |
+| `--fee-payer <ACCOUNT>` | the account that pays the fee (`send`, `deploy`); for a private call, an owned private account |
+| `--binary <FILE>` | the program's binary (the R0BF `.bin`). Overrides a `spel.toml` `binary`. A private call is proved with it, and `pda --group` derives from its ImageID |
 | `-t, --type <TYPE>` | `inspect`: decode as this IDL type instead of the state type |
 | `-d, --data <HEX>` | `inspect`: decode these bytes offline instead of fetching |
 | `--format <text\|hex\|json>` | `program-id` output format |
@@ -38,12 +39,16 @@ Commands that touch the chain open LEZ's wallet from `LEE_WALLET_HOME_DIR`
 
 ### Accounts and programs
 
-- **Accounts** are base58 or hex ids (a `Public/` prefix is accepted), or **wallet labels**
-  (`wallet account new public --label alice`). Labels resolve in `--root`, `--actor`,
-  `--signer`, `--fee-payer`, `inspect`, and in account-typed message fields.
+- **Accounts** are base58 or hex ids, with an optional `Public/` or `Private/` prefix, or
+  **wallet labels** (`wallet account new public --label alice`). Labels resolve in `--root`,
+  `--actor`, `--signer`, `--fee-payer`, `inspect`, and in account-typed message fields.
+  An account is **private** when it has the `Private/` prefix, when its label names a private
+  account, or when it's a bare id the wallet witnesses as private. That makes `send` use a
+  [private call](#private-calls).
 - **Programs** are addressed by their header account (the address `spel deploy` prints), not
-  their ImageID. A `spel.toml` name works wherever a program is expected.
-- **Actors** are written `ACCOUNT@PROGRAM`: `alice@token`.
+  their ImageID. A `spel.toml` name works wherever a program is expected. `native` is the native
+  token program: an account's actor under it is its balance.
+- **Actors** are written `ACCOUNT@PROGRAM`: `alice@token`, `vault@native`.
 
 ---
 
@@ -109,8 +114,10 @@ spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MES
 | --- | --- |
 | `--root <ACCOUNT>[@<PROGRAM>]` | **required.** The actor that receives the message. |
 | `--actor <ACCOUNT>[@<PROGRAM>]` | declare one more actor (repeatable). `PROGRAM` defaults to the root's. |
-| `--signer <ACCOUNT>` | sign with this account (repeatable). The wallet must hold its key. |
-| `--no-auto-actors` | declare only the root, the `--actor`s and the signers |
+| `--signer <ACCOUNT>` | sign with this public account (repeatable). The wallet must hold its key. |
+| `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable). Makes the call private |
+| `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private |
+| `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
 | `--gas-limit <N>` | execution gas limit (a wallet config override for this call) |
 | `--dry-run`, `--dry-run=json` | print the transaction and send nothing |
 
@@ -168,6 +175,71 @@ A signer whose key the wallet doesn't hold is refused before anything is sent.
 `--fee-payer` names the paying account; it may be outside the access list (it co-signs). Without
 it the wallet picks a funded signer.
 
+### Private calls
+
+A call is sent as a **privacy-preserving transaction** when an actor's account is private, or
+when it has a `--seal` or `--recover` credit. The wallet runs the call locally, against the
+decrypted states it holds, and proves it with the program's binary (`--binary`, or the
+`spel.toml` program's `binary`). Only the proof, nullifiers, encrypted notes and whatever
+crosses into public execution are published.
+
+**Private accounts take part through the wallet's keys**, not signatures:
+- an account of the wallet's own key tree;
+- a private PDA keyed by one of them, or by a wallet group's secret, which must be registered
+  first with [`pda --register`](#pda).
+
+A private account authorizes by being witnessed, so `--signer` names only public accounts. A
+public actor in a private call is declared as in a public one.
+
+**The access list is inferred from simulation**, not from the message's fields: a field may name
+a private account no one in the transaction can witness. The wallet simulates the call before
+proving it. When the simulation reaches an actor that isn't declared, `send` adds it (resolved
+through the wallet: private if registered, else public) and simulates again, up to 8 times.
+Each one is printed:
+
+```text
+pay (tag 3, 33 bytes) to (seat (9Wj…), payroll), as a privacy-preserving transaction
+Access list:
+  (seat (9Wj…), payroll) root, private: authorized by this wallet's keys
+Credit sealed to emp1
+  + (treasury (8bw…), payroll) reached in simulation, private
+```
+
+When anything was inferred, `send` also prints the same call with every actor declared
+(`--no-auto-actors`). The simulation finds the actors a call reaches by sync messages. It
+doesn't find the destination of an **async** credit, so declare a witnessed account's balance
+(`--actor seat@native`) for its credit to apply in the transaction.
+
+**Credits to a private recipient** need the recipient's keys:
+
+| `DEST` | |
+| --- | --- |
+| a private account of this wallet (label, `Private/<id>`) | its keys; the credit still waits for it, and isn't applied in the transaction |
+| `keys:<FILE>` | keys from `wallet account show-keys` output (two lines: npk, then vpk), for someone else's account |
+| a public account | declared in the transaction, so its credit applies there |
+
+A credit from private execution is **sealed** (`--seal`): only the recipient reads it, and it
+comes from a blinded alias. A credit from a public actor can't be sealed, so it goes with a
+**recovery binding** (`--recover`): its amount and sender are public. The recipient collects
+either with `wallet pending receive`. A public recipient must already exist on chain, or the call
+is refused (`UnadmittedPublicActor`).
+
+With credits, only the listed ones are delivered in the transaction. Without them, every async
+message to a witnessed account is.
+
+After inclusion, `send` waits for the block, fails with exit `2` if the transaction reverted
+there (its fee is still charged), syncs the wallet's private accounts, and prints what changed,
+with private states read from the wallet's decrypted copies. A dry run of a private call shows
+the declared actors only: inference needs the wallet's simulation, which runs only when sending.
+
+```bash
+# Payroll: the treasury is a private PDA keyed by the seat; the payee's credit is sealed.
+spel --program payroll pda account:seat --owner seat --register --label treasury
+spel --program payroll send --root seat -- open --treasury treasury --period-ms 60000
+spel --program payroll send --root seat --seal emp1 -- pay --employee emp1
+spel --program payroll send --root seat --actor seat@native -- withdraw --amount 500000
+```
+
 ### Outcome and exit codes
 
 The wallet simulates the transaction before sending it. If it would be refused, by the program
@@ -190,7 +262,7 @@ Included in block 356. Changed:
 | exit | meaning |
 | --- | --- |
 | `0` | included; at least one declared actor changed |
-| `2` | nothing changed: refused in simulation (not sent; the reason is printed), or it was included and changed no declared actor (a no-op, like a second `initialize-holding`) |
+| `2` | nothing changed: refused in simulation (not sent; the reason is printed), reverted after inclusion (private calls; the fee is charged), or it was included and changed no declared actor (a no-op, like a second `initialize-holding`) |
 | `1` | not sent or not included: bad arguments, unknown message or field, unresolvable account or program, a signer without a key in the wallet, an IDL that doesn't match the root's program, a wallet error, or a timeout |
 
 stdout carries only the transaction hash; the guardrail, progress and diff go to stderr.
@@ -205,11 +277,14 @@ prints a machine-readable plan:
   "message": { "name": "Transfer", "tag": 2, "hex": "02…" },
   "root": { "account": "J3q2…", "program": "B6Es…" },
   "actors": [
-    { "account": "J3q2…", "program": "B6Es…", "authorizes": true,  "reason": "root" },
-    { "account": "rdey…", "program": "B6Es…", "authorizes": false, "reason": "field `to`" }
+    { "account": "J3q2…", "program": "B6Es…", "authorizes": true,  "private": false, "reason": "root" },
+    { "account": "rdey…", "program": "B6Es…", "authorizes": false, "private": false, "reason": "field `to`" }
   ],
   "signers": ["J3q2…"],
-  "fee_payer": null
+  "fee_payer": null,
+  "private": false,
+  "seal": [],
+  "recover": []
 }
 ```
 
@@ -266,6 +341,9 @@ spel --idl <IDL> inspect <anything> --data <HEX> [--type <TYPE>]
   ```
 
 - **`--data <HEX>`** decodes bytes offline; no wallet or sequencer needed.
+- **A private account** is read from the wallet's decrypted copy, after syncing the wallet's
+  private accounts. Only a wallet that witnesses it can read it.
+- **`ACCOUNT@native`** prints the account's balance: `{"balance": "1000"}`.
 
 Decoding consumes every byte: leftover bytes are an error, so a wrong type doesn't decode
 silently. The JSON follows the core types' serde form, with two differences: `u64`/`u128`
@@ -384,6 +462,59 @@ Derives a public PDA of the program: `AccountId::for_public_pda(program, seed)`.
 64 hex characters (32 bytes) or a string of at most 32 bytes, zero-padded. Several seeds are
 combined as `SHA-256(seed1 ‖ seed2 ‖ …)`. Programs document their own seeds; the IDL has none.
 
+### Private PDAs
+
+```bash
+spel --program <P> pda <SEED>... --owner <ACCOUNT> [--register [--label <LABEL>] [--rescan]]
+spel --program <P> --binary <BIN> pda <SEED>... --group <GROUP> [--register [--label <LABEL>] [--rescan]]
+```
+
+A private PDA, `AccountId::for_private_pda(program, seed, npk, vpk)`, with the keys of:
+- **`--owner`**: a private account of this wallet's key tree. Only its owner can put the PDA in a
+  transaction.
+- **`--group`**: a wallet group's secret (`wallet group new | join`), derived for the program's
+  ImageID, which comes from its binary. Every holder of the secret derives the same PDA and can
+  put it in a transaction.
+
+The wallet can't find a PDA from what it stores, so `--register` records it, labelled `--label`
+if that label is free; `send` can then witness it, and syncs follow it. `--rescan` then
+rediscovers private accounts from genesis, for a PDA that already has history on chain. The
+address goes to stdout either way.
+
+A seed here may also be 64 hex characters with `0x`, or `account:<ACCOUNT>`: that account's id
+(a label resolves through the wallet).
+
+---
+
+## `blind`
+
+```bash
+spel blind <BASE> <FACTOR> [--hex]
+```
+
+Prints `AccountId::blinded(base, factor)` in base58 (or `0x` hex with `--hex`): the
+domain-separated SHA-256 LEZ uses for blinded addresses, which programs also use to derive
+seeds and pseudonyms. `BASE` and `FACTOR` are 64 hex characters (optionally `0x`), base58 ids,
+wallet labels, or `le64:N` (N as 8 little-endian bytes, zero-padded to 32). Blinds compose:
+
+```bash
+SEED=$(spel blind 0x$CREATE_KEY le64:1 --hex)                          # a generation's seed
+PSEUDONYM=$(spel blind seat $(spel blind 0x$SECRET 0x$CREATE_KEY))     # a self-named member
+```
+
+---
+
+## `transfer`
+
+```bash
+spel transfer --from <ACCOUNT> --to <ACCOUNT | keys:FILE> --amount <N>
+```
+
+Moves native balance between any two accounts the wallet can act for (public, private, or a
+registered private PDA, including a group's), or to a private account known by its keys, whose
+credit waits for its owner. Private sides make it a privacy-preserving transaction. It prints the
+hash on stdout and waits for the block; a revert exits `2`.
+
 ---
 
 ## Value formats
@@ -397,7 +528,7 @@ combined as `SHA-256(seed1 ‖ seed2 ‖ …)`. Programs document their own seed
 | `program_id` | eight comma-separated `u32`s |
 | `[u8; N]` | 2N hex characters, or a string of at most N bytes (right-padded) |
 | `Vec<u8>`, `Vec<u32>`, `Vec<u64>`, `Vec<u128>`, `Vec<bool>` | comma-separated: `1,2,3` |
-| `Vec<[u8; 32]>` | comma-separated base58 or hex ids |
+| `Vec<[u8; 32]>`, `Vec<account_id>` | comma-separated base58 or hex ids |
 | `Vec<string>` | repeat the flag: `--tag a --tag b` |
 | `Option<T>` | the value, or `none` |
 | struct | JSON object keyed by field name; a tuple struct takes a JSON array |
