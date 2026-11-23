@@ -19,6 +19,8 @@ pub mod generate_idl;
 pub mod hex;
 pub mod inspect;
 pub mod parse;
+pub mod private;
+pub mod private_cmds;
 pub mod send;
 pub mod serialize;
 
@@ -45,6 +47,7 @@ pub async fn run() {
     let mut data_hex: Option<String> = None;
     let mut inspect_format: Option<String> = None;
     let mut fee_payer: Option<String> = None;
+    let mut binary_arg: Option<String> = None;
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut i = 1;
 
@@ -109,6 +112,14 @@ pub async fn run() {
                     process::exit(1);
                 }
                 fee_payer = Some(args[i].clone());
+            },
+            "--binary" => {
+                i += 1;
+                if i >= args.len() || args[i].starts_with('-') {
+                    eprintln!("❌ --binary requires the program binary's path");
+                    process::exit(1);
+                }
+                binary_arg = Some(args[i].clone());
             },
             _ => remaining_args.push(args[i].clone()),
         }
@@ -189,6 +200,11 @@ pub async fn run() {
                 }
             }
         }
+    }
+
+    // An explicit --binary wins over spel.toml's.
+    if binary_arg.is_some() {
+        program_path = binary_arg;
     }
 
     // Handle commands that don't need an IDL
@@ -285,6 +301,29 @@ pub async fn run() {
                 }
                 return;
             },
+            "pda" if private_cmds::is_private_pda(&remaining_args[2..]) => {
+                let program = program_address.clone().unwrap_or_else(|| {
+                    eprintln!("❌ a private PDA needs its program: pass --program");
+                    eprintln!("{}", private_cmds::PDA_USAGE);
+                    process::exit(1);
+                });
+                private_cmds::pda_command(
+                    &remaining_args[2..],
+                    &program,
+                    program_path.as_deref(),
+                    config_programs(config.as_ref().map(|(_, cfg)| cfg)),
+                )
+                .await;
+                return;
+            },
+            "blind" => {
+                private_cmds::blind_command(&remaining_args[2..]);
+                return;
+            },
+            "transfer" => {
+                private_cmds::transfer_command(&remaining_args[2..]).await;
+                return;
+            },
             "pda" if program_address.is_some() => {
                 // Usage: <bin> --program <address> pda <seed1> [seed2] ...
                 let mut raw_args =
@@ -363,6 +402,10 @@ pub async fn run() {
         eprintln!("                           Missing values come from spel.toml (`core`, [idl-gen])");
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
+        eprintln!("  {}", private_cmds::PDA_USAGE.trim_start_matches("Usage: spel "));
+        eprintln!("                           A private PDA; --register records it in the wallet");
+        eprintln!("  {}", private_cmds::BLIND_USAGE.trim_start_matches("Usage: spel "));
+        eprintln!("  {}", private_cmds::TRANSFER_USAGE.trim_start_matches("Usage: spel "));
         eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");
         process::exit(1);
     }
@@ -393,6 +436,7 @@ pub async fn run() {
                 program_address.as_deref(),
                 fee_payer.as_deref(),
                 programs,
+                program_path.as_deref(),
             )
             .await;
         },

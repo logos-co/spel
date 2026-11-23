@@ -10,7 +10,8 @@
 use std::process;
 
 use lee::AccountId;
-use lee_core::account::Actor;
+use lee_core::native_token::{decode_balance, NATIVE_TOKEN_PROGRAM_ID};
+use wallet::account::AccountIdWithPrivacy;
 use serde_json::{json, Map, Value};
 use spel_framework_core::decode;
 use spel_framework_core::idl::SpelIdl;
@@ -70,16 +71,32 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
         return;
     }
 
-    let wallet = open_wallet(None).unwrap_or_else(|e| {
+    let mut wallet = open_wallet(None).unwrap_or_else(|e| {
         fail(format!(
             "Failed to open the wallet: {e}\n   Set LEE_WALLET_HOME_DIR"
         ))
     });
+    let (account, program) = split_actor(args.target);
+    // A private account is read from the wallet's decrypted copy, synced first.
+    let private = {
+        let names = Names {
+            wallet: Some(&wallet),
+            programs: Vec::new(),
+        };
+        matches!(
+            names.account_with_privacy(account).unwrap_or_else(|e| fail(e)),
+            AccountIdWithPrivacy::Private(_)
+        )
+    };
+    if private {
+        crate::private::sync(&mut wallet, false)
+            .await
+            .unwrap_or_else(|e| fail(e));
+    }
     let names = Names {
         wallet: Some(&wallet),
         programs: args.programs,
     };
-    let (account, program) = split_actor(args.target);
     let account = names.account(account).unwrap_or_else(|e| fail(e));
     let program = program
         .or(args.default_program)
@@ -87,25 +104,30 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
         .or_else(|| args.idl.and_then(|idl| names.program(&idl.name).ok()));
 
     let Some(program) = program else {
-        list_actor_states(&wallet, &names, account).await;
+        list_actor_states(&wallet, &names, account, private).await;
         return;
     };
 
     if let Some(idl) = args.idl {
         check_idl_matches(idl, program, &names);
     }
-    let view = wallet
-        .get_account_view(Actor::new(account, program))
+    let state = crate::private::actor_state(&wallet, account, program, private)
         .await
-        .unwrap_or_else(|e| fail(format!("reading {account}: {e:#}")));
-    let state = view
-        .map(|a| a.data.actor_state(program).to_vec())
-        .unwrap_or_default();
+        .unwrap_or_else(|e| fail(e));
     let actor = format!(
-        "({}, {})",
+        "({}{}, {})",
+        if private { "private " } else { "" },
         names.account_name(account),
         names.program_name(program)
     );
+    // The native token's state on an account is its balance.
+    if program == NATIVE_TOKEN_PROGRAM_ID && args.type_name.is_none() {
+        let balance = decode_balance(&state)
+            .unwrap_or_else(|_| fail(format!("{actor}: not a balance: {}", hex_encode(&state))));
+        eprintln!("{actor}: balance");
+        print_json(&json!({ "balance": balance.to_string() }));
+        return;
+    }
     if state.is_empty() {
         eprintln!("{actor}: no state");
         println!("null");
@@ -147,11 +169,20 @@ fn check_idl_matches(idl: &SpelIdl, program: AccountId, names: &Names<'_>) {
 }
 
 /// Every program holding state on `account`, with the state as hex.
-async fn list_actor_states(wallet: &crate::send::Wallet, names: &Names<'_>, account: AccountId) {
-    let found = wallet
-        .get_account_public(account)
-        .await
-        .unwrap_or_else(|e| fail(format!("reading {account}: {e:#}")));
+async fn list_actor_states(
+    wallet: &crate::send::Wallet,
+    names: &Names<'_>,
+    account: AccountId,
+    private: bool,
+) {
+    let found = if private {
+        wallet.get_account_private(account)
+    } else {
+        wallet
+            .get_account_public(account)
+            .await
+            .unwrap_or_else(|e| fail(format!("reading {account}: {e:#}")))
+    };
     let mut states = Map::new();
     if let Some(found) = found {
         for (program, state) in &found.data.actor_states {

@@ -380,6 +380,25 @@ fn a_missing_one_of_several_state_types_fails() {
 }
 
 #[test]
+fn a_pda_seed_is_its_32_bytes() {
+    let dir = shape_crate(
+        "use lee_core::program::PdaSeed;\n\
+         pub enum Message { Ping }\n\
+         pub struct VaultState { pub seed: PdaSeed, pub next_id: u64 }\n",
+        &[],
+    );
+    let idl = generate(&options(dir.path(), "Message", Some("VaultState"), None)).unwrap();
+    let mut state = vec![7_u8; 32];
+    state.extend(9_u64.to_le_bytes());
+    let decoded = decode_state(&state, &idl).unwrap();
+    assert_eq!(decoded["next_id"], json!("9"));
+    assert_eq!(
+        serde_json::to_value(&idl.type_def("VaultState").unwrap().fields[0].type_).unwrap(),
+        json!({ "array": ["u8", 32] })
+    );
+}
+
+#[test]
 fn events_come_from_trait_impls_in_the_named_module() {
     let dir = shape_crate(
         "pub mod outer;\npub enum Message { Ping }\n",

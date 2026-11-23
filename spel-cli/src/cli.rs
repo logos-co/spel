@@ -34,8 +34,14 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!(
         "  send --root <ACCOUNT>[@<PROGRAM>] [--actor A[@P]]... [--signer A]... [--no-auto-actors]"
     );
-    println!("       [--fee-payer A] [--gas-limit N] [--dry-run[=json]] -- <MESSAGE> [ARGS]");
-    println!("                             Send a message; prints the transaction hash");
+    println!("       [--seal DEST]... [--recover DEST]... [--fee-payer A] [--gas-limit N]");
+    println!("       [--dry-run[=json]] -- <MESSAGE> [ARGS]");
+    println!("                             Send a message; prints the transaction hash. A private");
+    println!("                             account or a credit makes it a private call (--binary)");
+    println!("  pda <SEED>... --owner A | --group G [--register [--label L] [--rescan]]");
+    println!("                             Derive (and record) a private PDA");
+    println!("  blind <BASE> <FACTOR> [--hex]  AccountId::blinded");
+    println!("  transfer --from A --to B --amount N  Move native balance");
     println!("  encode <MESSAGE> [ARGS]    Print a message's Borsh encoding as hex");
     println!(
         "  generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]"
