@@ -99,6 +99,41 @@ regenerate from the core crate.
 A `--message`, `--state` or `--events` name that doesn't exist, or a referenced type outside
 the crate and its path dependencies, fails the run. Fix the name rather than dropping the flag.
 
+## Private calls
+
+### A private PDA must be registered before it's used
+
+The wallet can't find a private PDA from what it stores. Until `spel pda … --owner | --group …
+--register` records it, `send` refuses it ("isn't an account this wallet can witness") and
+`inspect` can't read it. For a PDA that already has history (joining an existing group vault),
+add `--rescan`.
+
+### Inference finds sync messages, not async credits
+
+A private call's undeclared actors come from the wallet's simulation, one per retry. A sync
+message to an undeclared actor stops the simulation, so it's found. An async credit to an
+undeclared account isn't: it's left for its recipient. Declare `ACCOUNT@native` when the credit
+should apply in the transaction (the caller's own balance, or a successor vault's), and name a
+foreign private recipient with `--seal` / `--recover`.
+
+### Seal from private execution, recover from public execution
+
+A credit sent by a private actor (a private vault's balance) is sealed: `--seal DEST`. A credit
+sent by a public actor can't be sealed, so it needs a recovery binding: `--recover DEST`, which
+publishes its amount and sender. Using `--seal` for a public sender makes the transaction
+revert.
+
+### A public payee must exist on chain
+
+Paying a brand-new public account from a private call is refused in simulation with
+`UnadmittedPublicActor`: no transaction vouches for it. Fund it once first.
+
+### A credit to your own private account waits
+
+`--seal <your own private account>` addresses it by its keys, so the credit is pending
+(`wallet pending receive`), not applied in the transaction. To apply it in place, declare
+`ACCOUNT@native` instead.
+
 ## Values
 
 ### Wide integers are strings in `inspect` output

@@ -1,3 +1,32 @@
+## Unreleased (private calls, on the LEZ v0.4.0-rc3 port)
+
+### ✨ Features
+
+- **Private calls.** `spel send` sends a privacy-preserving transaction when an actor's account
+  is private (`Private/<id>`, a private label, or an id the wallet witnesses privately), or when
+  it has a `--seal DEST` / `--recover DEST` credit. It is proved with the program's binary (the
+  new global `--binary`, or `spel.toml`'s `binary`). Private accounts authorize through the
+  wallet's keys. Actors the call reaches by sync messages are inferred from the wallet's
+  simulation and printed, with the equivalent fully declared command. A revert after inclusion
+  exits `2`, and private states are reported before and after from the wallet's decrypted copy.
+- **`--seal` / `--recover`:** a credit to a private recipient (a wallet account, or `keys:FILE`
+  from `wallet account show-keys`), sealed from private execution or with a recovery binding
+  from public execution.
+- **`native`** names the native token program: `ACCOUNT@native` is an account's balance, which
+  `inspect` prints as `{"balance": …}`.
+- **`spel inspect`** reads private accounts, syncing the wallet first.
+- **`spel pda … --owner ACCOUNT | --group GROUP [--register [--label L] [--rescan]]`** derives a
+  private PDA under an owned account's keys or a wallet group's secret, and records it in the
+  wallet so calls can witness it. Seeds may be `account:<ACCOUNT>` or `0x`-prefixed hex.
+- **`spel blind BASE FACTOR [--hex]`:** `AccountId::blinded`, for derived seeds and pseudonyms.
+- **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
+  can act for, including group-shared private PDAs, or to `keys:FILE`.
+
+### 🐛 Fixes
+
+- `generate-idl` describes `PdaSeed` (as `[u8; 32]`) instead of failing on it.
+- `Vec<account_id>` message fields take comma-separated ids instead of failing to encode.
+
 ## v0.7.0 (2026-09-16)
 
 ### 💥 Breaking Changes
