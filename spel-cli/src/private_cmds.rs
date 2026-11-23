@@ -111,14 +111,18 @@ pub async fn pda_command(
             "--label" => label = Some(value("--label")),
             "--register" => register = true,
             "--rescan" => rescan = true,
-            flag if flag.starts_with("--") => fail(format!("unknown pda option '{flag}'\n{PDA_USAGE}")),
+            flag if flag.starts_with("--") => {
+                fail(format!("unknown pda option '{flag}'\n{PDA_USAGE}"))
+            },
             seed => seeds_raw.push(seed.to_owned()),
         }
     }
     let keys = match (&owner, &group) {
         (Some(owner), None) => Keys::Owner(owner),
         (None, Some(group)) => Keys::Group(group),
-        _ => fail(format!("name exactly one of --owner and --group\n{PDA_USAGE}")),
+        _ => fail(format!(
+            "name exactly one of --owner and --group\n{PDA_USAGE}"
+        )),
     };
     if seeds_raw.is_empty() {
         fail(format!("at least one seed\n{PDA_USAGE}"));
@@ -155,7 +159,11 @@ pub async fn pda_command(
             .unwrap_or_else(|e| fail(e));
         eprintln!(
             "{} Private/{account}",
-            if new { "registered" } else { "already registered:" }
+            if new {
+                "registered"
+            } else {
+                "already registered:"
+            }
         );
         if rescan {
             eprintln!("rescanning private accounts from genesis...");
@@ -171,9 +179,7 @@ pub async fn pda_command(
 /// digits with or without `0x`, an account id, or a wallet label.
 fn blind_value(raw: &str, wallet: &mut Option<Wallet>) -> [u8; 32] {
     if let Some(n) = raw.strip_prefix("le64:") {
-        let n: u64 = n
-            .parse()
-            .unwrap_or_else(|e| fail(format!("{raw}: {e}")));
+        let n: u64 = n.parse().unwrap_or_else(|e| fail(format!("{raw}: {e}")));
         let mut bytes = [0_u8; 32];
         bytes[..8].copy_from_slice(&n.to_le_bytes());
         return bytes;
@@ -231,7 +237,9 @@ pub async fn transfer_command(args: &[String]) {
                         .unwrap_or_else(|e| fail(format!("--amount {raw}: {e}"))),
                 );
             },
-            other => fail(format!("unknown transfer argument '{other}'\n{TRANSFER_USAGE}")),
+            other => fail(format!(
+                "unknown transfer argument '{other}'\n{TRANSFER_USAGE}"
+            )),
         }
     }
     let (Some(from), Some(to), Some(amount)) = (from, to, amount) else {
@@ -244,7 +252,10 @@ pub async fn transfer_command(args: &[String]) {
             wallet: Some(&wallet),
             programs: Vec::new(),
         };
-        let sender = match names.account_with_privacy(&from).unwrap_or_else(|e| fail(e)) {
+        let sender = match names
+            .account_with_privacy(&from)
+            .unwrap_or_else(|e| fail(e))
+        {
             AccountIdWithPrivacy::Public(id) => AccountIdentity::Public(id),
             AccountIdWithPrivacy::Private(id) => {
                 private::private_identity(&wallet, id).unwrap_or_else(|e| fail(e))
@@ -298,7 +309,10 @@ mod tests {
     #[test]
     fn seeds_take_hex_accounts_and_strings() {
         let id = AccountId::new([5; 32]);
-        assert_eq!(seed_bytes(&format!("account:{id}"), &names()).unwrap(), [5; 32]);
+        assert_eq!(
+            seed_bytes(&format!("account:{id}"), &names()).unwrap(),
+            [5; 32]
+        );
         assert_eq!(seed_bytes(&"ab".repeat(32), &names()).unwrap(), [0xab; 32]);
         assert_eq!(
             seed_bytes(&format!("0x{}", "cd".repeat(32)), &names()).unwrap(),

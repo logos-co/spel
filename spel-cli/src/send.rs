@@ -199,14 +199,17 @@ impl Names<'_> {
 
     pub fn account_name(&self, id: AccountId) -> String {
         let label = self.wallet.and_then(|w| {
-            [AccountIdWithPrivacy::Public(id), AccountIdWithPrivacy::Private(id)]
-                .into_iter()
-                .find_map(|account| {
-                    w.storage()
-                        .labels_for_account(account)
-                        .next()
-                        .map(|l| l.as_ref().to_owned())
-                })
+            [
+                AccountIdWithPrivacy::Public(id),
+                AccountIdWithPrivacy::Private(id),
+            ]
+            .into_iter()
+            .find_map(|account| {
+                w.storage()
+                    .labels_for_account(account)
+                    .next()
+                    .map(|l| l.as_ref().to_owned())
+            })
         });
         match label {
             Some(label) => format!("{label} ({id})"),
@@ -771,8 +774,8 @@ async fn send_private(
              spel.toml program with a `binary`",
         )
     });
-    let (catalog, _) =
-        crate::private::catalog(Path::new(binary), prepared.list[0].program).unwrap_or_else(|e| fail(e));
+    let (catalog, _) = crate::private::catalog(Path::new(binary), prepared.list[0].program)
+        .unwrap_or_else(|e| fail(e));
 
     let mut before = Vec::with_capacity(prepared.list.len());
     for planned in &prepared.list {
@@ -924,7 +927,10 @@ fn explicit_command(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -
         };
         format!("{account}@{}", names.program_name(p.program))
     };
-    let mut words = vec!["spel send".to_owned(), format!("--root {}", actor(&prepared.list[0]))];
+    let mut words = vec![
+        "spel send".to_owned(),
+        format!("--root {}", actor(&prepared.list[0])),
+    ];
     for planned in &prepared.list[1..] {
         if planned.reason != "--signer" {
             words.push(format!("--actor {}", actor(planned)));
@@ -1023,7 +1029,9 @@ mod tests {
         assert_eq!(names.program_name(NATIVE_TOKEN_PROGRAM_ID), "native");
         let id = id(4);
         assert_eq!(
-            names.account_with_privacy(&format!("Private/{id}")).unwrap(),
+            names
+                .account_with_privacy(&format!("Private/{id}"))
+                .unwrap(),
             AccountIdWithPrivacy::Private(id)
         );
         assert_eq!(

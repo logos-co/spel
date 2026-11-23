@@ -69,12 +69,16 @@ pub fn destination(names: &Names<'_>, raw: &str) -> Result<AccountMention, Strin
         AccountIdWithPrivacy::Public(id) => Ok(AccountIdentity::PublicNoSign(id).balance()),
         AccountIdWithPrivacy::Private(id) => {
             let wallet = names.wallet.ok_or("no wallet is open")?;
-            let found = wallet.storage().key_chain().private_account(id).ok_or_else(|| {
-                format!(
-                    "{raw}: this wallet holds no keys for Private/{id}; pass keys:<FILE> \
+            let found = wallet
+                .storage()
+                .key_chain()
+                .private_account(id)
+                .ok_or_else(|| {
+                    format!(
+                        "{raw}: this wallet holds no keys for Private/{id}; pass keys:<FILE> \
                      (`wallet account show-keys` output from its owner)"
-                )
-            })?;
+                    )
+                })?;
             Ok(foreign(
                 found.key_chain.nullifier_public_key,
                 found.key_chain.viewing_public_key.clone(),
@@ -406,7 +410,10 @@ mod tests {
             undeclared_actor_in_text(&text),
             Some(Actor::new(account, program))
         );
-        assert_eq!(undeclared_actor_in_text("ProgramExecutionFailed(\"x\")"), None);
+        assert_eq!(
+            undeclared_actor_in_text("ProgramExecutionFailed(\"x\")"),
+            None
+        );
     }
 
     #[test]
