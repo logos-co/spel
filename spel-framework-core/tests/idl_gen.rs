@@ -255,6 +255,50 @@ fn several_state_types_become_state_types() {
 }
 
 #[test]
+fn state_markers_name_the_state_types_in_source_order() {
+    let dir = shape_crate(
+        "use spel_attrs::state;\n\
+         pub mod oracle;\n\
+         pub enum Message { Observe }\n\
+         #[state]\n\
+         #[derive(Debug)]\n\
+         pub struct PriceObservations { pub prices: Vec<u64> }\n\
+         pub struct Tick { pub tick: u32 }\n\
+         #[serde(rename = \"x\")]\n\
+         pub struct NotMarked { pub y: u8 }\n",
+        &[(
+            "oracle.rs",
+            "#[spel_attrs::state]\npub enum OraclePrice { Set { price: u64, at: crate::Tick }, Unset }\n",
+        )],
+    );
+    let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
+    // Declaration order, a module's items at its `mod` line: `oracle` comes first.
+    assert_eq!(idl.state_types, ["OraclePrice", "PriceObservations"]);
+    assert!(idl.type_def("Tick").is_some(), "referenced by a marked type");
+    assert!(idl.type_def("NotMarked").is_none());
+}
+
+#[test]
+fn named_state_types_win_over_markers_with_a_warning() {
+    let dir = shape_crate(
+        "pub enum Message { Ping }\n#[state]\npub struct A { pub x: u8 }\npub struct B { pub y: u8 }\n",
+        &[],
+    );
+    let mut warnings = Vec::new();
+    let idl = generate_idl(&options(dir.path(), "Message", Some("B"), None), |w| {
+        warnings.push(w);
+    })
+    .unwrap();
+    assert_eq!(idl.state_types, ["B"]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("(B)") && warnings[0].contains("(A)"), "{warnings:?}");
+
+    // Naming what the markers say is quiet.
+    let idl = generate(&options(dir.path(), "Message", Some("A"), None)).unwrap();
+    assert_eq!(idl.state_types, ["A"]);
+}
+
+#[test]
 fn a_missing_one_of_several_state_types_fails() {
     let dir = shape_crate("pub enum Message { Ping }\npub struct A { pub x: u8 }\n", &[]);
     let mut opts = options(dir.path(), "Message", None, None);

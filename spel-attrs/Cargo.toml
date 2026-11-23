@@ -1,0 +1,13 @@
+[package]
+name = "spel-attrs"
+version = "0.7.0"
+edition = "2021"
+description = "Inert markers that `spel generate-idl` reads from a program's core crate"
+
+# A proc-macro runs on the host at compile time: nothing from this crate is linked into a
+# guest. It deliberately has no dependencies.
+[lib]
+proc-macro = true
+
+[lints]
+workspace = true

@@ -136,6 +136,20 @@ crate's source with `syn`; the program carries no annotations. It reads:
   program's internal message enum (messages only its own actors send) is left out: nobody
   outside sends it.
 - **the state types** (`--state`, repeatable), written to `state_types` in the order given.
+  Without `--state` (or a `state` in spel.toml), the structs and enums the crate marks with
+  `#[state]` are used, in declaration order:
+
+  ```rust
+  use spel_attrs::state;   // spel-attrs = { git = "…/spel" }, a build-time dependency only
+
+  #[state]
+  pub enum TokenState { Definition(TokenDefinition), Holding(TokenHolding) }
+  ```
+
+  `#[state]` (from the `spel-attrs` crate) changes nothing about the type: it returns it
+  unchanged and is never linked into the guest. It takes no arguments and only goes on a
+  struct or an enum. The generator recognizes `#[state]` and `#[spel_attrs::state]`, not a
+  renamed import. Named state types win over the markers; if they differ, it warns.
 - **the events** (`--events <module>`): every `impl <Trait> for <Struct> { const NAME: &str = "…"; }`
   in that module, in source order. The trait's name doesn't matter.
 - **every type those reference**, across the crate's path dependencies (`Cargo.toml`

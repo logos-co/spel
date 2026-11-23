@@ -310,7 +310,7 @@ spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events
 | --- | --- |
 | `<CRATE_DIR>` | the core crate (with `Cargo.toml` and `src/lib.rs`); else the program's `core` in `spel.toml` |
 | `--message <ENUM>` | **required** here or in `[idl-gen]`. The external message enum; its variant order gives the Borsh tags |
-| `--state <TYPE>` | the actor state type, written to the IDL's `state_types`. Repeat it for a program that stores several untagged state types |
+| `--state <TYPE>` | the actor state type, written to the IDL's `state_types`. Repeat it for a program that stores several untagged state types. Without it (and without `state` in spel.toml), the types the crate marks `#[state]` ([idl.md](idl.md#generation)) |
 | `--events <MODULE>` | the module holding the events (`event`, or nested `a::b`) |
 | `--namespace <NAME>` | the IDL name and event namespace; defaults to the crate name without `_core` |
 

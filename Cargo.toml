@@ -1,5 +1,6 @@
 [workspace]
 members = [
+    "spel-attrs",
     "spel-framework-core",
     "spel-cli",
 ]

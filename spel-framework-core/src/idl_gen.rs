@@ -2,7 +2,8 @@
 //!
 //! The caller names the three things a client needs: the message enum, the state type (or
 //! types) and the module holding the events (`spel generate-idl programs/token/core --message
-//! Message --state TokenState --events event`). Everything else is read from plain Rust types: the
+//! Message --state TokenState --events event`). State types can instead be marked in the crate
+//! with `#[state]` from `spel-attrs`, an inert attribute. Everything else is read from plain Rust types: the
 //! enum's variant order gives the Borsh tags, doc comments become help, and every struct or
 //! enum those types reference is described, following path dependencies.
 //!
@@ -29,7 +30,8 @@ pub struct GenOptions {
     pub message: String,
     /// The actor state types, usually one (e.g. `TokenState`); several for a program that
     /// stores different untagged structs on different actors. They become the IDL's
-    /// `state_types`, in this order, without duplicates.
+    /// `state_types`, in this order, without duplicates. Empty: the crate's `#[state]` markers,
+    /// in declaration order.
     pub states: Vec<String>,
     /// The module holding the event structs, e.g. `event` (nested: `a::b`).
     pub events: Option<String>,
@@ -123,15 +125,34 @@ pub fn generate_idl<F: FnMut(String)>(
         });
     }
 
+    // Named state types win; without any, the crate's `#[state]` markers say.
+    let marked = marked_states(&own);
+    let (named, source) = if options.states.is_empty() {
+        (&marked, "#[state]")
+    } else {
+        let mut explicit = options.states.clone();
+        explicit.sort();
+        explicit.dedup();
+        let mut markers = marked.clone();
+        markers.sort();
+        if !marked.is_empty() && explicit != markers {
+            on_warning(format!(
+                "using the named state types ({}), not the #[state] markers ({})",
+                options.states.join(", "),
+                marked.join(", ")
+            ));
+        }
+        (&options.states, "--state")
+    };
     let mut state_types: Vec<String> = Vec::new();
-    for name in &options.states {
+    for name in named {
         if state_types.contains(name) {
             continue;
         }
         if index.own_definition(name).is_none() {
             return Err(not_found("type", name));
         }
-        collector.queue(name, "--state");
+        collector.queue(name, source);
         state_types.push(name.clone());
     }
 
@@ -164,6 +185,32 @@ pub fn generate_idl<F: FnMut(String)>(
         events,
         types,
     })
+}
+
+/// The structs and enums of the crate marked `#[state]` or `#[spel_attrs::state]`, in
+/// declaration order (a module's items where its `mod` is declared). A marker imported under
+/// another name isn't recognized.
+fn marked_states(items: &[SourceItem]) -> Vec<String> {
+    let is_marker = |attr: &Attribute| {
+        let path: Vec<String> = attr
+            .path()
+            .segments
+            .iter()
+            .map(|s| s.ident.to_string())
+            .collect();
+        matches!(
+            path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
+            ["state"] | ["spel_attrs", "state"]
+        )
+    };
+    items
+        .iter()
+        .filter_map(|source| match &source.item {
+            Item::Struct(s) if s.attrs.iter().any(is_marker) => Some(s.ident.to_string()),
+            Item::Enum(e) if e.attrs.iter().any(is_marker) => Some(e.ident.to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The crate name without a `_core` suffix: `token_core` → `token`.

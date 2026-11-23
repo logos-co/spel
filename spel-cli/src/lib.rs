@@ -268,7 +268,7 @@ pub async fn run() {
                         path.display(),
                         options.message,
                         if options.states.is_empty() {
-                            "none".to_owned()
+                            "from #[state] markers".to_owned()
                         } else {
                             options.states.join(", ")
                         },
