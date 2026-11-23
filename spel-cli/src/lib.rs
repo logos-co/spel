@@ -266,7 +266,7 @@ pub async fn run() {
                         "generate-idl: {} (from {}) · message: {} · state: {} · events: {}",
                         options.crate_dir.display(),
                         path.display(),
-                        options.message,
+                        options.message.as_deref().unwrap_or("from #[message] marker"),
                         if options.states.is_empty() {
                             "from #[state] markers".to_owned()
                         } else {

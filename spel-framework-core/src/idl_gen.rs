@@ -2,8 +2,9 @@
 //!
 //! The caller names the three things a client needs: the message enum, the state type (or
 //! types) and the module holding the events (`spel generate-idl programs/token/core --message
-//! Message --state TokenState --events event`). State types can instead be marked in the crate
-//! with `#[state]` from `spel-attrs`, an inert attribute. Everything else is read from plain Rust types: the
+//! Message --state TokenState --events event`). The message enum and the state types can
+//! instead be marked in the crate with `#[message]` and `#[state]` from `spel-attrs`, inert
+//! attributes. Everything else is read from plain Rust types: the
 //! enum's variant order gives the Borsh tags, doc comments become help, and every struct or
 //! enum those types reference is described, following path dependencies.
 //!
@@ -26,8 +27,9 @@ use crate::source::{crate_items, SourceItem};
 pub struct GenOptions {
     /// The core crate's directory (holding `Cargo.toml` and `src/lib.rs`).
     pub crate_dir: PathBuf,
-    /// The external message enum, e.g. `Message`.
-    pub message: String,
+    /// The external message enum, e.g. `Message`. `None`: the enum the crate marks
+    /// `#[message]`.
+    pub message: Option<String>,
     /// The actor state types, usually one (e.g. `TokenState`); several for a program that
     /// stores different untagged structs on different actors. They become the IDL's
     /// `state_types`, in this order, without duplicates. Empty: the crate's `#[state]` markers,
@@ -51,6 +53,13 @@ pub enum IdlGenError {
     },
     #[error("`{name}` is not an enum; --message names the program's message enum")]
     MessageNotEnum { name: String },
+    #[error(
+        "no message enum: pass --message, set `message` in spel.toml's [idl-gen], or mark the \
+         enum #[message]"
+    )]
+    NoMessage,
+    #[error("several enums are marked #[message] ({names}); mark only the external one")]
+    SeveralMessages { names: String },
     #[error("`{name}` has {count} variants; a Borsh tag holds at most 256")]
     TooManyVariants { name: String, count: usize },
     #[error("no events in module `{module}`: expected `impl <Trait> for <Struct> {{ const NAME: &str = \"..\"; }}`")]
@@ -99,24 +108,44 @@ pub fn generate_idl<F: FnMut(String)>(
 
     let mut collector = Collector::new(&index);
 
-    let message_enum = match index.own_definition(&options.message) {
+    // A named message enum wins; without one, the crate's `#[message]` marker says.
+    let marked_messages = marked(&own, "message");
+    let message_name = match (&options.message, marked_messages.as_slice()) {
+        (Some(named), markers) => {
+            if !markers.is_empty() && markers != [named.clone()] {
+                on_warning(format!(
+                    "using the named message enum `{named}`, not the #[message] marker ({})",
+                    markers.join(", ")
+                ));
+            }
+            named.clone()
+        },
+        (None, [one]) => one.clone(),
+        (None, []) => return Err(IdlGenError::NoMessage),
+        (None, several) => {
+            return Err(IdlGenError::SeveralMessages {
+                names: several.join(", "),
+            })
+        },
+    };
+    let message_enum = match index.own_definition(&message_name) {
         Some(Item::Enum(e)) => e,
         Some(_) => {
             return Err(IdlGenError::MessageNotEnum {
-                name: options.message.clone(),
+                name: message_name.clone(),
             })
         },
-        None => return Err(not_found("enum", &options.message)),
+        None => return Err(not_found("enum", &message_name)),
     };
     if message_enum.variants.len() > 256 {
         return Err(IdlGenError::TooManyVariants {
-            name: options.message.clone(),
+            name: message_name.clone(),
             count: message_enum.variants.len(),
         });
     }
     let mut messages = Vec::new();
     for (tag, variant) in (0_u8..=u8::MAX).zip(&message_enum.variants) {
-        let used_by = format!("{}::{}", options.message, variant.ident);
+        let used_by = format!("{message_name}::{}", variant.ident);
         messages.push(IdlMessage {
             name: variant.ident.to_string(),
             tag,
@@ -126,7 +155,7 @@ pub fn generate_idl<F: FnMut(String)>(
     }
 
     // Named state types win; without any, the crate's `#[state]` markers say.
-    let marked = marked_states(&own);
+    let marked = marked(&own, "state");
     let (named, source) = if options.states.is_empty() {
         (&marked, "#[state]")
     } else {
@@ -187,10 +216,10 @@ pub fn generate_idl<F: FnMut(String)>(
     })
 }
 
-/// The structs and enums of the crate marked `#[state]` or `#[spel_attrs::state]`, in
+/// The structs and enums of the crate marked `#[<marker>]` or `#[spel_attrs::<marker>]`, in
 /// declaration order (a module's items where its `mod` is declared). A marker imported under
 /// another name isn't recognized.
-fn marked_states(items: &[SourceItem]) -> Vec<String> {
+fn marked(items: &[SourceItem], marker: &str) -> Vec<String> {
     let is_marker = |attr: &Attribute| {
         let path: Vec<String> = attr
             .path()
@@ -198,10 +227,11 @@ fn marked_states(items: &[SourceItem]) -> Vec<String> {
             .iter()
             .map(|s| s.ident.to_string())
             .collect();
-        matches!(
-            path.iter().map(String::as_str).collect::<Vec<_>>().as_slice(),
-            ["state"] | ["spel_attrs", "state"]
-        )
+        match path.as_slice() {
+            [name] => name == marker,
+            [krate, name] => krate == "spel_attrs" && name == marker,
+            _ => false,
+        }
     };
     items
         .iter()

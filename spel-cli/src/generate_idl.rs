@@ -53,10 +53,11 @@ pub fn parse_args(args: &[String]) -> Result<GenArgs, String> {
 
 /// Complete `args` from a `spel.toml` program (`config_dir` is the file's directory, which its
 /// paths are relative to). Each command-line value wins; `--state` replaces the configured list
-/// rather than adding to it.
+/// rather than adding to it. A message enum or state type neither names is left for the
+/// crate's `#[message]` / `#[state]` markers.
 ///
 /// # Errors
-/// If neither gives a crate directory or a message enum.
+/// If neither gives a crate directory.
 pub fn resolve(
     args: GenArgs,
     config: Option<(&Path, &ProgramConfig)>,
@@ -71,9 +72,7 @@ pub fn resolve(
             Some(dir.join(program.core.as_ref()?))
         })
         .ok_or("missing <CRATE_DIR>: pass it, or set `core` on the spel.toml program")?;
-    let message = args.message.or(gen.message).ok_or(
-        "missing --message <ENUM>: pass it, or set `message` in the program's [idl-gen] table",
-    )?;
+    let message = args.message.or(gen.message);
     let states = if args.states.is_empty() {
         gen.state.map(|s| s.into_vec()).unwrap_or_default()
     } else {
@@ -118,7 +117,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(options.crate_dir, PathBuf::from("programs/token/core"));
-        assert_eq!(options.message, "Message");
+        assert_eq!(options.message.as_deref(), Some("Message"));
         assert_eq!(options.states, ["TokenState"]);
         assert_eq!(options.events.as_deref(), Some("event"));
         assert_eq!(options.namespace.as_deref(), Some("tok"));
@@ -131,9 +130,10 @@ mod tests {
     }
 
     #[test]
-    fn message_is_required() {
-        let err = resolve(parse_args(&args("core")).unwrap(), None).unwrap_err();
-        assert!(err.contains("--message"), "{err}");
+    fn message_is_left_to_the_marker() {
+        let options = resolve(parse_args(&args("core")).unwrap(), None).unwrap();
+        assert_eq!(options.message, None);
+        assert!(options.states.is_empty());
     }
 
     #[test]
@@ -165,7 +165,7 @@ mod tests {
         let program = program(Some("programs/oracle/core"), Some(gen));
         let options = resolve(GenArgs::default(), Some((Path::new("/proj"), &program))).unwrap();
         assert_eq!(options.crate_dir, PathBuf::from("/proj/programs/oracle/core"));
-        assert_eq!(options.message, "Message");
+        assert_eq!(options.message.as_deref(), Some("Message"));
         assert_eq!(options.states, ["A", "B"]);
         assert_eq!(options.events.as_deref(), Some("event"));
     }
@@ -184,7 +184,7 @@ mod tests {
         assert_eq!(options.crate_dir, PathBuf::from("other/core"));
         assert_eq!(options.states, ["C"], "--state replaces the configured list");
         assert_eq!(options.namespace.as_deref(), Some("o2"));
-        assert_eq!(options.message, "Message");
+        assert_eq!(options.message.as_deref(), Some("Message"));
     }
 
     #[test]

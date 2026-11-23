@@ -91,8 +91,9 @@ spel generate-idl --program token > artifacts/token-idl.json   # everything from
 Values not given come from the `--program` entry's `core` and `[idl-gen]` (or the default
 program when no `<CRATE_DIR>` is given). The IDL lists the state types in `state_types`;
 repeat `--state` (or give a list in `[idl-gen]`) for several untagged ones, and `inspect` then
-prints hex and the candidates until `--type` picks one. Without any named state type, the types
-the core crate marks `#[state]` (crate `spel-attrs`, an inert attribute) are used.
+prints hex and the candidates until `--type` picks one. Without a named message enum or state
+type, the ones the core crate marks `#[message]` / `#[state]` (crate `spel-attrs`, inert
+attributes) are used; names win, with a warning if they differ.
 
 ### deploy, program-id, pda, idl
 

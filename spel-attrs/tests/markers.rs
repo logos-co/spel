@@ -1,6 +1,18 @@
-//! `#[state]` leaves its item exactly as written.
+//! `#[message]` and `#[state]` leave their item exactly as written.
 
-use spel_attrs::state;
+use spel_attrs::{message, state};
+
+#[message]
+#[derive(Debug, PartialEq, Eq)]
+pub enum Message {
+    Increment { by: u64 },
+    Close,
+}
+
+#[spel_attrs::message]
+enum Internal {
+    Ping,
+}
 
 /// Docs and other attributes stay.
 #[state]
@@ -25,4 +37,6 @@ fn marked_types_are_unchanged() {
     assert_ne!(CounterState::Closed, CounterState::Count(0));
     assert_eq!(Observations::default().prices, Vec::<u64>::new());
     assert_eq!(Tick(7).0, 7);
+    assert_ne!(Message::Increment { by: 1 }, Message::Close);
+    assert!(matches!(Internal::Ping, Internal::Ping));
 }

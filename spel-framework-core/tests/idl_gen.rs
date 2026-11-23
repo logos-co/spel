@@ -17,7 +17,7 @@ fn fixtures() -> PathBuf {
 fn options(crate_dir: &Path, message: &str, state: Option<&str>, events: Option<&str>) -> GenOptions {
     GenOptions {
         crate_dir: crate_dir.to_owned(),
-        message: message.to_owned(),
+        message: Some(message.to_owned()),
         states: state.map(str::to_owned).into_iter().collect(),
         events: events.map(str::to_owned),
         namespace: None,
@@ -276,6 +276,78 @@ fn state_markers_name_the_state_types_in_source_order() {
     assert_eq!(idl.state_types, ["OraclePrice", "PriceObservations"]);
     assert!(idl.type_def("Tick").is_some(), "referenced by a marked type");
     assert!(idl.type_def("NotMarked").is_none());
+}
+
+#[test]
+fn the_message_marker_names_the_message_enum() {
+    let dir = shape_crate(
+        "use spel_attrs::{message, state};\n\
+         #[message]\n\
+         pub enum Message { Transfer { amount: u128 }, Close }\n\
+         pub enum Internal { Settle }\n\
+         #[state]\n\
+         pub struct Counter { pub n: u64 }\n",
+        &[],
+    );
+    let mut opts = options(dir.path(), "unused", None, None);
+    opts.message = None;
+    let idl = generate(&opts).unwrap();
+    let names: Vec<&str> = idl.messages.iter().map(|m| m.name.as_str()).collect();
+    assert_eq!(names, ["Transfer", "Close"]);
+    assert_eq!(idl.state_types, ["Counter"]);
+}
+
+#[test]
+fn the_message_marker_follows_the_qualified_path_into_modules() {
+    let dir = shape_crate(
+        "pub mod api;\n",
+        &[("api.rs", "#[spel_attrs::message]\npub enum Request { Ping }\n")],
+    );
+    let mut opts = options(dir.path(), "unused", None, None);
+    opts.message = None;
+    let idl = generate(&opts).unwrap();
+    assert_eq!(idl.messages[0].name, "Ping");
+}
+
+#[test]
+fn without_a_named_or_marked_message_enum_generation_fails() {
+    let dir = shape_crate("pub enum Message { Ping }\n", &[]);
+    let mut opts = options(dir.path(), "unused", None, None);
+    opts.message = None;
+    let err = generate(&opts).unwrap_err().to_string();
+    assert!(err.contains("--message") && err.contains("#[message]"), "{err}");
+}
+
+#[test]
+fn several_marked_message_enums_fail() {
+    let dir = shape_crate(
+        "#[message]\npub enum A { X }\n#[message]\npub enum B { Y }\n",
+        &[],
+    );
+    let mut opts = options(dir.path(), "unused", None, None);
+    opts.message = None;
+    let err = generate(&opts).unwrap_err().to_string();
+    assert!(err.contains("A, B"), "{err}");
+}
+
+#[test]
+fn a_named_message_enum_wins_over_the_marker_with_a_warning() {
+    let dir = shape_crate(
+        "#[message]\npub enum Message { Ping }\npub enum Other { Pong }\n",
+        &[],
+    );
+    let mut warnings = Vec::new();
+    let idl = generate_idl(&options(dir.path(), "Other", None, None), |w| {
+        warnings.push(w);
+    })
+    .unwrap();
+    assert_eq!(idl.messages[0].name, "Pong");
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("`Other`") && warnings[0].contains("(Message)"), "{warnings:?}");
+
+    // Naming the marked enum is quiet.
+    let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
+    assert_eq!(idl.messages[0].name, "Ping");
 }
 
 #[test]
