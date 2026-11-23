@@ -11,12 +11,15 @@ SPEL is the client toolchain for programs on LEZ's actor model. An actor is an
 - generates an **IDL v2** (messages, state, events, types) from a program's **core crate**, with
   no annotations in the program;
 - **sends** one message to an actor, declaring the actors the transaction may touch and the
-  accounts that sign, and reports what changed;
-- **reads** an actor's state and decodes it through the IDL;
-- **deploys** programs through LEZ's program loader.
+  accounts that sign, and reports what changed; with a private account or a sealed credit it
+  sends a **privacy-preserving transaction**, inferring the actors from the wallet's simulation;
+- **reads** an actor's state, public or private, and decodes it through the IDL;
+- **deploys** programs through LEZ's program loader;
+- derives and registers **private PDAs** (`pda --owner | --group --register`), blinds ids
+  (`blind`), and moves native balance (`transfer`).
 
 The old `#[lez_program]` guest framework, `spel init`, instruction calls and `sign`/`submit`
-are retired. Private sends and client generation (`spel-client-gen`) are not ported yet.
+are retired. Client generation (`spel-client-gen`) is not ported yet.
 
 ## References
 
@@ -40,6 +43,13 @@ are retired. Private sends and client generation (`spel-client-gen`) are not por
   actors on another program need `--actor ACCOUNT@PROGRAM`.
 - **Signers are never inferred.** One signature authorizes every actor of that account in the
   transaction, under every program.
+- **Private calls** (an actor that is `Private/…`, a private label, `--seal` or `--recover`) need
+  the program's binary (`--binary` or spel.toml `binary`). Private accounts authorize through the
+  wallet's keys, never `--signer`. A private PDA must be registered first
+  (`spel pda … --owner | --group … --register`). Undeclared actors reached by sync messages are
+  inferred from simulation; an async credit's destination is not: declare `ACCOUNT@native`, or
+  use `--seal DEST` (from private execution) / `--recover DEST` (from public execution) for a
+  private recipient.
 - **Check the exit code.** `send`'s exit code: `0` changed, `2` nothing changed (refused in
   simulation, so not sent, with the reason printed; or a no-op), `1` error.
 - **A program is its address,** the header account `spel deploy` prints, not its ImageID

@@ -51,7 +51,9 @@ pub enum IdlGenError {
     TooManyVariants { name: String, count: usize },
     #[error("no events in module `{module}`: expected `impl <Trait> for <Struct> {{ const NAME: &str = \"..\"; }}`")]
     NoEvents { module: String },
-    #[error("type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies")]
+    #[error(
+        "type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies"
+    )]
     UnknownType { name: String, used_by: String },
     #[error("cannot describe `{ty}` (in `{used_by}`): {reason}")]
     Unsupported {
@@ -226,7 +228,12 @@ fn docs(attrs: &[Attribute]) -> Option<String> {
             syn::Meta::NameValue(nv) => string_literal(&nv.value),
             _ => None,
         })
-        .map(|line| line.strip_prefix(' ').unwrap_or(&line).trim_end().to_owned())
+        .map(|line| {
+            line.strip_prefix(' ')
+                .unwrap_or(&line)
+                .trim_end()
+                .to_owned()
+        })
         .collect();
     let text = lines.join("\n").trim().to_owned();
     (!text.is_empty()).then_some(text)
@@ -287,7 +294,8 @@ impl<'a> Collector<'a> {
 
     fn queue(&mut self, name: &str, used_by: &str) {
         if !self.done.contains_key(name) {
-            self.pending.push_back((name.to_owned(), used_by.to_owned()));
+            self.pending
+                .push_back((name.to_owned(), used_by.to_owned()));
         }
     }
 
@@ -375,6 +383,10 @@ impl<'a> Collector<'a> {
                     "String" => Ok(IdlType::Primitive("string".to_owned())),
                     "AccountId" => Ok(IdlType::Primitive("account_id".to_owned())),
                     "ProgramId" => Ok(IdlType::Primitive("program_id".to_owned())),
+                    // `lee_core::program::PdaSeed`: a newtype over 32 bytes, which is its Borsh.
+                    "PdaSeed" => Ok(IdlType::Array {
+                        array: (Box::new(IdlType::Primitive("u8".to_owned())), 32),
+                    }),
                     "Vec" => {
                         let inner = first_arg().ok_or_else(|| unsupported("Vec without a type"))?;
                         Ok(IdlType::Vec {

@@ -7597,6 +7597,7 @@ version = "0.7.0"
 dependencies = [
  "base58",
  "borsh",
+ "common",
  "hex",
  "lee",
  "lee_core",

@@ -453,7 +453,7 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
         // element with the primitive parser. An empty (or whitespace-only) string is an
         // empty list; an empty element inside a non-empty list (`"1,,2"`, `","`) is an
         // error rather than being silently dropped.
-        IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" => {
+        IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" || p == "account_id" => {
             if raw.trim().is_empty() {
                 return Ok(ParsedValue::Seq(Vec::new()));
             }
@@ -612,6 +612,21 @@ mod tests {
         IdlType::Vec {
             vec: Box::new(IdlType::Primitive(prim.to_string())),
         }
+    }
+
+    #[test]
+    fn a_vec_of_account_ids_encodes_like_borsh() {
+        use lee_core::account::AccountId;
+        let (a, b) = (AccountId::new([1; 32]), AccountId::new([2; 32]));
+        let ty = vec_of("account_id");
+        let parsed = parse_value(&format!("{a},{b}"), &ty, &[]).expect("parses");
+        let bytes = crate::serialize::serialize_to_borsh(0, &[(&ty, &parsed)]).expect("encodes");
+        // The variant's tag, then the field.
+        let field = borsh::to_vec(&vec![[1_u8; 32], [2_u8; 32]]).unwrap();
+        assert!(
+            bytes.ends_with(&field) && bytes.len() - field.len() <= 4,
+            "{bytes:?}"
+        );
     }
 
     #[test]

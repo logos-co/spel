@@ -13,12 +13,19 @@
 //! program or by LEZ's rules; `send` prints the reason and exits with [`EXIT_NO_CHANGE`]. Otherwise it reads every
 //! declared actor before and after inclusion and reports what changed. Inclusion with no change
 //! (a no-op, or a refusal the simulation didn't foresee) also exits with [`EXIT_NO_CHANGE`].
+//!
+//! A call that declares a private account, or credits one with `--seal` / `--recover`, is a
+//! privacy-preserving transaction ([`crate::private`]). Its access list isn't filled from the
+//! message's fields: the wallet's simulation names each actor the call reaches that isn't
+//! declared, and `send` adds it and simulates again.
 
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::process;
 
 use lee::AccountId;
 use lee_core::account::Actor;
+use lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
 use serde_json::{json, Value};
 use spel_framework_core::decode::decode_state;
 use spel_framework_core::idl::{to_kebab, IdlMessage, IdlType, SpelIdl};
@@ -39,8 +46,11 @@ pub const EXIT_NO_CHANGE: i32 = 2;
 
 pub const USAGE: &str =
     "Usage: spel send --idl <IDL> --root <ACCOUNT>[@<PROGRAM>] [--actor <ACCOUNT>[@<PROGRAM>]]... \
-     [--signer <ACCOUNT>]... [--no-auto-actors] [--fee-payer <ACCOUNT>] [--gas-limit <N>] \
-     [--dry-run[=json]] [--] <MESSAGE> [--field value]...";
+     [--signer <ACCOUNT>]... [--seal <DEST>]... [--recover <DEST>]... [--no-auto-actors] \
+     [--fee-payer <ACCOUNT>] [--gas-limit <N>] [--dry-run[=json]] [--] <MESSAGE> [--field value]...";
+
+/// How many undeclared actors a private send adds from simulation before giving up.
+const MAX_INFERRED: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DryRun {
@@ -54,6 +64,10 @@ pub struct SendFlags {
     pub root: String,
     pub actors: Vec<String>,
     pub signers: Vec<String>,
+    /// Credits sealed to their recipient: sent by private execution.
+    pub seals: Vec<String>,
+    /// Credits published with a recovery binding: sent by public execution.
+    pub recovers: Vec<String>,
     pub no_auto_actors: bool,
     pub gas_limit: Option<u64>,
     pub dry_run: Option<DryRun>,
@@ -82,6 +96,8 @@ pub fn parse_send_args(args: &[String]) -> Result<SendFlags, String> {
             "--root" => root = Some(value("--root")?),
             "--actor" => flags.actors.push(value("--actor")?),
             "--signer" => flags.signers.push(value("--signer")?),
+            "--seal" => flags.seals.push(value("--seal")?),
+            "--recover" => flags.recovers.push(value("--recover")?),
             "--no-auto-actors" => flags.no_auto_actors = true,
             "--gas-limit" => {
                 let raw = value("--gas-limit")?;
@@ -123,29 +139,58 @@ pub struct Names<'a> {
 }
 
 impl Names<'_> {
+    /// An account's id, public or private.
+    ///
     /// # Errors
     /// If `raw` is neither an id nor a label in the wallet.
     pub fn account(&self, raw: &str) -> Result<AccountId, String> {
+        Ok(match self.account_with_privacy(raw)? {
+            AccountIdWithPrivacy::Public(id) | AccountIdWithPrivacy::Private(id) => id,
+        })
+    }
+
+    /// An account and whether it's private: `Private/<id>`, `Public/<id>`, a wallet label, or a
+    /// bare id (private when this wallet can witness it as a private account).
+    ///
+    /// # Errors
+    /// If `raw` is neither an id nor a label in the wallet.
+    pub fn account_with_privacy(&self, raw: &str) -> Result<AccountIdWithPrivacy, String> {
         if let Ok(bytes) = decode_bytes_32(raw) {
-            return Ok(AccountId::new(bytes));
+            let id = AccountId::new(bytes);
+            return Ok(if raw.starts_with("Private/") {
+                AccountIdWithPrivacy::Private(id)
+            } else if raw.starts_with("Public/") || !self.is_private(id) {
+                AccountIdWithPrivacy::Public(id)
+            } else {
+                AccountIdWithPrivacy::Private(id)
+            });
         }
         let wallet = self.wallet.ok_or_else(|| {
             format!("'{raw}' is not an account id, and no wallet is open to resolve it as a label")
         })?;
-        match wallet.storage().resolve_label(&Label::new(raw)) {
-            Some(AccountIdWithPrivacy::Public(id)) => Ok(id),
-            Some(AccountIdWithPrivacy::Private(_)) => Err(format!(
-                "'{raw}' is a private account; spel send is public only"
-            )),
-            None => Err(format!("'{raw}' is not an account id or a wallet label")),
-        }
+        wallet
+            .storage()
+            .resolve_label(&Label::new(raw))
+            .ok_or_else(|| format!("'{raw}' is not an account id or a wallet label"))
     }
 
+    /// Whether this wallet witnesses `id` as a private account.
+    pub fn is_private(&self, id: AccountId) -> bool {
+        self.wallet
+            .is_some_and(|w| w.resolve_private_account(id).is_some())
+    }
+
+    /// A program: a `spel.toml` name, an id, or `native` (the native token program, whose actor
+    /// on an account is its balance).
+    ///
     /// # Errors
     /// If `raw` is neither an id nor a program named in `spel.toml`.
     pub fn program(&self, raw: &str) -> Result<AccountId, String> {
         if let Some((_, id)) = self.programs.iter().find(|(name, _)| name == raw) {
             return Ok(*id);
+        }
+        if raw == "native" {
+            return Ok(NATIVE_TOKEN_PROGRAM_ID);
         }
         decode_bytes_32(raw).map(AccountId::new).map_err(|e| {
             format!("'{raw}' is not a program named in spel.toml, nor a program id: {e}")
@@ -154,10 +199,17 @@ impl Names<'_> {
 
     pub fn account_name(&self, id: AccountId) -> String {
         let label = self.wallet.and_then(|w| {
-            w.storage()
-                .labels_for_account(AccountIdWithPrivacy::Public(id))
-                .next()
-                .map(|l| l.as_ref().to_owned())
+            [
+                AccountIdWithPrivacy::Public(id),
+                AccountIdWithPrivacy::Private(id),
+            ]
+            .into_iter()
+            .find_map(|account| {
+                w.storage()
+                    .labels_for_account(account)
+                    .next()
+                    .map(|l| l.as_ref().to_owned())
+            })
         });
         match label {
             Some(label) => format!("{label} ({id})"),
@@ -166,6 +218,9 @@ impl Names<'_> {
     }
 
     pub fn program_name(&self, id: AccountId) -> String {
+        if id == NATIVE_TOKEN_PROGRAM_ID {
+            return "native".into();
+        }
         self.programs
             .iter()
             .find(|(_, p)| *p == id)
@@ -179,6 +234,8 @@ pub struct Planned {
     pub account: AccountId,
     pub program: AccountId,
     pub signs: bool,
+    /// Witnessed through this wallet's keys in a privacy-preserving transaction.
+    pub private: bool,
     pub reason: String,
 }
 
@@ -205,6 +262,7 @@ pub fn plan_access_list(
                 account,
                 program,
                 signs: signers.contains(&account),
+                private: false,
                 reason,
             });
         }
@@ -308,6 +366,9 @@ struct Prepared {
     list: Vec<Planned>,
     signers: Vec<AccountId>,
     fee_payer: Option<AccountId>,
+    /// Sent as a privacy-preserving transaction: an actor is private, or a credit is sealed or
+    /// recoverable.
+    private: bool,
 }
 
 fn prepare(
@@ -349,7 +410,18 @@ fn prepare(
             idl.name
         ));
     }
-    let root = Actor::new(names.account(root_account)?, root_program);
+    // The accounts the caller declares, and which of them are private.
+    let mut private_accounts = BTreeSet::new();
+    let mut declared = |raw: &str| -> Result<AccountId, String> {
+        Ok(match names.account_with_privacy(raw)? {
+            AccountIdWithPrivacy::Public(id) => id,
+            AccountIdWithPrivacy::Private(id) => {
+                private_accounts.insert(id);
+                id
+            },
+        })
+    };
+    let root = Actor::new(declared(root_account)?, root_program);
     let explicit = flags
         .actors
         .iter()
@@ -359,23 +431,36 @@ fn prepare(
                 Some(p) => names.program(p)?,
                 None => root_program,
             };
-            Ok(Actor::new(names.account(account)?, program))
+            Ok(Actor::new(declared(account)?, program))
         })
         .collect::<Result<Vec<_>, String>>()?;
     let signers = flags
         .signers
         .iter()
-        .map(|raw| names.account(raw))
+        .map(|raw| match names.account_with_privacy(raw)? {
+            AccountIdWithPrivacy::Public(id) => Ok(id),
+            AccountIdWithPrivacy::Private(_) => Err(format!(
+                "--signer {raw}: a private account authorizes with this wallet's keys, not a \
+                 signature; drop --signer"
+            )),
+        })
         .collect::<Result<Vec<_>, String>>()?;
     let fee_payer = fee_payer.map(|raw| names.account(raw)).transpose()?;
+    let private =
+        !private_accounts.is_empty() || !flags.seals.is_empty() || !flags.recovers.is_empty();
 
-    let list = plan_access_list(
+    // A private call's undeclared actors come from simulation, not from the message's fields: a
+    // field may name a private account no one in this transaction can witness.
+    let mut list = plan_access_list(
         root,
         &explicit,
         &account_fields(message, &args),
         &signers,
-        !flags.no_auto_actors,
+        !flags.no_auto_actors && !private,
     );
+    for planned in &mut list {
+        planned.private = private_accounts.contains(&planned.account);
+    }
     Ok(Prepared {
         message_name: message.name.clone(),
         tag: message.tag,
@@ -383,6 +468,7 @@ fn prepare(
         list,
         signers,
         fee_payer,
+        private,
     })
 }
 
@@ -395,24 +481,42 @@ fn actor_name(names: &Names<'_>, account: AccountId, program: AccountId) -> Stri
 }
 
 /// The access list, then per signer every actor its signature authorizes.
-fn print_guardrail(prepared: &Prepared, names: &Names<'_>) {
+fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
     eprintln!(
-        "{} (tag {}, {} bytes) to {}",
+        "{} (tag {}, {} bytes) to {}{}",
         to_kebab(&prepared.message_name),
         prepared.tag,
         prepared.bytes.len(),
-        actor_name(names, prepared.list[0].account, prepared.list[0].program)
+        actor_name(names, prepared.list[0].account, prepared.list[0].program),
+        if prepared.private {
+            ", as a privacy-preserving transaction"
+        } else {
+            ""
+        }
     );
     eprintln!("Access list:");
     for planned in &prepared.list {
         eprintln!(
-            "  {:<60} {}{}",
+            "  {:<60} {}{}{}",
             actor_name(names, planned.account, planned.program),
             planned.reason,
-            if planned.signs { ", signs" } else { "" }
+            if planned.signs { ", signs" } else { "" },
+            if planned.private {
+                ", private: authorized by this wallet's keys"
+            } else {
+                ""
+            }
         );
     }
-    if prepared.signers.is_empty() {
+    for seal in &flags.seals {
+        eprintln!("Credit sealed to {seal}");
+    }
+    for recover in &flags.recovers {
+        eprintln!("Credit to {recover}, with a recovery binding");
+    }
+    if prepared.private {
+        // Private accounts authorize through the wallet's keys, not signatures.
+    } else if prepared.signers.is_empty() {
         eprintln!("No signers: no actor is authorized.");
     }
     for signer in &prepared.signers {
@@ -437,22 +541,31 @@ fn print_guardrail(prepared: &Prepared, names: &Names<'_>) {
     }
 }
 
-fn dry_run_json(prepared: &Prepared) -> Value {
+fn dry_run_json(prepared: &Prepared, flags: &SendFlags) -> Value {
     json!({
         "message": { "name": prepared.message_name, "tag": prepared.tag, "hex": hex_encode(&prepared.bytes) },
         "root": { "account": prepared.list[0].account.to_string(), "program": prepared.list[0].program.to_string() },
         "actors": prepared.list.iter().map(|p| json!({
             "account": p.account.to_string(),
             "program": p.program.to_string(),
-            "authorizes": p.signs,
+            "authorizes": p.signs || p.private,
+            "private": p.private,
             "reason": p.reason,
         })).collect::<Vec<_>>(),
         "signers": prepared.signers.iter().map(ToString::to_string).collect::<Vec<_>>(),
         "fee_payer": prepared.fee_payer.map(|p| p.to_string()),
+        "private": prepared.private,
+        "seal": flags.seals,
+        "recover": flags.recovers,
     })
 }
 
-pub(crate) fn open_wallet(gas_limit: Option<u64>) -> Result<Wallet, String> {
+/// Open the wallet `LEE_WALLET_HOME_DIR` names, with its password from `LEE_WALLET_PASSWORD` or a
+/// prompt.
+///
+/// # Errors
+/// If the wallet can't be found or opened.
+pub fn open_wallet(gas_limit: Option<u64>) -> Result<Wallet, String> {
     let overrides = gas_limit.map(|gas_limit| WalletConfigOverrides {
         gas_limit: Some(gas_limit),
         ..Default::default()
@@ -482,6 +595,12 @@ async fn read_states(wallet: &Wallet, list: &[Planned]) -> Result<Vec<Vec<u8>>, 
 
 /// An actor state as JSON when the IDL describes its program, else its size.
 fn render_state(bytes: &[u8], program: AccountId, idl_program: AccountId, idl: &SpelIdl) -> String {
+    if program == NATIVE_TOKEN_PROGRAM_ID {
+        return lee_core::native_token::decode_balance(bytes).map_or_else(
+            |_| format!("{} bytes", bytes.len()),
+            |balance| format!("balance {balance}"),
+        );
+    }
     if bytes.is_empty() {
         return "none".into();
     }
@@ -494,18 +613,17 @@ fn render_state(bytes: &[u8], program: AccountId, idl_program: AccountId, idl: &
 }
 
 /// Run `spel send`. Exits non-zero on any error, and with [`EXIT_NO_CHANGE`] when the message
-/// was refused in simulation or the included transaction changed no declared actor.
+/// was refused in simulation, reverted, or the included transaction changed no declared actor.
+///
+/// `binary` is the program's binary, which a privacy-preserving transaction is proved with.
 pub async fn send_command(
     args: &[String],
     idl: &SpelIdl,
     default_program: Option<&str>,
     fee_payer: Option<&str>,
     programs: Vec<(String, AccountId)>,
+    binary: Option<&str>,
 ) {
-    let fail = |msg: String| -> ! {
-        eprintln!("❌ {msg}");
-        process::exit(1);
-    };
     let flags = parse_send_args(args).unwrap_or_else(|e| {
         eprintln!("❌ {e}");
         eprintln!("{USAGE}");
@@ -513,7 +631,7 @@ pub async fn send_command(
     });
 
     // The wallet resolves labels and signs. A dry run works without one, on raw ids.
-    let wallet = match open_wallet(flags.gas_limit) {
+    let mut wallet = match open_wallet(flags.gas_limit) {
         Ok(wallet) => Some(wallet),
         Err(e) if flags.dry_run.is_some() => {
             eprintln!("⚠️  No wallet ({e}): labels won't resolve and signing keys aren't checked.");
@@ -523,44 +641,73 @@ pub async fn send_command(
             "Failed to open the wallet: {e}\n   Set LEE_WALLET_HOME_DIR"
         )),
     };
-    let names = Names {
-        wallet: wallet.as_ref(),
-        programs,
-    };
-    let prepared =
-        prepare(&flags, idl, default_program, fee_payer, &names).unwrap_or_else(|e| fail(e));
-
-    if let Some(wallet) = &wallet {
-        for signer in &prepared.signers {
-            if wallet.get_account_public_signing_key(*signer).is_none() {
-                fail(format!(
-                    "--signer {}: this wallet doesn't hold its signing key",
-                    names.account_name(*signer)
-                ));
+    let prepared = {
+        let names = Names {
+            wallet: wallet.as_ref(),
+            programs: programs.clone(),
+        };
+        let prepared =
+            prepare(&flags, idl, default_program, fee_payer, &names).unwrap_or_else(|e| fail(e));
+        if let Some(wallet) = &wallet {
+            for signer in &prepared.signers {
+                if wallet.get_account_public_signing_key(*signer).is_none() {
+                    fail(format!(
+                        "--signer {}: this wallet doesn't hold its signing key",
+                        names.account_name(*signer)
+                    ));
+                }
             }
         }
-    }
-
-    match flags.dry_run {
-        Some(DryRun::Json) => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&dry_run_json(&prepared)).unwrap_or_default()
-            );
-            return;
-        },
-        Some(DryRun::Text) => {
-            print_guardrail(&prepared, &names);
-            eprintln!("Message: {}", hex_encode(&prepared.bytes));
-            eprintln!("Dry run: nothing sent.");
-            return;
-        },
-        None => print_guardrail(&prepared, &names),
-    }
-    let Some(wallet) = &wallet else {
+        match flags.dry_run {
+            Some(DryRun::Json) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&dry_run_json(&prepared, &flags))
+                        .unwrap_or_default()
+                );
+                return;
+            },
+            Some(DryRun::Text) => {
+                print_guardrail(&prepared, &flags, &names);
+                eprintln!("Message: {}", hex_encode(&prepared.bytes));
+                if prepared.private && !flags.no_auto_actors {
+                    eprintln!(
+                        "Private: the actors the call reaches beyond these are found when it's \
+                         sent (the wallet simulates before proving)."
+                    );
+                }
+                eprintln!("Dry run: nothing sent.");
+                return;
+            },
+            None => print_guardrail(&prepared, &flags, &names),
+        }
+        prepared
+    };
+    let Some(wallet) = wallet.as_mut() else {
         unreachable!("only a dry run proceeds without a wallet")
     };
+    if prepared.private {
+        send_private(wallet, prepared, &flags, idl, programs, binary).await;
+    } else {
+        send_public(wallet, &prepared, idl, programs).await;
+    }
+}
 
+fn fail(msg: impl std::fmt::Display) -> ! {
+    eprintln!("❌ {msg}");
+    process::exit(1);
+}
+
+async fn send_public(
+    wallet: &Wallet,
+    prepared: &Prepared,
+    idl: &SpelIdl,
+    programs: Vec<(String, AccountId)>,
+) {
+    let names = Names {
+        wallet: Some(wallet),
+        programs,
+    };
     let before = read_states(wallet, &prepared.list)
         .await
         .unwrap_or_else(|e| fail(e));
@@ -607,11 +754,211 @@ pub async fn send_command(
     let after = read_states(wallet, &prepared.list)
         .await
         .unwrap_or_else(|e| fail(e));
-    let root_program = prepared.list[0].program;
-    let changed: Vec<_> = prepared
-        .list
+    report_changes(&names, &prepared.list, &before, &after, block, idl);
+}
+
+/// A privacy-preserving transaction: proved with the program's binary, with private actors
+/// witnessed through this wallet's keys. Undeclared actors the simulation reaches are added, one
+/// at a time.
+async fn send_private(
+    wallet: &mut Wallet,
+    mut prepared: Prepared,
+    flags: &SendFlags,
+    idl: &SpelIdl,
+    programs: Vec<(String, AccountId)>,
+    binary: Option<&str>,
+) {
+    let binary = binary.unwrap_or_else(|| {
+        fail(
+            "a private call is proved with the program's binary: pass --binary <FILE>, or name a \
+             spel.toml program with a `binary`",
+        )
+    });
+    let (catalog, _) = crate::private::catalog(Path::new(binary), prepared.list[0].program)
+        .unwrap_or_else(|e| fail(e));
+
+    let mut before = Vec::with_capacity(prepared.list.len());
+    for planned in &prepared.list {
+        before.push(
+            crate::private::actor_state(wallet, planned.account, planned.program, planned.private)
+                .await
+                .unwrap_or_else(|e| fail(e)),
+        );
+    }
+    let mut inferred = 0;
+    let hash = loop {
+        let names = Names {
+            wallet: Some(&*wallet),
+            programs: programs.clone(),
+        };
+        let mut mentions = prepared
+            .list
+            .iter()
+            .map(|planned| mention(wallet, planned))
+            .collect::<Result<Vec<_>, String>>()
+            .unwrap_or_else(|e| fail(e));
+        let destinations = |raws: &[String]| {
+            raws.iter()
+                .map(|raw| crate::private::destination(&names, raw))
+                .collect::<Result<Vec<_>, String>>()
+                .unwrap_or_else(|e| fail(e))
+        };
+        let (declared, delivery) = crate::private::delivery(
+            wallet,
+            destinations(&flags.recovers),
+            destinations(&flags.seals),
+        )
+        .unwrap_or_else(|e| fail(e));
+        mentions.extend(declared);
+
+        let sent = {
+            let _quiet = StdoutToStderr::new();
+            wallet
+                .send_tx_with_pre_check(
+                    mentions,
+                    0,
+                    prepared.bytes.clone(),
+                    &catalog,
+                    None,
+                    delivery,
+                    prepared.fee_payer,
+                    |_| Ok(()),
+                )
+                .await
+        };
+        let error = match sent {
+            Ok((hash, _)) => break hash,
+            Err(error) => error,
+        };
+        let reached = (!flags.no_auto_actors && inferred < MAX_INFERRED)
+            .then(|| crate::private::undeclared_actor(&error))
+            .flatten();
+        let Some(actor) = reached else {
+            if let Some(reason) = crate::private::refusal(&error) {
+                eprintln!("⚠️  Refused in simulation, so not sent: {reason}");
+                process::exit(EXIT_NO_CHANGE);
+            }
+            fail(format!("send refused by the wallet: {error:#}"))
+        };
+        let (account, program) = (actor.account_id, actor.program_account_id);
+        if prepared
+            .list
+            .iter()
+            .any(|p| p.account == account && p.program == program)
+        {
+            fail(format!(
+                "the simulation reaches {}, which is declared: {error:#}",
+                actor_name(&names, account, program)
+            ));
+        }
+        let private = names.is_private(account);
+        eprintln!(
+            "  + {:<58} reached in simulation{}",
+            actor_name(&names, account, program),
+            if private { ", private" } else { "" }
+        );
+        before.push(
+            crate::private::actor_state(wallet, account, program, private)
+                .await
+                .unwrap_or_else(|e| fail(e)),
+        );
+        prepared.list.push(Planned {
+            account,
+            program,
+            signs: false,
+            private,
+            reason: "reached in simulation".into(),
+        });
+        inferred += 1;
+    };
+    eprintln!("Submitted {hash}, waiting for a block...");
+    let (block, reverted) = crate::private::settle(wallet, hash)
+        .await
+        .unwrap_or_else(|e| fail(e));
+    println!("{hash}");
+
+    let names = Names {
+        wallet: Some(&*wallet),
+        programs,
+    };
+    if inferred > 0 {
+        eprintln!(
+            "The same call, declared: {}",
+            explicit_command(&prepared, flags, &names)
+        );
+    }
+    if reverted {
+        eprintln!(
+            "⚠️  Included in block {block}, but it reverted: its fee was charged and nothing else \
+             applied."
+        );
+        process::exit(EXIT_NO_CHANGE);
+    }
+    let mut after = Vec::with_capacity(prepared.list.len());
+    for planned in &prepared.list {
+        after.push(
+            crate::private::actor_state(wallet, planned.account, planned.program, planned.private)
+                .await
+                .unwrap_or_else(|e| fail(e)),
+        );
+    }
+    report_changes(&names, &prepared.list, &before, &after, block, idl);
+}
+
+/// A declared actor of a privacy-preserving transaction.
+fn mention(wallet: &Wallet, planned: &Planned) -> Result<AccountMention, String> {
+    let identity = if planned.private {
+        crate::private::private_identity(wallet, planned.account)?
+    } else if planned.signs {
+        AccountIdentity::Public(planned.account)
+    } else {
+        AccountIdentity::PublicNoSign(planned.account)
+    };
+    Ok(identity.select_program_actor_state(planned.program))
+}
+
+/// `spel send` with every actor declared and nothing inferred.
+fn explicit_command(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -> String {
+    let actor = |p: &Planned| {
+        let account = if p.private {
+            format!("Private/{}", p.account)
+        } else {
+            p.account.to_string()
+        };
+        format!("{account}@{}", names.program_name(p.program))
+    };
+    let mut words = vec![
+        "spel send".to_owned(),
+        format!("--root {}", actor(&prepared.list[0])),
+    ];
+    for planned in &prepared.list[1..] {
+        if planned.reason != "--signer" {
+            words.push(format!("--actor {}", actor(planned)));
+        }
+    }
+    words.extend(flags.signers.iter().map(|s| format!("--signer {s}")));
+    words.extend(flags.seals.iter().map(|s| format!("--seal {s}")));
+    words.extend(flags.recovers.iter().map(|s| format!("--recover {s}")));
+    words.push("--no-auto-actors --".to_owned());
+    words.push(flags.message.clone());
+    words.extend(flags.message_args.iter().cloned());
+    words.join(" ")
+}
+
+/// Each declared actor whose state changed, before and after. Exits with [`EXIT_NO_CHANGE`] when
+/// none did.
+fn report_changes(
+    names: &Names<'_>,
+    list: &[Planned],
+    before: &[Vec<u8>],
+    after: &[Vec<u8>],
+    block: u64,
+    idl: &SpelIdl,
+) {
+    let root_program = list[0].program;
+    let changed: Vec<_> = list
         .iter()
-        .zip(before.iter().zip(&after))
+        .zip(before.iter().zip(after))
         .filter(|(_, (b, a))| b != a)
         .collect();
     if changed.is_empty() {
@@ -623,7 +970,7 @@ pub async fn send_command(
     }
     eprintln!("Included in block {block}. Changed:");
     for (planned, (b, a)) in changed {
-        eprintln!("  {}", actor_name(&names, planned.account, planned.program));
+        eprintln!("  {}", actor_name(names, planned.account, planned.program));
         eprintln!(
             "    before: {}",
             render_state(b, planned.program, root_program, idl)
@@ -659,6 +1006,39 @@ mod tests {
         assert_eq!(flags.dry_run, Some(DryRun::Json));
         assert_eq!(flags.message, "transfer");
         assert_eq!(flags.message_args, args("--to bob --amount 3"));
+    }
+
+    #[test]
+    fn credits_repeat_and_stay_apart() {
+        let flags = parse_send_args(&args(
+            "--root seat@payroll --seal emp --seal keys:/tmp/b.keys --recover bob pay --employee emp",
+        ))
+        .unwrap();
+        assert_eq!(flags.seals, ["emp", "keys:/tmp/b.keys"]);
+        assert_eq!(flags.recovers, ["bob"]);
+        assert_eq!(flags.message_args, args("--employee emp"));
+    }
+
+    #[test]
+    fn native_names_the_balance_program() {
+        let names = Names {
+            wallet: None,
+            programs: vec![],
+        };
+        assert_eq!(names.program("native").unwrap(), NATIVE_TOKEN_PROGRAM_ID);
+        assert_eq!(names.program_name(NATIVE_TOKEN_PROGRAM_ID), "native");
+        let id = id(4);
+        assert_eq!(
+            names
+                .account_with_privacy(&format!("Private/{id}"))
+                .unwrap(),
+            AccountIdWithPrivacy::Private(id)
+        );
+        assert_eq!(
+            names.account_with_privacy(&id.to_string()).unwrap(),
+            AccountIdWithPrivacy::Public(id),
+            "a bare id with no wallet to witness it privately is public"
+        );
     }
 
     #[test]
@@ -717,12 +1097,14 @@ mod tests {
                     account: alice,
                     program: token,
                     signs: true,
+                    private: false,
                     reason: "root".into()
                 },
                 Planned {
                     account: bob,
                     program: token,
                     signs: false,
+                    private: false,
                     reason: "field `to`".into()
                 },
             ]
