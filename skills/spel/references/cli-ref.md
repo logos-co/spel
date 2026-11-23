@@ -28,6 +28,12 @@ name. Actors: `ACCOUNT@PROGRAM`.
 address = "<header account from spel deploy>"
 idl     = "artifacts/token-idl.json"
 binary  = "target/guest/token.bin"      # optional: default for `spel deploy`
+core    = "programs/token/core"         # optional: the crate `generate-idl` reads
+
+[programs.token.idl-gen]                # optional: generate-idl names; flags win
+message = "Message"
+state   = "TokenState"                  # or a list for several untagged state types
+events  = "event"
 ```
 
 One `[programs.x]` (or an unnamed `[program]`) is selected automatically; with several, pass
@@ -78,8 +84,14 @@ spel --idl token.json encode transfer --to <id> --amount 300    # Borsh hex, no 
 ### generate-idl
 
 ```bash
-spel generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>] [--namespace <NAME>]
+spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>] [--namespace <NAME>]
+spel generate-idl --program token > artifacts/token-idl.json   # everything from spel.toml
 ```
+
+Values not given come from the `--program` entry's `core` and `[idl-gen]` (or the default
+program when no `<CRATE_DIR>` is given). The IDL lists the state types in `state_types`;
+repeat `--state` (or give a list in `[idl-gen]`) for several untagged ones, and `inspect` then
+prints hex and the candidates until `--type` picks one.
 
 ### deploy, program-id, pda, idl
 

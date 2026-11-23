@@ -18,7 +18,7 @@ fn options(crate_dir: &Path, message: &str, state: Option<&str>, events: Option<
     GenOptions {
         crate_dir: crate_dir.to_owned(),
         message: message.to_owned(),
-        state: state.map(str::to_owned),
+        states: state.map(str::to_owned).into_iter().collect(),
         events: events.map(str::to_owned),
         namespace: None,
     }
@@ -214,6 +214,53 @@ fn shapes_decode_through_the_idl() {
     assert_eq!(decode_state(&[1, 1], &idl).unwrap(), json!({ "B": { "flag": true } }));
     assert_eq!(decode_named(&[1, 0, 0, 0], "Inner", &idl).unwrap(), json!(1));
     assert!(decode_state(&[2], &idl).unwrap_err().contains("out of range"));
+}
+
+#[test]
+fn several_state_types_become_state_types() {
+    let dir = shape_crate(
+        "pub enum Message { Observe }\n\
+         pub struct PriceObservations { pub prices: Vec<u64> }\n\
+         pub struct OraclePrice { pub price: u64, pub at: Tick }\n\
+         pub struct Tick { pub tick: u32 }\n",
+        &[],
+    );
+    let mut opts = options(dir.path(), "Message", None, None);
+    opts.states = vec![
+        "PriceObservations".into(),
+        "OraclePrice".into(),
+        "PriceObservations".into(),
+    ];
+    let idl = generate(&opts).unwrap();
+    assert_eq!(idl.state_types, ["PriceObservations", "OraclePrice"]);
+    // Each one, and what it references, is described.
+    for name in ["PriceObservations", "OraclePrice", "Tick"] {
+        assert!(idl.type_def(name).is_some(), "{name} missing");
+    }
+    // The bytes don't say which one an actor holds: decoding needs a type.
+    let err = decode_state(&[0; 12], &idl).unwrap_err();
+    assert!(
+        err.contains("PriceObservations, OraclePrice") && err.contains("--type"),
+        "{err}"
+    );
+    assert_eq!(
+        decode_named(&[7, 0, 0, 0, 0, 0, 0, 0, 3, 0, 0, 0], "OraclePrice", &idl).unwrap(),
+        json!({ "price": "7", "at": { "tick": 3 } })
+    );
+    // It passes the reader's checks.
+    assert_eq!(
+        SpelIdl::from_json(&idl.to_json_pretty().unwrap()).unwrap(),
+        idl
+    );
+}
+
+#[test]
+fn a_missing_one_of_several_state_types_fails() {
+    let dir = shape_crate("pub enum Message { Ping }\npub struct A { pub x: u8 }\n", &[]);
+    let mut opts = options(dir.path(), "Message", None, None);
+    opts.states = vec!["A".into(), "Nope".into()];
+    let err = generate(&opts).unwrap_err().to_string();
+    assert!(err.contains("`Nope`"), "{err}");
 }
 
 #[test]

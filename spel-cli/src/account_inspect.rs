@@ -2,7 +2,9 @@
 //!
 //! An account holds one state per program. With a program (`@PROGRAM`, `--program`, or the
 //! `spel.toml` program named like the IDL) the actor's state is decoded as the IDL's state
-//! type, or as `--type`. Without one, every program holding state on the account is listed.
+//! type, or as `--type`. An IDL with several state types prints the state as hex and lists them,
+//! unless `--type` picks one. Without a program, every program holding state on the account is
+//! listed.
 //! `--data HEX` decodes offline.
 
 use std::process;
@@ -111,6 +113,15 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
     }
     eprintln!("{actor}: {} bytes", state.len());
     match args.idl {
+        // Several untagged state types: the bytes don't say which one this actor holds.
+        Some(idl) if args.type_name.is_none() && idl.state_types.len() > 1 => {
+            eprintln!(
+                "The '{}' IDL has several state types: {}. Decode with --type <TYPE>.",
+                idl.name,
+                idl.state_types.join(", ")
+            );
+            println!("{}", hex_encode(&state));
+        },
         Some(idl) => {
             let value = decode(&state, idl, args.type_name).unwrap_or_else(|e| {
                 eprintln!("Hex: {}", hex_encode(&state));

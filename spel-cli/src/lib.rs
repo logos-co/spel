@@ -226,11 +226,55 @@ pub async fn run() {
                 return;
             },
             "generate-idl" => {
-                let options = generate_idl::parse_args(&remaining_args[2..]).unwrap_or_else(|e| {
+                let usage_error = |e: String| -> ! {
                     eprintln!("❌ {e}");
                     eprintln!("{}", generate_idl::USAGE);
                     process::exit(1);
-                });
+                };
+                let parsed =
+                    generate_idl::parse_args(&remaining_args[2..]).unwrap_or_else(|e| usage_error(e));
+                // spel.toml fills the gaps when --program names one of its programs, or when no
+                // crate directory is given (then its default program). A crate directory alone
+                // never picks up another program's settings.
+                let from_config = match (&config, &program_ref) {
+                    (Some((path, cfg)), Some(name)) => {
+                        if !cfg.has_program(name) {
+                            usage_error(format!(
+                                "--program {name}: generate-idl takes a [programs.<name>] entry \
+                                 of spel.toml"
+                            ));
+                        }
+                        cfg.resolve_program(Some(name)).ok().map(|p| (path, p))
+                    },
+                    (Some((path, cfg)), None) if parsed.crate_dir.is_none() => Some((
+                        path,
+                        cfg.resolve_program(None)
+                            .unwrap_or_else(|e| usage_error(format!("missing <CRATE_DIR>: {e}"))),
+                    )),
+                    (None, Some(name)) => usage_error(format!(
+                        "--program {name}: no spel.toml found to name it"
+                    )),
+                    _ => None,
+                };
+                let options = generate_idl::resolve(
+                    parsed,
+                    from_config.and_then(|(path, p)| Some((path.parent()?, p))),
+                )
+                .unwrap_or_else(|e| usage_error(e));
+                if let Some((path, _)) = from_config {
+                    eprintln!(
+                        "generate-idl: {} (from {}) · message: {} · state: {} · events: {}",
+                        options.crate_dir.display(),
+                        path.display(),
+                        options.message,
+                        if options.states.is_empty() {
+                            "none".to_owned()
+                        } else {
+                            options.states.join(", ")
+                        },
+                        options.events.as_deref().unwrap_or("none"),
+                    );
+                }
                 match spel_framework_core::idl_gen::generate_idl(&options, |w| eprintln!("⚠️  {w}"))
                 {
                     Ok(idl) => println!("{}", idl.to_json_pretty().unwrap()),
@@ -314,8 +358,9 @@ pub async fn run() {
         eprintln!("  inspect <ACCOUNT>[@<PROGRAM>] [--idl <IDL>] [--type <TYPE>] [--data <HEX>]");
         eprintln!("                           Read and decode an actor's state");
         eprintln!(
-            "  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]"
+            "  generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]"
         );
+        eprintln!("                           Missing values come from spel.toml (`core`, [idl-gen])");
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
         eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");

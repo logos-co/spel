@@ -65,7 +65,7 @@ spel inspect alice@token
 
 | command | what it does |
 | --- | --- |
-| `generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]` | IDL v2 from a core crate |
+| `generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]` | IDL v2 from a core crate; missing values come from spel.toml (`core`, `[idl-gen]`) |
 | `send --root <ACCOUNT>[@<PROGRAM>] … -- <MESSAGE> [--field value]…` | send one message to an actor; reports what changed |
 | `inspect <ACCOUNT>[@<PROGRAM>]` | read and decode an actor's state, or list every program holding state on an account |
 | `encode <MESSAGE> [--field value]…` | print a message's Borsh bytes as hex |

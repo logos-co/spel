@@ -17,7 +17,7 @@ Version 2 replaces the instruction-based version 1 of the retired `#[lez_program
   "version": "2",
   "name": "token",
   "messages": [ … ],
-  "state": { "defined": "TokenState" },
+  "state_types": ["TokenState"],
   "events": [ … ],
   "types": [ … ]
 }
@@ -28,7 +28,7 @@ Version 2 replaces the instruction-based version 1 of the retired `#[lez_program
 | `version` | always `"2"` |
 | `name` | the program's name and event namespace (`token` for `token_core`) |
 | `messages` | the external message enum's variants, in enum order |
-| `state` | the type of an actor's state; omitted if not given to the generator |
+| `state_types` | the types of an actor's state: usually one, several for untagged state types; omitted if none was given to the generator |
 | `events` | the events the program emits; omitted if none |
 | `types` | every struct and enum the messages, state and events reference, sorted by name |
 
@@ -59,15 +59,32 @@ One entry per variant of the message enum:
 The encoded message is the tag byte followed by each field's Borsh encoding in order, exactly
 what `borsh::to_vec(&Message::…)` produces in the program's core crate.
 
-## `state`
+## `state_types`
 
-The type an actor of the program holds, usually an enum over the actor kinds:
+The types an actor of the program holds, as names of structs or enums in `types`. Usually
+there is one, an enum over the actor kinds, and every actor decodes as it:
 
 ```json
-"state": { "defined": "TokenState" }
+"state_types": ["TokenState"]
 ```
 
 `spel inspect` decodes actor state as this type unless `--type` names another.
+
+A program can instead store different structs on different actors, with no tag saying which (a
+straight port of `twap_oracle` keeps `PriceObservations`, `OraclePriceAccount` and
+`CurrentTickAccount` apart). Its IDL lists all of them:
+
+```json
+"state_types": ["PriceObservations", "OraclePriceAccount", "CurrentTickAccount"]
+```
+
+The bytes don't say which type an actor holds, and two structs of the same size both decode
+cleanly, so nothing guesses: with several state types, `spel inspect` prints the state as hex
+and lists the types until `--type` picks one. Prefer one enum over the actor kinds where you
+can; it costs one byte per actor and makes every actor decodable.
+
+Early version 2 IDLs had a single `"state": { "defined": … }` field. `spel` refuses those with a
+message to regenerate.
 
 ## `events`
 
@@ -118,7 +135,7 @@ crate's source with `syn`; the program carries no annotations. It reads:
 - **the message enum** (`--message`): variants in order, their fields and doc comments. A
   program's internal message enum (messages only its own actors send) is left out: nobody
   outside sends it.
-- **the state type** (`--state`).
+- **the state types** (`--state`, repeatable), written to `state_types` in the order given.
 - **the events** (`--events <module>`): every `impl <Trait> for <Struct> { const NAME: &str = "…"; }`
   in that module, in source order. The trait's name doesn't matter.
 - **every type those reference**, across the crate's path dependencies (`Cargo.toml`
@@ -162,7 +179,7 @@ The token program's IDL, abbreviated:
     { "name": "Burn", "tag": 3, "fields": [ { "name": "amount", "type": "u128" } ] },
     { "name": "ReadState", "tag": 6 }
   ],
-  "state": { "defined": "TokenState" },
+  "state_types": ["TokenState"],
   "events": [
     { "name": "Transferred", "selector": "dc1cd384aa229a4b", "type": { "defined": "Transferred" } }
   ],

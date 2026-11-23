@@ -10,13 +10,18 @@ use serde_json::{json, Value};
 /// Decode an actor state as the IDL's state type. Every byte must be consumed.
 ///
 /// # Errors
-/// If the IDL declares no state type, or the bytes are not a value of it.
+/// If the IDL doesn't declare exactly one state type (none, or several, where the bytes don't
+/// say which one applies), or the bytes are not a value of it.
 pub fn decode_state(data: &[u8], idl: &SpelIdl) -> Result<Value, String> {
-    let state = idl
-        .state
-        .as_ref()
-        .ok_or_else(|| format!("the '{}' IDL declares no state type", idl.name))?;
-    decode_value(data, state, idl)
+    match idl.state_types.as_slice() {
+        [state] => decode_named(data, state, idl),
+        [] => Err(format!("the '{}' IDL declares no state type", idl.name)),
+        several => Err(format!(
+            "the '{}' IDL has several state types ({}); pick one with --type",
+            idl.name,
+            several.join(", ")
+        )),
+    }
 }
 
 /// Decode `data` as the struct or enum named `type_name`. Every byte must be consumed.

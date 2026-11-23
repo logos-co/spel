@@ -77,9 +77,9 @@
       "docs": "Reply to the sender with this actor's state, as a `lee_core::program::StateReply`."
     }
   ],
-  "state": {
-    "defined": "NftState"
-  },
+  "state_types": [
+    "NftState"
+  ],
   "events": [
     {
       "name": "NewDefinition",

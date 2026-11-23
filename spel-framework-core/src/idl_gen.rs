@@ -1,8 +1,8 @@
 //! Generates an IDL from a program's core crate, with no annotations in the program.
 //!
-//! The caller names the three things a client needs: the message enum, the state type and the
-//! module holding the events (`spel generate-idl programs/token/core --message Message
-//! --state TokenState --events event`). Everything else is read from plain Rust types: the
+//! The caller names the three things a client needs: the message enum, the state type (or
+//! types) and the module holding the events (`spel generate-idl programs/token/core --message
+//! Message --state TokenState --events event`). Everything else is read from plain Rust types: the
 //! enum's variant order gives the Borsh tags, doc comments become help, and every struct or
 //! enum those types reference is described, following path dependencies.
 //!
@@ -27,8 +27,10 @@ pub struct GenOptions {
     pub crate_dir: PathBuf,
     /// The external message enum, e.g. `Message`.
     pub message: String,
-    /// The actor state type, e.g. `TokenState`.
-    pub state: Option<String>,
+    /// The actor state types, usually one (e.g. `TokenState`); several for a program that
+    /// stores different untagged structs on different actors. They become the IDL's
+    /// `state_types`, in this order, without duplicates.
+    pub states: Vec<String>,
     /// The module holding the event structs, e.g. `event` (nested: `a::b`).
     pub events: Option<String>,
     /// The program name and event namespace. Defaults to the crate name without `_core`.
@@ -121,18 +123,17 @@ pub fn generate_idl<F: FnMut(String)>(
         });
     }
 
-    let state = match &options.state {
-        Some(name) => {
-            if index.own_definition(name).is_none() {
-                return Err(not_found("type", name));
-            }
-            collector.queue(name, "--state");
-            Some(IdlType::Defined {
-                defined: name.clone(),
-            })
-        },
-        None => None,
-    };
+    let mut state_types: Vec<String> = Vec::new();
+    for name in &options.states {
+        if state_types.contains(name) {
+            continue;
+        }
+        if index.own_definition(name).is_none() {
+            return Err(not_found("type", name));
+        }
+        collector.queue(name, "--state");
+        state_types.push(name.clone());
+    }
 
     let mut events = Vec::new();
     if let Some(module) = &options.events {
@@ -159,7 +160,7 @@ pub fn generate_idl<F: FnMut(String)>(
         version: IDL_VERSION.to_owned(),
         name: namespace,
         messages,
-        state,
+        state_types,
         events,
         types,
     })

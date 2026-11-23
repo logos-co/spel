@@ -72,6 +72,24 @@ idl     = "artifacts/nft-idl.json"
 - `[program]` and `[programs]` are mutually exclusive.
 - Each deployment gets a fresh address: update `address` after every deploy.
 
+**IDL generation settings:** a program's `core` crate and an `[idl-gen]` table let
+`spel generate-idl --program <name>` run with no other arguments (see
+[`generate-idl`](#generate-idl)):
+
+```toml
+[programs.token]
+idl  = "artifacts/token-idl.json"
+core = "programs/token/core"           # the crate generate-idl reads
+
+[programs.token.idl-gen]
+message = "Message"
+state   = "TokenState"                 # or a list: ["PriceObservations", "OraclePrice"]
+events  = "event"
+# namespace = "token"                  # defaults to the crate name without `_core`
+```
+
+Unlike the program keys, a misspelled key in `[idl-gen]` is an error.
+
 **IDL/program check:** when a program has a `spel.toml` name, `send` and `inspect` refuse an
 IDL whose `name` differs from it. Layouts of different programs can line up, so a token IDL
 would otherwise "decode" an NFT actor into plausible nonsense. With a raw program id the IDL
@@ -234,6 +252,8 @@ spel --idl <IDL> inspect <anything> --data <HEX> [--type <TYPE>]
 - **With a program** (`@PROGRAM`, else `--program`, else the `spel.toml` program named like the
   IDL): prints the actor's state decoded as the IDL's state type, or as `--type`. An actor with
   no state prints `null` (and "no state" on stderr). Without an IDL the state is printed as hex.
+  An IDL with several `state_types` prints hex too, listing them on stderr:
+  the bytes don't say which one the actor holds, so pick one with `--type`.
 - **Without a program:** lists every program holding state on the account, keyed by `spel.toml`
   name or program id, as hex:
 
@@ -283,19 +303,29 @@ Fields take the same values as in `send`, except that wallet labels don't resolv
 Generate an IDL v2 from a program's core crate. The program needs no annotations.
 
 ```bash
-spel generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>] [--namespace <NAME>]
+spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>] [--namespace <NAME>]
 ```
 
 | option | meaning |
 | --- | --- |
-| `<CRATE_DIR>` | the core crate (with `Cargo.toml` and `src/lib.rs`) |
-| `--message <ENUM>` | **required.** The external message enum; its variant order gives the Borsh tags |
-| `--state <TYPE>` | the actor state type |
+| `<CRATE_DIR>` | the core crate (with `Cargo.toml` and `src/lib.rs`); else the program's `core` in `spel.toml` |
+| `--message <ENUM>` | **required** here or in `[idl-gen]`. The external message enum; its variant order gives the Borsh tags |
+| `--state <TYPE>` | the actor state type, written to the IDL's `state_types`. Repeat it for a program that stores several untagged state types |
 | `--events <MODULE>` | the module holding the events (`event`, or nested `a::b`) |
 | `--namespace <NAME>` | the IDL name and event namespace; defaults to the crate name without `_core` |
 
 ```bash
 spel generate-idl programs/token/core --message Message --state TokenState --events event > token-idl.json
+```
+
+**From `spel.toml`:** values not given on the command line come from the program's `core` and
+its [`[idl-gen]` table](#configuration-speltoml). That program is the one `--program <name>`
+names, or, when no `<CRATE_DIR>` is given, the default program. A crate directory without
+`--program` uses only the command line. Each flag wins over its key; `--state` replaces the
+configured list. spel prints what it took on stderr.
+
+```bash
+spel generate-idl --program token > artifacts/token-idl.json
 ```
 
 What it reads, and the failures it reports, are described in [idl.md](idl.md#generation).

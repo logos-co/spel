@@ -22,9 +22,14 @@ pub struct SpelIdl {
     pub name: String,
     /// The external message enum's variants, in enum order.
     pub messages: Vec<IdlMessage>,
-    /// The type of an actor's state, if the program declares one.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<IdlType>,
+    /// The types of an actor's state, each naming a struct or enum in [`SpelIdl::types`].
+    ///
+    /// Usually one (e.g. an enum over the actor kinds), which every actor of the program decodes
+    /// as. Several mean the program stores different untagged structs on different actors: the
+    /// bytes don't say which one an actor holds, so a reader has to pick. Empty if the program
+    /// declares none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_types: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub events: Vec<IdlEvent>,
     /// Every struct and enum the messages, state and events reference, sorted by name.
@@ -120,7 +125,28 @@ impl SpelIdl {
                  `spel generate-idl <core-crate> --message <Enum>`."
             ));
         }
-        serde_json::from_value(value).map_err(|e| format!("invalid IDL: {e}"))
+        // Unknown fields are otherwise ignored, which would drop an early v2 IDL's state type
+        // without a word.
+        if value.get("state").is_some() {
+            return Err(
+                "IDL has a `state` field, which is now `state_types` (a list of type names). \
+                 Regenerate the IDL with `spel generate-idl`."
+                    .into(),
+            );
+        }
+        let idl: Self = serde_json::from_value(value).map_err(|e| format!("invalid IDL: {e}"))?;
+        idl.validate()?;
+        Ok(idl)
+    }
+
+    /// Check what serde can't: every state type is defined.
+    fn validate(&self) -> Result<(), String> {
+        if let Some(missing) = self.state_types.iter().find(|n| self.type_def(n).is_none()) {
+            return Err(format!(
+                "invalid IDL: state type `{missing}` is not defined in `types`"
+            ));
+        }
+        Ok(())
     }
 
     /// Serialize the IDL to pretty-printed JSON.
@@ -204,7 +230,7 @@ mod tests {
                     docs: None,
                 }],
             }],
-            state: None,
+            state_types: vec![],
             events: vec![],
             types: vec![],
         };
@@ -212,6 +238,47 @@ mod tests {
         assert_eq!(parsed, idl);
         assert_eq!(parsed.message("initialize-holding").map(|m| m.tag), Some(0));
         assert_eq!(parsed.message("initialize_holding").map(|m| m.tag), Some(0));
+    }
+
+    fn idl_json(extra: serde_json::Value) -> String {
+        let mut value = serde_json::json!({
+            "version": "2",
+            "name": "oracle",
+            "messages": [],
+            "types": [
+                { "name": "A", "kind": "struct" },
+                { "name": "B", "kind": "struct" }
+            ]
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        value.to_string()
+    }
+
+    #[test]
+    fn state_types_round_trip() {
+        let idl = SpelIdl::from_json(&idl_json(serde_json::json!({ "state_types": ["A", "B"] })))
+            .unwrap();
+        assert_eq!(idl.state_types, ["A", "B"]);
+        assert!(idl.to_json_pretty().unwrap().contains("\"state_types\""));
+    }
+
+    #[test]
+    fn a_state_field_is_refused_with_a_hint() {
+        let err = SpelIdl::from_json(&idl_json(serde_json::json!({
+            "state": { "defined": "A" }
+        })))
+        .unwrap_err();
+        assert!(err.contains("state_types") && err.contains("Regenerate"), "{err}");
+    }
+
+    #[test]
+    fn a_state_type_must_be_defined() {
+        let err = SpelIdl::from_json(&idl_json(serde_json::json!({ "state_types": ["A", "C"] })))
+            .unwrap_err();
+        assert!(err.contains("`C`"), "{err}");
     }
 
     #[test]

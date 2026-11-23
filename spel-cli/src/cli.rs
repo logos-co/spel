@@ -37,7 +37,10 @@ pub fn print_help(idl: &SpelIdl, binary_name: &str) {
     println!("       [--fee-payer A] [--gas-limit N] [--dry-run[=json]] -- <MESSAGE> [ARGS]");
     println!("                             Send a message; prints the transaction hash");
     println!("  encode <MESSAGE> [ARGS]    Print a message's Borsh encoding as hex");
-    println!("  generate-idl <CRATE_DIR> --message <ENUM> [--state <TYPE>] [--events <MODULE>]");
+    println!(
+        "  generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]"
+    );
+    println!("                             Missing values come from spel.toml (`core`, [idl-gen])");
     println!("  idl                        Print the IDL");
     println!();
     println!("MESSAGES:");
