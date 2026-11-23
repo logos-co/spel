@@ -375,6 +375,10 @@ impl<'a> Collector<'a> {
                     "String" => Ok(IdlType::Primitive("string".to_owned())),
                     "AccountId" => Ok(IdlType::Primitive("account_id".to_owned())),
                     "ProgramId" => Ok(IdlType::Primitive("program_id".to_owned())),
+                    // `lee_core::program::PdaSeed`: a newtype over 32 bytes, which is its Borsh.
+                    "PdaSeed" => Ok(IdlType::Array {
+                        array: (Box::new(IdlType::Primitive("u8".to_owned())), 32),
+                    }),
                     "Vec" => {
                         let inner = first_arg().ok_or_else(|| unsupported("Vec without a type"))?;
                         Ok(IdlType::Vec {
