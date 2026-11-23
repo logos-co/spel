@@ -402,10 +402,19 @@ pub async fn run() {
         eprintln!("                           Missing values come from spel.toml (`core`, [idl-gen])");
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
-        eprintln!("  {}", private_cmds::PDA_USAGE.trim_start_matches("Usage: spel "));
+        eprintln!(
+            "  {}",
+            private_cmds::PDA_USAGE.trim_start_matches("Usage: spel ")
+        );
         eprintln!("                           A private PDA; --register records it in the wallet");
-        eprintln!("  {}", private_cmds::BLIND_USAGE.trim_start_matches("Usage: spel "));
-        eprintln!("  {}", private_cmds::TRANSFER_USAGE.trim_start_matches("Usage: spel "));
+        eprintln!(
+            "  {}",
+            private_cmds::BLIND_USAGE.trim_start_matches("Usage: spel ")
+        );
+        eprintln!(
+            "  {}",
+            private_cmds::TRANSFER_USAGE.trim_start_matches("Usage: spel ")
+        );
         eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");
         process::exit(1);
     }

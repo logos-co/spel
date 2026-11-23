@@ -14,7 +14,12 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn options(crate_dir: &Path, message: &str, state: Option<&str>, events: Option<&str>) -> GenOptions {
+fn options(
+    crate_dir: &Path,
+    message: &str,
+    state: Option<&str>,
+    events: Option<&str>,
+) -> GenOptions {
     GenOptions {
         crate_dir: crate_dir.to_owned(),
         message: Some(message.to_owned()),
@@ -54,7 +59,11 @@ fn check_golden(name: &str, state: &str) -> SpelIdl {
 fn token_core_matches_its_golden_idl() {
     let idl = check_golden("token", "TokenState");
     assert_eq!(idl.name, "token");
-    let tags: Vec<(&str, u8)> = idl.messages.iter().map(|m| (m.name.as_str(), m.tag)).collect();
+    let tags: Vec<(&str, u8)> = idl
+        .messages
+        .iter()
+        .map(|m| (m.name.as_str(), m.tag))
+        .collect();
     assert_eq!(
         tags,
         [
@@ -67,7 +76,10 @@ fn token_core_matches_its_golden_idl() {
             ("ReadState", 6)
         ]
     );
-    assert!(idl.type_def("Internal").is_none(), "the internal enum stays out");
+    assert!(
+        idl.type_def("Internal").is_none(),
+        "the internal enum stays out"
+    );
     let transferred = idl.events.iter().find(|e| e.name == "Transferred").unwrap();
     assert_eq!(transferred.selector, event_selector("token", "Transferred"));
 }
@@ -79,7 +91,9 @@ fn nft_core_matches_its_golden_idl() {
     let new_definition = idl.message("new-definition").unwrap();
     assert_eq!(
         new_definition.fields[2].type_,
-        IdlType::Defined { defined: "NftMetadata".into() }
+        IdlType::Defined {
+            defined: "NftMetadata".into()
+        }
     );
     assert_eq!(idl.type_def("MetadataStandard").unwrap().kind, "enum");
 }
@@ -175,7 +189,10 @@ fn every_shape_is_described() {
     let dir = shape_crate(SHAPES, &[]);
     let idl = generate(&options(dir.path(), "Message", Some("Outer"), None)).unwrap();
     assert_eq!(idl.name, "shape");
-    assert_eq!(idl.message("ping").unwrap().docs.as_deref(), Some("No fields."));
+    assert_eq!(
+        idl.message("ping").unwrap().docs.as_deref(),
+        Some("No fields.")
+    );
     assert!(idl.message("ping").unwrap().fields.is_empty());
 
     let pay = serde_json::to_value(&idl.message("pay").unwrap().fields).unwrap();
@@ -203,17 +220,32 @@ fn every_shape_is_described() {
     );
 
     let names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["Inner", "Outer"], "referenced types only, sorted; no aliases");
+    assert_eq!(
+        names,
+        ["Inner", "Outer"],
+        "referenced types only, sorted; no aliases"
+    );
 }
 
 #[test]
 fn shapes_decode_through_the_idl() {
     let dir = shape_crate(SHAPES, &[]);
     let idl = generate(&options(dir.path(), "Message", Some("Outer"), None)).unwrap();
-    assert_eq!(decode_state(&[0, 42, 0, 0, 0], &idl).unwrap(), json!({ "A": 42 }));
-    assert_eq!(decode_state(&[1, 1], &idl).unwrap(), json!({ "B": { "flag": true } }));
-    assert_eq!(decode_named(&[1, 0, 0, 0], "Inner", &idl).unwrap(), json!(1));
-    assert!(decode_state(&[2], &idl).unwrap_err().contains("out of range"));
+    assert_eq!(
+        decode_state(&[0, 42, 0, 0, 0], &idl).unwrap(),
+        json!({ "A": 42 })
+    );
+    assert_eq!(
+        decode_state(&[1, 1], &idl).unwrap(),
+        json!({ "B": { "flag": true } })
+    );
+    assert_eq!(
+        decode_named(&[1, 0, 0, 0], "Inner", &idl).unwrap(),
+        json!(1)
+    );
+    assert!(decode_state(&[2], &idl)
+        .unwrap_err()
+        .contains("out of range"));
 }
 
 #[test]
@@ -573,7 +605,10 @@ fn two_events_with_one_name_fail() {
 fn a_missing_message_enum_fails() {
     let dir = shape_crate(SHAPES, &[]);
     let err = generate(&options(dir.path(), "Msg", None, None)).unwrap_err();
-    assert!(matches!(err, IdlGenError::NotFound { ref name, .. } if name == "Msg"), "{err}");
+    assert!(
+        matches!(err, IdlGenError::NotFound { ref name, .. } if name == "Msg"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -587,7 +622,10 @@ fn a_message_that_is_not_an_enum_fails() {
 fn a_missing_state_type_fails() {
     let dir = shape_crate(SHAPES, &[]);
     let err = generate(&options(dir.path(), "Message", Some("State"), None)).unwrap_err();
-    assert!(matches!(err, IdlGenError::NotFound { ref name, .. } if name == "State"), "{err}");
+    assert!(
+        matches!(err, IdlGenError::NotFound { ref name, .. } if name == "State"),
+        "{err}"
+    );
 }
 
 #[test]

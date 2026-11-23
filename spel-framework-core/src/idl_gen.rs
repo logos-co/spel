@@ -77,7 +77,9 @@ pub enum IdlGenError {
     },
     #[error("two events are named `{name}`; their selectors would collide")]
     DuplicateEvent { name: String },
-    #[error("type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies")]
+    #[error(
+        "type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies"
+    )]
     UnknownType { name: String, used_by: String },
     #[error("cannot describe `{ty}` (in `{used_by}`): {reason}")]
     Unsupported {
@@ -401,7 +403,12 @@ fn docs(attrs: &[Attribute]) -> Option<String> {
             syn::Meta::NameValue(nv) => string_literal(&nv.value),
             _ => None,
         })
-        .map(|line| line.strip_prefix(' ').unwrap_or(&line).trim_end().to_owned())
+        .map(|line| {
+            line.strip_prefix(' ')
+                .unwrap_or(&line)
+                .trim_end()
+                .to_owned()
+        })
         .collect();
     let text = lines.join("\n").trim().to_owned();
     (!text.is_empty()).then_some(text)
@@ -462,7 +469,8 @@ impl<'a> Collector<'a> {
 
     fn queue(&mut self, name: &str, used_by: &str) {
         if !self.done.contains_key(name) {
-            self.pending.push_back((name.to_owned(), used_by.to_owned()));
+            self.pending
+                .push_back((name.to_owned(), used_by.to_owned()));
         }
     }
 

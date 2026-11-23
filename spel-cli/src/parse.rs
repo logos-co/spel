@@ -623,7 +623,10 @@ mod tests {
         let bytes = crate::serialize::serialize_to_borsh(0, &[(&ty, &parsed)]).expect("encodes");
         // The variant's tag, then the field.
         let field = borsh::to_vec(&vec![[1_u8; 32], [2_u8; 32]]).unwrap();
-        assert!(bytes.ends_with(&field) && bytes.len() - field.len() <= 4, "{bytes:?}");
+        assert!(
+            bytes.ends_with(&field) && bytes.len() - field.len() <= 4,
+            "{bytes:?}"
+        );
     }
 
     #[test]

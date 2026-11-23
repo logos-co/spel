@@ -11,10 +11,10 @@ use std::process;
 
 use lee::AccountId;
 use lee_core::native_token::{decode_balance, NATIVE_TOKEN_PROGRAM_ID};
-use wallet::account::AccountIdWithPrivacy;
 use serde_json::{json, Map, Value};
 use spel_framework_core::decode;
 use spel_framework_core::idl::SpelIdl;
+use wallet::account::AccountIdWithPrivacy;
 
 use crate::hex::{hex_decode, hex_encode};
 use crate::send::{open_wallet, split_actor, Names};
@@ -84,7 +84,9 @@ pub async fn inspect_command(args: InspectArgs<'_>) {
             programs: Vec::new(),
         };
         matches!(
-            names.account_with_privacy(account).unwrap_or_else(|e| fail(e)),
+            names
+                .account_with_privacy(account)
+                .unwrap_or_else(|e| fail(e)),
             AccountIdWithPrivacy::Private(_)
         )
     };
