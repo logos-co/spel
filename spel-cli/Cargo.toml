@@ -23,6 +23,7 @@ common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git",
 fee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
 anyhow = "1"
 sha2 = "0.10"
+risc0-binfmt = "3.0.5"
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"
 serde = { version = "1.0", features = ["derive"] }

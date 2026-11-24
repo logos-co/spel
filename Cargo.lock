@@ -7606,6 +7606,7 @@ dependencies = [
  "libc",
  "program_loader_core",
  "programs",
+ "risc0-binfmt",
  "risc0-zkvm",
  "sequencer_service_rpc",
  "serde",
