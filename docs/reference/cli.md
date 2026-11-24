@@ -212,6 +212,9 @@ again, up to 8 times:
 - LEZ gives an account one authority across all its actors. So an actor of an account the call
   already authorizes (a signer) isn't added: `send` stops, sends nothing, exits `2`, and prints
   the command that declares it.
+- A ninth undeclared actor stops the send the same way (exit `2`): `send` lists the actors it
+  added and the next one, and prints the command that declares them all. That command still
+  infers, so a call that reaches more continues from there.
 
 Each added actor is printed with its authority:
 

@@ -68,7 +68,7 @@ Private calls (a private actor, `--seal` or `--recover`): proved with the binary
 not debited; a private PDA only through its program's seed grant, so `--signer` refuses it);
 actors reached by sync messages are inferred from simulation and added without authority
 (`+ … reached in simulation`), except on a signer's account, which stops the send (exit 2)
-with the declaring command; an async credit's destination isn't inferred (declare
+with the declaring command, as does a ninth one; an async credit's destination isn't inferred (declare
 `ACCOUNT@native`, or `--seal`/`--recover`, one per recipient). `keys:FILE` in an account field
 gives the program the id only; seal it explicitly.
 

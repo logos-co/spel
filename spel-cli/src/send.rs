@@ -983,9 +983,14 @@ async fn send_private(
             Ok((hash, _)) => break hash,
             Err(error) => error,
         };
-        let reached = (!flags.no_auto_actors && inferred < MAX_INFERRED)
+        let reached = (!flags.no_auto_actors)
             .then(|| crate::private::undeclared_actor(&error))
             .flatten();
+        if let Some(actor) = reached.filter(|_| inferred >= MAX_INFERRED) {
+            // Past the cap: show what was added and what's next, and let the caller decide.
+            eprintln!("{}", cap_report(&prepared.list, actor, flags, &names));
+            process::exit(EXIT_NO_CHANGE);
+        }
         let Some(actor) = reached else {
             if let Some(reason) = crate::private::refusal(&error) {
                 eprintln!("⚠️  Refused in simulation, so not sent: {reason}");
@@ -1030,7 +1035,7 @@ async fn send_private(
                     actor_name(&names, account, program),
                     names.account_name(account),
                     holder.reason,
-                    explicit_command(&declared, flags, &names)
+                    explicit_command(&declared, flags, &names, false)
                 );
                 process::exit(EXIT_NO_CHANGE);
             },
@@ -1061,7 +1066,7 @@ async fn send_private(
     if inferred > 0 {
         eprintln!(
             "The same call, declared: {}",
-            explicit_command(&prepared.list, flags, &names)
+            explicit_command(&prepared.list, flags, &names, false)
         );
     }
     if reverted {
@@ -1138,8 +1143,35 @@ fn reached_actor(
     }
 }
 
-/// `spel send` with every actor of `list` (root first) declared and nothing inferred.
-fn explicit_command(list: &[Planned], flags: &SendFlags, names: &Names<'_>) -> String {
+/// Why a private send stopped at [`MAX_INFERRED`] inferred actors: those added, `next` (the one
+/// past the cap), and the command that declares them all and still infers.
+fn cap_report(list: &[Planned], next: Actor, flags: &SendFlags, names: &Names<'_>) -> String {
+    let (account, program) = (next.account_id, next.program_account_id);
+    let mut declared = list.to_vec();
+    declared.push(
+        reached_actor(&declared, account, program, names).unwrap_or_else(|holder| Planned {
+            program,
+            reason: "--actor".into(),
+            ..holder
+        }),
+    );
+    let added = list
+        .iter()
+        .filter(|p| p.reason == "reached in simulation")
+        .map(|p| format!("\n   + {}", actor_name(names, p.account, p.program)))
+        .collect::<String>();
+    format!(
+        "⚠️  Not sent: the call reaches more than {MAX_INFERRED} undeclared actors, the most spel \
+         adds by itself. Added:{added}\n   next: {}\nIf these are expected, declare them; spel \
+         infers any further ones from there:\n   {}",
+        actor_name(names, account, program),
+        explicit_command(&declared, flags, names, true)
+    )
+}
+
+/// `spel send` with every actor of `list` (root first) declared, and nothing more inferred unless
+/// `infer`.
+fn explicit_command(list: &[Planned], flags: &SendFlags, names: &Names<'_>, infer: bool) -> String {
     let actor = |p: &Planned| {
         let account = if p.private {
             format!("Private/{}", p.account)
@@ -1160,7 +1192,10 @@ fn explicit_command(list: &[Planned], flags: &SendFlags, names: &Names<'_>) -> S
     words.extend(flags.signers.iter().map(|s| format!("--signer {s}")));
     words.extend(flags.seals.iter().map(|s| format!("--seal {s}")));
     words.extend(flags.recovers.iter().map(|s| format!("--recover {s}")));
-    words.push("--no-auto-actors --".to_owned());
+    if !infer {
+        words.push("--no-auto-actors".to_owned());
+    }
+    words.push("--".to_owned());
     words.push(flags.message.clone());
     words.extend(flags.message_args.iter().cloned());
     words.join(" ")
