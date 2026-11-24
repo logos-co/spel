@@ -115,3 +115,69 @@ fn explicit_revisions_reach_every_crate() {
     assert_all(&framework_selectors(dir.path()), "tag = \"v9.9.9\"");
     assert_all(&lez_selectors(dir.path()), "rev = \"abc123\"");
 }
+
+/// Runs `spel init <args…>` verbatim, with cargo hidden for the reason given
+/// on [`init`].
+fn run_init(dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_spel"))
+        .arg("init")
+        .args(args)
+        .current_dir(dir)
+        .env("PATH", "")
+        .output()
+        .expect("failed to run spel binary")
+}
+
+/// Flags written after the project name used to be dropped without a word, and
+/// the project was created pinned to the defaults instead.
+#[test]
+fn flags_after_the_project_name_are_honoured() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_init(
+        dir.path(),
+        &[NAME, "--spel-tag", "v9.9.9", "--lez-rev", "abc123"],
+    );
+    assert!(
+        out.status.success(),
+        "spel init failed:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    assert_all(&framework_selectors(dir.path()), "tag = \"v9.9.9\"");
+    assert_all(&lez_selectors(dir.path()), "rev = \"abc123\"");
+}
+
+/// An argument `init` does not understand must fail loudly, not be discarded,
+/// and must not leave a half-configured project behind.
+#[test]
+fn unexpected_arguments_are_an_error() {
+    for extra in [
+        &[NAME, "--no-such-flag"][..],
+        &[NAME, "another-name"][..],
+        &["--no-such-flag", NAME][..],
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let out = run_init(dir.path(), extra);
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!out.status.success(), "{extra:?} was accepted:\n{stderr}");
+        assert!(
+            stderr.contains("unexpected argument"),
+            "{extra:?}: no `unexpected argument` error:\n{stderr}"
+        );
+        assert!(
+            !dir.path().join(NAME).exists(),
+            "{extra:?} still created the project"
+        );
+    }
+}
+
+/// A flag with nothing after it used to be ignored the same way.
+#[test]
+fn a_flag_without_a_value_is_an_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = run_init(dir.path(), &[NAME, "--spel-tag"]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "accepted:\n{stderr}");
+    assert!(stderr.contains("--spel-tag"), "{stderr}");
+    assert!(!dir.path().join(NAME).exists());
+}
