@@ -188,25 +188,36 @@ crosses into public execution are published.
 - a private PDA keyed by one of them, or by a wallet group's secret, which must be registered
   first with [`pda --register`](#pda).
 
-A private account authorizes by being witnessed, so `--signer` names only public accounts. A
-public actor in a private call is declared as in a public one.
+**Authority comes only from what you declare.** A private account you declare (`--root`,
+`--actor`) is taken with its authorization key: the private counterpart of a signature. So
+`--signer` names only public accounts. A private PDA's keys never authorize it; only its
+program's seed grant can. A public actor in a private call is declared as in a public one.
 
 **The access list is inferred from simulation**, not from the message's fields: a field may name
 a private account no one in the transaction can witness. The wallet simulates the call before
-proving it. When the simulation reaches an actor that isn't declared, `send` adds it (resolved
-through the wallet: private if registered, else public) and simulates again, up to 8 times.
-Each one is printed:
+proving it. When the simulation reaches an actor that isn't declared, `send` adds it **without
+authority** (resolved through the wallet: private if registered, else public) and simulates
+again, up to 8 times:
+- a private account comes in with only its nullifier key, a public one unsigned, so the program
+  can only do what it allows any account (such as crediting it). If it needs more, the next
+  simulation refuses the call, and you declare the actor yourself.
+- LEZ gives an account one authority across all its actors. So an actor of an account the call
+  already authorizes (it signs, or it's a declared private account) isn't added: `send` stops,
+  sends nothing, exits `2`, and prints the command that declares it.
+
+Each added actor is printed with its authority:
 
 ```text
 pay (tag 3, 33 bytes) to (seat (9Wj…), payroll), as a privacy-preserving transaction
 Access list:
   (seat (9Wj…), payroll) root, private: authorized by this wallet's keys
 Credit sealed to emp1
-  + (treasury (8bw…), payroll) reached in simulation, private
+  + (treasury (8bw…), payroll) reached in simulation, private PDA: only its program's seed grant can authorize it
 ```
 
-When anything was inferred, `send` also prints the same call with every actor declared
-(`--no-auto-actors`). The simulation finds the actors a call reaches by sync messages. It
+When anything was inferred, `send` also prints the call with every actor declared
+(`--no-auto-actors`). Declaring a private actor authorizes it, so that command grants more than
+the inferred call did. The simulation finds the actors a call reaches by sync messages. It
 doesn't find the destination of an **async** credit, so declare a witnessed account's balance
 (`--actor seat@native`) for its credit to apply in the transaction.
 
@@ -277,8 +288,8 @@ prints a machine-readable plan:
   "message": { "name": "Transfer", "tag": 2, "hex": "02…" },
   "root": { "account": "J3q2…", "program": "B6Es…" },
   "actors": [
-    { "account": "J3q2…", "program": "B6Es…", "authorizes": true,  "private": false, "reason": "root" },
-    { "account": "rdey…", "program": "B6Es…", "authorizes": false, "private": false, "reason": "field `to`" }
+    { "account": "J3q2…", "program": "B6Es…", "authorizes": true,  "private": false, "pda": false, "reason": "root" },
+    { "account": "rdey…", "program": "B6Es…", "authorizes": false, "private": false, "pda": false, "reason": "field `to`" }
   ],
   "signers": ["J3q2…"],
   "fee_payer": null,

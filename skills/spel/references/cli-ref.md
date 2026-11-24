@@ -63,10 +63,12 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
-Private calls (a private actor, `--seal` or `--recover`): proved with the binary; private
-accounts authorize through the wallet's keys; actors reached by sync messages are inferred from
-simulation (`+ … reached in simulation`); an async credit's destination is not (declare
-`ACCOUNT@native`, or `--seal`/`--recover`).
+Private calls (a private actor, `--seal` or `--recover`): proved with the binary; declared
+private accounts authorize through the wallet's keys (a private PDA only through its program's
+seed grant); actors reached by sync messages are inferred from simulation and added without
+authority (`+ … reached in simulation`), except on an account the call already authorizes,
+which stops the send (exit 2) with the declaring command; an async credit's destination isn't
+inferred (declare `ACCOUNT@native`, or `--seal`/`--recover`).
 
 ```bash
 spel --program payroll send --root seat -- open --treasury treasury --period-ms 60000

@@ -180,6 +180,16 @@ impl Names<'_> {
             .is_some_and(|w| w.resolve_private_account(id).is_some())
     }
 
+    /// Whether this wallet witnesses `id` as a private PDA (owner-keyed or a group's).
+    pub fn is_private_pda(&self, id: AccountId) -> bool {
+        self.wallet.is_some_and(|w| {
+            w.storage()
+                .key_chain()
+                .managed_private_account(id)
+                .is_some_and(|m| matches!(m.kind, lee_core::PrivateAccountKind::Pda { .. }))
+        })
+    }
+
     /// A program: a `spel.toml` name, an id, or `native` (the native token program, whose actor
     /// on an account is its balance).
     ///
@@ -236,7 +246,36 @@ pub struct Planned {
     pub signs: bool,
     /// Witnessed through this wallet's keys in a privacy-preserving transaction.
     pub private: bool,
+    /// Taken with its account's authority: a signature (public), or the authorization key
+    /// (private). A declared actor has it when it signs or is private; an actor reached in
+    /// simulation never does.
+    pub authorizes: bool,
+    /// A private PDA. Its keys never authorize it: only its program's seed grant can.
+    pub pda: bool,
     pub reason: String,
+}
+
+impl Planned {
+    /// Whether this transaction authorizes the actor's account: a signature, or a regular
+    /// private account's authorization key.
+    pub const fn authorized(&self) -> bool {
+        if self.private {
+            self.authorizes && !self.pda
+        } else {
+            self.signs
+        }
+    }
+
+    /// How the guardrail describes the actor's authority.
+    fn authority(&self) -> &'static str {
+        match (self.private, self.pda, self.authorizes, self.signs) {
+            (true, true, _, _) => ", private PDA: only its program's seed grant can authorize it",
+            (true, false, true, _) => ", private: authorized by this wallet's keys",
+            (true, false, false, _) => ", private: not authorized",
+            (false, _, _, true) => ", signs",
+            (false, _, _, false) => "",
+        }
+    }
 }
 
 /// The access list, root first. Rules:
@@ -263,6 +302,8 @@ pub fn plan_access_list(
                 program,
                 signs: signers.contains(&account),
                 private: false,
+                authorizes: signers.contains(&account),
+                pda: false,
                 reason,
             });
         }
@@ -460,6 +501,9 @@ fn prepare(
     );
     for planned in &mut list {
         planned.private = private_accounts.contains(&planned.account);
+        // A declared private account is taken with its authorization key.
+        planned.authorizes |= planned.private;
+        planned.pda = planned.private && names.is_private_pda(planned.account);
     }
     Ok(Prepared {
         message_name: message.name.clone(),
@@ -497,15 +541,10 @@ fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
     eprintln!("Access list:");
     for planned in &prepared.list {
         eprintln!(
-            "  {:<60} {}{}{}",
+            "  {:<60} {}{}",
             actor_name(names, planned.account, planned.program),
             planned.reason,
-            if planned.signs { ", signs" } else { "" },
-            if planned.private {
-                ", private: authorized by this wallet's keys"
-            } else {
-                ""
-            }
+            planned.authority()
         );
     }
     for seal in &flags.seals {
@@ -548,8 +587,9 @@ fn dry_run_json(prepared: &Prepared, flags: &SendFlags) -> Value {
         "actors": prepared.list.iter().map(|p| json!({
             "account": p.account.to_string(),
             "program": p.program.to_string(),
-            "authorizes": p.signs || p.private,
+            "authorizes": p.authorized(),
             "private": p.private,
+            "pda": p.pda,
             "reason": p.reason,
         })).collect::<Vec<_>>(),
         "signers": prepared.signers.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -851,24 +891,39 @@ async fn send_private(
                 actor_name(&names, account, program)
             ));
         }
-        let private = names.is_private(account);
+        let reached = match reached_actor(&prepared.list, account, program, &names) {
+            Ok(reached) => reached,
+            Err(holder) => {
+                // Authority is per account: adding the actor would extend it unasked.
+                let mut declared = prepared.list.clone();
+                declared.push(Planned {
+                    program,
+                    reason: "--actor".into(),
+                    ..holder.clone()
+                });
+                eprintln!(
+                    "⚠️  Not sent: the call reaches {}, and this transaction authorizes {} ({}). \
+                     That authority would cover the new actor too, so spel doesn't add it \
+                     unasked. To send it, declare it:\n   {}",
+                    actor_name(&names, account, program),
+                    names.account_name(account),
+                    holder.reason,
+                    explicit_command(&declared, flags, &names)
+                );
+                process::exit(EXIT_NO_CHANGE);
+            },
+        };
         eprintln!(
             "  + {:<58} reached in simulation{}",
             actor_name(&names, account, program),
-            if private { ", private" } else { "" }
+            reached.authority()
         );
         before.push(
-            crate::private::actor_state(wallet, account, program, private)
+            crate::private::actor_state(wallet, account, program, reached.private)
                 .await
                 .unwrap_or_else(|e| fail(e)),
         );
-        prepared.list.push(Planned {
-            account,
-            program,
-            signs: false,
-            private,
-            reason: "reached in simulation".into(),
-        });
+        prepared.list.push(reached);
         inferred += 1;
     };
     eprintln!("Submitted {hash}, waiting for a block...");
@@ -883,8 +938,8 @@ async fn send_private(
     };
     if inferred > 0 {
         eprintln!(
-            "The same call, declared: {}",
-            explicit_command(&prepared, flags, &names)
+            "The same call, declared (declaring a private actor authorizes it): {}",
+            explicit_command(&prepared.list, flags, &names)
         );
     }
     if reverted {
@@ -905,7 +960,8 @@ async fn send_private(
     report_changes(&names, &prepared.list, &before, &after, block, idl);
 }
 
-/// A declared actor of a privacy-preserving transaction.
+/// An actor of a privacy-preserving transaction, with its account's authority only if
+/// `planned.authorizes`.
 fn mention(wallet: &Wallet, planned: &Planned) -> Result<AccountMention, String> {
     let identity = if planned.private {
         crate::private::private_identity(wallet, planned.account)?
@@ -914,11 +970,54 @@ fn mention(wallet: &Wallet, planned: &Planned) -> Result<AccountMention, String>
     } else {
         AccountIdentity::PublicNoSign(planned.account)
     };
-    Ok(identity.select_program_actor_state(planned.program))
+    let mention = identity.select_program_actor_state(planned.program);
+    Ok(if planned.authorizes {
+        mention
+    } else {
+        mention.without_authorization()
+    })
 }
 
-/// `spel send` with every actor declared and nothing inferred.
-fn explicit_command(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -> String {
+/// How to add an actor the simulation reached, `(account, program)`, which isn't declared.
+///
+/// LEZ takes an account with one authority for all its actors. So:
+/// - a new account comes in without authority (a regular private account with only its
+///   nullifier key, a public one unsigned);
+/// - an account already in the list without authority, or a private PDA (whose keys never
+///   authorize it), comes in as it is there;
+/// - an account the transaction authorizes (it signs, or is a declared private account) isn't
+///   added: the error is the actor holding that authority.
+fn reached_actor(
+    list: &[Planned],
+    account: AccountId,
+    program: AccountId,
+    names: &Names<'_>,
+) -> Result<Planned, Planned> {
+    let reason = "reached in simulation".to_owned();
+    match list.iter().find(|p| p.account == account) {
+        Some(holder) if holder.authorized() => Err(holder.clone()),
+        Some(holder) => Ok(Planned {
+            program,
+            reason,
+            ..holder.clone()
+        }),
+        None => {
+            let private = names.is_private(account);
+            Ok(Planned {
+                account,
+                program,
+                signs: false,
+                private,
+                authorizes: false,
+                pda: private && names.is_private_pda(account),
+                reason,
+            })
+        },
+    }
+}
+
+/// `spel send` with every actor of `list` (root first) declared and nothing inferred.
+fn explicit_command(list: &[Planned], flags: &SendFlags, names: &Names<'_>) -> String {
     let actor = |p: &Planned| {
         let account = if p.private {
             format!("Private/{}", p.account)
@@ -929,9 +1028,9 @@ fn explicit_command(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -
     };
     let mut words = vec![
         "spel send".to_owned(),
-        format!("--root {}", actor(&prepared.list[0])),
+        format!("--root {}", actor(&list[0])),
     ];
-    for planned in &prepared.list[1..] {
+    for planned in &list[1..] {
         if planned.reason != "--signer" {
             words.push(format!("--actor {}", actor(planned)));
         }
@@ -1098,6 +1197,8 @@ mod tests {
                     program: token,
                     signs: true,
                     private: false,
+                    authorizes: true,
+                    pda: false,
                     reason: "root".into()
                 },
                 Planned {
@@ -1105,6 +1206,8 @@ mod tests {
                     program: token,
                     signs: false,
                     private: false,
+                    authorizes: false,
+                    pda: false,
                     reason: "field `to`".into()
                 },
             ]
@@ -1170,5 +1273,117 @@ mod tests {
         );
         assert!(list.iter().all(|p| p.signs));
         assert_eq!(list.len(), 2);
+    }
+
+    fn planned(account: AccountId, program: AccountId, reason: &str) -> Planned {
+        Planned {
+            account,
+            program,
+            signs: false,
+            private: false,
+            authorizes: false,
+            pda: false,
+            reason: reason.into(),
+        }
+    }
+
+    fn no_wallet() -> Names<'static> {
+        Names {
+            wallet: None,
+            programs: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_reached_actor_of_a_new_account_comes_without_authority() {
+        let (alice, bob, payroll, native) = (id(1), id(2), id(9), id(7));
+        let list = [planned(alice, payroll, "root")];
+        let reached = reached_actor(&list, bob, native, &no_wallet()).unwrap();
+        assert_eq!((reached.account, reached.program), (bob, native));
+        assert!(!reached.authorizes && !reached.signs && !reached.authorized());
+        assert_eq!(reached.reason, "reached in simulation");
+    }
+
+    #[test]
+    fn a_reached_actor_of_a_signer_is_not_added() {
+        let (alice, nft, amm) = (id(1), id(9), id(8));
+        let root = Planned {
+            signs: true,
+            authorizes: true,
+            ..planned(alice, amm, "root")
+        };
+        let holder =
+            reached_actor(std::slice::from_ref(&root), alice, nft, &no_wallet()).unwrap_err();
+        assert_eq!(holder, root);
+    }
+
+    #[test]
+    fn a_reached_actor_of_a_declared_private_account_is_not_added() {
+        let (seat, payroll, native) = (id(1), id(9), id(7));
+        let root = Planned {
+            private: true,
+            authorizes: true,
+            ..planned(seat, payroll, "root")
+        };
+        assert!(root.authorized());
+        let holder =
+            reached_actor(std::slice::from_ref(&root), seat, native, &no_wallet()).unwrap_err();
+        assert_eq!(holder, root);
+    }
+
+    #[test]
+    fn a_reached_actor_of_an_unauthorized_account_comes_as_it_is_there() {
+        let (alice, bob, token, native) = (id(1), id(2), id(9), id(7));
+        let list = [
+            planned(alice, token, "root"),
+            Planned {
+                private: true,
+                ..planned(bob, token, "reached in simulation")
+            },
+        ];
+        let reached = reached_actor(&list, bob, native, &no_wallet()).unwrap();
+        assert!(reached.private && !reached.authorizes);
+        assert_eq!(reached.program, native);
+    }
+
+    #[test]
+    fn a_private_pda_is_never_authorized_by_its_keys() {
+        let (seat, treasury, payroll, native) = (id(1), id(3), id(9), id(7));
+        let pda = Planned {
+            private: true,
+            authorizes: true,
+            pda: true,
+            ..planned(treasury, payroll, "--actor")
+        };
+        assert!(
+            !pda.authorized(),
+            "only its program's seed grant authorizes it"
+        );
+        assert!(pda.authority().contains("seed grant"));
+        // So another of its actors is added, the same way (one authority per account).
+        let list = [planned(seat, payroll, "root"), pda];
+        let reached = reached_actor(&list, treasury, native, &no_wallet()).unwrap();
+        assert!(reached.pda && reached.authorizes);
+    }
+
+    #[test]
+    fn the_guardrail_names_each_actors_authority() {
+        let (a, p) = (id(1), id(9));
+        let private = |authorizes| Planned {
+            private: true,
+            authorizes,
+            ..planned(a, p, "root")
+        };
+        assert!(private(true)
+            .authority()
+            .contains("authorized by this wallet's keys"));
+        assert!(private(false).authority().contains("not authorized"));
+        let signer = Planned {
+            signs: true,
+            authorizes: true,
+            ..planned(a, p, "root")
+        };
+        assert_eq!(signer.authority(), ", signs");
+        assert_eq!(planned(a, p, "root").authority(), "");
     }
 }
