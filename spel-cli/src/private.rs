@@ -52,21 +52,23 @@ pub fn private_identity(wallet: &Wallet, account: AccountId) -> Result<AccountId
     })
 }
 
-/// A credit's destination, for `--seal` or `--recover`.
+/// A credit's private recipient, for `--seal` or `--recover`.
 ///
 /// `keys:<FILE>` is a private account known by its keys (`wallet account show-keys` output). A
 /// private account of this wallet is addressed by its keys too, so its credit waits for it rather
-/// than applying in the transaction. A public account is declared.
+/// than applying in the transaction.
 ///
 /// # Errors
-/// If `raw` names nothing usable.
+/// If `raw` names nothing usable, or a public account: it has nothing to seal or recover, and is
+/// declared as an actor instead (`--actor ACCOUNT@PROGRAM`, under the program its credit goes
+/// to), so its credit applies in the transaction.
 pub fn destination(names: &Names<'_>, raw: &str) -> Result<AccountMention, String> {
     if let Some(path) = raw.strip_prefix("keys:") {
         let (npk, vpk) = wallet::cli::read_keys_file(path).map_err(|e| format!("{raw}: {e:#}"))?;
         return Ok(foreign(npk, vpk));
     }
     match names.account_with_privacy(raw)? {
-        AccountIdWithPrivacy::Public(id) => Ok(AccountIdentity::PublicNoSign(id).balance()),
+        AccountIdWithPrivacy::Public(_) => Err(public_destination(raw)),
         AccountIdWithPrivacy::Private(id) => {
             let wallet = names.wallet.ok_or("no wallet is open")?;
             let found = wallet
@@ -87,6 +89,16 @@ pub fn destination(names: &Names<'_>, raw: &str) -> Result<AccountMention, Strin
     }
 }
 
+/// Why a public account can't be a `--seal` / `--recover` recipient, and what to do instead.
+#[must_use]
+pub fn public_destination(raw: &str) -> String {
+    format!(
+        "{raw} is a public account: its credit isn't sealed or recovered. Declare it under the \
+         program the credit goes to, so the credit applies in the transaction: --actor \
+         {raw}@<PROGRAM> (--actor {raw}@native for a native balance)"
+    )
+}
+
 fn foreign(npk: NullifierPublicKey, vpk: lee_core::encryption::ViewingPublicKey) -> AccountMention {
     AccountIdentity::PrivateForeign {
         npk,
@@ -97,8 +109,8 @@ fn foreign(npk: NullifierPublicKey, vpk: lee_core::encryption::ViewingPublicKey)
 }
 
 /// The credits of a call: `recover` with a recovery binding (an async message from public
-/// execution), `seal` sealed to the recipient (from private execution). A public destination is
-/// declared instead, and returned to add to the transaction.
+/// execution), `seal` sealed to the recipient (from private execution). Every destination is
+/// private ([`destination`] refuses public ones), so the wallet declares no actor for them.
 ///
 /// Without credits, every async message to an account the transaction witnesses (a declared
 /// private balance, say) is delivered in the transaction. With them, only the listed ones are, so
@@ -110,15 +122,15 @@ pub fn delivery(
     wallet: &Wallet,
     recover: Vec<AccountMention>,
     seal: Vec<AccountMention>,
-) -> Result<(Vec<AccountMention>, AsyncDelivery), String> {
+) -> Result<AsyncDelivery, String> {
     if recover.is_empty() && seal.is_empty() {
-        return Ok((Vec::new(), AsyncDelivery::default()));
+        return Ok(AsyncDelivery::default());
     }
-    let (declared, mut delivery) = wallet
+    let (_, mut delivery) = wallet
         .async_destinations(recover, seal)
         .map_err(|e| format!("preparing the credits: {e:#}"))?;
     delivery.promotions.listed_only = true;
-    Ok((declared, delivery))
+    Ok(delivery)
 }
 
 /// The program's refusal, when `error` is the guest panicking in the wallet's simulation: the

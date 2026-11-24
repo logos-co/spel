@@ -52,7 +52,9 @@ are retired. Client generation (`spel-client-gen`) is not ported yet.
   authority; one on a signer's account stops the send (exit 2) with the
   command that declares it. An async credit's destination isn't inferred: declare `ACCOUNT@native`, or
   use `--seal DEST` (from private execution) / `--recover DEST` (from public execution) for a
-  private recipient, one per recipient. `keys:FILE` in an account field fills in the derived id
+  private recipient, one per recipient. A public recipient isn't sealed: declare it,
+  `--actor bob@token`. A private call's fee comes from a private `--signer`, `--fee-payer`, or
+  an owned private account the wallet picks. `keys:FILE` in an account field fills in the derived id
   only; it doesn't seal.
 - **Check the exit code.** `send`'s exit code: `0` changed, `2` nothing changed (refused in
   simulation, so not sent, with the reason printed; or a no-op), `1` error.

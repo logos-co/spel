@@ -531,9 +531,33 @@ fn prepare(
             ));
         }
     }
-    let fee_payer = fee_payer.map(|raw| names.account(raw)).transpose()?;
     let private =
         !private_accounts.is_empty() || !flags.seals.is_empty() || !flags.recovers.is_empty();
+    // A credit's recipient must be private. Without a wallet, a bare id can't be told apart, so
+    // the check waits for the send.
+    for raw in flags.seals.iter().chain(&flags.recovers) {
+        if raw.starts_with("keys:") || (names.wallet.is_none() && !raw.starts_with("Public/")) {
+            continue;
+        }
+        if let AccountIdWithPrivacy::Public(_) = names.account_with_privacy(raw)? {
+            return Err(crate::private::public_destination(raw));
+        }
+    }
+    // A public transaction's fee is paid by a public account, a private one's (in the proof) by a
+    // private account of this wallet.
+    let fee_payer = fee_payer
+        .map(|raw| match (names.account_with_privacy(raw)?, private) {
+            (AccountIdWithPrivacy::Public(id), false)
+            | (AccountIdWithPrivacy::Private(id), true) => Ok(id),
+            (AccountIdWithPrivacy::Public(_), true) => Err(format!(
+                "--fee-payer {raw}: a private call's fee is paid in the proof, from a private \
+                 account of this wallet; name one"
+            )),
+            (AccountIdWithPrivacy::Private(_), false) => Err(format!(
+                "--fee-payer {raw}: a public call's fee is paid by a public account; name one"
+            )),
+        })
+        .transpose()?;
 
     // A private call's undeclared actors come from simulation, not from the message's fields: a
     // field may name a private account no one in this transaction can witness.
@@ -631,6 +655,12 @@ fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
     }
     if let Some(payer) = prepared.fee_payer {
         eprintln!("Fee payer: {}", names.account_name(payer));
+    } else if prepared.private && !prepared.list.iter().any(|p| p.private && p.authorized()) {
+        // With no authorized private account, the wallet picks the payer among its own.
+        eprintln!(
+            "Fee payer: an owned private account the wallet picks (no private signer; \
+             --fee-payer chooses one)"
+        );
     }
 }
 
@@ -754,6 +784,30 @@ pub async fn send_command(
                     fail(format!(
                         "--signer {}: this wallet doesn't hold its signing key",
                         names.account_name(*signer)
+                    ));
+                }
+            }
+            // The payer authorizes its fee: a public one signs, a private one is an owned regular
+            // account (a PDA has no authorization key).
+            if let Some(payer) = prepared.fee_payer {
+                let held = if prepared.private {
+                    wallet
+                        .storage()
+                        .key_chain()
+                        .managed_private_account(payer)
+                        .is_some_and(|m| matches!(m.kind, lee_core::PrivateAccountKind::Regular))
+                } else {
+                    wallet.get_account_public_signing_key(payer).is_some()
+                };
+                if !held {
+                    fail(format!(
+                        "--fee-payer {}: this wallet doesn't hold its {}",
+                        names.account_name(payer),
+                        if prepared.private {
+                            "keys (a private fee payer is an owned account, not a PDA)"
+                        } else {
+                            "signing key"
+                        }
                     ));
                 }
             }
@@ -891,7 +945,7 @@ async fn send_private(
             wallet: Some(&*wallet),
             programs: programs.clone(),
         };
-        let mut mentions = prepared
+        let mentions = prepared
             .list
             .iter()
             .map(|planned| mention(wallet, planned))
@@ -903,13 +957,12 @@ async fn send_private(
                 .collect::<Result<Vec<_>, String>>()
                 .unwrap_or_else(|e| fail(e))
         };
-        let (declared, delivery) = crate::private::delivery(
+        let delivery = crate::private::delivery(
             wallet,
             destinations(&flags.recovers),
             destinations(&flags.seals),
         )
         .unwrap_or_else(|e| fail(e));
-        mentions.extend(declared);
 
         let sent = {
             let _quiet = StdoutToStderr::new();
@@ -938,7 +991,16 @@ async fn send_private(
                 eprintln!("⚠️  Refused in simulation, so not sent: {reason}");
                 process::exit(EXIT_NO_CHANGE);
             }
-            fail(format!("send refused by the wallet: {error:#}"))
+            let error = format!("{error:#}");
+            // The wallet's only report of it is this text (`InvalidInput`).
+            if error.contains("no private account to pay its fee") {
+                fail(format!(
+                    "send refused by the wallet: {error}\n   No private account of this wallet \
+                     can pay the fee: authorize one that can (--signer <PRIVATE ACCOUNT>), or \
+                     name the payer (--fee-payer <PRIVATE ACCOUNT>)"
+                ));
+            }
+            fail(format!("send refused by the wallet: {error}"))
         };
         let (account, program) = (actor.account_id, actor.program_account_id);
         if prepared

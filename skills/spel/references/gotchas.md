@@ -65,8 +65,10 @@ refuses a `--signer` whose key the wallet lacks before sending.
 
 ### The fee payer can be anyone in the wallet
 
-`--fee-payer` may be outside the access list. Accounts created by `spel deploy` (headers,
-segments) are in the wallet but hold nothing.
+`--fee-payer` may be outside the access list, but the wallet must hold its key. A private call's
+payer is an owned private account; without a private `--signer` or `--fee-payer`, the wallet
+picks one of its own. Accounts created by `spel deploy` (headers, segments) are in the wallet
+but hold nothing.
 
 ## Programs and IDLs
 
@@ -123,10 +125,13 @@ sent by a public actor can't be sealed, so it needs a recovery binding: `--recov
 publishes its amount and sender. Using `--seal` for a public sender makes the transaction
 revert.
 
-### A public payee must exist on chain
+### A public payee is declared, not sealed
 
-Paying a brand-new public account from a private call is refused in simulation with
-`UnadmittedPublicActor`: no transaction vouches for it. Fund it once first.
+`--seal` / `--recover` refuse a public account. Declare it under the program its credit goes
+to (`--actor bob@token`, `--actor bob@native`): declaring `(bob, native)` doesn't deliver a
+token credit to `(bob, token)`. Paying a brand-new public account from a private call is
+refused in simulation with `UnadmittedPublicActor`: no transaction vouches for it. Fund it once
+first.
 
 ### A credit to your own private account waits
 

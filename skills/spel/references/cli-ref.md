@@ -13,7 +13,7 @@ spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]     # `--` keeps message fields apart 
 | --- | --- |
 | `-i, --idl <FILE>` | IDL v2 file (overrides spel.toml) |
 | `-p, --program <NAME\|ADDRESS>` | spel.toml program (also loads its IDL) or a program address |
-| `--fee-payer <ACCOUNT>` | pays fees (`send`, `deploy`); may be outside the access list |
+| `--fee-payer <ACCOUNT>` | pays fees (`send`, `deploy`); may be outside the access list; the wallet must hold its key; a private call's payer is an owned private account |
 | `-t, --type <TYPE>` | `inspect`: decode as this type |
 | `-d, --data <HEX>` | `inspect`: decode offline |
 | `--format text\|hex\|json` | `program-id` output |
@@ -55,7 +55,7 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 | `--root A[@P]` | receiving actor (required). Program: `@P`, else `--program`, else the spel.toml program named like the IDL |
 | `--actor A[@P]` | declare another actor (repeatable); replaces the field default for that account |
 | `--signer A` | authorize an account (repeatable): public signs, private uses the wallet's authorization key; the wallet must hold the key |
-| `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private |
+| `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private. A public recipient is refused: declare it, `--actor bob@token` |
 | `--no-auto-actors` | no actors from message fields (public) or from simulation (private) |
 | `--gas-limit N` | gas limit for this call |
 | `--dry-run[=json]` | print, don't send (works without a wallet on raw ids) |

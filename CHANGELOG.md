@@ -13,7 +13,11 @@
   exits `2`, and private states are reported before and after from the wallet's decrypted copy.
 - **`--seal` / `--recover`:** a credit to a private recipient (a wallet account, or `keys:FILE`
   from `wallet account show-keys`), sealed from private execution or with a recovery binding
-  from public execution.
+  from public execution. A public recipient is refused: it's declared with `--actor
+  ACCOUNT@PROGRAM`, so the credit reaches the right actor.
+- **`--fee-payer`** is checked before sending: the wallet must hold its key, and its privacy must
+  match the call's (a private call pays from an owned private account). A private call with no
+  payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.
 - **`keys:FILE` in account fields:** `send … -- pay --employee keys:emp1.keys` fills in the id
   derived from the keys (also in `Vec<account_id>` elements). The credit still needs `--seal`.
 - **`native`** names the native token program: `ACCOUNT@native` is an account's balance, which

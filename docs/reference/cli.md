@@ -117,7 +117,7 @@ spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MES
 | `--root <ACCOUNT>[@<PROGRAM>]` | **required.** The actor that receives the message. |
 | `--actor <ACCOUNT>[@<PROGRAM>]` | declare one more actor (repeatable). `PROGRAM` defaults to the root's. |
 | `--signer <ACCOUNT>` | authorize this account (repeatable): a public one signs, a private one uses this wallet's authorization key. The wallet must hold the key. |
-| `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable). Makes the call private |
+| `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable; not a public account, which is declared with `--actor`). Makes the call private |
 | `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private |
 | `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
 | `--gas-limit <N>` | execution gas limit (a wallet config override for this call) |
@@ -174,8 +174,13 @@ A signer whose key the wallet doesn't hold is refused before anything is sent.
 
 ### Fees
 
-`--fee-payer` names the paying account; it may be outside the access list (it co-signs). Without
-it the wallet picks a funded signer.
+`--fee-payer` names the paying account; it may be outside the access list, and authorizes only
+the fee. The wallet must hold its key, which `send` checks before sending. A public call's
+payer is a public account, which co-signs; without `--fee-payer` the wallet picks a funded
+signer. A private call's fee is paid in the proof by an owned private account (not a PDA);
+without `--fee-payer` the wallet picks an authorized private account (a private `--signer`), or
+failing that one of its own that can pay, and the guardrail says so. If none can, `send` fails
+and suggests `--signer` or `--fee-payer`.
 
 ### Private calls
 
@@ -229,7 +234,6 @@ doesn't find the destination of an **async** credit, so declare a witnessed acco
 | --- | --- |
 | a private account of this wallet (label, `Private/<id>`) | its keys; the credit still waits for it, and isn't applied in the transaction |
 | `keys:<FILE>` | keys from `wallet account show-keys` output (two lines: npk, then vpk), for someone else's account |
-| a public account | declared in the transaction, so its credit applies there |
 
 Naming a recipient in a message field (`--employee keys:emp1.keys`) only gives the program its
 id; the credit still needs its `--seal` or `--recover`. A call can carry several, one per
@@ -239,8 +243,17 @@ uses is ignored.
 A credit from private execution is **sealed** (`--seal`): only the recipient reads it, and it
 comes from a blinded alias. A credit from a public actor can't be sealed, so it goes with a
 **recovery binding** (`--recover`): its amount and sender are public. The recipient collects
-either with `wallet pending receive`. A public recipient must already exist on chain, or the call
-is refused (`UnadmittedPublicActor`).
+either with `wallet pending receive`.
+
+**A public recipient** is never sealed: `--seal` and `--recover` refuse one. Declare it under the
+program its credit goes to (`--actor bob@token`, `--actor bob@native` for a native balance), and
+the credit applies publicly in the transaction. The private sender shows up there as a fresh
+blinded alias; the recipient's change, and so the amount, is public. A public recipient must
+already exist on chain, or the call is refused (`UnadmittedPublicActor`).
+
+```bash
+spel --program token send --root alice --signer alice --actor bob@token -- transfer --to bob --amount 300
+```
 
 With credits, only the listed ones are delivered in the transaction. Without them, every async
 message to a witnessed account is.
