@@ -150,39 +150,20 @@ pub fn refusal(error: &ExecutionFailureKind) -> Option<String> {
     }
 }
 
-/// The actor a simulation reached without it being declared.
+/// The actor a simulation reached without it being declared. A private send's simulation returns
+/// it typed: nothing turns it into text on the way.
 #[must_use]
 pub fn undeclared_actor(error: &ExecutionFailureKind) -> Option<Actor> {
-    let ExecutionFailureKind::TransactionBuildError(error) = error else {
-        return None;
-    };
     match error {
-        lee::error::LeeError::InvalidProgramBehavior(
-            lee::error::InvalidProgramBehaviorError::Execution(ExecutionError::UndeclaredActor {
-                actor,
-            }),
+        ExecutionFailureKind::TransactionBuildError(
+            lee::error::LeeError::InvalidProgramBehavior(
+                lee::error::InvalidProgramBehaviorError::Execution(
+                    ExecutionError::UndeclaredActor { actor },
+                ),
+            ),
         ) => Some(*actor),
-        _ => undeclared_actor_in_text(&format!("{error:?}")),
+        _ => None,
     }
-}
-
-/// `UndeclaredActor { actor: Actor { account_id: <id>, program_account_id: <id> } }`, read back from
-/// an error that was turned into text on the way.
-fn undeclared_actor_in_text(text: &str) -> Option<Actor> {
-    let rest = &text[text.find("UndeclaredActor")?..];
-    let field = |name: &str| -> Option<AccountId> {
-        let start = rest.find(name)? + name.len();
-        let value: String = rest[start..]
-            .trim_start_matches([':', ' ', '"'])
-            .chars()
-            .take_while(char::is_ascii_alphanumeric)
-            .collect();
-        value.parse().ok()
-    };
-    Some(Actor::new(
-        field("account_id")?,
-        field("program_account_id")?,
-    ))
 }
 
 /// Sync the wallet's private accounts with the chain, then save the wallet. `rescan` rediscovers
@@ -410,23 +391,6 @@ pub fn register(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn an_undeclared_actor_is_read_back_from_text() {
-        let (account, program) = (AccountId::new([1; 32]), AccountId::new([2; 32]));
-        let text = format!(
-            "InvalidProgramBehavior(Execution(UndeclaredActor {{ actor: Actor {{ account_id: \
-             {account}, program_account_id: {program} }} }}))"
-        );
-        assert_eq!(
-            undeclared_actor_in_text(&text),
-            Some(Actor::new(account, program))
-        );
-        assert_eq!(
-            undeclared_actor_in_text("ProgramExecutionFailed(\"x\")"),
-            None
-        );
-    }
 
     #[test]
     fn a_typed_undeclared_actor_is_found() {
