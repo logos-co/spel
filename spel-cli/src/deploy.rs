@@ -18,6 +18,18 @@ use wallet::WalletCore;
 
 use crate::hex::decode_bytes_32;
 
+/// Segment accounts `program_loader` needs for a program binary.
+///
+/// The loader segments the *user ELF* inside a packaged `.bin` (the R0BF container also holds
+/// the kernel), so the count is taken over that, not over the whole file. A file that is not a
+/// packaged binary is counted as is.
+fn segments_for(bytes: &[u8]) -> usize {
+    match risc0_binfmt::ProgramBinary::decode(bytes) {
+        Ok(binary) => segment_count(binary.user_elf.len()),
+        Err(_) => segment_count(bytes.len()),
+    }
+}
+
 /// Number of segment accounts `program_loader` needs for a binary of `len` bytes.
 pub fn segment_count(len: usize) -> usize {
     len.div_ceil(MAX_SEGMENT_DATA_LEN)
@@ -43,7 +55,7 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
         eprintln!("❌ Program binary '{}' is empty", binary.display());
         process::exit(1);
     }
-    let n_segments = segment_count(bytes.len());
+    let n_segments = segments_for(&bytes);
     if n_segments > MAX_PROGRAM_SEGMENTS {
         eprintln!(
             "❌ '{}' is {} bytes: {} segments of {} bytes, over program_loader's cap of {}",
@@ -165,6 +177,20 @@ impl Drop for StdoutToStderr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segments_are_counted_over_the_user_elf_not_the_kernel() {
+        let user_elf = vec![1u8; MAX_SEGMENT_DATA_LEN * 2 - 10];
+        let kernel = vec![2u8; MAX_SEGMENT_DATA_LEN];
+        let packaged = risc0_binfmt::ProgramBinary::new(&user_elf, &kernel).encode();
+        assert!(
+            segment_count(packaged.len()) > 2,
+            "the whole file spills over"
+        );
+        assert_eq!(segments_for(&packaged), 2);
+        // Not a packaged binary: counted as is.
+        assert_eq!(segments_for(&user_elf), 2);
+    }
 
     #[test]
     fn segment_count_rounds_up() {

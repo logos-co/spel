@@ -103,7 +103,10 @@ fn item_kind(item: &TokenStream) -> Option<String> {
             // `#`, the attribute's `[...]`, and a visibility's `(...)`.
             TokenTree::Punct(_) => {},
             TokenTree::Group(group)
-                if matches!(group.delimiter(), Delimiter::Bracket | Delimiter::Parenthesis) => {},
+                if matches!(
+                    group.delimiter(),
+                    Delimiter::Bracket | Delimiter::Parenthesis
+                ) => {},
             _ => return None,
         }
     }

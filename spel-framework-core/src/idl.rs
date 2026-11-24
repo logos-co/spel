@@ -210,8 +210,8 @@ mod tests {
 
     #[test]
     fn version_one_is_refused() {
-        let err = SpelIdl::from_json(r#"{"version":"0.1.0","name":"t","instructions":[]}"#)
-            .unwrap_err();
+        let err =
+            SpelIdl::from_json(r#"{"version":"0.1.0","name":"t","instructions":[]}"#).unwrap_err();
         assert!(err.contains("version '0.1.0' is not supported"), "{err}");
     }
 
@@ -271,7 +271,10 @@ mod tests {
             "state": { "defined": "A" }
         })))
         .unwrap_err();
-        assert!(err.contains("state_types") && err.contains("Regenerate"), "{err}");
+        assert!(
+            err.contains("state_types") && err.contains("Regenerate"),
+            "{err}"
+        );
     }
 
     #[test]
