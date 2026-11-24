@@ -1543,4 +1543,60 @@ mod tests {
         assert_eq!(signer.authority(), ", signs");
         assert_eq!(planned(a, p, "root").authority(), "");
     }
+
+    /// The access list after `count` actors reached in simulation, as the inference loop builds
+    /// it, with alice signing the root.
+    fn inferred(count: u8, names: &Names<'_>) -> Vec<Planned> {
+        let (alice, payroll) = (id(1), id(9));
+        let mut list = vec![Planned {
+            signs: true,
+            authorizes: true,
+            ..planned(alice, payroll, "root")
+        }];
+        for byte in 0..count {
+            let reached = reached_actor(&list, id(10 + byte), payroll, names).unwrap();
+            list.push(reached);
+        }
+        list
+    }
+
+    fn cap_flags() -> SendFlags {
+        parse_send_args(&args(
+            "--root alice@payroll --signer alice -- pay-all --period 1",
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn past_the_cap_send_lists_what_it_added_and_the_next_actor() {
+        let names = no_wallet();
+        let list = inferred(MAX_INFERRED as u8, &names);
+        let next = Actor::new(id(30), id(9));
+        let report = cap_report(&list, next, &cap_flags(), &names);
+
+        assert!(report.contains(&format!("more than {MAX_INFERRED} undeclared actors")));
+        for p in &list[1..] {
+            assert!(report.contains(&format!("+ ({}, {})", p.account, p.program)));
+        }
+        assert!(report.contains(&format!("next: ({}, {})", id(30), id(9))));
+
+        let command = report.lines().last().unwrap();
+        assert_eq!(command.matches("--actor ").count(), MAX_INFERRED + 1);
+        assert!(command.contains(&format!("--actor {}@{}", id(30), id(9))));
+        assert!(command.contains("--signer alice"));
+        // Declared actors don't count towards the cap, so the command keeps inferring.
+        assert!(!command.contains("--no-auto-actors"));
+        assert!(command.ends_with("-- pay-all --period 1"));
+    }
+
+    #[test]
+    fn past_the_cap_an_actor_of_the_signer_is_declared_under_its_signature() {
+        let names = no_wallet();
+        let list = inferred(MAX_INFERRED as u8, &names);
+        let (alice, native) = (id(1), id(7));
+        let report = cap_report(&list, Actor::new(alice, native), &cap_flags(), &names);
+        let command = report.lines().last().unwrap();
+        assert!(command.contains(&format!("--actor {alice}@{native}")));
+        assert!(command.contains("--signer alice"));
+    }
 }
