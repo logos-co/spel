@@ -129,6 +129,18 @@ pub async fn run() {
     // An --idl given on the command line wins over spel.toml.
     let idl_explicit = !idl_path.is_empty();
 
+    // The global options as given, for the commands `send` prints to repeat the call.
+    let globals: Vec<String> = [
+        ("--idl", idl_explicit.then(|| idl_path.clone())),
+        ("--program", program_ref.clone()),
+        ("--fee-payer", fee_payer.clone()),
+        ("--binary", binary_arg.clone()),
+    ]
+    .into_iter()
+    .filter_map(|(flag, value)| value.map(|value| [flag.to_owned(), value]))
+    .flatten()
+    .collect();
+
     // Load spel.toml config
     let config = env::current_dir()
         .ok()
@@ -446,6 +458,7 @@ pub async fn run() {
                 fee_payer.as_deref(),
                 programs,
                 program_path.as_deref(),
+                globals,
             )
             .await;
         },

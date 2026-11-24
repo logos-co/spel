@@ -74,6 +74,9 @@ pub struct SendFlags {
     pub dry_run: Option<DryRun>,
     pub message: String,
     pub message_args: Vec<String>,
+    /// The global options the call was given (`--idl`, `--program`, `--fee-payer`, `--binary`),
+    /// for the commands `send` prints. Not parsed from the send arguments.
+    pub globals: Vec<String>,
 }
 
 /// Parse the arguments after `send`: send flags up to the message name, then the message's
@@ -747,12 +750,14 @@ pub async fn send_command(
     fee_payer: Option<&str>,
     programs: Vec<(String, AccountId)>,
     binary: Option<&str>,
+    globals: Vec<String>,
 ) {
-    let flags = parse_send_args(args).unwrap_or_else(|e| {
+    let mut flags = parse_send_args(args).unwrap_or_else(|e| {
         eprintln!("❌ {e}");
         eprintln!("{USAGE}");
         process::exit(1);
     });
+    flags.globals = globals;
 
     // The wallet resolves labels and signs. A dry run works without one, on raw ids.
     let mut wallet = match open_wallet(flags.gas_limit) {
@@ -1180,25 +1185,48 @@ fn explicit_command(list: &[Planned], flags: &SendFlags, names: &Names<'_>, infe
         };
         format!("{account}@{}", names.program_name(p.program))
     };
-    let mut words = vec![
-        "spel send".to_owned(),
-        format!("--root {}", actor(&list[0])),
-    ];
+    let mut words = vec!["spel".to_owned()];
+    words.extend(flags.globals.iter().cloned());
+    words.extend(["send".to_owned(), "--root".to_owned(), actor(&list[0])]);
     for planned in &list[1..] {
         if planned.reason != "--signer" {
-            words.push(format!("--actor {}", actor(planned)));
+            words.extend(["--actor".to_owned(), actor(planned)]);
         }
     }
-    words.extend(flags.signers.iter().map(|s| format!("--signer {s}")));
-    words.extend(flags.seals.iter().map(|s| format!("--seal {s}")));
-    words.extend(flags.recovers.iter().map(|s| format!("--recover {s}")));
+    let repeated = |flag: &str, values: &[String]| {
+        values
+            .iter()
+            .flat_map(|value| [flag.to_owned(), value.clone()])
+            .collect::<Vec<_>>()
+    };
+    words.extend(repeated("--signer", &flags.signers));
+    words.extend(repeated("--seal", &flags.seals));
+    words.extend(repeated("--recover", &flags.recovers));
+    if let Some(gas_limit) = flags.gas_limit {
+        words.extend(["--gas-limit".to_owned(), gas_limit.to_string()]);
+    }
     if !infer {
         words.push("--no-auto-actors".to_owned());
     }
     words.push("--".to_owned());
     words.push(flags.message.clone());
     words.extend(flags.message_args.iter().cloned());
-    words.join(" ")
+    words
+        .iter()
+        .map(|word| shell_word(word))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// `word` as a POSIX shell reads it back: as is when it holds only safe characters, else
+/// single-quoted.
+fn shell_word(word: &str) -> String {
+    let safe = |c: char| c.is_ascii_alphanumeric() || "@%+=:,./_-".contains(c);
+    if !word.is_empty() && word.chars().all(safe) {
+        word.to_owned()
+    } else {
+        format!("'{}'", word.replace('\'', r"'\''"))
+    }
 }
 
 /// Each declared actor whose state changed, before and after. Exits with [`EXIT_NO_CHANGE`] when
