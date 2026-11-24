@@ -77,7 +77,9 @@ pub enum IdlGenError {
     },
     #[error("two events are named `{name}`; their selectors would collide")]
     DuplicateEvent { name: String },
-    #[error("type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies")]
+    #[error(
+        "type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies"
+    )]
     UnknownType { name: String, used_by: String },
     #[error("cannot describe `{ty}` (in `{used_by}`): {reason}")]
     Unsupported {
@@ -212,7 +214,10 @@ pub fn generate_idl<F: FnMut(String)>(
             let mut named: Vec<&str> = found.iter().map(|(_, s)| s.as_str()).collect();
             named.sort_unstable();
             let marker_impls = trait_impls(&own, &event_traits);
-            let mut markers: Vec<&str> = marker_impls.iter().map(|i| i.struct_name.as_str()).collect();
+            let mut markers: Vec<&str> = marker_impls
+                .iter()
+                .map(|i| i.struct_name.as_str())
+                .collect();
             markers.sort_unstable();
             if !event_traits.is_empty() && named != markers {
                 on_warning(format!(
@@ -224,7 +229,11 @@ pub fn generate_idl<F: FnMut(String)>(
         },
         None => marked_events(&own, &event_traits)?,
     };
-    let source = if options.events.is_some() { "--events" } else { "#[event]" };
+    let source = if options.events.is_some() {
+        "--events"
+    } else {
+        "#[event]"
+    };
     let mut events: Vec<IdlEvent> = Vec::new();
     for (name, struct_name) in found {
         if events.iter().any(|e| e.name == name) {
@@ -401,7 +410,12 @@ fn docs(attrs: &[Attribute]) -> Option<String> {
             syn::Meta::NameValue(nv) => string_literal(&nv.value),
             _ => None,
         })
-        .map(|line| line.strip_prefix(' ').unwrap_or(&line).trim_end().to_owned())
+        .map(|line| {
+            line.strip_prefix(' ')
+                .unwrap_or(&line)
+                .trim_end()
+                .to_owned()
+        })
         .collect();
     let text = lines.join("\n").trim().to_owned();
     (!text.is_empty()).then_some(text)
@@ -462,7 +476,8 @@ impl<'a> Collector<'a> {
 
     fn queue(&mut self, name: &str, used_by: &str) {
         if !self.done.contains_key(name) {
-            self.pending.push_back((name.to_owned(), used_by.to_owned()));
+            self.pending
+                .push_back((name.to_owned(), used_by.to_owned()));
         }
     }
 

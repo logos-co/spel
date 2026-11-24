@@ -14,7 +14,12 @@ fn fixtures() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures")
 }
 
-fn options(crate_dir: &Path, message: &str, state: Option<&str>, events: Option<&str>) -> GenOptions {
+fn options(
+    crate_dir: &Path,
+    message: &str,
+    state: Option<&str>,
+    events: Option<&str>,
+) -> GenOptions {
     GenOptions {
         crate_dir: crate_dir.to_owned(),
         message: Some(message.to_owned()),
@@ -54,7 +59,11 @@ fn check_golden(name: &str, state: &str) -> SpelIdl {
 fn token_core_matches_its_golden_idl() {
     let idl = check_golden("token", "TokenState");
     assert_eq!(idl.name, "token");
-    let tags: Vec<(&str, u8)> = idl.messages.iter().map(|m| (m.name.as_str(), m.tag)).collect();
+    let tags: Vec<(&str, u8)> = idl
+        .messages
+        .iter()
+        .map(|m| (m.name.as_str(), m.tag))
+        .collect();
     assert_eq!(
         tags,
         [
@@ -67,7 +76,10 @@ fn token_core_matches_its_golden_idl() {
             ("ReadState", 6)
         ]
     );
-    assert!(idl.type_def("Internal").is_none(), "the internal enum stays out");
+    assert!(
+        idl.type_def("Internal").is_none(),
+        "the internal enum stays out"
+    );
     let transferred = idl.events.iter().find(|e| e.name == "Transferred").unwrap();
     assert_eq!(transferred.selector, event_selector("token", "Transferred"));
 }
@@ -79,7 +91,9 @@ fn nft_core_matches_its_golden_idl() {
     let new_definition = idl.message("new-definition").unwrap();
     assert_eq!(
         new_definition.fields[2].type_,
-        IdlType::Defined { defined: "NftMetadata".into() }
+        IdlType::Defined {
+            defined: "NftMetadata".into()
+        }
     );
     assert_eq!(idl.type_def("MetadataStandard").unwrap().kind, "enum");
 }
@@ -175,7 +189,10 @@ fn every_shape_is_described() {
     let dir = shape_crate(SHAPES, &[]);
     let idl = generate(&options(dir.path(), "Message", Some("Outer"), None)).unwrap();
     assert_eq!(idl.name, "shape");
-    assert_eq!(idl.message("ping").unwrap().docs.as_deref(), Some("No fields."));
+    assert_eq!(
+        idl.message("ping").unwrap().docs.as_deref(),
+        Some("No fields.")
+    );
     assert!(idl.message("ping").unwrap().fields.is_empty());
 
     let pay = serde_json::to_value(&idl.message("pay").unwrap().fields).unwrap();
@@ -203,17 +220,32 @@ fn every_shape_is_described() {
     );
 
     let names: Vec<&str> = idl.types.iter().map(|t| t.name.as_str()).collect();
-    assert_eq!(names, ["Inner", "Outer"], "referenced types only, sorted; no aliases");
+    assert_eq!(
+        names,
+        ["Inner", "Outer"],
+        "referenced types only, sorted; no aliases"
+    );
 }
 
 #[test]
 fn shapes_decode_through_the_idl() {
     let dir = shape_crate(SHAPES, &[]);
     let idl = generate(&options(dir.path(), "Message", Some("Outer"), None)).unwrap();
-    assert_eq!(decode_state(&[0, 42, 0, 0, 0], &idl).unwrap(), json!({ "A": 42 }));
-    assert_eq!(decode_state(&[1, 1], &idl).unwrap(), json!({ "B": { "flag": true } }));
-    assert_eq!(decode_named(&[1, 0, 0, 0], "Inner", &idl).unwrap(), json!(1));
-    assert!(decode_state(&[2], &idl).unwrap_err().contains("out of range"));
+    assert_eq!(
+        decode_state(&[0, 42, 0, 0, 0], &idl).unwrap(),
+        json!({ "A": 42 })
+    );
+    assert_eq!(
+        decode_state(&[1, 1], &idl).unwrap(),
+        json!({ "B": { "flag": true } })
+    );
+    assert_eq!(
+        decode_named(&[1, 0, 0, 0], "Inner", &idl).unwrap(),
+        json!(1)
+    );
+    assert!(decode_state(&[2], &idl)
+        .unwrap_err()
+        .contains("out of range"));
 }
 
 #[test]
@@ -274,7 +306,10 @@ fn state_markers_name_the_state_types_in_source_order() {
     let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
     // Declaration order, a module's items at its `mod` line: `oracle` comes first.
     assert_eq!(idl.state_types, ["OraclePrice", "PriceObservations"]);
-    assert!(idl.type_def("Tick").is_some(), "referenced by a marked type");
+    assert!(
+        idl.type_def("Tick").is_some(),
+        "referenced by a marked type"
+    );
     assert!(idl.type_def("NotMarked").is_none());
 }
 
@@ -301,7 +336,10 @@ fn the_message_marker_names_the_message_enum() {
 fn the_message_marker_follows_the_qualified_path_into_modules() {
     let dir = shape_crate(
         "pub mod api;\n",
-        &[("api.rs", "#[spel_attrs::message]\npub enum Request { Ping }\n")],
+        &[(
+            "api.rs",
+            "#[spel_attrs::message]\npub enum Request { Ping }\n",
+        )],
     );
     let mut opts = options(dir.path(), "unused", None, None);
     opts.message = None;
@@ -315,7 +353,10 @@ fn without_a_named_or_marked_message_enum_generation_fails() {
     let mut opts = options(dir.path(), "unused", None, None);
     opts.message = None;
     let err = generate(&opts).unwrap_err().to_string();
-    assert!(err.contains("--message") && err.contains("#[message]"), "{err}");
+    assert!(
+        err.contains("--message") && err.contains("#[message]"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -343,7 +384,10 @@ fn a_named_message_enum_wins_over_the_marker_with_a_warning() {
     .unwrap();
     assert_eq!(idl.messages[0].name, "Pong");
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("`Other`") && warnings[0].contains("(Message)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("`Other`") && warnings[0].contains("(Message)"),
+        "{warnings:?}"
+    );
 
     // Naming the marked enum is quiet.
     let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
@@ -363,7 +407,10 @@ fn named_state_types_win_over_markers_with_a_warning() {
     .unwrap();
     assert_eq!(idl.state_types, ["B"]);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("(B)") && warnings[0].contains("(A)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("(B)") && warnings[0].contains("(A)"),
+        "{warnings:?}"
+    );
 
     // Naming what the markers say is quiet.
     let idl = generate(&options(dir.path(), "Message", Some("A"), None)).unwrap();
@@ -372,7 +419,10 @@ fn named_state_types_win_over_markers_with_a_warning() {
 
 #[test]
 fn a_missing_one_of_several_state_types_fails() {
-    let dir = shape_crate("pub enum Message { Ping }\npub struct A { pub x: u8 }\n", &[]);
+    let dir = shape_crate(
+        "pub enum Message { Ping }\npub struct A { pub x: u8 }\n",
+        &[],
+    );
     let mut opts = options(dir.path(), "Message", None, None);
     opts.states = vec!["A".into(), "Nope".into()];
     let err = generate(&opts).unwrap_err().to_string();
@@ -485,7 +535,10 @@ fn a_named_events_module_wins_over_the_marker_with_a_warning() {
     let names: Vec<&str> = idl.events.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["Legacy"]);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("`other`") && warnings[0].contains("(Ev)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("`other`") && warnings[0].contains("(Ev)"),
+        "{warnings:?}"
+    );
 
     // Naming the module that holds the marked trait's impls is quiet.
     let mut warnings = Vec::new();
@@ -554,7 +607,10 @@ fn two_events_with_one_name_fail() {
 fn a_missing_message_enum_fails() {
     let dir = shape_crate(SHAPES, &[]);
     let err = generate(&options(dir.path(), "Msg", None, None)).unwrap_err();
-    assert!(matches!(err, IdlGenError::NotFound { ref name, .. } if name == "Msg"), "{err}");
+    assert!(
+        matches!(err, IdlGenError::NotFound { ref name, .. } if name == "Msg"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -568,7 +624,10 @@ fn a_message_that_is_not_an_enum_fails() {
 fn a_missing_state_type_fails() {
     let dir = shape_crate(SHAPES, &[]);
     let err = generate(&options(dir.path(), "Message", Some("State"), None)).unwrap_err();
-    assert!(matches!(err, IdlGenError::NotFound { ref name, .. } if name == "State"), "{err}");
+    assert!(
+        matches!(err, IdlGenError::NotFound { ref name, .. } if name == "State"),
+        "{err}"
+    );
 }
 
 #[test]

@@ -343,7 +343,10 @@ namespace = "oracle"
 
         let oracle = config.resolve_program(Some("oracle")).unwrap();
         let gen = oracle.idl_gen.clone().unwrap();
-        assert_eq!(gen.state.unwrap().into_vec(), ["PriceObservations", "OraclePrice"]);
+        assert_eq!(
+            gen.state.unwrap().into_vec(),
+            ["PriceObservations", "OraclePrice"]
+        );
         assert_eq!(gen.namespace.as_deref(), Some("oracle"));
     }
 
