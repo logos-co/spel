@@ -44,14 +44,16 @@ are retired. Client generation (`spel-client-gen`) is not ported yet.
 - **Signers are never inferred.** One signature authorizes every actor of that account in the
   transaction, under every program.
 - **Private calls** (an actor that is `Private/…`, a private label, `--seal` or `--recover`) need
-  the program's binary (`--binary` or spel.toml `binary`). A declared private account is
-  authorized by the wallet's keys, never `--signer`; a private PDA only by its program's seed
-  grant. A private PDA must be registered first (`spel pda … --owner | --group … --register`).
+  the program's binary (`--binary` or spel.toml `binary`). Only `--signer` authorizes, as in
+  public calls: a private signer through the wallet's authorization key. A private root or
+  `--actor` alone can be credited, not debited. A private PDA only by its program's seed grant
+  (`--signer` refuses it). A private PDA must be registered first (`spel pda … --owner | --group … --register`).
   Undeclared actors reached by sync messages are inferred from simulation and added without
-  authority; one on an account the call already authorizes stops the send (exit 2) with the
+  authority; one on a signer's account stops the send (exit 2) with the
   command that declares it. An async credit's destination isn't inferred: declare `ACCOUNT@native`, or
   use `--seal DEST` (from private execution) / `--recover DEST` (from public execution) for a
-  private recipient.
+  private recipient, one per recipient. `keys:FILE` in an account field fills in the derived id
+  only; it doesn't seal.
 - **Check the exit code.** `send`'s exit code: `0` changed, `2` nothing changed (refused in
   simulation, so not sent, with the reason printed; or a no-op), `1` error.
 - **A program is its address,** the header account `spel deploy` prints, not its ImageID

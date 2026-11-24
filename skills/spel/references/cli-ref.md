@@ -54,7 +54,7 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 | --- | --- |
 | `--root A[@P]` | receiving actor (required). Program: `@P`, else `--program`, else the spel.toml program named like the IDL |
 | `--actor A[@P]` | declare another actor (repeatable); replaces the field default for that account |
-| `--signer A` | sign with a public account (repeatable); the wallet must hold the key |
+| `--signer A` | authorize an account (repeatable): public signs, private uses the wallet's authorization key; the wallet must hold the key |
 | `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private |
 | `--no-auto-actors` | no actors from message fields (public) or from simulation (private) |
 | `--gas-limit N` | gas limit for this call |
@@ -63,17 +63,19 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
-Private calls (a private actor, `--seal` or `--recover`): proved with the binary; declared
-private accounts authorize through the wallet's keys (a private PDA only through its program's
-seed grant); actors reached by sync messages are inferred from simulation and added without
-authority (`+ … reached in simulation`), except on an account the call already authorizes,
-which stops the send (exit 2) with the declaring command; an async credit's destination isn't
-inferred (declare `ACCOUNT@native`, or `--seal`/`--recover`).
+Private calls (a private actor, `--seal` or `--recover`): proved with the binary; only
+`--signer` authorizes, as in public calls (a private root or `--actor` alone can be credited,
+not debited; a private PDA only through its program's seed grant, so `--signer` refuses it);
+actors reached by sync messages are inferred from simulation and added without authority
+(`+ … reached in simulation`), except on a signer's account, which stops the send (exit 2)
+with the declaring command; an async credit's destination isn't inferred (declare
+`ACCOUNT@native`, or `--seal`/`--recover`, one per recipient). `keys:FILE` in an account field
+gives the program the id only; seal it explicitly.
 
 ```bash
-spel --program payroll send --root seat -- open --treasury treasury --period-ms 60000
-spel --program payroll send --root seat --seal emp1 -- pay --employee emp1
-spel --program payroll send --root seat --actor seat@native -- withdraw --amount 500
+spel --program payroll send --root seat --signer seat -- open --treasury treasury --period-ms 60000
+spel --program payroll send --root seat --signer seat --seal keys:emp1.keys -- pay --employee keys:emp1.keys
+spel --program payroll send --root seat --signer seat --actor seat@native -- withdraw --amount 500
 ```
 
 Exit codes: `0` included and changed; `2` nothing changed (refused in simulation and not
@@ -134,11 +136,11 @@ spel --idl token.json                                      # help with the IDL's
 | --- | --- |
 | integers | decimal |
 | `bool` | `true`/`false`; a bare flag is `true` |
-| `account_id` | base58/hex; label in `send` |
+| `account_id` | base58/hex; label or `keys:FILE` in `send` |
 | `Option<T>` | value or `none` |
 | `[u8; N]` | hex (2N chars) or a string ≤ N bytes |
 | `Vec<u8\|u32\|u64\|u128\|bool>` | `1,2,3` |
-| `Vec<[u8; 32]>`, `Vec<account_id>` | comma-separated ids |
+| `Vec<[u8; 32]>`, `Vec<account_id>` | comma-separated ids (labels, `keys:FILE` in `send`) |
 | `Vec<string>` | repeat the flag |
 | struct | JSON object: `'{"standard":"Simple","uri":"ipfs://x","creators":"me"}'` |
 | enum | `Variant` or `{"Variant": {…}}` |

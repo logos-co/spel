@@ -41,7 +41,9 @@ Commands that touch the chain open LEZ's wallet from `LEE_WALLET_HOME_DIR`
 
 - **Accounts** are base58 or hex ids, with an optional `Public/` or `Private/` prefix, or
   **wallet labels** (`wallet account new public --label alice`). Labels resolve in `--root`,
-  `--actor`, `--signer`, `--fee-payer`, `inspect`, and in account-typed message fields.
+  `--actor`, `--signer`, `--fee-payer`, `inspect`, and in account-typed message fields. A
+  message field (or a `Vec<account_id>` element) also takes `keys:<FILE>`: a private account
+  known by its keys (`wallet account show-keys` output), whose id they derive.
   An account is **private** when it has the `Private/` prefix, when its label names a private
   account, or when it's a bare id the wallet witnesses as private. That makes `send` use a
   [private call](#private-calls).
@@ -114,7 +116,7 @@ spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MES
 | --- | --- |
 | `--root <ACCOUNT>[@<PROGRAM>]` | **required.** The actor that receives the message. |
 | `--actor <ACCOUNT>[@<PROGRAM>]` | declare one more actor (repeatable). `PROGRAM` defaults to the root's. |
-| `--signer <ACCOUNT>` | sign with this public account (repeatable). The wallet must hold its key. |
+| `--signer <ACCOUNT>` | authorize this account (repeatable): a public one signs, a private one uses this wallet's authorization key. The wallet must hold the key. |
 | `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable). Makes the call private |
 | `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private |
 | `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
@@ -188,10 +190,11 @@ crosses into public execution are published.
 - a private PDA keyed by one of them, or by a wallet group's secret, which must be registered
   first with [`pda --register`](#pda).
 
-**Authority comes only from what you declare.** A private account you declare (`--root`,
-`--actor`) is taken with its authorization key: the private counterpart of a signature. So
-`--signer` names only public accounts. A private PDA's keys never authorize it; only its
-program's seed grant can. A public actor in a private call is declared as in a public one.
+**Authority comes only from `--signer`**, as in a public call. A private signer authorizes with
+this wallet's authorization key, the private counterpart of a signature, and covers every
+actor of its account. A private account declared with `--root` or `--actor` alone takes part
+with only its nullifier key: it can be credited, but not debited. A private PDA's keys never
+authorize it, so `--signer` refuses one; only its program's seed grant can.
 
 **The access list is inferred from simulation**, not from the message's fields: a field may name
 a private account no one in the transaction can witness. The wallet simulates the call before
@@ -202,8 +205,8 @@ again, up to 8 times:
   can only do what it allows any account (such as crediting it). If it needs more, the next
   simulation refuses the call, and you declare the actor yourself.
 - LEZ gives an account one authority across all its actors. So an actor of an account the call
-  already authorizes (it signs, or it's a declared private account) isn't added: `send` stops,
-  sends nothing, exits `2`, and prints the command that declares it.
+  already authorizes (a signer) isn't added: `send` stops, sends nothing, exits `2`, and prints
+  the command that declares it.
 
 Each added actor is printed with its authority:
 
@@ -216,8 +219,7 @@ Credit sealed to emp1
 ```
 
 When anything was inferred, `send` also prints the call with every actor declared
-(`--no-auto-actors`). Declaring a private actor authorizes it, so that command grants more than
-the inferred call did. The simulation finds the actors a call reaches by sync messages. It
+(`--no-auto-actors`). The simulation finds the actors a call reaches by sync messages. It
 doesn't find the destination of an **async** credit, so declare a witnessed account's balance
 (`--actor seat@native`) for its credit to apply in the transaction.
 
@@ -228,6 +230,11 @@ doesn't find the destination of an **async** credit, so declare a witnessed acco
 | a private account of this wallet (label, `Private/<id>`) | its keys; the credit still waits for it, and isn't applied in the transaction |
 | `keys:<FILE>` | keys from `wallet account show-keys` output (two lines: npk, then vpk), for someone else's account |
 | a public account | declared in the transaction, so its credit applies there |
+
+Naming a recipient in a message field (`--employee keys:emp1.keys`) only gives the program its
+id; the credit still needs its `--seal` or `--recover`. A call can carry several, one per
+recipient: the wallet matches each credit to the seal of its destination, and a seal no credit
+uses is ignored.
 
 A credit from private execution is **sealed** (`--seal`): only the recipient reads it, and it
 comes from a blinded alias. A credit from a public actor can't be sealed, so it goes with a
@@ -246,9 +253,10 @@ the declared actors only: inference needs the wallet's simulation, which runs on
 ```bash
 # Payroll: the treasury is a private PDA keyed by the seat; the payee's credit is sealed.
 spel --program payroll pda account:seat --owner seat --register --label treasury
-spel --program payroll send --root seat -- open --treasury treasury --period-ms 60000
-spel --program payroll send --root seat --seal emp1 -- pay --employee emp1
-spel --program payroll send --root seat --actor seat@native -- withdraw --amount 500000
+spel --program payroll send --root seat --signer seat -- open --treasury treasury --period-ms 60000
+spel --program payroll send --root seat --signer seat --seal emp1 -- pay --employee emp1
+spel --program payroll send --root seat --signer seat --seal keys:bob.keys -- pay --employee keys:bob.keys
+spel --program payroll send --root seat --signer seat --actor seat@native -- withdraw --amount 500000
 ```
 
 ### Outcome and exit codes

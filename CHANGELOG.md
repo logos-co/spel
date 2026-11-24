@@ -5,14 +5,17 @@
 - **Private calls.** `spel send` sends a privacy-preserving transaction when an actor's account
   is private (`Private/<id>`, a private label, or an id the wallet witnesses privately), or when
   it has a `--seal DEST` / `--recover DEST` credit. It is proved with the program's binary (the
-  new global `--binary`, or `spel.toml`'s `binary`). Declared private accounts authorize through
-  the wallet's keys. Actors the call reaches by sync messages are inferred from the wallet's
-  simulation and added without authority; one on an account the call already authorizes stops
+  new global `--binary`, or `spel.toml`'s `binary`). Only `--signer` authorizes, as in public
+  calls: a private signer with the wallet's authorization key (a private PDA can't be one).
+  Actors the call reaches by sync messages are inferred from the wallet's
+  simulation and added without authority; one on a signer's account stops
   the send with the command that declares it. A revert after inclusion
   exits `2`, and private states are reported before and after from the wallet's decrypted copy.
 - **`--seal` / `--recover`:** a credit to a private recipient (a wallet account, or `keys:FILE`
   from `wallet account show-keys`), sealed from private execution or with a recovery binding
   from public execution.
+- **`keys:FILE` in account fields:** `send … -- pay --employee keys:emp1.keys` fills in the id
+  derived from the keys (also in `Vec<account_id>` elements). The credit still needs `--seal`.
 - **`native`** names the native token program: `ACCOUNT@native` is an account's balance, which
   `inspect` prints as `{"balance": …}`.
 - **`spel inspect`** reads private accounts, syncing the wallet first.

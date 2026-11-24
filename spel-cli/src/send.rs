@@ -6,8 +6,9 @@
 //!
 //! The message is encoded from the IDL. The access list holds the root, each `--actor`, and
 //! (unless `--no-auto-actors`) an actor on the root's program for every account-typed field.
-//! A `--signer` authorizes every actor of its account in the transaction; the guardrail
-//! printed before sending lists them.
+//! A `--signer` authorizes every actor of its account in the transaction (a public account with
+//! a signature, a private one with this wallet's authorization key); the guardrail printed
+//! before sending lists them. Nothing else authorizes: not `--actor`, not the root.
 //!
 //! The wallet simulates the transaction first and doesn't send one that would be refused, by the
 //! program or by LEZ's rules; `send` prints the reason and exits with [`EXIT_NO_CHANGE`]. Otherwise it reads every
@@ -243,12 +244,12 @@ impl Names<'_> {
 pub struct Planned {
     pub account: AccountId,
     pub program: AccountId,
+    /// Signs: a public `--signer`'s actor.
     pub signs: bool,
     /// Witnessed through this wallet's keys in a privacy-preserving transaction.
     pub private: bool,
     /// Taken with its account's authority: a signature (public), or the authorization key
-    /// (private). A declared actor has it when it signs or is private; an actor reached in
-    /// simulation never does.
+    /// (private). Only a `--signer` gives it; an actor reached in simulation never has it.
     pub authorizes: bool,
     /// A private PDA. Its keys never authorize it: only its program's seed grant can.
     pub pda: bool,
@@ -375,13 +376,24 @@ fn is_account_field(ty: &IdlType) -> bool {
     }
 }
 
-/// Replace wallet labels in account-typed fields with their ids, so `--to bob` works.
+fn is_account_list(ty: &IdlType) -> bool {
+    matches!(ty, IdlType::Vec { vec } if matches!(vec.as_ref(), IdlType::Primitive(p) if p == "account_id"))
+}
+
+/// Replace wallet labels and `keys:<FILE>` in account-typed fields (and in `Vec<account_id>`
+/// elements) with their ids, so `--to bob` and `--to keys:bob.keys` work. Returns the accounts
+/// named by their keys: foreign private accounts, which no actor of this transaction can be.
 fn resolve_account_fields(
     message: &IdlMessage,
     args: &mut HashMap<String, Vec<String>>,
     names: &Names<'_>,
-) -> Result<(), String> {
-    for field in message.fields.iter().filter(|f| is_account_field(&f.type_)) {
+) -> Result<BTreeSet<AccountId>, String> {
+    let mut keyed = BTreeSet::new();
+    for field in &message.fields {
+        let list = is_account_list(&field.type_);
+        if !list && !is_account_field(&field.type_) {
+            continue;
+        }
         let flag = field_flag(&field.name);
         let Some(values) = args.get_mut(&flag) else {
             continue;
@@ -390,13 +402,41 @@ fn resolve_account_fields(
             if matches!(value.as_str(), "none" | "null" | "") {
                 continue;
             }
-            *value = names
-                .account(value)
-                .map_err(|e| format!("--{flag}: {e}"))?
-                .to_string();
+            let mut resolve = |raw: &str| {
+                let raw = raw.trim();
+                let id = field_account(names, raw).map_err(|e| format!("--{flag}: {e}"))?;
+                if raw.starts_with("keys:") {
+                    keyed.insert(id);
+                }
+                Ok::<_, String>(id.to_string())
+            };
+            *value = if list {
+                value
+                    .split(',')
+                    .map(&mut resolve)
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(",")
+            } else {
+                resolve(value)?
+            };
         }
     }
-    Ok(())
+    Ok(keyed)
+}
+
+/// The account a message field names: a wallet label, an id, or `keys:<FILE>` (a regular private
+/// account known by its keys, `wallet account show-keys` output, whose id they derive).
+///
+/// Naming a recipient by its keys doesn't seal a credit to it: that stays `--seal`.
+fn field_account(names: &Names<'_>, raw: &str) -> Result<AccountId, String> {
+    match raw.strip_prefix("keys:") {
+        Some(path) => {
+            let (npk, vpk) =
+                wallet::cli::read_keys_file(path).map_err(|e| format!("{raw}: {e:#}"))?;
+            Ok(AccountId::from((&npk, &vpk)))
+        },
+        None => names.account(raw),
+    }
 }
 
 /// Everything `send` would do, resolved.
@@ -429,7 +469,7 @@ fn prepare(
         )
     })?;
     let mut args = parse_message_args(&flags.message_args, message);
-    resolve_account_fields(message, &mut args, names)?;
+    let keyed = resolve_account_fields(message, &mut args, names)?;
     let bytes = encode_message(idl, message, &args)?;
 
     let (root_account, root_program) = split_actor(&flags.root);
@@ -475,34 +515,41 @@ fn prepare(
             Ok(Actor::new(declared(account)?, program))
         })
         .collect::<Result<Vec<_>, String>>()?;
+    // A signer authorizes its account: a public one with a signature, a private one with this
+    // wallet's authorization key. A private PDA has no such key: only its program's seed grant
+    // authorizes it.
     let signers = flags
         .signers
         .iter()
-        .map(|raw| match names.account_with_privacy(raw)? {
-            AccountIdWithPrivacy::Public(id) => Ok(id),
-            AccountIdWithPrivacy::Private(_) => Err(format!(
-                "--signer {raw}: a private account authorizes with this wallet's keys, not a \
-                 signature; drop --signer"
-            )),
-        })
+        .map(|raw| declared(raw))
         .collect::<Result<Vec<_>, String>>()?;
+    for (raw, id) in flags.signers.iter().zip(&signers) {
+        if private_accounts.contains(id) && names.is_private_pda(*id) {
+            return Err(format!(
+                "--signer {raw}: a private PDA's keys don't authorize it, only its program's \
+                 seed grant can; drop --signer"
+            ));
+        }
+    }
     let fee_payer = fee_payer.map(|raw| names.account(raw)).transpose()?;
     let private =
         !private_accounts.is_empty() || !flags.seals.is_empty() || !flags.recovers.is_empty();
 
     // A private call's undeclared actors come from simulation, not from the message's fields: a
     // field may name a private account no one in this transaction can witness.
+    let mut fields = account_fields(message, &args);
+    fields.retain(|(_, account)| !keyed.contains(account));
     let mut list = plan_access_list(
         root,
         &explicit,
-        &account_fields(message, &args),
+        &fields,
         &signers,
         !flags.no_auto_actors && !private,
     );
     for planned in &mut list {
         planned.private = private_accounts.contains(&planned.account);
-        // A declared private account is taken with its authorization key.
-        planned.authorizes |= planned.private;
+        // A private signer authorizes with its key, not a signature.
+        planned.signs &= !planned.private;
         planned.pda = planned.private && names.is_private_pda(planned.account);
     }
     Ok(Prepared {
@@ -553,15 +600,22 @@ fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
     for recover in &flags.recovers {
         eprintln!("Credit to {recover}, with a recovery binding");
     }
-    if prepared.private {
-        // Private accounts authorize through the wallet's keys, not signatures.
-    } else if prepared.signers.is_empty() {
+    if prepared.signers.is_empty() {
         eprintln!("No signers: no actor is authorized.");
     }
     for signer in &prepared.signers {
+        let private = prepared
+            .list
+            .iter()
+            .any(|p| p.account == *signer && p.private);
         eprintln!(
-            "{} signs. In this transaction that authorizes:",
-            names.account_name(*signer)
+            "{} {}. In this transaction that authorizes:",
+            names.account_name(*signer),
+            if private {
+                "authorizes with this wallet's key"
+            } else {
+                "signs"
+            }
         );
         for planned in prepared.list.iter().filter(|p| p.account == *signer) {
             let role = if planned.reason == "root" {
@@ -689,7 +743,13 @@ pub async fn send_command(
         let prepared =
             prepare(&flags, idl, default_program, fee_payer, &names).unwrap_or_else(|e| fail(e));
         if let Some(wallet) = &wallet {
-            for signer in &prepared.signers {
+            let public_signers = prepared
+                .list
+                .iter()
+                .filter(|p| p.signs)
+                .map(|p| p.account)
+                .collect::<BTreeSet<_>>();
+            for signer in &public_signers {
                 if wallet.get_account_public_signing_key(*signer).is_none() {
                     fail(format!(
                         "--signer {}: this wallet doesn't hold its signing key",
@@ -938,7 +998,7 @@ async fn send_private(
     };
     if inferred > 0 {
         eprintln!(
-            "The same call, declared (declaring a private actor authorizes it): {}",
+            "The same call, declared: {}",
             explicit_command(&prepared.list, flags, &names)
         );
     }
