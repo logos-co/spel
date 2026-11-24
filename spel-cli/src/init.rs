@@ -38,6 +38,62 @@ fn default_spel_ref() -> String {
     format!("branch = \"{DEFAULT_SPEL_BRANCH}\"")
 }
 
+/// What `spel init` was asked to create, as parsed from its arguments.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InitArgs {
+    pub name: String,
+    pub lez_tag: Option<String>,
+    pub spel_tag: Option<String>,
+    pub lez_rev: Option<String>,
+    pub spel_rev: Option<String>,
+    pub spel_git: Option<String>,
+}
+
+/// Parses the arguments after `spel init`: one project name and any of the
+/// `--lez-tag`, `--spel-tag`, `--lez-rev`, `--spel-rev` and `--spel-git`
+/// options, in any order, before or after the name.
+///
+/// Anything else is an error rather than being dropped: an option that is
+/// silently ignored leaves the project pinned to the defaults, and the drift
+/// only shows up later as a confusing build error.
+///
+/// # Errors
+///
+/// Returns a message naming the offending argument when an option is unknown
+/// or has no value, when a second project name is given, or when there is none.
+pub fn parse_init_args(args: &[String]) -> Result<InitArgs, String> {
+    let mut parsed = InitArgs::default();
+    let mut name: Option<&str> = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let slot = match arg.as_str() {
+            "--lez-tag" => &mut parsed.lez_tag,
+            "--spel-tag" => &mut parsed.spel_tag,
+            "--lez-rev" => &mut parsed.lez_rev,
+            "--spel-rev" => &mut parsed.spel_rev,
+            "--spel-git" => &mut parsed.spel_git,
+            flag if flag.starts_with('-') => {
+                return Err(format!("unexpected argument `{flag}`"));
+            },
+            positional => {
+                if let Some(first) = name {
+                    return Err(format!(
+                        "unexpected argument `{positional}` (the project name is already `{first}`)"
+                    ));
+                }
+                name = Some(positional);
+                continue;
+            },
+        };
+        let value = iter
+            .next()
+            .ok_or_else(|| format!("`{arg}` requires a value"))?;
+        *slot = Some(value.clone());
+    }
+    parsed.name = name.ok_or("missing <project-name>")?.to_owned();
+    Ok(parsed)
+}
+
 pub fn init_project(
     name: &str,
     lez_tag: Option<&str>,
@@ -947,6 +1003,100 @@ mod tests {
         assert!(
             pin.contains(&format!("tag = \"{DEFAULT_LEZ_TAG}\"")),
             "DEFAULT_LEZ_TAG ({DEFAULT_LEZ_TAG}) differs from spel-framework-core's LEZ pin: {pin}"
+        );
+    }
+
+    fn parse(args: &[&str]) -> Result<InitArgs, String> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        parse_init_args(&args)
+    }
+
+    #[test]
+    fn options_are_accepted_before_and_after_the_name() {
+        let want = InitArgs {
+            name: "tp".into(),
+            lez_tag: Some("v0.2.4".into()),
+            spel_tag: Some("v0.7.0".into()),
+            ..InitArgs::default()
+        };
+        assert_eq!(
+            parse(&["--lez-tag", "v0.2.4", "--spel-tag", "v0.7.0", "tp"]),
+            Ok(want.clone())
+        );
+        assert_eq!(
+            parse(&["tp", "--lez-tag", "v0.2.4", "--spel-tag", "v0.7.0"]),
+            Ok(want.clone())
+        );
+        assert_eq!(
+            parse(&["--lez-tag", "v0.2.4", "tp", "--spel-tag", "v0.7.0"]),
+            Ok(want)
+        );
+    }
+
+    #[test]
+    fn every_option_is_read() {
+        let got = parse(&[
+            "--lez-tag",
+            "a",
+            "--spel-tag",
+            "b",
+            "--lez-rev",
+            "c",
+            "--spel-rev",
+            "d",
+            "--spel-git",
+            "e",
+            "tp",
+        ])
+        .unwrap();
+        assert_eq!(got.lez_tag.as_deref(), Some("a"));
+        assert_eq!(got.spel_tag.as_deref(), Some("b"));
+        assert_eq!(got.lez_rev.as_deref(), Some("c"));
+        assert_eq!(got.spel_rev.as_deref(), Some("d"));
+        assert_eq!(got.spel_git.as_deref(), Some("e"));
+    }
+
+    #[test]
+    fn a_bare_name_uses_no_options() {
+        assert_eq!(
+            parse(&["tp"]),
+            Ok(InitArgs {
+                name: "tp".into(),
+                ..InitArgs::default()
+            })
+        );
+    }
+
+    #[test]
+    fn unexpected_arguments_are_rejected() {
+        assert_eq!(
+            parse(&["tp", "--no-such-flag"]),
+            Err("unexpected argument `--no-such-flag`".into())
+        );
+        assert_eq!(
+            parse(&["--no-such-flag", "tp"]),
+            Err("unexpected argument `--no-such-flag`".into())
+        );
+        let err = parse(&["tp", "other"]).unwrap_err();
+        assert!(err.contains("unexpected argument `other`"), "{err}");
+        assert!(err.contains("already `tp`"), "{err}");
+    }
+
+    #[test]
+    fn an_option_without_a_value_is_rejected() {
+        assert_eq!(
+            parse(&["tp", "--spel-tag"]),
+            Err("`--spel-tag` requires a value".into())
+        );
+    }
+
+    #[test]
+    fn a_missing_name_is_rejected() {
+        assert_eq!(parse(&[]), Err("missing <project-name>".into()));
+        // The value is consumed by the option, which leaves no name.
+        assert_eq!(
+            parse(&["--spel-tag", "v1"]),
+            Err("missing <project-name>".into())
         );
     }
 }

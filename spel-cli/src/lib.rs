@@ -268,8 +268,9 @@ pub async fn run() {
         match cmd {
             "init" => {
                 // Check for help flag
-                if remaining_args.get(2) == Some(&"-h".to_string())
-                    || remaining_args.get(2) == Some(&"--help".to_string())
+                if remaining_args[2..]
+                    .iter()
+                    .any(|a| a == "-h" || a == "--help")
                 {
                     println!("Usage: spel init [OPTIONS] <project-name>");
                     println!();
@@ -298,57 +299,18 @@ pub async fn run() {
                     );
                     return;
                 }
-                let mut lez_tag: Option<String> = None;
-                let mut spel_tag: Option<String> = None;
-                let mut lez_rev: Option<String> = None;
-                let mut spel_rev: Option<String> = None;
-                let mut spel_git: Option<String> = None;
-                let mut name_arg_idx = 2;
-
-                while name_arg_idx < remaining_args.len() {
-                    let arg = &remaining_args[name_arg_idx];
-                    if arg == "--lez-tag" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            lez_tag = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-tag" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_tag = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--lez-rev" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            lez_rev = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-rev" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_rev = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else if arg == "--spel-git" {
-                        name_arg_idx += 1;
-                        if name_arg_idx < remaining_args.len() {
-                            spel_git = Some(remaining_args[name_arg_idx].clone());
-                        }
-                    } else {
-                        break;
-                    }
-                    name_arg_idx += 1;
-                }
-
-                let name = remaining_args.get(name_arg_idx).unwrap_or_else(|| {
+                let parsed = init::parse_init_args(&remaining_args[2..]).unwrap_or_else(|e| {
+                    eprintln!("error: {e}");
                     eprintln!("Usage: {} init [--lez-tag <tag>] [--spel-tag <tag>] [--lez-rev <rev>] [--spel-rev <rev>] [--spel-git <url>] <project-name>", args[0]);
                     process::exit(1);
                 });
                 init_project(
-                    name,
-                    lez_tag.as_deref(),
-                    spel_tag.as_deref(),
-                    lez_rev.as_deref(),
-                    spel_rev.as_deref(),
-                    spel_git.as_deref(),
+                    &parsed.name,
+                    parsed.lez_tag.as_deref(),
+                    parsed.spel_tag.as_deref(),
+                    parsed.lez_rev.as_deref(),
+                    parsed.spel_rev.as_deref(),
+                    parsed.spel_git.as_deref(),
                 );
                 return;
             },
