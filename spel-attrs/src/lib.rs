@@ -5,7 +5,7 @@
 //! types alone don't say, without the program naming it on the command line or in `spel.toml`.
 //!
 //! ```ignore
-//! use spel_attrs::{message, state};
+//! use spel_attrs::{event, message, state};
 //!
 //! #[message]
 //! pub enum Message {
@@ -16,6 +16,15 @@
 //! pub enum TokenState {
 //!     Definition(TokenDefinition),
 //!     Holding(TokenHolding),
+//! }
+//!
+//! #[event]
+//! pub trait TokenEvent: BorshSerialize {
+//!     const NAME: &'static str;
+//! }
+//!
+//! impl TokenEvent for Transferred {
+//!     const NAME: &'static str = "Transferred";
 //! }
 //! ```
 
@@ -47,6 +56,19 @@ pub fn state(attr: TokenStream, item: TokenStream) -> TokenStream {
     marker("state", &["struct", "enum"], &attr, item)
 }
 
+/// Marks the trait a program's events implement, so `spel generate-idl` lists every impl of it
+/// as an event without an `--events` flag. Each impl names its event with a string literal
+/// `const NAME: &str`, which gives the event's selector; the implementing struct is its payload.
+///
+/// Mark the trait, not the event structs. Without a marked trait (or `--events`), the IDL has
+/// no events. Marking several traits merges their events.
+///
+/// It takes no arguments and goes on a trait; anything else is a compile error.
+#[proc_macro_attribute]
+pub fn event(attr: TokenStream, item: TokenStream) -> TokenStream {
+    marker("event", &["trait"], &attr, item)
+}
+
 /// `item` unchanged if the marker has no arguments and `item` is one of `kinds`; else a
 /// compile error.
 fn marker(name: &str, kinds: &[&str], attr: &TokenStream, item: TokenStream) -> TokenStream {
@@ -59,7 +81,7 @@ fn marker(name: &str, kinds: &[&str], attr: &TokenStream, item: TokenStream) -> 
     item
 }
 
-/// `"an enum"`, `"a struct or an enum"`.
+/// `"an enum"`, `"a struct or an enum"`, `"a trait"`.
 fn describe(kinds: &[&str]) -> String {
     kinds
         .iter()
@@ -74,8 +96,8 @@ fn item_kind(item: &TokenStream) -> Option<String> {
     for token in item.clone() {
         match token {
             TokenTree::Ident(ident) => match ident.to_string().as_str() {
-                // Visibility (`pub`, `pub(crate)`) comes before the keyword.
-                "pub" | "crate" | "super" | "self" | "in" => {},
+                // Visibility (`pub`, `pub(crate)`) and `unsafe` come before the keyword.
+                "pub" | "crate" | "super" | "self" | "in" | "unsafe" => {},
                 keyword => return Some(keyword.to_owned()),
             },
             // `#`, the attribute's `[...]`, and a visibility's `(...)`.

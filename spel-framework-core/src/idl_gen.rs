@@ -2,11 +2,11 @@
 //!
 //! The caller names the three things a client needs: the message enum, the state type (or
 //! types) and the module holding the events (`spel generate-idl programs/token/core --message
-//! Message --state TokenState --events event`). The message enum and the state types can
-//! instead be marked in the crate with `#[message]` and `#[state]` from `spel-attrs`, inert
-//! attributes. Everything else is read from plain Rust types: the
-//! enum's variant order gives the Borsh tags, doc comments become help, and every struct or
-//! enum those types reference is described, following path dependencies.
+//! Message --state TokenState --events event`). Each can instead be marked in the crate with
+//! an inert attribute from `spel-attrs`: `#[message]` on the enum, `#[state]` on the state
+//! types, `#[event]` on the trait the events implement. Everything else is read from plain Rust
+//! types: the enum's variant order gives the Borsh tags, doc comments become help, and every
+//! struct or enum those types reference is described, following path dependencies.
 //!
 //! A name that doesn't exist is an error, so a rename breaks generation instead of silently
 //! dropping a type.
@@ -35,7 +35,8 @@ pub struct GenOptions {
     /// `state_types`, in this order, without duplicates. Empty: the crate's `#[state]` markers,
     /// in declaration order.
     pub states: Vec<String>,
-    /// The module holding the event structs, e.g. `event` (nested: `a::b`).
+    /// The module holding the event structs, e.g. `event` (nested: `a::b`). `None`: the impls
+    /// of the traits the crate marks `#[event]`, or no events if none is marked.
     pub events: Option<String>,
     /// The program name and event namespace. Defaults to the crate name without `_core`.
     pub namespace: Option<String>,
@@ -64,6 +65,18 @@ pub enum IdlGenError {
     TooManyVariants { name: String, count: usize },
     #[error("no events in module `{module}`: expected `impl <Trait> for <Struct> {{ const NAME: &str = \"..\"; }}`")]
     NoEvents { module: String },
+    #[error("nothing implements `{trait_name}`, marked #[event]")]
+    UnimplementedEventTrait { trait_name: String },
+    #[error(
+        "`impl {trait_name} for {struct_name}` has no `const NAME: &str = \"..\"`; an event's name \
+         must be a string literal"
+    )]
+    EventWithoutName {
+        trait_name: String,
+        struct_name: String,
+    },
+    #[error("two events are named `{name}`; their selectors would collide")]
+    DuplicateEvent { name: String },
     #[error("type `{name}` (used by `{used_by}`) is not defined in the crate or its path dependencies")]
     UnknownType { name: String, used_by: String },
     #[error("cannot describe `{ty}` (in `{used_by}`): {reason}")]
@@ -155,20 +168,20 @@ pub fn generate_idl<F: FnMut(String)>(
     }
 
     // Named state types win; without any, the crate's `#[state]` markers say.
-    let marked = marked(&own, "state");
+    let marked_states = marked(&own, "state");
     let (named, source) = if options.states.is_empty() {
-        (&marked, "#[state]")
+        (&marked_states, "#[state]")
     } else {
         let mut explicit = options.states.clone();
         explicit.sort();
         explicit.dedup();
-        let mut markers = marked.clone();
+        let mut markers = marked_states.clone();
         markers.sort();
-        if !marked.is_empty() && explicit != markers {
+        if !marked_states.is_empty() && explicit != markers {
             on_warning(format!(
                 "using the named state types ({}), not the #[state] markers ({})",
                 options.states.join(", "),
-                marked.join(", ")
+                marked_states.join(", ")
             ));
         }
         (&options.states, "--state")
@@ -185,24 +198,46 @@ pub fn generate_idl<F: FnMut(String)>(
         state_types.push(name.clone());
     }
 
-    let mut events = Vec::new();
-    if let Some(module) = &options.events {
-        let path: Vec<String> = module.split("::").map(str::to_owned).collect();
-        for (name, struct_name) in event_impls(&own, &path) {
-            collector.queue(&struct_name, "--events");
-            events.push(IdlEvent {
-                selector: event_selector(&namespace, &name),
-                name,
-                type_: IdlType::Defined {
-                    defined: struct_name,
-                },
-            });
+    // A named events module wins; without one, the impls of the crate's `#[event]` traits.
+    let event_traits = marked(&own, "event");
+    let found = match &options.events {
+        Some(module) => {
+            let path: Vec<String> = module.split("::").map(str::to_owned).collect();
+            let found = module_events(&own, &path);
+            if found.is_empty() {
+                return Err(IdlGenError::NoEvents {
+                    module: module.clone(),
+                });
+            }
+            let mut named: Vec<&str> = found.iter().map(|(_, s)| s.as_str()).collect();
+            named.sort_unstable();
+            let marker_impls = trait_impls(&own, &event_traits);
+            let mut markers: Vec<&str> = marker_impls.iter().map(|i| i.struct_name.as_str()).collect();
+            markers.sort_unstable();
+            if !event_traits.is_empty() && named != markers {
+                on_warning(format!(
+                    "using the events in module `{module}`, not the impls of the #[event] trait ({})",
+                    event_traits.join(", ")
+                ));
+            }
+            found
+        },
+        None => marked_events(&own, &event_traits)?,
+    };
+    let source = if options.events.is_some() { "--events" } else { "#[event]" };
+    let mut events: Vec<IdlEvent> = Vec::new();
+    for (name, struct_name) in found {
+        if events.iter().any(|e| e.name == name) {
+            return Err(IdlGenError::DuplicateEvent { name });
         }
-        if events.is_empty() {
-            return Err(IdlGenError::NoEvents {
-                module: module.clone(),
-            });
-        }
+        collector.queue(&struct_name, source);
+        events.push(IdlEvent {
+            selector: event_selector(&namespace, &name),
+            name,
+            type_: IdlType::Defined {
+                defined: struct_name,
+            },
+        });
     }
 
     let types = collector.finish()?;
@@ -238,6 +273,7 @@ fn marked(items: &[SourceItem], marker: &str) -> Vec<String> {
         .filter_map(|source| match &source.item {
             Item::Struct(s) if s.attrs.iter().any(is_marker) => Some(s.ident.to_string()),
             Item::Enum(e) if e.attrs.iter().any(is_marker) => Some(e.ident.to_string()),
+            Item::Trait(t) if t.attrs.iter().any(is_marker) => Some(t.ident.to_string()),
             _ => None,
         })
         .collect()
@@ -259,23 +295,84 @@ fn default_namespace(crate_dir: &Path) -> Result<String, String> {
 }
 
 /// `(event name, struct name)` for every `impl <Trait> for <Struct> { const NAME: &str = ".."; }`
-/// in the module at `path`, in source order.
-fn event_impls(items: &[SourceItem], path: &[String]) -> Vec<(String, String)> {
+/// in the module at `path`, in source order. Trait impls without such a `NAME` are skipped.
+fn module_events(items: &[SourceItem], path: &[String]) -> Vec<(String, String)> {
     items
         .iter()
         .filter(|source| source.module == path)
         .filter_map(|source| match &source.item {
             Item::Impl(imp) if imp.trait_.is_some() => {
                 let struct_name = last_ident(&imp.self_ty)?;
-                let name = imp.items.iter().find_map(|item| match item {
-                    syn::ImplItem::Const(c) if c.ident == "NAME" => string_literal(&c.expr),
-                    _ => None,
-                })?;
-                Some((name, struct_name))
+                Some((event_name(imp)?, struct_name))
             },
             _ => None,
         })
         .collect()
+}
+
+/// An impl of one of the `#[event]` traits.
+struct TraitImpl {
+    trait_name: String,
+    struct_name: String,
+    name: Option<String>,
+}
+
+/// Every `impl <Trait> for <Struct>` in the crate whose trait is one of `traits`, in
+/// declaration order. The trait is matched by its last path segment.
+fn trait_impls(items: &[SourceItem], traits: &[String]) -> Vec<TraitImpl> {
+    items
+        .iter()
+        .filter_map(|source| match &source.item {
+            Item::Impl(imp) => {
+                let (_, trait_path, _) = imp.trait_.as_ref()?;
+                let trait_name = trait_path.segments.last()?.ident.to_string();
+                if !traits.contains(&trait_name) {
+                    return None;
+                }
+                Some(TraitImpl {
+                    trait_name,
+                    struct_name: last_ident(&imp.self_ty)?,
+                    name: event_name(imp),
+                })
+            },
+            _ => None,
+        })
+        .collect()
+}
+
+/// `(event name, struct name)` for the impls of the `#[event]` traits. Each marked trait needs
+/// at least one impl, and each impl a literal `NAME`.
+fn marked_events(
+    items: &[SourceItem],
+    traits: &[String],
+) -> Result<Vec<(String, String)>, IdlGenError> {
+    let impls = trait_impls(items, traits);
+    if let Some(unused) = traits
+        .iter()
+        .find(|t| !impls.iter().any(|i| &i.trait_name == *t))
+    {
+        return Err(IdlGenError::UnimplementedEventTrait {
+            trait_name: unused.clone(),
+        });
+    }
+    impls
+        .into_iter()
+        .map(|i| match i.name {
+            Some(name) => Ok((name, i.struct_name)),
+            None => Err(IdlGenError::EventWithoutName {
+                trait_name: i.trait_name,
+                struct_name: i.struct_name,
+            }),
+        })
+        .collect()
+}
+
+/// The string literal of the impl's `const NAME`.
+fn event_name(imp: &syn::ItemImpl) -> Option<String> {
+    imp.items.iter().find_map(|item| match item {
+        syn::ImplItem::Const(c) if c.ident == "NAME" => string_literal(&c.expr),
+        _ => None,
+    })
 }
 
 fn string_literal(expr: &syn::Expr) -> Option<String> {

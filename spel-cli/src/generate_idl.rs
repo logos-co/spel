@@ -53,8 +53,8 @@ pub fn parse_args(args: &[String]) -> Result<GenArgs, String> {
 
 /// Complete `args` from a `spel.toml` program (`config_dir` is the file's directory, which its
 /// paths are relative to). Each command-line value wins; `--state` replaces the configured list
-/// rather than adding to it. A message enum or state type neither names is left for the
-/// crate's `#[message]` / `#[state]` markers.
+/// rather than adding to it. A message enum, state type or events module neither names is left
+/// for the crate's `#[message]` / `#[state]` / `#[event]` markers.
 ///
 /// # Errors
 /// If neither gives a crate directory.

@@ -401,6 +401,153 @@ fn events_come_from_trait_impls_in_the_named_module() {
     assert!(idl.type_def("Paid").is_some());
 }
 
+#[test]
+fn the_event_marker_makes_every_impl_of_the_trait_an_event() {
+    let dir = shape_crate(
+        "pub mod event;\n\
+         pub enum Message { Ping }\n\
+         pub struct Paid { pub amount: u128 }\n\
+         impl event::Ev for Paid { const NAME: &'static str = \"Paid\"; }\n\
+         pub trait Named { const NAME: &'static str; }\n\
+         pub struct NotAnEvent;\n\
+         impl Named for NotAnEvent { const NAME: &'static str = \"NotAnEvent\"; }\n",
+        &[(
+            "event.rs",
+            "#[spel_attrs::event]\n\
+             pub trait Ev { const NAME: &'static str; }\n\
+             pub struct Refunded { pub amount: u128 }\n\
+             impl Ev for Refunded { const NAME: &'static str = \"Refunded\"; }\n",
+        )],
+    );
+    let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
+    let names: Vec<&str> = idl.events.iter().map(|e| e.name.as_str()).collect();
+    // Declaration order, a module's items at its `mod` line: `event` comes first.
+    assert_eq!(names, ["Refunded", "Paid"]);
+    assert_eq!(idl.events[1].selector, event_selector("shape", "Paid"));
+    assert!(idl.type_def("Paid").is_some() && idl.type_def("Refunded").is_some());
+    assert!(idl.type_def("NotAnEvent").is_none());
+}
+
+#[test]
+fn without_a_named_module_or_marked_trait_there_are_no_events() {
+    let dir = shape_crate(
+        "pub enum Message { Ping }\n\
+         pub trait Ev { const NAME: &'static str; }\n\
+         pub struct Paid;\n\
+         impl Ev for Paid { const NAME: &'static str = \"Paid\"; }\n",
+        &[],
+    );
+    let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
+    assert!(idl.events.is_empty(), "no guessing from `const NAME`");
+}
+
+#[test]
+fn several_marked_event_traits_merge() {
+    let dir = shape_crate(
+        "use spel_attrs::event;\n\
+         pub enum Message { Ping }\n\
+         #[event]\npub trait A { const NAME: &'static str; }\n\
+         #[event]\npub trait B { const NAME: &'static str; }\n\
+         pub struct X;\npub struct Y;\n\
+         impl B for Y { const NAME: &'static str = \"Y\"; }\n\
+         impl A for X { const NAME: &'static str = \"X\"; }\n",
+        &[],
+    );
+    let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
+    let names: Vec<&str> = idl.events.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["Y", "X"], "impls in declaration order");
+}
+
+#[test]
+fn a_named_events_module_wins_over_the_marker_with_a_warning() {
+    let dir = shape_crate(
+        "pub mod ev;\npub mod other;\npub enum Message { Ping }\n",
+        &[
+            (
+                "ev.rs",
+                "#[event]\npub trait Ev { const NAME: &'static str; }\n\
+                 pub struct Paid;\n\
+                 impl Ev for Paid { const NAME: &'static str = \"Paid\"; }\n",
+            ),
+            (
+                "other.rs",
+                "pub trait Old { const NAME: &'static str; }\n\
+                 pub struct Legacy;\n\
+                 impl Old for Legacy { const NAME: &'static str = \"Legacy\"; }\n",
+            ),
+        ],
+    );
+    let mut warnings = Vec::new();
+    let idl = generate_idl(&options(dir.path(), "Message", None, Some("other")), |w| {
+        warnings.push(w);
+    })
+    .unwrap();
+    let names: Vec<&str> = idl.events.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(names, ["Legacy"]);
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("`other`") && warnings[0].contains("(Ev)"), "{warnings:?}");
+
+    // Naming the module that holds the marked trait's impls is quiet.
+    let mut warnings = Vec::new();
+    let idl = generate_idl(&options(dir.path(), "Message", None, Some("ev")), |w| {
+        warnings.push(w);
+    })
+    .unwrap();
+    assert_eq!(idl.events[0].name, "Paid");
+    assert!(warnings.is_empty(), "{warnings:?}");
+}
+
+#[test]
+fn a_marked_event_trait_without_impls_fails() {
+    let dir = shape_crate(
+        "pub enum Message { Ping }\n#[event]\npub trait Ev { const NAME: &'static str; }\n",
+        &[],
+    );
+    let err = generate(&options(dir.path(), "Message", None, None)).unwrap_err();
+    assert!(
+        matches!(err, IdlGenError::UnimplementedEventTrait { ref trait_name } if trait_name == "Ev"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_event_impl_without_a_literal_name_fails() {
+    let dir = shape_crate(
+        "pub enum Message { Ping }\n\
+         const PAID: &str = \"Paid\";\n\
+         #[event]\npub trait Ev { const NAME: &'static str; }\n\
+         pub struct Paid;\n\
+         impl Ev for Paid { const NAME: &'static str = PAID; }\n",
+        &[],
+    );
+    let err = generate(&options(dir.path(), "Message", None, None)).unwrap_err();
+    assert!(
+        matches!(err, IdlGenError::EventWithoutName { ref struct_name, .. } if struct_name == "Paid"),
+        "{err}"
+    );
+}
+
+#[test]
+fn two_events_with_one_name_fail() {
+    let dir = shape_crate(
+        "pub mod ev;\npub enum Message { Ping }\n",
+        &[(
+            "ev.rs",
+            "#[event]\npub trait Ev { const NAME: &'static str; }\n\
+             pub struct A;\npub struct B;\n\
+             impl Ev for A { const NAME: &'static str = \"Paid\"; }\n\
+             impl Ev for B { const NAME: &'static str = \"Paid\"; }\n",
+        )],
+    );
+    for events in [None, Some("ev")] {
+        let err = generate(&options(dir.path(), "Message", None, events)).unwrap_err();
+        assert!(
+            matches!(err, IdlGenError::DuplicateEvent { ref name } if name == "Paid"),
+            "{events:?}: {err}"
+        );
+    }
+}
+
 // ── failures ──────────────────────────────────────────────────────────────────
 
 #[test]

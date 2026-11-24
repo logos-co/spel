@@ -272,7 +272,7 @@ pub async fn run() {
                         } else {
                             options.states.join(", ")
                         },
-                        options.events.as_deref().unwrap_or("none"),
+                        options.events.as_deref().unwrap_or("from #[event] markers"),
                     );
                 }
                 match spel_framework_core::idl_gen::generate_idl(&options, |w| eprintln!("⚠️  {w}"))

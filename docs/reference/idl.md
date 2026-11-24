@@ -130,7 +130,8 @@ spel generate-idl programs/token/core --message Message --state TokenState --eve
 ```
 
 The generator (`spel_framework_core::idl_gen::generate_idl`, feature `idl-gen`) reads the
-crate's source with `syn`; the program needs no annotations. It reads:
+crate's source with `syn`; the program needs no annotations, though it can [mark](#markers)
+what it would otherwise name. It reads:
 
 - **the message enum** (`--message`, else the enum marked `#[message]`): variants in order,
   their fields and doc comments. A program's internal message enum (messages only its own
@@ -138,35 +139,47 @@ crate's source with `syn`; the program needs no annotations. It reads:
 - **the state types** (`--state`, repeatable, else the types marked `#[state]`), written to
   `state_types` in the order given, or for markers in declaration order (a module's items
   where its `mod` is declared).
-- **the events** (`--events <module>`): every `impl <Trait> for <Struct> { const NAME: &str = "…"; }`
-  in that module, in source order. The trait's name doesn't matter.
+- **the events** (`--events <module>`, else the impls of the trait marked `#[event]`): every
+  `impl <Trait> for <Struct> { const NAME: &str = "…"; }` in that module (whatever the trait),
+  or every impl of the marked trait anywhere in the crate, in declaration order. The impl's
+  `NAME` names the event; the struct is its payload. With neither, the IDL has no events: the
+  generator doesn't guess from `const NAME`.
 - **every type those reference**, across the crate's path dependencies (`Cargo.toml`
   `path = …` entries, transitively). The crate's own definitions win over a dependency's.
 
 ### Markers
 
-Instead of naming them, a crate can mark its message enum and state types with the inert
-attributes of the `spel-attrs` crate:
+Instead of naming them, a crate can mark its message enum, state types and event trait with
+the inert attributes of the `spel-attrs` crate:
 
 ```rust
-use spel_attrs::{message, state};   // spel-attrs = { git = "…/spel" }, a build-time dependency only
+use spel_attrs::{event, message, state};   // spel-attrs = { git = "…/spel" }, a build-time dependency only
 
 #[message]
 pub enum Message { Transfer { to: AccountId, amount: u128 }, Burn { amount: u128 } }
 
 #[state]
 pub enum TokenState { Definition(TokenDefinition), Holding(TokenHolding) }
+
+#[event]
+pub trait TokenEvent: BorshSerialize { const NAME: &'static str; }
+
+impl TokenEvent for Transferred { const NAME: &'static str = "Transferred"; }
 ```
 
-The markers change nothing about the type: they return it unchanged and are never linked into
+With all three, `spel generate-idl programs/token/core` needs no flags.
+
+The markers change nothing about the item: they return it unchanged and are never linked into
 the guest. They take no arguments; `#[message]` goes only on an enum, `#[state]` on a struct
-or an enum, and anything else fails to compile. The generator recognizes `#[message]` /
-`#[state]` and `#[spel_attrs::message]` / `#[spel_attrs::state]`, not a renamed import, and
-looks only in the crate itself.
+or an enum, `#[event]` on a trait, and anything else fails to compile. The generator
+recognizes each marker bare (`#[event]`) or qualified (`#[spel_attrs::event]`), not a renamed
+import, and looks only in the crate itself. It matches an impl to a marked trait by the
+trait's last path segment, so `impl event::TokenEvent for …` counts.
 
 Names win over markers: a command-line flag first, then `spel.toml`'s `[idl-gen]`, then the
 markers. When a name and the markers disagree, the generator uses the name and warns. Mark
-one message enum: several fail generation.
+one message enum: several fail generation. Several marked event traits are fine: their impls
+merge.
 
 Type rules: `String` → `string`, `AccountId` → `account_id`, `ProgramId` → `program_id`;
 `Box<T>` is transparent; type aliases resolve to their target; array lengths must be integer
@@ -179,7 +192,9 @@ It fails, naming the cause, when:
   instead of silently dropping a type);
 - no message enum is named or marked, or several enums are marked `#[message]`;
 - `--message` names a struct, or an enum with more than 256 variants;
-- the events module has no event impls;
+- the events module has no event impls, a marked event trait has no impls, or an impl of one
+  has no string-literal `NAME`;
+- two events share a name (their selectors would collide);
 - a referenced type is defined neither in the crate nor in its path dependencies (the error
   names the field that uses it);
 - a type can't be described (tuples, references, non-literal array lengths).
