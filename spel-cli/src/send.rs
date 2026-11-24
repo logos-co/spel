@@ -1627,4 +1627,34 @@ mod tests {
         assert!(command.contains(&format!("--actor {alice}@{native}")));
         assert!(command.contains("--signer alice"));
     }
+
+    #[test]
+    fn a_printed_command_repeats_the_global_options_and_quotes_what_needs_it() {
+        let names = no_wallet();
+        let mut flags = parse_send_args(&args(
+            "--root alice@payroll --signer alice --gas-limit 900 -- set-meta --meta x",
+        ))
+        .unwrap();
+        flags.message_args = vec!["--meta".into(), r#"{"uri":"ipfs://a b"}"#.into()];
+        flags.globals = args("--program payroll --fee-payer savings --binary");
+        flags.globals.push("my guests/payroll.bin".into());
+        let list = inferred(1, &names);
+
+        let command = explicit_command(&list, &flags, &names, false);
+        assert!(command.starts_with(
+            "spel --program payroll --fee-payer savings --binary 'my guests/payroll.bin' send --root "
+        ));
+        assert!(command.contains(" --signer alice --gas-limit 900 --no-auto-actors -- set-meta "));
+        assert!(command.ends_with(r#" --meta '{"uri":"ipfs://a b"}'"#));
+    }
+
+    #[test]
+    fn a_shell_word_is_quoted_only_when_it_has_to_be() {
+        assert_eq!(shell_word("Private/9Wj@payroll"), "Private/9Wj@payroll");
+        assert_eq!(shell_word("keys:/tmp/b.keys,abc"), "keys:/tmp/b.keys,abc");
+        assert_eq!(shell_word(""), "''");
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word("it's"), r"'it'\''s'");
+        assert_eq!(shell_word("$HOME"), "'$HOME'");
+    }
 }
