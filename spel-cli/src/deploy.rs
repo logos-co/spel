@@ -5,8 +5,9 @@
 //! chain, and the program is addressed by that header account from then on. The
 //! wallet's `program-loader deploy` does the upload but takes every account as an
 //! argument, so a caller first has to create one header and exactly
-//! `ceil(len / MAX_SEGMENT_DATA_LEN)` segment accounts by hand. This command does
-//! that bookkeeping and prints the header address.
+//! `ceil(user_elf_len / MAX_SEGMENT_DATA_LEN)` segment accounts by hand: only the
+//! user ELF inside the risc0 `ProgramBinary` (`.bin`) goes on chain, not its kernel.
+//! This command does that bookkeeping and prints the header address.
 
 use std::path::Path;
 use std::process;
@@ -18,9 +19,22 @@ use wallet::WalletCore;
 
 use crate::hex::decode_bytes_32;
 
-/// Number of segment accounts `program_loader` needs for a binary of `len` bytes.
+/// Number of segment accounts `program_loader` needs for a user ELF of `len` bytes.
 pub fn segment_count(len: usize) -> usize {
     len.div_ceil(MAX_SEGMENT_DATA_LEN)
+}
+
+/// The length of the user ELF in a risc0 `ProgramBinary`: the part `program_loader`
+/// splits into segments (LEZ's `ProgramLoader::deploy` decodes it the same way and
+/// refuses any other segment count).
+///
+/// # Errors
+///
+/// When `bytes` isn't a `ProgramBinary` (a bare ELF, say).
+pub fn user_elf_len(bytes: &[u8]) -> Result<usize, String> {
+    risc0_binfmt::ProgramBinary::decode(bytes)
+        .map(|binary| binary.user_elf.len())
+        .map_err(|e| e.to_string())
 }
 
 /// Deploy `binary` and print its program address on stdout. Everything else,
@@ -43,12 +57,20 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
         eprintln!("❌ Program binary '{}' is empty", binary.display());
         process::exit(1);
     }
-    let n_segments = segment_count(bytes.len());
+    let user_elf_len = user_elf_len(&bytes).unwrap_or_else(|e| {
+        eprintln!(
+            "❌ '{}' isn't a risc0 program binary (.bin): {}",
+            binary.display(),
+            e
+        );
+        process::exit(1);
+    });
+    let n_segments = segment_count(user_elf_len);
     if n_segments > MAX_PROGRAM_SEGMENTS {
         eprintln!(
-            "❌ '{}' is {} bytes: {} segments of {} bytes, over program_loader's cap of {}",
+            "❌ '{}' has a {}-byte user ELF: {} segments of {} bytes, over program_loader's cap of {}",
             binary.display(),
-            bytes.len(),
+            user_elf_len,
             n_segments,
             MAX_SEGMENT_DATA_LEN,
             MAX_PROGRAM_SEGMENTS
@@ -172,5 +194,18 @@ mod tests {
         assert_eq!(segment_count(MAX_SEGMENT_DATA_LEN), 1);
         assert_eq!(segment_count(MAX_SEGMENT_DATA_LEN + 1), 2);
         assert_eq!(segment_count(3 * MAX_SEGMENT_DATA_LEN), 3);
+    }
+
+    #[test]
+    fn user_elf_len_reads_the_program_binary() {
+        // A `.bin` holds the user ELF and then the kernel ELF.
+        let user_elf = vec![7u8; MAX_SEGMENT_DATA_LEN + 1];
+        let kernel = vec![9u8; 3 * MAX_SEGMENT_DATA_LEN];
+        let bin = risc0_binfmt::ProgramBinary::new(&user_elf, &kernel).encode();
+        // Two segments for the user ELF, though the whole file would take five.
+        let len = user_elf_len(&bin).unwrap();
+        assert_eq!(len, user_elf.len());
+        assert_eq!(segment_count(len), 2);
+        assert!(user_elf_len(b"\x7fELF not a program binary").is_err());
     }
 }
