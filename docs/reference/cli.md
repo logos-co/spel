@@ -241,7 +241,10 @@ doesn't find the destination of an **async** credit, so declare a witnessed acco
 Naming a recipient in a message field (`--employee keys:emp1.keys`) only gives the program its
 id; the credit still needs its `--seal` or `--recover`. A call can carry several, one per
 recipient: the wallet matches each credit to the seal of its destination, and a seal no credit
-uses is ignored.
+uses is ignored. When private execution sends an async message that no `--seal` covers, the
+wallet refuses the call, and `send` names the destination and prints the command with the
+`--seal` added: the `keys:<FILE>` a field named it by, `Private/<id>` for an account of this
+wallet, else a `keys:<FILE>` placeholder (or, for a public account, `--actor <id>@<PROGRAM>`).
 
 A credit from private execution is **sealed** (`--seal`): only the recipient reads it, and it
 comes from a blinded alias. A credit from a public actor can't be sealed, so it goes with a

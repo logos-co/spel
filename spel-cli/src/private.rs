@@ -166,6 +166,20 @@ pub fn undeclared_actor(error: &ExecutionFailureKind) -> Option<Actor> {
     }
 }
 
+/// The destination of an async message from private execution that nothing seals, from the
+/// wallet's refusal: "No recipient material seals an async message to <id>". The wallet reports it
+/// only as text (`InvalidInput`), so a reworded message just loses the hint.
+#[must_use]
+pub fn unsealed_destination(error: &str) -> Option<AccountId> {
+    const MARKER: &str = "No recipient material seals an async message to ";
+    let rest = &error[error.find(MARKER)? + MARKER.len()..];
+    let id: String = rest
+        .chars()
+        .take_while(char::is_ascii_alphanumeric)
+        .collect();
+    id.parse().ok()
+}
+
 /// Sync the wallet's private accounts with the chain, then save the wallet. `rescan` rediscovers
 /// them from genesis (for an account registered after its history).
 ///

@@ -20,6 +20,8 @@
   payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.
 - **`keys:FILE` in account fields:** `send … -- pay --employee keys:emp1.keys` fills in the id
   derived from the keys (also in `Vec<account_id>` elements). The credit still needs `--seal`.
+- **A missing seal** is named: when private execution sends an async message nothing seals,
+  `send` prints the destination and the command with the `--seal` added.
 - **`native`** names the native token program: `ACCOUNT@native` is an account's balance, which
   `inspect` prints as `{"balance": …}`.
 - **`spel inspect`** reads private accounts, syncing the wallet first.

@@ -20,7 +20,7 @@
 //! message's fields: the wallet's simulation names each actor the call reaches that isn't
 //! declared, and `send` adds it and simulates again.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 use std::process;
 
@@ -60,7 +60,7 @@ pub enum DryRun {
 }
 
 /// The flags after `send`, as given.
-#[derive(Debug, Default, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct SendFlags {
     pub root: String,
     pub actors: Vec<String>,
@@ -385,13 +385,14 @@ fn is_account_list(ty: &IdlType) -> bool {
 
 /// Replace wallet labels and `keys:<FILE>` in account-typed fields (and in `Vec<account_id>`
 /// elements) with their ids, so `--to bob` and `--to keys:bob.keys` work. Returns the accounts
-/// named by their keys: foreign private accounts, which no actor of this transaction can be.
+/// named by their keys, with the `keys:<FILE>` that named them: foreign private accounts, which
+/// no actor of this transaction can be.
 fn resolve_account_fields(
     message: &IdlMessage,
     args: &mut HashMap<String, Vec<String>>,
     names: &Names<'_>,
-) -> Result<BTreeSet<AccountId>, String> {
-    let mut keyed = BTreeSet::new();
+) -> Result<BTreeMap<AccountId, String>, String> {
+    let mut keyed = BTreeMap::new();
     for field in &message.fields {
         let list = is_account_list(&field.type_);
         if !list && !is_account_field(&field.type_) {
@@ -409,7 +410,7 @@ fn resolve_account_fields(
                 let raw = raw.trim();
                 let id = field_account(names, raw).map_err(|e| format!("--{flag}: {e}"))?;
                 if raw.starts_with("keys:") {
-                    keyed.insert(id);
+                    keyed.insert(id, raw.to_owned());
                 }
                 Ok::<_, String>(id.to_string())
             };
@@ -453,6 +454,8 @@ struct Prepared {
     /// Sent as a privacy-preserving transaction: an actor is private, or a credit is sealed or
     /// recoverable.
     private: bool,
+    /// The accounts message fields name by `keys:<FILE>`, with that value.
+    keyed: BTreeMap<AccountId, String>,
 }
 
 fn prepare(
@@ -565,7 +568,7 @@ fn prepare(
     // A private call's undeclared actors come from simulation, not from the message's fields: a
     // field may name a private account no one in this transaction can witness.
     let mut fields = account_fields(message, &args);
-    fields.retain(|(_, account)| !keyed.contains(account));
+    fields.retain(|(_, account)| !keyed.contains_key(account));
     let mut list = plan_access_list(
         root,
         &explicit,
@@ -587,6 +590,7 @@ fn prepare(
         signers,
         fee_payer,
         private,
+        keyed,
     })
 }
 
@@ -1003,6 +1007,12 @@ async fn send_private(
             }
             let error = format!("{error:#}");
             // The wallet's only report of it is this text (`InvalidInput`).
+            if let Some(to) = crate::private::unsealed_destination(&error) {
+                fail(format!(
+                    "send refused by the wallet: {error}\n{}",
+                    seal_hint(to, &prepared, flags, &names)
+                ));
+            }
             if error.contains("no private account to pay its fee") {
                 fail(format!(
                     "send refused by the wallet: {error}\n   No private account of this wallet \
@@ -1171,6 +1181,46 @@ fn cap_report(list: &[Planned], next: Actor, flags: &SendFlags, names: &Names<'_
          infers any further ones from there:\n   {}",
         actor_name(names, account, program),
         explicit_command(&declared, flags, names, true)
+    )
+}
+
+/// What to do when private execution sends an async message to `to` and nothing seals it: the
+/// recipient's keys are missing (or, for a public account, its declaration).
+fn seal_hint(to: AccountId, prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -> String {
+    let with_seal = |seal: &str| {
+        let mut flags = flags.clone();
+        flags.seals.push(seal.to_owned());
+        explicit_command(&prepared.list, &flags, names, !flags.no_auto_actors)
+    };
+    let intro = format!(
+        "   The call sends an async message from private execution to {}, and no --seal names its \
+         recipient, so the wallet can't seal it.",
+        names.account_name(to)
+    );
+    if let Some(keys) = prepared.keyed.get(&to) {
+        return format!(
+            "{intro} Seal it to the keys the message names:\n   {}",
+            with_seal(keys)
+        );
+    }
+    if names.is_private(to) {
+        let mut hint = format!(
+            "{intro} Seal it to this wallet's account:\n   {}",
+            with_seal(&format!("Private/{to}"))
+        );
+        if flags.seals.is_empty() && flags.recovers.is_empty() {
+            hint.push_str(&format!(
+                "\n   Or, for it to apply in this transaction, declare the actor it goes to: --actor \
+                 Private/{to}@<PROGRAM>"
+            ));
+        }
+        return hint;
+    }
+    format!(
+        "{intro} If it's a private account, add its keys (`wallet account show-keys` output from \
+         its owner):\n   {}\n   If it's a public account, declare the actor it goes to: --actor \
+         {to}@<PROGRAM>",
+        with_seal("keys:<FILE>")
     )
 }
 
