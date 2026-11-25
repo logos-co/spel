@@ -1707,4 +1707,57 @@ mod tests {
         assert_eq!(shell_word("it's"), r"'it'\''s'");
         assert_eq!(shell_word("$HOME"), "'$HOME'");
     }
+
+    fn prepared_with(keyed: BTreeMap<AccountId, String>) -> Prepared {
+        Prepared {
+            message_name: "Pay".into(),
+            tag: 0,
+            bytes: Vec::new(),
+            list: inferred(0, &no_wallet()),
+            signers: vec![id(1)],
+            fee_payer: None,
+            private: true,
+            keyed,
+        }
+    }
+
+    #[test]
+    fn a_missing_seal_for_a_keys_field_names_that_file() {
+        let bob = id(5);
+        let prepared = prepared_with(BTreeMap::from([(bob, "keys:bob.keys".to_owned())]));
+        let flags = parse_send_args(&args(
+            "--root alice@payroll --signer alice -- pay --employee keys:bob.keys",
+        ))
+        .unwrap();
+        let hint = seal_hint(bob, &prepared, &flags, &no_wallet());
+        assert!(hint.contains(&format!("async message from private execution to {bob}")));
+        assert!(
+            hint.contains(" --signer alice --seal keys:bob.keys -- pay --employee keys:bob.keys")
+        );
+        assert!(!hint.contains("--no-auto-actors"));
+    }
+
+    #[test]
+    fn a_missing_seal_for_an_unknown_account_offers_keys_or_a_public_actor() {
+        let carol = id(6);
+        let prepared = prepared_with(BTreeMap::new());
+        let flags = parse_send_args(&args("--root alice@payroll --signer alice -- pay")).unwrap();
+        let hint = seal_hint(carol, &prepared, &flags, &no_wallet());
+        assert!(hint.contains("--seal 'keys:<FILE>' -- pay"));
+        assert!(hint.contains(&format!("--actor {carol}@<PROGRAM>")));
+    }
+
+    #[test]
+    fn the_unsealed_destination_is_read_from_the_wallets_refusal() {
+        let bob = id(5);
+        let error = format!(
+            "Failed to build transaction: Invalid input: No recipient material seals an async \
+             message to {bob}"
+        );
+        assert_eq!(crate::private::unsealed_destination(&error), Some(bob));
+        assert_eq!(
+            crate::private::unsealed_destination("Program violated execution rules"),
+            None
+        );
+    }
 }
