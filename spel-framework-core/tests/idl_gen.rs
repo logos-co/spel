@@ -330,6 +330,26 @@ fn the_message_marker_names_the_message_enum() {
 }
 
 #[test]
+fn markers_behind_a_feature_count() {
+    // A crate keeps spel-attrs optional, so its guest never builds it.
+    let dir = shape_crate(
+        "#[cfg_attr(feature = \"idl\", spel_attrs::message)]\n\
+         #[derive(Debug)]\n\
+         pub enum Message { Ping }\n\
+         #[cfg_attr(all(feature = \"idl\", not(test)), derive(Debug), spel_attrs::state)]\n\
+         pub struct Counter { pub n: u64 }\n\
+         #[cfg_attr(feature = \"idl\", derive(Clone))]\n\
+         pub struct NotMarked { pub y: u8 }\n",
+        &[],
+    );
+    let mut opts = options(dir.path(), "unused", None, None);
+    opts.message = None;
+    let idl = generate(&opts).unwrap();
+    assert_eq!(idl.messages[0].name, "Ping");
+    assert_eq!(idl.state_types, ["Counter"]);
+}
+
+#[test]
 fn the_message_marker_follows_the_qualified_path_into_modules() {
     let dir = shape_crate(
         "pub mod api;\n",
