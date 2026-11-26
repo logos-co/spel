@@ -7603,6 +7603,7 @@ dependencies = [
  "lee_core",
  "libc",
  "program_loader_core",
+ "programs",
  "risc0-zkvm",
  "sequencer_service_rpc",
  "serde",

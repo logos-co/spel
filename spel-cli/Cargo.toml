@@ -35,6 +35,9 @@ libc = "0.2"
 [dev-dependencies]
 tempfile = "3"
 sha2 = "0.10"
+# LEZ's builtin guests, as real program binaries for the program-loading tests. The wallet
+# already builds this crate with its artifacts.
+programs = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["artifacts"] }
 
 [lints]
 workspace = true

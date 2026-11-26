@@ -69,3 +69,25 @@ fn a_seed_longer_than_32_bytes_is_refused() {
         stderr_of(&out)
     );
 }
+
+#[test]
+fn deploy_and_a_group_pda_take_one_binary() {
+    let deploy = spel_in_empty_dir(&["--binary", "a.bin", "--binary", "b.bin", "deploy"]);
+    assert_eq!(deploy.status.code(), Some(1));
+    assert!(stderr_of(&deploy).contains("deploy takes one --binary"));
+
+    let pda = spel_in_empty_dir(&[
+        "--program",
+        PROGRAM_ADDRESS_HEX,
+        "--binary",
+        "a.bin",
+        "--binary",
+        "b.bin",
+        "pda",
+        "vault",
+        "--group",
+        "board",
+    ]);
+    assert_eq!(pda.status.code(), Some(1));
+    assert!(stderr_of(&pda).contains("pda --group takes one --binary"));
+}

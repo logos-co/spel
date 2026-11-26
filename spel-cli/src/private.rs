@@ -579,4 +579,96 @@ mod tests {
             None
         );
     }
+
+    mod programs_ {
+        use super::*;
+
+        /// Write `program`'s binary into `dir` as `name`, returning its path.
+        fn write(dir: &tempfile::TempDir, name: &str, program: &Program) -> String {
+            let path = dir.path().join(name);
+            std::fs::write(&path, program.elf()).unwrap();
+            path.to_string_lossy().into_owned()
+        }
+
+        #[test]
+        fn a_local_binary_is_matched_by_its_image_id() {
+            let dir = tempfile::tempdir().unwrap();
+            let (clock, fee) = (::programs::clock(), ::programs::fee());
+            let clock_bin = write(&dir, "clock.bin", &clock);
+            let fee_bin = write(&dir, "fee.bin", &fee);
+            let mut loader = Programs::new(vec![clock_bin.clone(), fee_bin.clone()], Vec::new());
+
+            let (path, program) = loader.local_match(clock.id()).unwrap().unwrap();
+            assert_eq!(path, clock_bin);
+            assert_eq!(program.id(), clock.id());
+            // A binary no program of the call matched is reported, a matched one isn't.
+            assert_eq!(loader.unused(), [fee_bin.as_str()]);
+        }
+
+        #[test]
+        fn a_binary_of_other_code_is_never_used() {
+            let dir = tempfile::tempdir().unwrap();
+            let fee_bin = write(&dir, "stale.bin", &::programs::fee());
+            let mut loader = Programs::new(vec![fee_bin], Vec::new());
+            assert!(loader
+                .local_match(::programs::clock().id())
+                .unwrap()
+                .is_none());
+        }
+
+        #[test]
+        fn a_missing_binary_fails_and_a_missing_spel_toml_one_is_skipped() {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("none.bin").to_string_lossy().into_owned();
+            let clock = ::programs::clock();
+
+            let mut explicit = Programs::new(vec![missing.clone()], Vec::new());
+            assert!(explicit
+                .local_match(clock.id())
+                .unwrap_err()
+                .contains("none.bin"));
+
+            let clock_bin = write(&dir, "clock.bin", &clock);
+            let mut configured = Programs::new(Vec::new(), vec![missing, clock_bin.clone()]);
+            let (path, _) = configured.local_match(clock.id()).unwrap().unwrap();
+            assert_eq!(path, clock_bin);
+        }
+
+        #[test]
+        fn an_unused_spel_toml_binary_isnt_reported() {
+            let dir = tempfile::tempdir().unwrap();
+            let fee_bin = write(&dir, "fee.bin", &::programs::fee());
+            let mut loader = Programs::new(Vec::new(), vec![fee_bin]);
+            assert!(loader
+                .local_match(::programs::clock().id())
+                .unwrap()
+                .is_none());
+            assert!(loader.unused().is_empty());
+        }
+
+        #[test]
+        fn the_native_token_program_needs_no_loading() {
+            let loader = Programs::new(Vec::new(), Vec::new());
+            assert!(loader.has(NATIVE_TOKEN_PROGRAM_ID));
+            assert!(!loader.has(AccountId::new([7; 32])));
+        }
+
+        #[test]
+        fn a_typed_undeclared_program_is_found() {
+            let program = AccountId::new([5; 32]);
+            let error = ExecutionFailureKind::TransactionBuildError(
+                lee::error::LeeError::InvalidProgramBehavior(
+                    lee::error::InvalidProgramBehaviorError::UndeclaredProgramDependency {
+                        program_account_id: program,
+                    },
+                ),
+            );
+            assert_eq!(undeclared_program(&error), Some(program));
+            assert_eq!(undeclared_actor(&error), None);
+            assert_eq!(
+                undeclared_program(&ExecutionFailureKind::KeyNotFoundError),
+                None
+            );
+        }
+    }
 }
