@@ -71,23 +71,32 @@ fn a_seed_longer_than_32_bytes_is_refused() {
 }
 
 #[test]
-fn deploy_and_a_group_pda_take_one_binary() {
+fn deploy_takes_one_binary_and_a_group_pda_none() {
     let deploy = spel_in_empty_dir(&["--binary", "a.bin", "--binary", "b.bin", "deploy"]);
     assert_eq!(deploy.status.code(), Some(1));
     assert!(stderr_of(&deploy).contains("deploy takes one --binary"));
 
-    let pda = spel_in_empty_dir(&[
-        "--program",
-        PROGRAM_ADDRESS_HEX,
-        "--binary",
-        "a.bin",
-        "--binary",
-        "b.bin",
-        "pda",
-        "vault",
-        "--group",
-        "board",
-    ]);
+    // A group's PDA reads the ImageID from the deployed header, so binaries don't matter (it
+    // stops later, at opening the wallet, which this test has none of).
+    let dir = tempfile::tempdir().unwrap();
+    let pda = Command::new(env!("CARGO_BIN_EXE_spel"))
+        .current_dir(dir.path())
+        .env("LEE_WALLET_HOME_DIR", dir.path().join("no-wallet"))
+        .args([
+            "--program",
+            PROGRAM_ADDRESS_HEX,
+            "--binary",
+            "a.bin",
+            "--binary",
+            "b.bin",
+            "pda",
+            "vault",
+            "--group",
+            "board",
+        ])
+        .output()
+        .expect("failed to run spel binary");
+    let stderr = stderr_of(&pda);
     assert_eq!(pda.status.code(), Some(1));
-    assert!(stderr_of(&pda).contains("pda --group takes one --binary"));
+    assert!(!stderr.contains("--binary"), "stderr: {stderr}");
 }

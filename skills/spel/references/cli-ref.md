@@ -17,7 +17,7 @@ spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]     # `--` keeps message fields apart 
 | `-t, --type <TYPE>` | `inspect`: decode as this type |
 | `-d, --data <HEX>` | `inspect`: decode offline |
 | `--format text\|hex\|json` | `program-id` output |
-| `--binary <FILE>` | a program's `.bin`, repeatable: local copies for private calls (matched by ImageID, else loaded from chain); `deploy` and `pda --group` take one |
+| `--binary <FILE>` | a program's `.bin`, repeatable: local copies for private calls (matched by ImageID, else loaded from chain); `deploy` takes one |
 
 Accounts: base58, hex, `Public/<id>`, `Private/<id>`, or a wallet label. Programs: an address,
 a spel.toml name, or `native` (an account's balance). Actors: `ACCOUNT@PROGRAM`.
@@ -124,7 +124,7 @@ ADDR=$(spel deploy target/guest/token.bin --fee-payer <funded> [--immutable])
 spel program-id target/guest/token.bin --format hex        # ImageID, not the address
 spel --program <ADDRESS> pda vault <64-hex-seed>           # public PDA from raw seeds
 spel -p <P> pda account:seat --owner seat --register --label treasury       # private PDA, owner's keys
-spel -p <P> --binary <BIN> pda 0x<seed> --group g1 --register --label vault # private PDA, a group's keys
+spel -p <P> pda 0x<seed> --group g1 --register --label vault                # private PDA, a group's keys
 spel blind <BASE> <FACTOR> [--hex]                         # AccountId::blinded; factor may be le64:N
 spel transfer --from seat --to treasury --amount 1000      # native balance, public or private
 spel --idl token.json idl                                  # print the IDL

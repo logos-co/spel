@@ -29,7 +29,8 @@
 - **`spel inspect`** reads private accounts, syncing the wallet first.
 - **`spel pda … --owner ACCOUNT | --group GROUP [--register [--label L] [--rescan]]`** derives a
   private PDA under an owned account's keys or a wallet group's secret, and records it in the
-  wallet so calls can witness it. Seeds may be `account:<ACCOUNT>` or `0x`-prefixed hex.
+  wallet so calls can witness it. Seeds may be `account:<ACCOUNT>` or `0x`-prefixed hex. A
+  group's PDA derives from the program's ImageID, read from its deployed header.
 - **`spel blind BASE FACTOR [--hex]`:** `AccountId::blinded`, for derived seeds and pseudonyms.
 - **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
   can act for, including group-shared private PDAs, or to `keys:FILE`.

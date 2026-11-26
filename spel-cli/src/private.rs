@@ -32,16 +32,6 @@ use wallet::{AccountIdentity, AccountMention, AsyncDelivery, ExecutionFailureKin
 use crate::deploy::StdoutToStderr;
 use crate::send::{Names, Wallet};
 
-/// The program catalog a privacy-preserving transaction proves against: the program at its
-/// deployed address, run from `binary`.
-///
-/// # Errors
-/// If the binary can't be read or isn't a program binary.
-pub fn catalog(binary: &Path, program: AccountId) -> Result<(ProgramCatalog, Program), String> {
-    let guest = read_program(binary)?;
-    Ok((ProgramCatalog::from([(program, guest.clone())]), guest))
-}
-
 /// The programs a privacy-preserving transaction runs. The wallet simulates the whole call, public
 /// parts included, and proves its private transitions, so every program it reaches must be here
 /// (the native token program is the protocol's own).
@@ -87,21 +77,7 @@ impl Programs {
     /// # Errors
     /// If a `--binary` can't be read, or the program isn't deployed through the program loader.
     pub async fn load(&mut self, wallet: &Wallet, program: AccountId) -> Result<String, String> {
-        let header = wallet
-            .get_account_view(Actor::new(program, PROGRAM_LOADER_ACCOUNT_ID))
-            .await
-            .map_err(|e| format!("reading program {program}'s header: {e:#}"))?
-            .and_then(|account| {
-                ProgramHeader::from_loader_actor_state(
-                    account.data.actor_state(PROGRAM_LOADER_ACCOUNT_ID),
-                )
-            })
-            .ok_or_else(|| {
-                format!(
-                    "{program} has no program header: it isn't a program deployed through the \
-                     program loader, so spel can't load it"
-                )
-            })?;
+        let header = program_header(wallet, program).await?;
         if let Some((path, guest)) = self.local_match(header.image_id)? {
             self.insert(program, guest);
             return Ok(path);
@@ -176,6 +152,28 @@ impl Programs {
         }
         Ok(self.local.get_or_insert_with(Vec::new))
     }
+}
+
+/// The header of the program deployed at `program`: its ImageID, first segment and mutability.
+///
+/// # Errors
+/// If it can't be read, or `program` isn't deployed through the program loader.
+pub async fn program_header(wallet: &Wallet, program: AccountId) -> Result<ProgramHeader, String> {
+    wallet
+        .get_account_view(Actor::new(program, PROGRAM_LOADER_ACCOUNT_ID))
+        .await
+        .map_err(|e| format!("reading program {program}'s header: {e:#}"))?
+        .and_then(|account| {
+            ProgramHeader::from_loader_actor_state(
+                account.data.actor_state(PROGRAM_LOADER_ACCOUNT_ID),
+            )
+        })
+        .ok_or_else(|| {
+            format!(
+                "{program} has no program header: it isn't a program deployed through the \
+                 program loader"
+            )
+        })
 }
 
 fn read_program(binary: &Path) -> Result<Program, String> {
@@ -446,7 +444,7 @@ pub fn derive_private_pda(
     program: AccountId,
     seed: PdaSeed,
     keys: &Keys<'_>,
-    binary: Option<&Path>,
+    image: Option<ProgramId>,
 ) -> Result<PrivatePda, String> {
     let wallet = names.wallet.ok_or("no wallet is open")?;
     match keys {
@@ -475,12 +473,8 @@ pub fn derive_private_pda(
             })
         },
         Keys::Group(group) => {
-            let binary = binary.ok_or(
-                "--group derives from the program's image id: pass --binary, or name a spel.toml \
-                 program with a `binary`",
-            )?;
-            let (_, guest) = catalog(binary, program)?;
-            let image = guest.id();
+            let image =
+                image.ok_or("--group derives from the program's ImageID, which wasn't read")?;
             let label = Label::new(*group);
             let holder = wallet
                 .storage()

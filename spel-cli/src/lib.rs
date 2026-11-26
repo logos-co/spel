@@ -218,8 +218,8 @@ pub async fn run() {
         }
     }
 
-    // An explicit --binary wins over spel.toml's for the commands that take one program's binary
-    // (`deploy`, `pda --group`); `send` takes them all.
+    // An explicit --binary wins over spel.toml's for `deploy`, which takes one program's binary;
+    // `send` takes them all.
     let several_binaries = binary_args.len() > 1;
     if let Some(binary) = binary_args.first() {
         program_path = Some(binary.clone());
@@ -326,10 +326,6 @@ pub async fn run() {
                 return;
             },
             "pda" if private_cmds::is_private_pda(&remaining_args[2..]) => {
-                // Only a group's PDA reads a binary (the program's ImageID).
-                if remaining_args.iter().skip(2).any(|a| a == "--group") {
-                    one_binary("pda --group");
-                }
                 let program = program_address.clone().unwrap_or_else(|| {
                     eprintln!("❌ a private PDA needs its program: pass --program");
                     eprintln!("{}", private_cmds::PDA_USAGE);
@@ -338,7 +334,6 @@ pub async fn run() {
                 private_cmds::pda_command(
                     &remaining_args[2..],
                     &program,
-                    program_path.as_deref(),
                     config_programs(config.as_ref().map(|(_, cfg)| cfg)),
                 )
                 .await;

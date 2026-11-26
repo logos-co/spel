@@ -1,7 +1,6 @@
 //! Commands for private accounts: `spel pda` with `--owner` / `--group`, `spel blind`, and
 //! `spel transfer`.
 
-use std::path::Path;
 use std::process;
 
 use lee::AccountId;
@@ -89,12 +88,7 @@ pub fn combine_seeds(seeds: &[[u8; 32]]) -> PdaSeed {
 
 /// `spel pda … --owner | --group`: derive a private PDA, and with `--register` record it in the
 /// wallet so `send` can witness it.
-pub async fn pda_command(
-    args: &[String],
-    program: &str,
-    binary: Option<&str>,
-    programs: Vec<(String, AccountId)>,
-) {
+pub async fn pda_command(args: &[String], program: &str, programs: Vec<(String, AccountId)>) {
     let mut seeds_raw = Vec::new();
     let (mut owner, mut group, mut label) = (None, None, None);
     let (mut register, mut rescan) = (false, false);
@@ -132,6 +126,23 @@ pub async fn pda_command(
     }
 
     let mut wallet = open_wallet_or_fail();
+    let program_id = Names {
+        wallet: Some(&wallet),
+        programs: programs.clone(),
+    }
+    .program(program)
+    .unwrap_or_else(|e| fail(e));
+    // A group's PDA keys derive from the program's ImageID: the deployed code's, read from its
+    // header, so a stale local build can't derive another address.
+    let image = match keys {
+        Keys::Group(_) => Some(
+            private::program_header(&wallet, program_id)
+                .await
+                .unwrap_or_else(|e| fail(e))
+                .image_id,
+        ),
+        Keys::Owner(_) => None,
+    };
     let (program, pda) = {
         let names = Names {
             wallet: Some(&wallet),
@@ -143,14 +154,8 @@ pub async fn pda_command(
             .map(|raw| seed_bytes(raw, &names))
             .collect::<Result<Vec<_>, String>>()
             .unwrap_or_else(|e| fail(e));
-        let pda = private::derive_private_pda(
-            &names,
-            program,
-            combine_seeds(&seeds),
-            &keys,
-            binary.map(Path::new),
-        )
-        .unwrap_or_else(|e| fail(e));
+        let pda = private::derive_private_pda(&names, program, combine_seeds(&seeds), &keys, image)
+            .unwrap_or_else(|e| fail(e));
         (program, pda)
     };
     let account = pda.account;

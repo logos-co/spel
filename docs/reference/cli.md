@@ -27,7 +27,7 @@ option.
 | `-i, --idl <FILE>` | the IDL (v2). Overrides a `spel.toml` IDL. |
 | `-p, --program <NAME\|ADDRESS>` | a `spel.toml` program name (also loads its IDL), or a program address in base58 or hex |
 | `--fee-payer <ACCOUNT>` | the account that pays the fee (`send`, `deploy`); for a private call, an owned private account |
-| `--binary <FILE>` | a program's binary (the R0BF `.bin`), repeatable. A private call uses each one whose ImageID matches a program it runs, instead of loading that program from the chain. `deploy` and `pda --group` take one, which overrides the `spel.toml` `binary` |
+| `--binary <FILE>` | a program's binary (the R0BF `.bin`), repeatable. A private call uses each one whose ImageID matches a program it runs, instead of loading that program from the chain. `deploy` takes one, which overrides the `spel.toml` `binary` |
 | `-t, --type <TYPE>` | `inspect`: decode as this IDL type instead of the state type |
 | `-d, --data <HEX>` | `inspect`: decode these bytes offline instead of fetching |
 | `--format <text\|hex\|json>` | `program-id` output format |
@@ -512,15 +512,17 @@ combined as `SHA-256(seed1 ‖ seed2 ‖ …)`. Programs document their own seed
 
 ```bash
 spel --program <P> pda <SEED>... --owner <ACCOUNT> [--register [--label <LABEL>] [--rescan]]
-spel --program <P> --binary <BIN> pda <SEED>... --group <GROUP> [--register [--label <LABEL>] [--rescan]]
+spel --program <P> pda <SEED>... --group <GROUP> [--register [--label <LABEL>] [--rescan]]
 ```
 
 A private PDA, `AccountId::for_private_pda(program, seed, npk, vpk)`, with the keys of:
 - **`--owner`**: a private account of this wallet's key tree. Only its owner can put the PDA in a
   transaction.
 - **`--group`**: a wallet group's secret (`wallet group new | join`), derived for the program's
-  ImageID, which comes from its binary. Every holder of the secret derives the same PDA and can
-  put it in a transaction.
+  ImageID, read from its deployed header (so a stale local build can't derive another
+  address). Every holder of the secret derives the same PDA and can put it in a transaction.
+  Upgrading a mutable program changes its ImageID: a PDA registered before still works, but
+  deriving it afresh afterwards gives another address.
 
 The wallet can't find a PDA from what it stores, so `--register` records it, labelled `--label`
 if that label is free; `send` can then witness it, and syncs follow it. `--rescan` then
