@@ -69,6 +69,7 @@ spel inspect alice@token
 | `init <PROJECT>` | scaffold an actor program (a counter): core, handler and guest crates, spel.toml, Makefile |
 | `generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]` | IDL v2 from a core crate; missing values come from spel.toml (`core`, `[idl-gen]`), then from `spel-attrs` markers |
 | `send --root <ACCOUNT>[@<PROGRAM>] … -- <MESSAGE> [--field value]…` | send one message to an actor, publicly or privately; reports what changed |
+| `send … --co-signer <ACCOUNT> --export <FILE>`, `sign <FILE>`, `submit <FILE>` | a public transaction signed in several wallets: export it, sign it in each, submit it |
 | `inspect <ACCOUNT>[@<PROGRAM>]` | read and decode an actor's state (a private one from the wallet's decrypted copy), or list every program holding state on an account |
 | `encode <MESSAGE> [--field value]…` | print a message's Borsh bytes as hex |
 | `deploy [BINARY] --fee-payer <ACCOUNT>` | deploy a program through LEZ's program loader, print its address |
@@ -155,8 +156,7 @@ The sender of a message that reaches public execution appears as a fresh blinded
 
 ## Not yet ported
 
-Multi-party signing (`sign` / `submit`), events in `send`
-output, and client generation.
+Events in `send` output, and client generation.
 
 ## License
 

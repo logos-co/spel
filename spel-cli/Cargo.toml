@@ -19,6 +19,9 @@ program_loader_core = { git = "https://github.com/logos-blockchain/logos-executi
 sequencer_service_rpc = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["client"] }
 # Transaction hashes and blocks, to settle a privacy-preserving transaction.
 common = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+# Fee arithmetic, to price an exported transaction as the wallet prices its own.
+fee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+anyhow = "1"
 sha2 = "0.10"
 risc0-zkvm = { version = "3.0.3", features = ["std"] }
 base58 = "0.2"

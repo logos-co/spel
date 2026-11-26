@@ -35,6 +35,12 @@
 - **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
   can act for, including group-shared private PDAs, or to `keys:FILE`.
 
+- **Signing in several wallets** is back, for v0.4 public transactions. `send --co-signer
+  ACCOUNT --export FILE` writes the transaction with its fee measured (simulated with every
+  signer authorized) and this wallet's signers signed; `spel sign FILE [--yes]` checks the
+  signatures, shows what the message does (decoded with the root program's IDL), and signs for
+  this wallet's missing signers; `spel submit FILE` sends it once every signer signed. The file
+  format is version 2 (JSON over the Borsh `public_transaction::Message`).
 - **`spel init <PROJECT>`** is back, for actor programs: it scaffolds a counter with a core
   crate, a handler crate with host tests, a risc0 guest (`lee_core::actor_entrypoint!`), a
   `spel.toml` and a Makefile (`build`, `idl`, `deploy`, `test`). It pins LEZ `v0.4.0-rc3`

@@ -19,7 +19,7 @@ SPEL is the client toolchain for programs on LEZ's actor model. An actor is an
 - derives and registers **private PDAs** (`pda --owner | --group --register`), blinds ids
   (`blind`), and moves native balance (`transfer`).
 
-The old `#[lez_program]` guest framework, instruction calls and `sign`/`submit` are retired. Client generation (`spel-client-gen`) is not ported yet.
+The old `#[lez_program]` guest framework and instruction calls are retired. Client generation (`spel-client-gen`) is not ported yet.
 
 ## References
 

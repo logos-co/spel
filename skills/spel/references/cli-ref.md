@@ -55,6 +55,8 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 | `--root A[@P]` | receiving actor (required). Program: `@P`, else `--program`, else the spel.toml program named like the IDL |
 | `--actor A[@P]` | declare another actor (repeatable); replaces the field default for that account |
 | `--signer A` | authorize an account (repeatable): public signs, private uses the wallet's authorization key; the wallet must hold the key |
+| `--co-signer A` | a public signer whose key is in another wallet (repeatable); needs `--export` |
+| `--export FILE` | write the public transaction (fee measured, our signers signed) instead of sending |
 | `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private. A public recipient is refused: declare it, `--actor bob@token` |
 | `--no-auto-actors` | no actors from message fields (public) or from simulation (private) |
 | `--gas-limit N` | gas limit for this call |
@@ -82,6 +84,17 @@ spel --program payroll send --root seat --signer seat --actor seat@native -- wit
 Exit codes: `0` included and changed; `2` nothing changed (refused in simulation and not
 sent, reason printed; reverted; or included as a no-op); `1` error or not included.
 stdout: the transaction hash only.
+
+Several wallets: export, sign in each, submit.
+
+```bash
+spel send --root alice --co-signer alice --fee-payer payer --export tx.json -- increment --by 4   # wallet A
+spel sign tx.json [--yes]        # wallet B: shows the decoded message, adds alice's signature
+spel submit tx.json              # anyone: 0 included, 2 reverted, 1 refused (unsigned, tampered)
+```
+
+The payer (`--fee-payer`, else the first signer) signs too. Public calls only; a file goes stale
+when a signer's nonce moves.
 
 ### inspect
 

@@ -117,6 +117,8 @@ spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MES
 | `--root <ACCOUNT>[@<PROGRAM>]` | **required.** The actor that receives the message. |
 | `--actor <ACCOUNT>[@<PROGRAM>]` | declare one more actor (repeatable). `PROGRAM` defaults to the root's. |
 | `--signer <ACCOUNT>` | authorize this account (repeatable): a public one signs, a private one uses this wallet's authorization key. The wallet must hold the key. |
+| `--co-signer <ACCOUNT>` | a public account that signs in another wallet (repeatable); needs `--export`. See [Signing in several wallets](#signing-in-several-wallets) |
+| `--export <FILE>` | write the public transaction to `FILE`, signed by this wallet's signers, instead of sending it |
 | `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable; not a public account, which is declared with `--actor`). Makes the call private |
 | `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private |
 | `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
@@ -181,6 +183,42 @@ signer. A private call's fee is paid in the proof by an owned private account (n
 without `--fee-payer` the wallet picks an authorized private account (a private `--signer`), or
 failing that one of its own that can pay, and the guardrail says so. If none can, `send` fails
 and suggests `--signer` or `--fee-payer`.
+
+### Signing in several wallets
+
+When a call needs a signature from an account whose key is in another wallet, the wallet that
+starts it exports the transaction instead of sending it, each other signer signs the file, and
+anyone submits it:
+
+```bash
+# Wallet A: alice signs in wallet B; A's account pays
+spel send --root alice --co-signer alice --fee-payer <A-ACCOUNT> --export increment.json -- increment --by 4
+# Wallet B: check what it does, add alice's signature
+spel sign increment.json
+# Anyone, once every signer signed
+spel submit increment.json
+```
+
+A co-signer authorizes its actors like a `--signer`; only the signature comes later. The export
+fixes everything the signatures cover: each signer's nonce, the authorized accounts, and the
+fee, measured as `send` measures it (simulated with every signer authorized, priced at the base
+fees the wallet's fee headroom could reach). The payer is `--fee-payer`, else the first signer;
+it signs too. A call that reverts in simulation isn't written (exit `2`). Only public calls
+export.
+
+`spel sign FILE [--yes]` checks the signatures already in the file, prints the exporter's
+summary and, decoded from the message bytes, what the signature covers: the root, the message
+(with the root program's IDL from `spel.toml`, or `--idl`), the actors, the fee and the signers.
+It then signs for every missing signer whose key this wallet holds, after a prompt (`--yes`
+skips it; without a terminal, `--yes` is required). `spel submit FILE` refuses a file a signer
+hasn't signed or whose message changed after signing, then sends it and waits for its block:
+exit `0` included, `2` included but reverted, `1` otherwise. Submitting it again finds the same
+inclusion.
+
+The file is JSON: `version` (2), `summary`, `message` (the Borsh-encoded
+`public_transaction::Message`, hex; signatures cover its hash) and `witnesses`
+(`{public_key, signature}`). It goes stale when a signer's nonce moves or the fee no longer
+covers the base fees; export it again.
 
 ### Private calls
 

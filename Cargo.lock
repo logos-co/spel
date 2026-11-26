@@ -7595,9 +7595,11 @@ dependencies = [
 name = "spel"
 version = "0.7.0"
 dependencies = [
+ "anyhow",
  "base58",
  "borsh",
  "common",
+ "fee_core",
  "hex",
  "lee",
  "lee_core",

@@ -15,6 +15,7 @@ pub mod account_inspect;
 pub mod cli;
 pub mod config;
 pub mod deploy;
+pub mod exchange;
 pub mod generate_idl;
 pub mod hex;
 pub mod init;
@@ -381,6 +382,45 @@ pub async fn run() {
                 private_cmds::transfer_command(&remaining_args[2..]).await;
                 return;
             },
+            "sign" | "submit" => {
+                let rest = &remaining_args[2..];
+                if rest.iter().any(|a| a == "-h" || a == "--help") {
+                    if cmd == "sign" {
+                        println!("{}", exchange::SIGN_USAGE);
+                        println!();
+                        println!("Check an exported transaction's signatures, show what it does (decoded");
+                        println!("with the root program's IDL from spel.toml, or --idl), and sign it for");
+                        println!("every missing signer whose key this wallet holds. --yes skips the prompt.");
+                    } else {
+                        println!("{}", exchange::SUBMIT_USAGE);
+                        println!();
+                        println!("Send an exported transaction once every signer has signed it. Prints the");
+                        println!("hash; exits 2 if it was included but reverted.");
+                    }
+                    return;
+                }
+                let mut wallet = send::open_wallet(None).unwrap_or_else(|e| {
+                    eprintln!("❌ Failed to open the wallet: {e}\n   Set LEE_WALLET_HOME_DIR");
+                    process::exit(1);
+                });
+                if cmd == "submit" {
+                    exchange::submit_command(rest, &mut wallet).await;
+                    return;
+                }
+                let programs = config_programs(config.as_ref().map(|(_, cfg)| cfg));
+                let idl = sign_idl(
+                    rest,
+                    config.as_ref(),
+                    idl_explicit.then_some(idl_path.as_str()),
+                )
+                .map(|path| load_idl(&path));
+                let names = send::Names {
+                    wallet: Some(&wallet),
+                    programs,
+                };
+                exchange::sign_command(rest, &wallet, idl.as_ref(), &names);
+                return;
+            },
             "pda" if program_address.is_some() => {
                 // Usage: <bin> --program <address> pda <seed1> [seed2] ...
                 let mut raw_args =
@@ -476,6 +516,10 @@ pub async fn run() {
             "  {}",
             private_cmds::TRANSFER_USAGE.trim_start_matches("Usage: spel ")
         );
+        eprintln!("  sign <FILE> [--yes]      Sign an exported transaction (send --export)");
+        eprintln!(
+            "  submit <FILE>            Send an exported transaction once every signer signed"
+        );
         eprintln!("send, encode and idl need an IDL: pass --idl or name a spel.toml program with --program.");
         process::exit(1);
     }
@@ -570,6 +614,38 @@ fn config_programs(config: Option<&SpelConfig>) -> Vec<(String, lee::AccountId)>
             }
         })
         .collect()
+}
+
+/// The IDL `spel sign` decodes a file's message with: the spel.toml program's whose address is
+/// the root's program, else an explicit `--idl`.
+fn sign_idl(
+    args: &[String],
+    config: Option<&(std::path::PathBuf, SpelConfig)>,
+    explicit: Option<&str>,
+) -> Option<String> {
+    let root_program = args
+        .iter()
+        .find(|a| !a.starts_with('-'))
+        .and_then(|path| exchange::TxFile::load(path).ok())
+        .and_then(|file| file.message().ok())
+        .map(|message| message.execution.root.to.program_account_id);
+    let from_config = config.and_then(|(path, cfg)| {
+        let root_program = root_program?;
+        let (_, program) = cfg.programs.as_ref()?.iter().find(|(_, program)| {
+            program
+                .address
+                .as_deref()
+                .and_then(|address| hex::decode_bytes_32(address).ok())
+                .is_some_and(|bytes| lee::AccountId::new(bytes) == root_program)
+        })?;
+        Some(
+            path.parent()?
+                .join(program.idl.as_ref()?)
+                .to_string_lossy()
+                .to_string(),
+        )
+    });
+    from_config.or_else(|| explicit.map(str::to_owned))
 }
 
 /// Every spel.toml program's `binary`, resolved against the file's directory.

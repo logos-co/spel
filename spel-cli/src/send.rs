@@ -46,8 +46,9 @@ pub const EXIT_NO_CHANGE: i32 = 2;
 
 pub const USAGE: &str =
     "Usage: spel send --idl <IDL> --root <ACCOUNT>[@<PROGRAM>] [--actor <ACCOUNT>[@<PROGRAM>]]... \
-     [--signer <ACCOUNT>]... [--seal <DEST>]... [--recover <DEST>]... [--no-auto-actors] \
-     [--fee-payer <ACCOUNT>] [--gas-limit <N>] [--dry-run[=json]] [--] <MESSAGE> [--field value]...";
+     [--signer <ACCOUNT>]... [--co-signer <ACCOUNT>]... [--seal <DEST>]... [--recover <DEST>]... \
+     [--no-auto-actors] [--fee-payer <ACCOUNT>] [--gas-limit <N>] [--dry-run[=json]] \
+     [--export <FILE>] [--] <MESSAGE> [--field value]...";
 
 /// How many undeclared actors a private send adds from simulation before giving up.
 const MAX_INFERRED: usize = 8;
@@ -64,6 +65,10 @@ pub struct SendFlags {
     pub root: String,
     pub actors: Vec<String>,
     pub signers: Vec<String>,
+    /// Signers whose keys are in other wallets: they sign the exported transaction (`spel sign`).
+    pub co_signers: Vec<String>,
+    /// Write the transaction to this file, signed by this wallet's signers, instead of sending.
+    pub export: Option<String>,
     /// Credits sealed to their recipient: sent by private execution.
     pub seals: Vec<String>,
     /// Credits published with a recovery binding: sent by public execution.
@@ -99,6 +104,8 @@ pub fn parse_send_args(args: &[String]) -> Result<SendFlags, String> {
             "--root" => root = Some(value("--root")?),
             "--actor" => flags.actors.push(value("--actor")?),
             "--signer" => flags.signers.push(value("--signer")?),
+            "--co-signer" => flags.co_signers.push(value("--co-signer")?),
+            "--export" => flags.export = Some(value("--export")?),
             "--seal" => flags.seals.push(value("--seal")?),
             "--recover" => flags.recovers.push(value("--recover")?),
             "--no-auto-actors" => flags.no_auto_actors = true,
@@ -120,6 +127,16 @@ pub fn parse_send_args(args: &[String]) -> Result<SendFlags, String> {
         }
     }
     flags.root = root.ok_or("missing --root <ACCOUNT>[@<PROGRAM>]")?;
+    if !flags.co_signers.is_empty() && flags.export.is_none() {
+        return Err(
+            "--co-signer signs in another wallet: pass --export <FILE> to write the \
+                    transaction for it"
+                .into(),
+        );
+    }
+    if flags.export.is_some() && flags.dry_run.is_some() {
+        return Err("pass --export or --dry-run, not both".into());
+    }
     if flags.message.is_empty() {
         return Err("missing the message to send".into());
     }
@@ -448,7 +465,10 @@ struct Prepared {
     tag: u8,
     bytes: Vec<u8>,
     list: Vec<Planned>,
+    /// Every signer, this wallet's and the co-signers.
     signers: Vec<AccountId>,
+    /// The signers whose keys are in other wallets.
+    co_signers: Vec<AccountId>,
     fee_payer: Option<AccountId>,
     /// Sent as a privacy-preserving transaction: an actor is private, or a credit is sealed or
     /// recoverable.
@@ -523,11 +543,27 @@ fn prepare(
     // A signer authorizes its account: a public one with a signature, a private one with this
     // wallet's authorization key. A private PDA has no such key: only its program's seed grant
     // authorizes it.
-    let signers = flags
+    let mut signers = flags
         .signers
         .iter()
         .map(|raw| declared(raw))
         .collect::<Result<Vec<_>, String>>()?;
+    let co_signers = flags
+        .co_signers
+        .iter()
+        .map(|raw| declared(raw))
+        .collect::<Result<Vec<_>, String>>()?;
+    for (raw, id) in flags.co_signers.iter().zip(&co_signers) {
+        if private_accounts.contains(id) {
+            return Err(format!(
+                "--co-signer {raw}: a co-signer signs, so it's a public account"
+            ));
+        }
+        if signers.contains(id) {
+            return Err(format!("--co-signer {raw} is a --signer too; pass one"));
+        }
+    }
+    signers.extend(&co_signers);
     for (raw, id) in flags.signers.iter().zip(&signers) {
         if private_accounts.contains(id) && names.is_private_pda(*id) {
             return Err(format!(
@@ -538,6 +574,13 @@ fn prepare(
     }
     let private =
         !private_accounts.is_empty() || !flags.seals.is_empty() || !flags.recovers.is_empty();
+    if private && flags.export.is_some() {
+        return Err(
+            "--export writes a public transaction, and this call is private (a private \
+                    actor, --seal or --recover)"
+                .into(),
+        );
+    }
     // A credit's recipient must be private. Without a wallet, a bare id can't be told apart, so
     // the check waits for the send.
     for raw in flags.seals.iter().chain(&flags.recovers) {
@@ -587,6 +630,7 @@ fn prepare(
         bytes,
         list,
         signers,
+        co_signers,
         fee_payer,
         private,
         keyed,
@@ -603,7 +647,13 @@ fn actor_name(names: &Names<'_>, account: AccountId, program: AccountId) -> Stri
 
 /// The access list, then per signer every actor its signature authorizes.
 fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
-    eprintln!(
+    eprint!("{}", guardrail(prepared, flags, names));
+}
+
+/// What [`print_guardrail`] prints; an exported transaction's summary.
+fn guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -> String {
+    let mut out: Vec<String> = Vec::new();
+    out.push(format!(
         "{} (tag {}, {} bytes) to {}{}",
         to_kebab(&prepared.message_name),
         prepared.tag,
@@ -614,60 +664,64 @@ fn print_guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) {
         } else {
             ""
         }
-    );
-    eprintln!("Access list:");
+    ));
+    out.push("Access list:".to_owned());
     for planned in &prepared.list {
-        eprintln!(
+        out.push(format!(
             "  {:<60} {}{}",
             actor_name(names, planned.account, planned.program),
             planned.reason,
             planned.authority()
-        );
+        ));
     }
     for seal in &flags.seals {
-        eprintln!("Credit sealed to {seal}");
+        out.push(format!("Credit sealed to {seal}"));
     }
     for recover in &flags.recovers {
-        eprintln!("Credit to {recover}, with a recovery binding");
+        out.push(format!("Credit to {recover}, with a recovery binding"));
     }
     if prepared.signers.is_empty() {
-        eprintln!("No signers: no actor is authorized.");
+        out.push("No signers: no actor is authorized.".to_owned());
     }
     for signer in &prepared.signers {
         let private = prepared
             .list
             .iter()
             .any(|p| p.account == *signer && p.private);
-        eprintln!(
+        out.push(format!(
             "{} {}. In this transaction that authorizes:",
             names.account_name(*signer),
             if private {
                 "authorizes with this wallet's key"
+            } else if prepared.co_signers.contains(signer) {
+                "co-signs, from another wallet (spel sign)"
             } else {
                 "signs"
             }
-        );
+        ));
         for planned in prepared.list.iter().filter(|p| p.account == *signer) {
             let role = if planned.reason == "root" {
                 "root"
             } else {
                 "reachable: any program in the conversation can send it owner messages"
             };
-            eprintln!(
+            out.push(format!(
                 "  {:<60} {role}",
                 actor_name(names, planned.account, planned.program)
-            );
+            ));
         }
     }
     if let Some(payer) = prepared.fee_payer {
-        eprintln!("Fee payer: {}", names.account_name(payer));
+        out.push(format!("Fee payer: {}", names.account_name(payer)));
     } else if prepared.private && !prepared.list.iter().any(|p| p.private && p.authorized()) {
         // With no authorized private account, the wallet picks the payer among its own.
-        eprintln!(
+        out.push(
             "Fee payer: an owned private account the wallet picks (no private signer; \
              --fee-payer chooses one)"
+                .to_owned(),
         );
     }
+    out.iter().map(|line| format!("{line}\n")).collect()
 }
 
 fn dry_run_json(prepared: &Prepared, flags: &SendFlags) -> Value {
@@ -785,10 +839,11 @@ pub async fn send_command(
         let prepared =
             prepare(&flags, idl, default_program, fee_payer, &names).unwrap_or_else(|e| fail(e));
         if let Some(wallet) = &wallet {
+            // A co-signer signs in its own wallet.
             let public_signers = prepared
                 .list
                 .iter()
-                .filter(|p| p.signs)
+                .filter(|p| p.signs && !prepared.co_signers.contains(&p.account))
                 .map(|p| p.account)
                 .collect::<BTreeSet<_>>();
             for signer in &public_signers {
@@ -801,7 +856,10 @@ pub async fn send_command(
             }
             // The payer authorizes its fee: a public one signs, a private one is an owned regular
             // account (a PDA has no authorization key).
-            if let Some(payer) = prepared.fee_payer {
+            if let Some(payer) = prepared
+                .fee_payer
+                .filter(|payer| !prepared.co_signers.contains(payer))
+            {
                 let held = if prepared.private {
                     wallet
                         .storage()
@@ -852,6 +910,11 @@ pub async fn send_command(
     let Some(wallet) = wallet.as_mut() else {
         unreachable!("only a dry run proceeds without a wallet")
     };
+    if let Some(path) = &flags.export {
+        let loader = crate::private::Programs::new(binaries, configured);
+        send_export(wallet, &prepared, &flags, path, programs, loader).await;
+        return;
+    }
     if prepared.private {
         let loader = crate::private::Programs::new(binaries, configured);
         send_private(wallet, prepared, &flags, idl, programs, loader).await;
@@ -922,6 +985,68 @@ async fn send_public(
         .await
         .unwrap_or_else(|e| fail(e));
     report_changes(&names, &prepared.list, &before, &after, block, idl);
+}
+
+/// Write the public transaction to `path` for its co-signers: measured with every signer
+/// authorized, signed by this wallet's.
+async fn send_export(
+    wallet: &Wallet,
+    prepared: &Prepared,
+    flags: &SendFlags,
+    path: &str,
+    programs: Vec<(String, AccountId)>,
+    mut loader: crate::private::Programs,
+) {
+    let names = Names {
+        wallet: Some(wallet),
+        programs,
+    };
+    let signers: BTreeSet<AccountId> = prepared.signers.iter().copied().collect();
+    // The payer signs: --fee-payer, else the first signer, ours before the co-signers.
+    let payer = prepared
+        .fee_payer
+        .or_else(|| prepared.signers.first().copied())
+        .unwrap_or_else(|| fail("--export: no signer to pay the fee; pass --fee-payer"));
+    let mut signers = signers;
+    signers.insert(payer);
+    let actors: Vec<Actor> = prepared
+        .list
+        .iter()
+        .map(|p| Actor::new(p.account, p.program))
+        .collect();
+    let Some(&root) = actors.first() else {
+        unreachable!("the access list starts with the root")
+    };
+    let built = match crate::exchange::build(
+        wallet,
+        root,
+        prepared.bytes.clone(),
+        &actors,
+        &signers,
+        payer,
+        &mut loader,
+        &names,
+    )
+    .await
+    {
+        Ok(built) => built,
+        Err(crate::exchange::BuildError::Refused(reason)) => {
+            eprintln!("⚠️  Refused in simulation, so not written: {reason}");
+            process::exit(EXIT_NO_CHANGE);
+        },
+        Err(crate::exchange::BuildError::Failed(e)) => fail(e),
+    };
+    if let Some(fee) = &built.message.execution.fee {
+        eprintln!(
+            "Fee: at most {} from {} ({} cycles measured, gas limit {})",
+            fee.max_fee,
+            names.account_name(payer),
+            built.cycles,
+            fee.gas_limit
+        );
+    }
+    let file = crate::exchange::TxFile::new(&built.message, guardrail(prepared, flags, &names));
+    crate::exchange::export(wallet, file, path, &names).unwrap_or_else(|e| fail(e));
 }
 
 /// A privacy-preserving transaction: proved with the programs it runs, with private actors
@@ -1757,6 +1882,7 @@ mod tests {
             bytes: Vec::new(),
             list: inferred(0, &no_wallet()),
             signers: vec![id(1)],
+            co_signers: Vec::new(),
             fee_payer: None,
             private: true,
             keyed,
