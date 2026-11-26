@@ -6,7 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use serde_json::json;
-use spel_framework_core::decode::{decode_named, decode_state};
+use spel_framework_core::decode::{decode_message, decode_named, decode_state};
 use spel_framework_core::idl::{event_selector, IdlType, SpelIdl};
 use spel_framework_core::idl_gen::{generate_idl, GenOptions, IdlGenError};
 
@@ -678,4 +678,24 @@ fn an_unsupported_type_fails() {
     let dir = shape_crate("pub enum Message { Go { x: (u8, u8) } }\n", &[]);
     let err = generate(&options(dir.path(), "Message", None, None)).unwrap_err();
     assert!(matches!(err, IdlGenError::Unsupported { .. }), "{err}");
+}
+
+#[test]
+fn token_messages_decode_through_the_idl() {
+    let idl = check_golden("token", "TokenState");
+    let mut transfer = vec![2u8];
+    transfer.extend([7u8; 32]);
+    transfer.extend(300u128.to_le_bytes());
+    assert_eq!(
+        decode_message(&transfer, &idl).unwrap(),
+        (
+            "Transfer".to_owned(),
+            json!({ "to": bs58_of([7u8; 32]), "amount": "300" })
+        )
+    );
+
+    let err = decode_message(&[transfer.as_slice(), &[0]].concat(), &idl).unwrap_err();
+    assert!(err.contains("1 bytes remaining"), "{err}");
+    let err = decode_message(&[99], &idl).unwrap_err();
+    assert!(err.contains("no message with tag 99"), "{err}");
 }
