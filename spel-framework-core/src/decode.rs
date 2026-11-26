@@ -41,6 +41,35 @@ pub fn decode_named(data: &[u8], type_name: &str, idl: &SpelIdl) -> Result<Value
     )
 }
 
+/// Decode a message's bytes (its one-byte tag, then its fields) into its IDL name and its fields
+/// as an object. Every byte must be consumed.
+///
+/// # Errors
+/// If no message has the tag, or the bytes are not its fields.
+pub fn decode_message(data: &[u8], idl: &SpelIdl) -> Result<(String, Value), String> {
+    let mut cursor: &[u8] = data;
+    let tag = read_u8(&mut cursor)?;
+    let message = idl
+        .messages
+        .iter()
+        .find(|m| m.tag == tag)
+        .ok_or_else(|| format!("no message with tag {tag} in the '{}' IDL", idl.name))?;
+    let mut fields = serde_json::Map::new();
+    for field in &message.fields {
+        let value = decode_borsh_value(&mut cursor, &field.type_, idl)
+            .map_err(|e| format!("{}: field '{}': {e}", message.name, field.name))?;
+        fields.insert(field.name.clone(), value);
+    }
+    if !cursor.is_empty() {
+        return Err(format!(
+            "{}: {} bytes remaining after its fields",
+            message.name,
+            cursor.len()
+        ));
+    }
+    Ok((message.name.clone(), Value::Object(fields)))
+}
+
 /// Decode `data` as a value of `ty`. Every byte must be consumed.
 ///
 /// # Errors
