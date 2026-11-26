@@ -176,6 +176,25 @@ recognizes each marker bare (`#[event]`) or qualified (`#[spel_attrs::event]`), 
 import, and looks only in the crate itself. It matches an impl to a marked trait by the
 trait's last path segment, so `impl event::TokenEvent for …` counts.
 
+The generator reads the source, so a marker behind a feature counts too, whatever features
+are enabled. That keeps `spel-attrs` out of every build that doesn't ask for it, the guest's
+included:
+
+```toml
+[dependencies]
+spel-attrs = { git = "…/spel", optional = true }
+
+[features]
+idl = ["dep:spel-attrs"]
+```
+
+```rust
+#[cfg_attr(feature = "idl", spel_attrs::message)]
+pub enum Message { Increment { by: u64 }, Reset }
+```
+
+`cargo check --features idl` checks that the markers compile.
+
 Names win over markers: a command-line flag first, then `spel.toml`'s `[idl-gen]`, then the
 markers. When a name and the markers disagree, the generator uses the name and warns. Mark
 one message enum: several fail generation. Several marked event traits are fine: their impls

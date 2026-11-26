@@ -254,21 +254,29 @@ pub fn generate_idl<F: FnMut(String)>(
 }
 
 /// The structs and enums of the crate marked `#[<marker>]` or `#[spel_attrs::<marker>]`, in
-/// declaration order (a module's items where its `mod` is declared). A marker imported under
-/// another name isn't recognized.
+/// declaration order (a module's items where its `mod` is declared). A marker inside
+/// `#[cfg_attr(<predicate>, …)]` counts whatever the predicate, so a crate can keep `spel-attrs`
+/// behind a feature its guest never enables. A marker imported under another name isn't
+/// recognized.
 fn marked(items: &[SourceItem], marker: &str) -> Vec<String> {
-    let is_marker = |attr: &Attribute| {
-        let path: Vec<String> = attr
-            .path()
-            .segments
-            .iter()
-            .map(|s| s.ident.to_string())
-            .collect();
+    let is_marker_path = |path: &syn::Path| {
+        let path: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
         match path.as_slice() {
             [name] => name == marker,
             [krate, name] => krate == "spel_attrs" && name == marker,
             _ => false,
         }
+    };
+    let is_marker = |attr: &Attribute| {
+        if attr.path().is_ident("cfg_attr") {
+            // `cfg_attr(predicate, attr, …)`: the attributes after the predicate.
+            return attr
+                .parse_args_with(
+                    syn::punctuated::Punctuated::<syn::Meta, syn::Token![,]>::parse_terminated,
+                )
+                .is_ok_and(|metas| metas.iter().skip(1).any(|meta| is_marker_path(meta.path())));
+        }
+        is_marker_path(attr.path())
     };
     items
         .iter()

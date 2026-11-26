@@ -35,6 +35,9 @@
 - **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
   can act for, including group-shared private PDAs, or to `keys:FILE`.
 
+- **`generate-idl` reads markers behind a feature:** `#[cfg_attr(feature = "idl",
+  spel_attrs::message)]` counts, so `spel-attrs` can be an optional dependency.
+
 ### 🐛 Fixes
 
 - `generate-idl` describes `PdaSeed` (as `[u8; 32]`) instead of failing on it.
