@@ -1802,4 +1802,170 @@ mod tests {
             None
         );
     }
+
+    mod prepare_ {
+        use super::*;
+
+        const IDL: &str = r#"{"version":"2","name":"payroll","messages":[
+            {"name":"Transfer","tag":0,"fields":[{"name":"to","type":"account_id"},{"name":"amount","type":"u128"}]},
+            {"name":"PayAll","tag":1,"fields":[{"name":"employees","type":{"vec":"account_id"}}]}],
+            "types":[]}"#;
+
+        fn hex(byte: u8) -> String {
+            hex_encode(&[byte; 32])
+        }
+
+        /// `spel send <args>` prepared against the payroll IDL, with no wallet (raw ids only).
+        fn prepared(args_: &str, fee_payer: Option<&str>) -> Result<Prepared, String> {
+            let idl = SpelIdl::from_json(IDL)?;
+            let flags = parse_send_args(&args(args_))?;
+            prepare(&flags, &idl, None, fee_payer, &no_wallet())
+        }
+
+        /// A keys file (`wallet account show-keys` output) and the id its keys derive.
+        fn keys_file(dir: &tempfile::TempDir) -> (String, AccountId) {
+            let path = dir.path().join("bob.keys");
+            std::fs::write(
+                &path,
+                format!("{}\n{}\n", "11".repeat(32), "00".repeat(1184)),
+            )
+            .unwrap();
+            let path = path.to_string_lossy().into_owned();
+            let (npk, vpk) = wallet::cli::read_keys_file(&path).unwrap();
+            (path, AccountId::from((&npk, &vpk)))
+        }
+
+        #[test]
+        fn a_keys_field_is_the_id_its_keys_derive_and_never_a_public_actor() {
+            let dir = tempfile::tempdir().unwrap();
+            let (keys, bob) = keys_file(&dir);
+            let p = prepared(
+                &format!(
+                    "--root {}@{} --signer {} -- transfer --to keys:{keys} --amount 1",
+                    hex(1),
+                    hex(9),
+                    hex(1)
+                ),
+                None,
+            )
+            .unwrap();
+            assert_eq!(&p.bytes[1..33], bob.value());
+            assert_eq!(p.keyed.get(&bob), Some(&format!("keys:{keys}")));
+            // A public call declares account fields as actors, but not a foreign private one.
+            assert!(!p.private);
+            assert!(p.list.iter().all(|planned| planned.account != bob));
+        }
+
+        #[test]
+        fn a_list_field_takes_keys_and_ids() {
+            let dir = tempfile::tempdir().unwrap();
+            let (keys, bob) = keys_file(&dir);
+            let carol = id(3);
+            let p = prepared(
+                &format!(
+                    "--root {}@{} -- pay-all --employees keys:{keys},{}",
+                    hex(1),
+                    hex(9),
+                    hex(3)
+                ),
+                None,
+            )
+            .unwrap();
+            // Tag, u32 length 2, then both ids.
+            assert_eq!(&p.bytes[..5], &[1, 2, 0, 0, 0]);
+            assert_eq!(&p.bytes[5..37], bob.value());
+            assert_eq!(&p.bytes[37..69], carol.value());
+        }
+
+        #[test]
+        fn a_public_recipient_is_refused_for_seal_and_recover() {
+            for flag in ["--seal", "--recover"] {
+                let error = prepared(
+                    &format!(
+                        "--root {}@{} {flag} Public/{} -- transfer --to {} --amount 1",
+                        hex(1),
+                        hex(9),
+                        hex(2),
+                        hex(2)
+                    ),
+                    None,
+                )
+                .err()
+                .expect("refused");
+                assert!(error.contains("is a public account"), "{flag}: {error}");
+                assert!(error.contains(&format!("--actor Public/{}@<PROGRAM>", hex(2))));
+            }
+        }
+
+        #[test]
+        fn the_fee_payer_matches_the_calls_privacy() {
+            let public_call = format!(
+                "--root {}@{} -- transfer --to {} --amount 1",
+                hex(1),
+                hex(9),
+                hex(2)
+            );
+            let error = prepared(&public_call, Some(&format!("Private/{}", hex(4))))
+                .err()
+                .expect("refused");
+            assert!(error.contains("a public call's fee is paid by a public account"));
+            assert!(prepared(&public_call, Some(&hex(4))).is_ok());
+
+            let private_call = format!(
+                "--root Private/{}@{} -- transfer --to {} --amount 1",
+                hex(1),
+                hex(9),
+                hex(2)
+            );
+            let error = prepared(&private_call, Some(&hex(4)))
+                .err()
+                .expect("refused");
+            assert!(error.contains("a private call's fee is paid in the proof"));
+            assert!(prepared(&private_call, Some(&format!("Private/{}", hex(4)))).is_ok());
+        }
+
+        #[test]
+        fn a_private_signer_authorizes_with_its_key() {
+            let p = prepared(
+                &format!(
+                    "--root Private/{}@{} --signer Private/{} -- transfer --to {} --amount 1",
+                    hex(1),
+                    hex(9),
+                    hex(1),
+                    hex(2)
+                ),
+                None,
+            )
+            .unwrap();
+            let root = &p.list[0];
+            assert!(p.private && root.private);
+            assert!(!root.signs, "a private signer doesn't sign");
+            assert!(root.authorizes && root.authorized());
+            assert_eq!(p.signers, [id(1)]);
+            // A private call doesn't add field actors: the simulation finds them.
+            assert_eq!(p.list.len(), 1);
+        }
+
+        #[test]
+        fn a_private_root_or_actor_alone_has_no_authority() {
+            let p = prepared(
+                &format!(
+                    "--root Private/{}@{} --actor Private/{}@{} -- transfer --to {} --amount 1",
+                    hex(1),
+                    hex(9),
+                    hex(5),
+                    hex(7),
+                    hex(2)
+                ),
+                None,
+            )
+            .unwrap();
+            assert_eq!(p.list.len(), 2);
+            assert!(p
+                .list
+                .iter()
+                .all(|planned| planned.private && !planned.authorized()));
+            assert!(p.signers.is_empty());
+        }
+    }
 }
