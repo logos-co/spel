@@ -10,8 +10,9 @@ env:
 
 jobs:
   # LEZ actor-model port: the framework, its macros and the FFI compile test are retired. The
-  # sequencer jobs are replaced by one smoke test (scripts/smoke-test.sh) and the init test
-  # (scripts/init-e2e-test.sh). The FFI test returns with client generation.
+  # sequencer jobs are replaced by the smoke and multisig tests (scripts/smoke-test.sh,
+  # scripts/multisig-e2e-test.sh) and the init test (scripts/init-e2e-test.sh). The FFI test
+  # returns with client generation.
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
@@ -32,7 +33,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
   smoke-test:
-    name: Smoke test (init, deploy, public and private sends)
+    name: Sequencer e2e (smoke, multisig)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -97,12 +98,20 @@ jobs:
           LEZ_DIR: /tmp/lez
         run: scripts/smoke-test.sh /tmp/spel-smoke
 
+      - name: Run the multisig e2e
+        env:
+          LEZ_DIR: /tmp/lez
+          SPEL_BIN: target/release/spel
+        run: scripts/multisig-e2e-test.sh /tmp/spel-multisig
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: smoke-test-logs
-          path: /tmp/spel-smoke/logs
+          name: sequencer-e2e-logs
+          path: |
+            /tmp/spel-smoke/logs
+            /tmp/spel-multisig/logs
 
   init-e2e:
     name: Init e2e (default dependencies)
