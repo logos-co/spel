@@ -10,7 +10,8 @@ env:
 
 jobs:
   # LEZ actor-model port: the framework, its macros and the FFI compile test are retired. The
-  # sequencer jobs are replaced by one smoke test (scripts/smoke-test.sh).
+  # sequencer jobs are replaced by one smoke test (scripts/smoke-test.sh) and the init test
+  # (scripts/init-e2e-test.sh). The FFI test returns with client generation.
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
@@ -102,3 +103,48 @@ jobs:
         with:
           name: smoke-test-logs
           path: /tmp/spel-smoke/logs
+
+  init-e2e:
+    name: Init e2e (default dependencies)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      RISC0_VERSION: "3.0.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "init-e2e"
+
+      - name: Install risc0 toolchain
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L https://risc0.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
+          rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # spel-attrs defaults to the commit spel is built from: on a pull request, the merge commit
+      # GitHub keeps under refs/pull/, in this repository (hence --spel-git, which forks need).
+      - name: Run the init test
+        env:
+          SPEL_INIT_ARGS: --spel-git ${{ github.server_url }}/${{ github.repository }}.git
+        run: scripts/init-e2e-test.sh /tmp/spel-init-e2e
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: init-e2e-logs
+          path: /tmp/spel-init-e2e/logs

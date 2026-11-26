@@ -1,326 +1,85 @@
 #!/usr/bin/env bash
-# Init E2E Test
-# Exercises the full spel init → build → deploy → TX pipeline.
+# `spel init` with its default dependencies: the scaffold must build as `spel init <PROJECT>`
+# writes it. The smoke test (smoke-test.sh) points spel-attrs at this checkout and goes on to
+# deploy and send; this one checks the defaults resolve: LEZ at the tag spel links, spel-attrs
+# from git at the commit spel was built from (so that commit must be pushed).
 #
-# Key difference from smoke-test-privacy.sh and ffi-call-test.sh:
-# - Does NOT pass --lez-tag, so the DEFAULT LEZ dependency resolution in init.rs
-#   is tested (catches bugs like PR #184 where default tag caused unbuildable projects)
-# - DOES accept optional SPEL_TAG to override which spel-framework revision is used.
-#   On PRs this should be set to the PR head so the scaffolded project uses the
-#   PR's framework changes. On main pushes leave unset for true default testing.
+# Usage: scripts/init-e2e-test.sh [WORK_DIR]
 #
-# Usage: ./init-e2e-test.sh [WORK_DIR]
+# Needs Docker and cargo-risczero (the guest builds in Docker) and python3. No sequencer.
 #
-# Required Environment Variables:
-#   LSSA_DIR    - Path to logos-execution-zone directory with sequencer built
-# Optional Environment Variables:
-#   SPEL_TAG    - SPEL revision for init (e.g. refs/pull/XXX/merge). If unset,
-#                 spel init uses its hardcoded default (branch = "main").
+# Environment:
+#   SPEL_BIN        default: built from this checkout (release)
+#   SPEL_INIT_ARGS  extra `spel init` flags, e.g. `--spel-git <fork URL>`; default: none
+#   WORK_DIR        default: ${TMPDIR:-/tmp}/spel-init-e2e
 
 set -euo pipefail
 
-export RISC0_DEV_MODE=1
-
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-WORK_DIR="${1:-${WORK_DIR:-/tmp/spel-init-e2e}}"
-SEQUENCER_PORT="${SEQUENCER_PORT:-3043}"
-SEQUENCER_URL="http://127.0.0.1:${SEQUENCER_PORT}"
-PROJECT_NAME="init_e2e_test"
-
-if [ -z "${LSSA_DIR:-}" ]; then
-    echo "ERROR: LSSA_DIR environment variable is required"
-    exit 1
-fi
-
-LSSA_DIR="$(cd "$LSSA_DIR" && pwd)"
+SPEL_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+WORK_DIR="${1:-${WORK_DIR:-${TMPDIR:-/tmp}/spel-init-e2e}}"
+WORK_DIR="${WORK_DIR%/}"
+LOG_DIR="$WORK_DIR/logs"
+PROJECT=init-e2e
+PROGRAM=init_e2e
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
+log()  { echo -e "${GREEN}[INIT]${NC} $*"; }
+fail() { echo -e "${RED}[FAIL]${NC} $*" >&2; exit 1; }
 
-log()  { echo -e "${GREEN}[INIT-E2E]${NC} $*"; }
-warn() { echo -e "${YELLOW}[WARN]${NC} $*"; }
-fail() { echo -e "${RED}[FAIL]${NC} $*"; exit 1; }
-
-cleanup() {
-    if [ -n "${SEQ_PID:-}" ] && kill -0 "$SEQ_PID" 2>/dev/null; then
-        kill "$SEQ_PID" 2>/dev/null || true
-        wait "$SEQ_PID" 2>/dev/null || true
-    fi
+# Run a step, logging to $LOG_DIR/<name>.log; print the log's tail on failure.
+step() {
+    local name="$1"; shift
+    "$@" > "$LOG_DIR/$name.log" 2>&1 || { tail -40 "$LOG_DIR/$name.log" >&2; fail "$name failed (see $LOG_DIR/$name.log)"; }
 }
-trap cleanup EXIT
 
-# ─── Prerequisites ─────────────────────────────────────────────────────────
+for tool in cargo cargo-risczero docker python3; do
+    command -v "$tool" >/dev/null || fail "$tool not found"
+done
 
-command -v cargo >/dev/null 2>&1 || fail "cargo not found"
-
-SEQUENCER_BIN="${LSSA_DIR}/target/release/sequencer_service"
-[ -x "$SEQUENCER_BIN" ] || fail "sequencer_service not found at $SEQUENCER_BIN"
-
-WALLET_BIN="${LSSA_DIR}/target/release/wallet"
-[ -x "$WALLET_BIN" ] || fail "wallet not found at $WALLET_BIN"
-
-SPEL_BIN="/tmp/lssa/target/release/spel"
-[ -x "$SPEL_BIN" ] || fail "spel binary not found at $SPEL_BIN"
-
-# LEZ v0.2.0 moved the debug configs under a lez/ subdirectory. Prefer the
-# new location, fall back to the pre-rc6 path for older LEZ revisions.
-if [ -z "${NSSA_WALLET_HOME_DIR:-}" ]; then
-    if [ -f "${LSSA_DIR}/lez/wallet/configs/debug/wallet_config.json" ]; then
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/lez/wallet/configs/debug"
-    else
-        NSSA_WALLET_HOME_DIR="${LSSA_DIR}/wallet/configs/debug"
-    fi
-fi
-export NSSA_WALLET_HOME_DIR
-# LEZ v0.2.0 renamed the wallet home env var to LEE_WALLET_HOME_DIR.
-# Export both so the wallet finds its config on old and new LEZ revisions.
-export LEE_WALLET_HOME_DIR="$NSSA_WALLET_HOME_DIR"
-WALLET_PASSWORD="${WALLET_PASSWORD:-test}"
-
-# ─── Setup ─────────────────────────────────────────────────────────────────
-
-log "Setting up in ${WORK_DIR}..."
 rm -rf "$WORK_DIR"
-mkdir -p "$WORK_DIR"
+mkdir -p "$WORK_DIR" "$LOG_DIR"
+
+if [ -z "${SPEL_BIN:-}" ]; then
+    log "Building spel..."
+    step spel-build cargo build --manifest-path "$SPEL_DIR/Cargo.toml" -p spel --release
+    SPEL_BIN="$SPEL_DIR/target/release/spel"
+fi
+SPEL_BIN="$(cd "$(dirname "$SPEL_BIN")" && pwd)/$(basename "$SPEL_BIN")"
+
+log "spel init $PROJECT ${SPEL_INIT_ARGS:-(defaults)}"
 cd "$WORK_DIR"
+# shellcheck disable=SC2086  # SPEL_INIT_ARGS is a list of flags
+step init "$SPEL_BIN" init "$PROJECT" ${SPEL_INIT_ARGS:-}
+cd "$PROJECT"
 
-# ─── Step 1: spel init — default LEZ, optional SPEL override ─────────────
-# Always uses DEFAULT LEZ resolution (no --lez-tag) to test init.rs defaults.
-# On PRs, SPEL_TAG is set to the PR's *merge* ref, so the scaffolded project
-# uses the PR's framework code as it would land: the PR merged into current
-# main, matching what the runner has checked out.
-# On main pushes, SPEL_TAG is unset so the default refs are tested.
-# SPEL_GIT is always set in CI (the repo's own URL) so forks test their own
-# code; only local runs without SPEL_GIT exercise the built-in default URL.
+# What the defaults resolved to, for diagnosing a failure below.
+grep -h -E '^(spel-attrs|lee_core|lee|risc0-zkvm) ' "${PROGRAM}_core/Cargo.toml" \
+    "${PROGRAM}_program/Cargo.toml" guest/Cargo.toml | sed 's/^/  /'
+! grep -q 'path = ' "${PROGRAM}_core/Cargo.toml" || fail "the default spel-attrs is a path, not git"
 
-log "Step 1: spel init (LEZ=defaults${SPEL_TAG:+, SPEL=$SPEL_TAG}${SPEL_GIT:+, SPEL_GIT=$SPEL_GIT})..."
-SPEL_GIT_ARGS=()
-if [ -n "${SPEL_GIT:-}" ]; then
-    SPEL_GIT_ARGS=(--spel-git "$SPEL_GIT")
-fi
-if [ -n "${SPEL_TAG:-}" ]; then
-    "$SPEL_BIN" init --spel-rev "$SPEL_TAG" "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
-        > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
-else
-    "$SPEL_BIN" init "${SPEL_GIT_ARGS[@]}" "$PROJECT_NAME" \
-        > "$WORK_DIR/init.log" 2>&1 || fail "spel init failed (see $WORK_DIR/init.log)"
-fi
-cd "$PROJECT_NAME"
-log "  ✓ Project scaffolded"
+log "Host tests..."
+step host-tests cargo test
 
-# Show what was resolved — this helps diagnose dependency issues
-log "  Resolved dependencies in methods/guest/Cargo.toml:"
-grep -E '(spel-framework|nssa_core) = ' methods/guest/Cargo.toml || true
+# The guest never builds spel-attrs; this builds it from the default git revision.
+log "Markers (--features idl)..."
+step markers cargo check -p "${PROGRAM}_core" --features idl
 
-# ─── Step 2: Build guest binary ───────────────────────────────────────────
-# This is where init bugs surface — if the default spel_ref or lez_ref point
-# to incompatible versions, the build fails here.
+log "Building the guest (Docker)..."
+step guest-build make build
+[ -f "guest/target/riscv32im-risc0-zkvm-elf/docker/$PROGRAM.bin" ] || fail "no guest binary"
+step program-id "$SPEL_BIN" program-id "guest/target/riscv32im-risc0-zkvm-elf/docker/$PROGRAM.bin"
 
-log "Step 2: Building guest binary..."
-RISC0_SKIP_BUILD= make build > "$WORK_DIR/build.log" 2>&1 || { cat "$WORK_DIR/build.log"; fail "Build failed"; }
-GUEST_BIN=$(find . -name "*.bin" -path "*/riscv32im*" | head -1)
-[ -n "$GUEST_BIN" ] || fail "No guest binary found"
-GUEST_BIN_ABS="$(realpath "$GUEST_BIN")"
-log "  ✓ Built: $(basename "$GUEST_BIN") ($(stat -c%s "$GUEST_BIN") bytes)"
-
-# ─── Step 3: Generate and validate IDL ────────────────────────────────────
-
-log "Step 3: Generating IDL..."
-# The scanner resolves the guest's graph with an offline metadata call,
-# which needs every lockfile entry cached, platforms the build never
-# fetched included. The documented consumer prerequisite applies to the
-# scaffold too.
-cargo fetch --manifest-path methods/guest/Cargo.toml > "$WORK_DIR/fetch.log" 2>&1 || fail "cargo fetch failed (see $WORK_DIR/fetch.log)"
-make idl > "$WORK_DIR/idl.log" 2>&1 || fail "IDL generation failed (see $WORK_DIR/idl.log)"
-IDL_FILE=$(find . -name "*-idl.json" | head -1)
-[ -n "$IDL_FILE" ] || fail "No IDL file found"
-IDL_ABS="$(realpath "$IDL_FILE")"
-
-# Validate IDL structure
-python3 -c "
+log "Generating the IDL..."
+step idl make idl SPEL="$SPEL_BIN"
+python3 - "$PROGRAM-idl.json" "$PROGRAM" <<'PY' || fail "unexpected IDL (see $PWD/$PROGRAM-idl.json)"
 import json, sys
-with open('$IDL_FILE') as f:
-    idl = json.load(f)
-assert 'name' in idl, 'Missing name'
-assert 'version' in idl, 'Missing version'
-assert 'instructions' in idl, 'Missing instructions'
-assert len(idl['instructions']) >= 2, f\"Expected >= 2 instructions, got {len(idl['instructions'])}\"
-ix_names = [ix['name'] for ix in idl['instructions']]
-assert 'initialize' in ix_names, f\"Expected 'initialize', got: {ix_names}\"
-assert 'do_something' in ix_names, f\"Expected 'do_something', got: {ix_names}\"
-print(f\"  ✓ IDL valid: {idl['name']} v{idl['version']}, {len(idl['instructions'])} instructions\")
-" || fail "IDL validation failed"
+idl = json.load(open(sys.argv[1]))
+assert idl["name"] == sys.argv[2], idl["name"]
+assert [m["name"] for m in idl["messages"]] == ["Increment", "Reset"], idl["messages"]
+assert idl["state_types"] == ["CounterState"], idl["state_types"]
+PY
 
-# ─── Step 4: Start sequencer ──────────────────────────────────────────────
-
-log "Step 4: Starting sequencer on port ${SEQUENCER_PORT}..."
-pgrep -f 'sequencer_service.*configs' | xargs -r kill 2>/dev/null || true
-sleep 1
-rm -rf "${LSSA_DIR}/rocksdb-${SEQUENCER_PORT}"
-
-# LEZ v0.2.0 moved this under lez/; prefer it, fall back to the old path.
-SEQ_CONFIGS="${LSSA_DIR}/lez/sequencer/service/configs/debug/sequencer_config.json"
-if [ ! -f "$SEQ_CONFIGS" ]; then
-    SEQ_CONFIGS="${LSSA_DIR}/sequencer/service/configs/debug/sequencer_config.json"
-fi
-if [ ! -f "$SEQ_CONFIGS" ]; then
-    SEQ_CONFIGS=$(find "$LSSA_DIR" -name "sequencer_config.json" 2>/dev/null | head -1)
-fi
-[ -n "$SEQ_CONFIGS" ] && [ -f "$SEQ_CONFIGS" ] || fail "Sequencer config not found"
-
-# LEZ v0.2.0 writes a bedrock_signing_key (and rocksdb) under config.home,
-# which defaults to "." — i.e. the sequencer's cwd. The LEZ checkout is
-# read-only in CI, so launching from there fails with "Permission denied".
-# Copy the config into the writable work dir with home rewritten to it.
-SEQ_HOME="$WORK_DIR/seq-home"
-mkdir -p "$SEQ_HOME"
-SEQ_CONFIG_PATCHED="$WORK_DIR/sequencer_config.json"
-# Paths are passed as argv (not interpolated into the source) so a path
-# containing quotes or other special characters can't break the script.
-python3 -c '
-import json, sys
-src, home, dst = sys.argv[1], sys.argv[2], sys.argv[3]
-cfg = json.load(open(src))
-cfg["home"] = home
-json.dump(cfg, open(dst, "w"))
-' "$SEQ_CONFIGS" "$SEQ_HOME" "$SEQ_CONFIG_PATCHED" || fail "Failed to patch sequencer config home"
-SEQ_CONFIGS="$SEQ_CONFIG_PATCHED"
-
-cd "$SEQ_HOME"
-RUST_LOG=info $SEQUENCER_BIN --port "$SEQUENCER_PORT" "$SEQ_CONFIGS" \
-    > "$WORK_DIR/sequencer.log" 2>&1 &
-SEQ_PID=$!
-sleep 2
-if ! kill -0 $SEQ_PID 2>/dev/null; then
-    echo "❌ Sequencer failed to start. Logs:"
-    cat "$WORK_DIR/sequencer.log" | tail -30
-    exit 1
-fi
-cd "$WORK_DIR/$PROJECT_NAME"
-
-log "  Waiting for sequencer..."
-for i in $(seq 1 90); do
-    if curl -sf -o /dev/null -w '%{http_code}' "$SEQUENCER_URL" 2>/dev/null | grep -qE '200|405'; then
-        log "  ✓ Sequencer up"; break
-    fi
-    kill -0 "$SEQ_PID" 2>/dev/null || fail "Sequencer died"
-    echo -n "."
-    sleep 2
-done
-
-log "  Waiting for first block..."
-for i in $(seq 1 60); do
-    if curl -sf -X POST "$SEQUENCER_URL" \
-        -H 'Content-Type: application/json' \
-        -d '{"jsonrpc":"2.0","method":"getLastBlockId","params":[],"id":1}' 2>/dev/null; then
-        log "  ✓ Sequencer producing blocks"; break
-    fi
-    sleep 3
-    echo -n "."
-done
-
-# ─── Step 5: Patch wallet config for correct sequencer port ──────────────
-# The wallet reads its sequencer address from wallet_config.json which points
-# to the default port. We need to update it to match our non-default port.
-
-log "Step 5: Updating wallet config for port ${SEQUENCER_PORT}..."
-WALLET_CONFIG="${NSSA_WALLET_HOME_DIR}/wallet_config.json"
-if [ -f "$WALLET_CONFIG" ]; then
-    # LEZ v0.2.1+ moved the sequencer address into a `sequencers` array; older
-    # revisions used a flat `sequencer_addr`. Patch whichever schema this wallet
-    # build expects — writing the wrong one is silently ignored by serde and the
-    # wallet then talks to the default port (spel/co #256).
-    # Paths/URLs are passed as argv so special characters can't break the script.
-    python3 -c '
-import json, sys
-path, url = sys.argv[1], sys.argv[2]
-with open(path) as f:
-    config = json.load(f)
-if isinstance(config.get("sequencers"), list):
-    entry = config["sequencers"][0] if config["sequencers"] else {}
-    entry["sequencer_addr"] = url
-    config["sequencers"] = [entry]
-    config.pop("sequencer_addr", None)
-else:
-    config["sequencer_addr"] = url
-with open(path, "w") as f:
-    json.dump(config, f, indent=4)
-print("  \u2713 Updated wallet config to use " + url)
-' "$WALLET_CONFIG" "$SEQUENCER_URL" || warn "Failed to update wallet config"
-else
-    warn "Wallet config not found at $WALLET_CONFIG — wallet may fail to connect"
-fi
-
-# ─── Step 6: Deploy program ──────────────────────────────────────────────
-
-log "Step 6: Deploying program..."
-# LEZ v0.2.5 deploys through program_loader: `spel deploy` creates the header +
-# segment accounts and prints the program address, which the calls below pass
-# as -p. The new accounts (and the signer below) hold nothing, so the debug
-# genesis account pays every fee (scripts/lib/fee-payer.sh).
-source "$SCRIPT_DIR/lib/fee-payer.sh"
-FEE_PAYER="${FEE_PAYER:-$(lez_fee_payer "$WALLET_BIN" "$WALLET_PASSWORD")}"
-[ -n "$FEE_PAYER" ] || fail "Could not import the debug genesis account as fee payer"
-log "  Fee payer: $FEE_PAYER"
-PROGRAM_ADDRESS=$("$SPEL_BIN" deploy "$GUEST_BIN_ABS" --fee-payer "$FEE_PAYER" 2> "$WORK_DIR/deploy.log") \
-    || { cat "$WORK_DIR/deploy.log"; fail "Deploy failed"; }
-log "  ✓ Program deployed at $PROGRAM_ADDRESS"
-
-# ─── Step 7: Create signer account ───────────────────────────────────────
-
-log "Step 7: Creating signer account..."
-SIGNER_ID=$(printf '%s\n' "$WALLET_PASSWORD" | $WALLET_BIN account new public 2>&1 \
-    | sed -n 's/.*Public\/\([A-Za-z0-9]*\).*/\1/p')
-[ -n "$SIGNER_ID" ] || fail "Could not create signer account"
-log "  Signer: ${SIGNER_ID:0:20}..."
-
-# ─── Step 8: Send initialize TX via spel CLI ─────────────────────────────
-
-log "Step 8: Sending initialize transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
-    initialize \
-    --owner "$SIGNER_ID" \
-    > "$WORK_DIR/initialize-tx.log" 2>&1 || { cat "$WORK_DIR/initialize-tx.log"; fail "Initialize TX failed"; }
-log "  ✓ Initialize TX submitted and confirmed"
-
-# ─── Step 9: Send do_something TX via spel CLI ───────────────────────────
-
-log "Step 9: Sending do_something transaction..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
-    do_something \
-    --owner "$SIGNER_ID" \
-    --amount 42 \
-    > "$WORK_DIR/do-something-tx.log" 2>&1 || { cat "$WORK_DIR/do-something-tx.log"; fail "do_something TX failed"; }
-log "  ✓ do_something TX submitted and confirmed"
-
-# ─── Step 10: Verify --dry-run works ──────────────────────────────────────
-
-log "Step 10: Verifying --dry-run mode..."
-SEQUENCER_URL="$SEQUENCER_URL" "$SPEL_BIN" --idl "$IDL_ABS" -p "$PROGRAM_ADDRESS" --fee-payer "$FEE_PAYER" \
-    --dry-run \
-    do_something \
-    --owner "$SIGNER_ID" \
-    --amount 100 \
-    > "$WORK_DIR/dry-run.log" 2>&1 || { cat "$WORK_DIR/dry-run.log"; fail "Dry-run failed"; }
-
-if grep -qi "dry.run\|DRY RUN" "$WORK_DIR/dry-run.log" 2>/dev/null; then
-    log "  ✓ Dry-run output verified"
-else
-    warn "  ⚠ Could not verify dry-run marker (may still be valid)"
-fi
-
-# ─── Done ─────────────────────────────────────────────────────────────────
-
-log ""
-log "🎉 Init E2E test PASSED!"
-log "  All steps completed successfully:"
-log "    ✅ spel init (default LEZ, PR spel on PRs) — scaffolded project"
-log "    ✅ make build — guest binary compiled"
-log "    ✅ make idl — IDL generated and validated"
-log "    ✅ wallet config patched — sequencer port configured"
-log "    ✅ deploy — program deployed to sequencer"
-log "    ✅ initialize TX — first instruction sent"
-log "    ✅ do_something TX — second instruction sent"
-log "    ✅ --dry-run — dry-run mode verified"
+log "🎉 Init e2e passed. Logs: $LOG_DIR"
