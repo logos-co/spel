@@ -44,7 +44,8 @@ are retired. Client generation (`spel-client-gen`) is not ported yet.
 - **Signers are never inferred.** One signature authorizes every actor of that account in the
   transaction, under every program.
 - **Private calls** (an actor that is `Private/…`, a private label, `--seal` or `--recover`) need
-  the program's binary (`--binary` or spel.toml `binary`). Only `--signer` authorizes, as in
+  no binary: each program it runs is loaded from the chain, or from a `--binary` / spel.toml
+  `binary` whose ImageID matches the deployed code. Only `--signer` authorizes, as in
   public calls: a private signer through the wallet's authorization key. A private root or
   `--actor` alone can be credited, not debited. A private PDA only by its program's seed grant
   (`--signer` refuses it). A private PDA must be registered first (`spel pda … --owner | --group … --register`).

@@ -21,7 +21,6 @@
 //! declared, and `send` adds it and simulates again.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
 use std::process;
 
 use lee::AccountId;
@@ -746,14 +745,18 @@ fn render_state(bytes: &[u8], program: AccountId, idl_program: AccountId, idl: &
 /// Run `spel send`. Exits non-zero on any error, and with [`EXIT_NO_CHANGE`] when the message
 /// was refused in simulation, reverted, or the included transaction changed no declared actor.
 ///
-/// `binary` is the program's binary, which a privacy-preserving transaction is proved with.
+/// A privacy-preserving transaction loads the programs it runs from `binaries` (the `--binary`
+/// files) and `configured` (spel.toml's), each matched by ImageID to the deployed code, else from
+/// the chain.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_command(
     args: &[String],
     idl: &SpelIdl,
     default_program: Option<&str>,
     fee_payer: Option<&str>,
     programs: Vec<(String, AccountId)>,
-    binary: Option<&str>,
+    binaries: Vec<String>,
+    configured: Vec<String>,
     globals: Vec<String>,
 ) {
     let mut flags = parse_send_args(args).unwrap_or_else(|e| {
@@ -850,7 +853,8 @@ pub async fn send_command(
         unreachable!("only a dry run proceeds without a wallet")
     };
     if prepared.private {
-        send_private(wallet, prepared, &flags, idl, programs, binary).await;
+        let loader = crate::private::Programs::new(binaries, configured);
+        send_private(wallet, prepared, &flags, idl, programs, loader).await;
     } else {
         send_public(wallet, &prepared, idl, programs).await;
     }
@@ -920,7 +924,7 @@ async fn send_public(
     report_changes(&names, &prepared.list, &before, &after, block, idl);
 }
 
-/// A privacy-preserving transaction: proved with the program's binary, with private actors
+/// A privacy-preserving transaction: proved with the programs it runs, with private actors
 /// witnessed through this wallet's keys. Undeclared actors the simulation reaches are added, one
 /// at a time.
 async fn send_private(
@@ -929,16 +933,18 @@ async fn send_private(
     flags: &SendFlags,
     idl: &SpelIdl,
     programs: Vec<(String, AccountId)>,
-    binary: Option<&str>,
+    mut loader: crate::private::Programs,
 ) {
-    let binary = binary.unwrap_or_else(|| {
-        fail(
-            "a private call is proved with the program's binary: pass --binary <FILE>, or name a \
-             spel.toml program with a `binary`",
-        )
-    });
-    let (catalog, _) = crate::private::catalog(Path::new(binary), prepared.list[0].program)
-        .unwrap_or_else(|e| fail(e));
+    // Every program a declared actor is on, before the first simulation.
+    {
+        let names = Names {
+            wallet: Some(&*wallet),
+            programs: programs.clone(),
+        };
+        for planned in &prepared.list {
+            load_program(&mut loader, wallet, &names, planned.program).await;
+        }
+    }
 
     let mut before = Vec::with_capacity(prepared.list.len());
     for planned in &prepared.list {
@@ -980,7 +986,7 @@ async fn send_private(
                     mentions,
                     0,
                     prepared.bytes.clone(),
-                    &catalog,
+                    &loader.catalog,
                     None,
                     delivery,
                     prepared.fee_payer,
@@ -992,6 +998,18 @@ async fn send_private(
             Ok((hash, _)) => break hash,
             Err(error) => error,
         };
+        // A program the call reaches is loaded, whatever --no-auto-actors says: code grants no
+        // authority.
+        if let Some(program) = crate::private::undeclared_program(&error) {
+            if loader.has(program) {
+                fail(format!(
+                    "the simulation reaches program {}, which is loaded: {error:#}",
+                    names.program_name(program)
+                ));
+            }
+            load_program(&mut loader, wallet, &names, program).await;
+            continue;
+        }
         let reached = (!flags.no_auto_actors)
             .then(|| crate::private::undeclared_actor(&error))
             .flatten();
@@ -1066,8 +1084,15 @@ async fn send_private(
                 .unwrap_or_else(|e| fail(e)),
         );
         prepared.list.push(reached);
+        load_program(&mut loader, wallet, &names, program).await;
         inferred += 1;
     };
+    for path in loader.unused() {
+        eprintln!(
+            "⚠️  --binary {path} is the code of no program this call ran, so it wasn't used (a \
+             stale build?)"
+        );
+    }
     eprintln!("Submitted {hash}, waiting for a block...");
     let (block, reverted) = crate::private::settle(wallet, hash)
         .await
@@ -1222,6 +1247,23 @@ fn seal_hint(to: AccountId, prepared: &Prepared, flags: &SendFlags, names: &Name
          {to}@<PROGRAM>",
         with_seal("keys:<FILE>")
     )
+}
+
+/// Load `program` for a private call unless it's ready, and say where it came from.
+async fn load_program(
+    loader: &mut crate::private::Programs,
+    wallet: &Wallet,
+    names: &Names<'_>,
+    program: AccountId,
+) {
+    if loader.has(program) {
+        return;
+    }
+    let source = loader
+        .load(wallet, program)
+        .await
+        .unwrap_or_else(|e| fail(e));
+    eprintln!("  program {}: from {source}", names.program_name(program));
 }
 
 /// `spel send` with every actor of `list` (root first) declared, and nothing more inferred unless

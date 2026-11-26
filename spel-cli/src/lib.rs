@@ -47,7 +47,7 @@ pub async fn run() {
     let mut data_hex: Option<String> = None;
     let mut inspect_format: Option<String> = None;
     let mut fee_payer: Option<String> = None;
-    let mut binary_arg: Option<String> = None;
+    let mut binary_args: Vec<String> = Vec::new();
     let mut remaining_args: Vec<String> = vec![args[0].clone()];
     let mut i = 1;
 
@@ -119,7 +119,7 @@ pub async fn run() {
                     eprintln!("❌ --binary requires the program binary's path");
                     process::exit(1);
                 }
-                binary_arg = Some(args[i].clone());
+                binary_args.push(args[i].clone());
             },
             _ => remaining_args.push(args[i].clone()),
         }
@@ -134,11 +134,15 @@ pub async fn run() {
         ("--idl", idl_explicit.then(|| idl_path.clone())),
         ("--program", program_ref.clone()),
         ("--fee-payer", fee_payer.clone()),
-        ("--binary", binary_arg.clone()),
     ]
     .into_iter()
     .filter_map(|(flag, value)| value.map(|value| [flag.to_owned(), value]))
     .flatten()
+    .chain(
+        binary_args
+            .iter()
+            .flat_map(|binary| ["--binary".to_owned(), binary.clone()]),
+    )
     .collect();
 
     // Load spel.toml config
@@ -214,10 +218,18 @@ pub async fn run() {
         }
     }
 
-    // An explicit --binary wins over spel.toml's.
-    if binary_arg.is_some() {
-        program_path = binary_arg;
+    // An explicit --binary wins over spel.toml's for the commands that take one program's binary
+    // (`deploy`, `pda --group`); `send` takes them all.
+    let several_binaries = binary_args.len() > 1;
+    if let Some(binary) = binary_args.first() {
+        program_path = Some(binary.clone());
     }
+    let one_binary = |command: &str| {
+        if several_binaries {
+            eprintln!("❌ {command} takes one --binary");
+            process::exit(1);
+        }
+    };
 
     // Handle commands that don't need an IDL
     if let Some(cmd) = remaining_args.get(1).map(|s| s.as_str()) {
@@ -314,6 +326,10 @@ pub async fn run() {
                 return;
             },
             "pda" if private_cmds::is_private_pda(&remaining_args[2..]) => {
+                // Only a group's PDA reads a binary (the program's ImageID).
+                if remaining_args.iter().skip(2).any(|a| a == "--group") {
+                    one_binary("pda --group");
+                }
                 let program = program_address.clone().unwrap_or_else(|| {
                     eprintln!("❌ a private PDA needs its program: pass --program");
                     eprintln!("{}", private_cmds::PDA_USAGE);
@@ -373,6 +389,9 @@ pub async fn run() {
                             process::exit(1);
                         },
                     }
+                }
+                if binary.is_none() {
+                    one_binary("deploy");
                 }
                 let binary = binary.or(program_path.clone()).unwrap_or_else(|| {
                     eprintln!(
@@ -457,7 +476,8 @@ pub async fn run() {
                 program_address.as_deref(),
                 fee_payer.as_deref(),
                 programs,
-                program_path.as_deref(),
+                binary_args,
+                config_binaries(config.as_ref()),
                 globals,
             )
             .await;
@@ -519,6 +539,21 @@ fn config_programs(config: Option<&SpelConfig>) -> Vec<(String, lee::AccountId)>
                 },
             }
         })
+        .collect()
+}
+
+/// Every spel.toml program's `binary`, resolved against the file's directory.
+fn config_binaries(config: Option<&(std::path::PathBuf, SpelConfig)>) -> Vec<String> {
+    let Some((path, cfg)) = config else {
+        return Vec::new();
+    };
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+    cfg.programs
+        .iter()
+        .flat_map(|programs| programs.values())
+        .chain(cfg.program.iter())
+        .filter_map(|program| program.binary.as_ref())
+        .map(|binary| dir.join(binary).to_string_lossy().to_string())
         .collect()
 }
 

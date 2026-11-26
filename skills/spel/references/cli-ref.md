@@ -17,7 +17,7 @@ spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]     # `--` keeps message fields apart 
 | `-t, --type <TYPE>` | `inspect`: decode as this type |
 | `-d, --data <HEX>` | `inspect`: decode offline |
 | `--format text\|hex\|json` | `program-id` output |
-| `--binary <FILE>` | the program's `.bin`: proves private calls, gives `pda --group` its ImageID |
+| `--binary <FILE>` | a program's `.bin`, repeatable: local copies for private calls (matched by ImageID, else loaded from chain); `deploy` and `pda --group` take one |
 
 Accounts: base58, hex, `Public/<id>`, `Private/<id>`, or a wallet label. Programs: an address,
 a spel.toml name, or `native` (an account's balance). Actors: `ACCOUNT@PROGRAM`.
@@ -28,7 +28,7 @@ a spel.toml name, or `native` (an account's balance). Actors: `ACCOUNT@PROGRAM`.
 [programs.token]
 address = "<header account from spel deploy>"
 idl     = "artifacts/token-idl.json"
-binary  = "target/guest/token.bin"      # optional: default for `spel deploy`
+binary  = "target/guest/token.bin"      # optional: deploy default; local copy for private calls
 core    = "programs/token/core"         # optional: the crate `generate-idl` reads
 
 [programs.token.idl-gen]                # optional: generate-idl names; flags win
@@ -63,7 +63,8 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
-Private calls (a private actor, `--seal` or `--recover`): proved with the binary; only
+Private calls (a private actor, `--seal` or `--recover`): the programs they run are loaded
+from matching local binaries or the chain; only
 `--signer` authorizes, as in public calls (a private root or `--actor` alone can be credited,
 not debited; a private PDA only through its program's seed grant, so `--signer` refuses it);
 actors reached by sync messages are inferred from simulation and added without authority

@@ -13,13 +13,19 @@
 
 use std::path::Path;
 
-use lee::{privacy_preserving_transaction::circuit::ProgramCatalog, program::Program, AccountId};
+use lee::{
+    privacy_preserving_transaction::circuit::{Dependency, ProgramCatalog, ProgramKind},
+    program::Program,
+    AccountId,
+};
 use lee_core::account::Actor;
 use lee_core::execution_state::ExecutionError;
-use lee_core::program::PdaSeed;
+use lee_core::native_token::NATIVE_TOKEN_PROGRAM_ID;
+use lee_core::program::{PdaSeed, ProgramHeader, ProgramId, PROGRAM_LOADER_ACCOUNT_ID};
 use lee_core::{NullifierPublicKey, PrivateAccountKind};
 use wallet::account::{AccountIdWithPrivacy, Label};
 use wallet::cli::{account::AccountSubcommand, execute_subcommand, Command};
+use wallet::program_facades::program_loader::ProgramLoader;
 use wallet::storage::key_chain::{SharedAccountDerivation, SharedAccountEntry};
 use wallet::{AccountIdentity, AccountMention, AsyncDelivery, ExecutionFailureKind};
 
@@ -32,11 +38,151 @@ use crate::send::{Names, Wallet};
 /// # Errors
 /// If the binary can't be read or isn't a program binary.
 pub fn catalog(binary: &Path, program: AccountId) -> Result<(ProgramCatalog, Program), String> {
+    let guest = read_program(binary)?;
+    Ok((ProgramCatalog::from([(program, guest.clone())]), guest))
+}
+
+/// The programs a privacy-preserving transaction runs. The wallet simulates the whole call, public
+/// parts included, and proves its private transitions, so every program it reaches must be here
+/// (the native token program is the protocol's own).
+///
+/// A program is loaded from a local binary whose ImageID matches the deployed header's, else from
+/// the chain (its bytecode segments). A binary that isn't the deployed code is never used: its
+/// proof would claim the wrong ImageID.
+pub struct Programs {
+    pub catalog: ProgramCatalog,
+    /// `--binary` files, which must exist, then spel.toml binaries, which may not be built yet.
+    explicit: Vec<String>,
+    configured: Vec<String>,
+    /// The local binaries, read on first need: path, ImageID, program, and whether it was used.
+    local: Option<Vec<LocalBinary>>,
+}
+
+struct LocalBinary {
+    path: String,
+    image: ProgramId,
+    program: Program,
+    used: bool,
+}
+
+impl Programs {
+    #[must_use]
+    pub fn new(explicit: Vec<String>, configured: Vec<String>) -> Self {
+        Self {
+            catalog: ProgramCatalog::default(),
+            explicit,
+            configured,
+            local: None,
+        }
+    }
+
+    /// Whether `program` is ready: the native token program, or one already loaded.
+    #[must_use]
+    pub fn has(&self, program: AccountId) -> bool {
+        program == NATIVE_TOKEN_PROGRAM_ID || self.catalog.programs.contains_key(&program)
+    }
+
+    /// Load `program`, and say where it came from: a local binary's path or "the chain".
+    ///
+    /// # Errors
+    /// If a `--binary` can't be read, or the program isn't deployed through the program loader.
+    pub async fn load(&mut self, wallet: &Wallet, program: AccountId) -> Result<String, String> {
+        let header = wallet
+            .get_account_view(Actor::new(program, PROGRAM_LOADER_ACCOUNT_ID))
+            .await
+            .map_err(|e| format!("reading program {program}'s header: {e:#}"))?
+            .and_then(|account| {
+                ProgramHeader::from_loader_actor_state(
+                    account.data.actor_state(PROGRAM_LOADER_ACCOUNT_ID),
+                )
+            })
+            .ok_or_else(|| {
+                format!(
+                    "{program} has no program header: it isn't a program deployed through the \
+                     program loader, so spel can't load it"
+                )
+            })?;
+        if let Some((path, guest)) = self.local_match(header.image_id)? {
+            self.insert(program, guest);
+            return Ok(path);
+        }
+        let deployed = ProgramLoader(wallet)
+            .program(program)
+            .await
+            .map_err(|e| format!("loading program {program} from the chain: {e:#}"))?
+            .ok_or_else(|| format!("program {program}'s bytecode isn't on chain"))?;
+        self.insert(program, deployed);
+        Ok("the chain".to_owned())
+    }
+
+    /// The `--binary` files no program of the call matched: stale builds, or another program's.
+    #[must_use]
+    pub fn unused(&self) -> Vec<&str> {
+        self.local
+            .iter()
+            .flatten()
+            .filter(|b| !b.used && self.explicit.contains(&b.path))
+            .map(|b| b.path.as_str())
+            .collect()
+    }
+
+    /// The local binary whose ImageID is `image`, marked used.
+    fn local_match(&mut self, image: ProgramId) -> Result<Option<(String, Program)>, String> {
+        Ok(self
+            .local()?
+            .iter_mut()
+            .find(|binary| binary.image == image)
+            .map(|binary| {
+                binary.used = true;
+                (binary.path.clone(), binary.program.clone())
+            }))
+    }
+
+    fn insert(&mut self, address: AccountId, program: Program) {
+        self.catalog.programs.insert(
+            address,
+            Dependency {
+                program,
+                kind: ProgramKind::Disclosed,
+            },
+        );
+    }
+
+    fn local(&mut self) -> Result<&mut Vec<LocalBinary>, String> {
+        if self.local.is_none() {
+            let mut local = Vec::new();
+            let configured = self
+                .configured
+                .iter()
+                .filter(|path| !self.explicit.contains(path) && Path::new(path).exists());
+            for (path, required) in self
+                .explicit
+                .iter()
+                .map(|path| (path, true))
+                .chain(configured.map(|path| (path, false)))
+            {
+                match read_program(Path::new(path)) {
+                    Ok(program) => local.push(LocalBinary {
+                        path: path.clone(),
+                        image: program.id(),
+                        program,
+                        used: false,
+                    }),
+                    Err(e) if required => return Err(e),
+                    Err(e) => eprintln!("⚠️  spel.toml binary skipped: {e}"),
+                }
+            }
+            self.local = Some(local);
+        }
+        Ok(self.local.get_or_insert_with(Vec::new))
+    }
+}
+
+fn read_program(binary: &Path) -> Result<Program, String> {
     let bytes = std::fs::read(binary)
         .map_err(|e| format!("reading the program binary {}: {e}", binary.display()))?;
-    let guest = Program::new(bytes.into())
-        .map_err(|e| format!("{} is not a program binary: {e:?}", binary.display()))?;
-    Ok((ProgramCatalog::from([(program, guest.clone())]), guest))
+    Program::new(bytes.into())
+        .map_err(|e| format!("{} is not a program binary: {e:?}", binary.display()))
 }
 
 /// How a declared private account takes part: through the keys this wallet holds for it.
@@ -146,6 +292,21 @@ pub fn refusal(error: &ExecutionFailureKind) -> Option<String> {
         ExecutionFailureKind::TransactionBuildError(
             lee::error::LeeError::InvalidProgramBehavior(cause),
         ) => Some(format!("{cause:?}")),
+        _ => None,
+    }
+}
+
+/// The program a simulation reached that isn't in the catalog. Typed, like [`undeclared_actor`].
+#[must_use]
+pub fn undeclared_program(error: &ExecutionFailureKind) -> Option<AccountId> {
+    match error {
+        ExecutionFailureKind::TransactionBuildError(
+            lee::error::LeeError::InvalidProgramBehavior(
+                lee::error::InvalidProgramBehaviorError::UndeclaredProgramDependency {
+                    program_account_id,
+                },
+            ),
+        ) => Some(*program_account_id),
         _ => None,
     }
 }

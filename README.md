@@ -110,9 +110,10 @@ works. `--dry-run` (or `--dry-run=json`) prints the transaction without sending.
 
 A call is a **privacy-preserving transaction** when an actor's account is private
 (`Private/<id>`, a private wallet label), or when it sends a credit with `--seal` / `--recover`.
-The wallet runs it locally against its decrypted states and proves it with the program's binary
-(`--binary`, or the `spel.toml` program's `binary`); only the proof, nullifiers, encrypted notes
-and what crosses into public execution are published.
+The wallet runs it locally against its decrypted states and proves it; only the proof,
+nullifiers, encrypted notes and what crosses into public execution are published. The programs
+it runs are loaded from the chain, or from a local binary (`--binary`, repeatable, or a
+`spel.toml` `binary`) whose ImageID matches the deployed code.
 
 ```bash
 # The seat pays an employee known only by their keys; the credit is sealed to them.

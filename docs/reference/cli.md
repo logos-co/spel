@@ -27,7 +27,7 @@ option.
 | `-i, --idl <FILE>` | the IDL (v2). Overrides a `spel.toml` IDL. |
 | `-p, --program <NAME\|ADDRESS>` | a `spel.toml` program name (also loads its IDL), or a program address in base58 or hex |
 | `--fee-payer <ACCOUNT>` | the account that pays the fee (`send`, `deploy`); for a private call, an owned private account |
-| `--binary <FILE>` | the program's binary (the R0BF `.bin`). Overrides a `spel.toml` `binary`. A private call is proved with it, and `pda --group` derives from its ImageID |
+| `--binary <FILE>` | a program's binary (the R0BF `.bin`), repeatable. A private call uses each one whose ImageID matches a program it runs, instead of loading that program from the chain. `deploy` and `pda --group` take one, which overrides the `spel.toml` `binary` |
 | `-t, --type <TYPE>` | `inspect`: decode as this IDL type instead of the state type |
 | `-d, --data <HEX>` | `inspect`: decode these bytes offline instead of fetching |
 | `--format <text\|hex\|json>` | `program-id` output format |
@@ -63,7 +63,7 @@ to the file.
 [programs.token]
 address = "B6Es5QgFbbB47PLmrBW7qnFzATpXeRrBG2P3XdKQs86C"   # the deployed header account
 idl     = "artifacts/token-idl.json"
-binary  = "target/guest/token.bin"                          # default for `spel deploy`
+binary  = "target/guest/token.bin"                          # deploy default; a local copy for private calls
 
 [programs.nft]
 address = "9Afg4tSzEQJAiWF2WoQXonY8Chqg4k2njXsy8ywyz69b"
@@ -186,9 +186,17 @@ and suggests `--signer` or `--fee-payer`.
 
 A call is sent as a **privacy-preserving transaction** when an actor's account is private, or
 when it has a `--seal` or `--recover` credit. The wallet runs the call locally, against the
-decrypted states it holds, and proves it with the program's binary (`--binary`, or the
-`spel.toml` program's `binary`). Only the proof, nullifiers, encrypted notes and whatever
-crosses into public execution are published.
+decrypted states it holds, and proves it. Only the proof, nullifiers, encrypted notes and
+whatever crosses into public execution are published.
+
+**The programs it runs** are loaded for the wallet's simulation and proof: every program a
+declared actor is on, then each program the simulation reaches (`program nft: from the chain`).
+A program comes from a local binary whose ImageID matches the deployed header's (`--binary`, any
+`spel.toml` `binary`), else from the chain, where its bytecode is stored. A local binary that
+isn't the deployed code is never used, since its proof would claim the wrong ImageID; a
+`--binary` that matched nothing is reported after sending. The native token program is the
+protocol's own and needs nothing. A program not deployed through the program loader (a builtin)
+can't be loaded.
 
 **Private accounts take part through the wallet's keys**, not signatures:
 - an account of the wallet's own key tree;
