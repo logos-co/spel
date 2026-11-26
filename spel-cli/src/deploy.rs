@@ -125,7 +125,8 @@ pub(crate) struct StdoutToStderr {
 impl StdoutToStderr {
     pub(crate) fn new() -> Self {
         use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        // Best effort: a failed flush only reorders output between the streams.
+        std::io::stdout().flush().ok();
         #[cfg(unix)]
         {
             // SAFETY: dup/dup2/close on the process's own standard descriptors.
@@ -150,7 +151,8 @@ impl StdoutToStderr {
 impl Drop for StdoutToStderr {
     fn drop(&mut self) {
         use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        // Best effort: a failed flush only reorders output between the streams.
+        std::io::stdout().flush().ok();
         #[cfg(unix)]
         if let Some(saved) = self.saved.take() {
             // SAFETY: restores the descriptor saved in `new`.
