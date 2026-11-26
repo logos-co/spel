@@ -9,9 +9,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # LEZ actor-model port: the framework, its macros and
-  # the FFI compile test are retired, and the sequencer jobs (privacy smoke, FFI call, multisig,
-  # init e2e) drive instruction sends that `spel send` replaces. They return with that port.
+  # LEZ actor-model port: the framework, its macros and the FFI compile test are retired. The
+  # sequencer jobs are replaced by one smoke test (scripts/smoke-test.sh).
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
@@ -30,3 +29,76 @@ jobs:
         run: cargo build --workspace --all-targets
       - name: Test
         run: cargo test --workspace --all-targets
+
+  smoke-test:
+    name: Smoke test (init, deploy, public and private sends)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      RISC0_VERSION: "3.0.5"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "smoke"
+
+      - name: LEZ tag spel links
+        id: lez
+        run: |
+          TAG=$(grep -m1 '^lee = ' spel-cli/Cargo.toml | grep -oE 'tag = "[^"]*"' | cut -d'"' -f2)
+          [ -n "$TAG" ] || { echo "no LEZ tag in spel-cli/Cargo.toml"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install risc0 toolchain
+        env:
+          # rzup looks releases up via the GitHub API; unauthenticated, that is 60 requests/hour
+          # shared by every job on the runner's IP.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          curl -L https://risc0.com/install | bash
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
+          export PATH="$HOME/.risc0/bin:$PATH"
+          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
+          rzup install rust
+
+      - name: Install logos-blockchain-circuits
+        run: |
+          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Clone LEZ
+        run: git clone --depth 1 --branch ${{ steps.lez.outputs.tag }} https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lez
+
+      - name: Cache the sequencer and wallet
+        id: lez-bins
+        uses: actions/cache@v4
+        with:
+          path: |
+            /tmp/lez/target/release/sequencer_service
+            /tmp/lez/target/release/wallet
+          key: lez-bins-${{ steps.lez.outputs.tag }}
+
+      - name: Build the sequencer and wallet
+        if: steps.lez-bins.outputs.cache-hit != 'true'
+        working-directory: /tmp/lez
+        run: |
+          cargo build --release --features standalone -p sequencer_service
+          cargo build --release -p wallet
+          # Keep the two binaries, free the rest of LEZ's target for spel's build.
+          find target/release -mindepth 1 -maxdepth 1 ! -name sequencer_service ! -name wallet -exec rm -rf {} +
+
+      - name: Run the smoke test
+        env:
+          LEZ_DIR: /tmp/lez
+        run: scripts/smoke-test.sh /tmp/spel-smoke
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: /tmp/spel-smoke/logs
