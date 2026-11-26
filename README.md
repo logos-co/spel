@@ -8,9 +8,9 @@ as privacy-preserving transactions), read and decode their state, and deploy pro
 
 On LEZ's actor model a program is written against `lee_core` directly: an actor is an
 (account, program) pair, and a handler receives one message for one actor. SPEL no longer
-provides a guest framework; the `#[lez_program]` macros, `spel init` scaffolding and
-instruction-style transactions were retired with the move to actors (they remain in git
-history).
+provides a guest framework; the `#[lez_program]` macros and instruction-style transactions
+were retired with the move to actors (they remain in git history). `spel init` scaffolds a
+plain actor program to start from.
 
 ## Documentation
 
@@ -66,6 +66,7 @@ spel inspect alice@token
 
 | command | what it does |
 | --- | --- |
+| `init <PROJECT>` | scaffold an actor program (a counter): core, handler and guest crates, spel.toml, Makefile |
 | `generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]` | IDL v2 from a core crate; missing values come from spel.toml (`core`, `[idl-gen]`), then from `spel-attrs` markers |
 | `send --root <ACCOUNT>[@<PROGRAM>] … -- <MESSAGE> [--field value]…` | send one message to an actor, publicly or privately; reports what changed |
 | `inspect <ACCOUNT>[@<PROGRAM>]` | read and decode an actor's state (a private one from the wallet's decrypted copy), or list every program holding state on an account |
@@ -149,13 +150,13 @@ The sender of a message that reaches public execution appears as a fresh blinded
 | --- | --- |
 | `spel-cli` (binary `spel`) | the CLI |
 | `spel-framework-core` | IDL v2 types, the IDL generator (feature `idl-gen`), the IDL-driven Borsh decoder, PDA helpers |
-| `spel-attrs` | inert `#[message]`, `#[state]` and `#[event]` markers for core crates, read by `generate-idl`; a build-time dependency, never linked into the guest |
+| `spel-attrs` | inert `#[message]`, `#[state]` and `#[event]` markers for core crates, read by `generate-idl`; can be optional (`cfg_attr`), never linked into the guest |
 | `spel-client-gen` | **parked**: generates clients from v1 IDLs; excluded from the workspace until it is ported to actor programs |
 
 ## Not yet ported
 
 Multi-party signing (`sign` / `submit`), events in `send`
-output, project scaffolding for actor programs, and client generation.
+output, and client generation.
 
 ## License
 

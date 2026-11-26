@@ -115,7 +115,19 @@ prints hex and the candidates until `--type` picks one. Without a named message 
 type or events module, the ones the core crate marks are used (crate `spel-attrs`, inert
 attributes): `#[message]` on the enum, `#[state]` on the state types, `#[event]` on the trait
 the events implement. Names win, with a warning if they differ. No events module and no
-marked trait means no events.
+marked trait means no events. Markers behind a feature count too
+(`#[cfg_attr(feature = "idl", spel_attrs::message)]`, `spel-attrs` optional).
+
+### init
+
+```bash
+spel init my-counter [--lez-tag T | --lez-rev R] [--spel-tag T | --spel-rev R | --spel-path DIR] [--spel-git URL]
+cd my-counter && make build idl && make deploy FEE_PAYER=<funded>
+```
+
+A counter: `<snake>_core` (markers behind feature `idl`), `<snake>_program` (handler, host
+tests), `guest/` (risc0, Docker build), spel.toml, Makefile (`build`, `idl`, `deploy`, `test`).
+Defaults: LEZ `v0.4.0-rc3`, spel-attrs at this spel's commit.
 
 ### deploy, program-id, pda, idl
 

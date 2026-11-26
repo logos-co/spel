@@ -17,6 +17,7 @@ pub mod config;
 pub mod deploy;
 pub mod generate_idl;
 pub mod hex;
+pub mod init;
 pub mod inspect;
 pub mod parse;
 pub mod private;
@@ -343,6 +344,39 @@ pub async fn run() {
                 private_cmds::blind_command(&remaining_args[2..]);
                 return;
             },
+            "init" => {
+                let rest = &remaining_args[2..];
+                if rest.iter().any(|a| a == "-h" || a == "--help") {
+                    println!("{}", init::USAGE);
+                    println!();
+                    println!("Scaffold an actor program: a counter with a core crate (marked for");
+                    println!("generate-idl), a handler crate and a risc0 guest, plus a spel.toml and a");
+                    println!("Makefile (build, idl, deploy, test).");
+                    println!();
+                    println!("  --lez-tag / --lez-rev    LEZ version (default: tag {})", init::DEFAULT_LEZ_TAG);
+                    println!("  --spel-tag / --spel-rev  spel version for spel-attrs (default: this spel's commit)");
+                    println!("  --spel-git <URL>         spel repository (default: logos-co/spel)");
+                    println!("  --spel-path <DIR>        a local spel checkout instead of git");
+                    return;
+                }
+                let args = init::parse_args(rest).unwrap_or_else(|e| {
+                    eprintln!("❌ {e}");
+                    eprintln!("{}", init::USAGE);
+                    process::exit(1);
+                });
+                match init::init_command(&args) {
+                    Ok(root) => {
+                        eprintln!("✅ Created {}", root.display());
+                        eprintln!("   cd {} && make build idl", root.display());
+                        eprintln!("   make deploy FEE_PAYER=<funded account>");
+                    },
+                    Err(e) => {
+                        eprintln!("❌ {e}");
+                        process::exit(1);
+                    },
+                }
+                return;
+            },
             "transfer" => {
                 private_cmds::transfer_command(&remaining_args[2..]).await;
                 return;
@@ -416,6 +450,7 @@ pub async fn run() {
         );
         eprintln!();
         eprintln!("Commands that don't need --idl:");
+        eprintln!("  init <PROJECT>           Scaffold an actor program (spel init --help)");
         eprintln!("  deploy [BINARY] --fee-payer <ADDRESS>  Deploy a program, print its address");
         eprintln!(
             "  program-id <FILE> [FILE...]  Extract ProgramId from program .bin (R0BF) binary(ies)"

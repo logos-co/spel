@@ -14,12 +14,12 @@ SPEL is the client toolchain for programs on LEZ's actor model. An actor is an
   accounts that sign, and reports what changed; with a private account or a sealed credit it
   sends a **privacy-preserving transaction**, inferring the actors from the wallet's simulation;
 - **reads** an actor's state, public or private, and decodes it through the IDL;
-- **deploys** programs through LEZ's program loader;
+- **deploys** programs through LEZ's program loader, and **scaffolds** one (`spel init`, a
+  counter);
 - derives and registers **private PDAs** (`pda --owner | --group --register`), blinds ids
   (`blind`), and moves native balance (`transfer`).
 
-The old `#[lez_program]` guest framework, `spel init`, instruction calls and `sign`/`submit`
-are retired. Client generation (`spel-client-gen`) is not ported yet.
+The old `#[lez_program]` guest framework, instruction calls and `sign`/`submit` are retired. Client generation (`spel-client-gen`) is not ported yet.
 
 ## References
 

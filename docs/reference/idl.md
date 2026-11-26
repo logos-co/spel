@@ -193,7 +193,8 @@ idl = ["dep:spel-attrs"]
 pub enum Message { Increment { by: u64 }, Reset }
 ```
 
-`cargo check --features idl` checks that the markers compile.
+`cargo check --features idl` checks that the markers compile. `spel init` scaffolds a core
+crate this way.
 
 Names win over markers: a command-line flag first, then `spel.toml`'s `[idl-gen]`, then the
 markers. When a name and the markers disagree, the generator uses the name and warns. Mark

@@ -13,6 +13,7 @@
 // directory that contains the `.framework`, and add it as an rpath. Non-framework
 // Python builds report an empty prefix, in which case we add nothing.
 fn main() {
+    embed_git_rev();
     println!("cargo:rerun-if-env-changed=PYO3_PYTHON");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
@@ -40,4 +41,28 @@ fn main() {
     if !prefix.is_empty() {
         println!("cargo:rustc-link-arg-bins=-Wl,-rpath,{prefix}");
     }
+}
+
+/// The commit this binary is built from, as `SPEL_GIT_REV` (empty outside a git checkout):
+/// `spel init` pins the scaffold's spel crates to it, so a project matches the CLI that made it.
+fn embed_git_rev() {
+    let manifest = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(&manifest)
+            .args(args)
+            .output()
+            .ok()
+            .filter(|out| out.status.success())
+            .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    };
+    let rev = git(&["rev-parse", "HEAD"]).unwrap_or_default();
+    // Rebuild when HEAD moves: a commit, a checkout, or a ref it points at.
+    if let Some(dir) = git(&["rev-parse", "--absolute-git-dir"]) {
+        println!("cargo:rerun-if-changed={dir}/HEAD");
+        if let Some(head_ref) = git(&["symbolic-ref", "-q", "HEAD"]) {
+            println!("cargo:rerun-if-changed={dir}/{head_ref}");
+        }
+    }
+    println!("cargo:rustc-env=SPEL_GIT_REV={rev}");
 }

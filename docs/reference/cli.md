@@ -422,6 +422,44 @@ Fields take the same values as in `send`, except that wallet labels don't resolv
 
 ---
 
+## `init`
+
+Scaffold an actor program: a counter to start from.
+
+```bash
+spel init <PROJECT> [--lez-tag <TAG> | --lez-rev <REV>] [--spel-tag <TAG> | --spel-rev <REV> | --spel-path <DIR>] [--spel-git <URL>]
+```
+
+| option | meaning |
+| --- | --- |
+| `<PROJECT>` | the directory to create; its name (`my-counter`) gives the crate names (`my_counter_core`, …) |
+| `--lez-tag` / `--lez-rev` | the LEZ version the crates depend on; default: the tag this spel links (`v0.4.0-rc3`) |
+| `--spel-tag` / `--spel-rev` | the spel version of `spel-attrs`; default: the commit this spel was built from |
+| `--spel-git <URL>` | the spel repository; default: logos-co/spel |
+| `--spel-path <DIR>` | a local spel checkout instead of git |
+
+It writes:
+
+| path | contents |
+| --- | --- |
+| `<snake>_core/` | the `Message` enum and `CounterState`, marked for `generate-idl` behind the `idl` feature ([idl.md](idl.md#markers)) |
+| `<snake>_program/` | `handle_message`: the counter's logic, with host tests |
+| `guest/` | the risc0 guest, `lee_core::actor_entrypoint!(handle_message)`; its own workspace, built in Docker |
+| `spel.toml` | the program's `idl`, `binary` and `core`; `make deploy` fills in `address` |
+| `Makefile` | `build` (`cargo risczero build`), `idl`, `deploy FEE_PAYER=<account>`, `test` |
+
+```bash
+spel init my-counter && cd my-counter
+make build idl
+make deploy FEE_PAYER=<funded account>
+spel send --root alice --signer alice -- increment --by 2
+spel inspect alice@my_counter
+```
+
+The guest needs Docker and `cargo risczero` (`rzup`).
+
+---
+
 ## `generate-idl`
 
 Generate an IDL v2 from a program's core crate. The program needs no annotations.

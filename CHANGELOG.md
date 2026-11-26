@@ -35,6 +35,12 @@
 - **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
   can act for, including group-shared private PDAs, or to `keys:FILE`.
 
+- **`spel init <PROJECT>`** is back, for actor programs: it scaffolds a counter with a core
+  crate, a handler crate with host tests, a risc0 guest (`lee_core::actor_entrypoint!`), a
+  `spel.toml` and a Makefile (`build`, `idl`, `deploy`, `test`). It pins LEZ `v0.4.0-rc3`
+  (`--lez-tag`/`--lez-rev`) and spel-attrs at the commit spel was built from
+  (`--spel-tag`/`--spel-rev`/`--spel-path`, `--spel-git`). The guest uses risc0-zkvm 3.1 (every
+  3.0 release is yanked) and resolves dependencies for its rustc 1.88.
 - **`generate-idl` reads markers behind a feature:** `#[cfg_attr(feature = "idl",
   spel_attrs::message)]` counts, so `spel-attrs` can be an optional dependency.
 
