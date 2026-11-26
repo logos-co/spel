@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 
 use crate::config::ProgramConfig;
 
-pub const USAGE: &str = "Usage: spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... \
+pub const USAGE: &str =
+    "Usage: spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... \
                          [--events <MODULE>] [--namespace <NAME>]\n\
                          Values not given come from spel.toml: the program's `core` and its \
                          [idl-gen] table (select it with --program <name>).";
@@ -164,7 +165,10 @@ mod tests {
         };
         let program = program(Some("programs/oracle/core"), Some(gen));
         let options = resolve(GenArgs::default(), Some((Path::new("/proj"), &program))).unwrap();
-        assert_eq!(options.crate_dir, PathBuf::from("/proj/programs/oracle/core"));
+        assert_eq!(
+            options.crate_dir,
+            PathBuf::from("/proj/programs/oracle/core")
+        );
         assert_eq!(options.message.as_deref(), Some("Message"));
         assert_eq!(options.states, ["A", "B"]);
         assert_eq!(options.events.as_deref(), Some("event"));
@@ -182,7 +186,11 @@ mod tests {
         let parsed = parse_args(&args("other/core --state C --namespace o2")).unwrap();
         let options = resolve(parsed, Some((Path::new("/proj"), &program))).unwrap();
         assert_eq!(options.crate_dir, PathBuf::from("other/core"));
-        assert_eq!(options.states, ["C"], "--state replaces the configured list");
+        assert_eq!(
+            options.states,
+            ["C"],
+            "--state replaces the configured list"
+        );
         assert_eq!(options.namespace.as_deref(), Some("o2"));
         assert_eq!(options.message.as_deref(), Some("Message"));
     }

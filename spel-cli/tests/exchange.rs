@@ -44,7 +44,10 @@ fn a_file_collects_one_signature_per_signer_until_none_is_missing() {
     let verified = file.verified(&message).unwrap();
     assert_eq!(missing(&message, &verified), [account(&alice)]);
     let error = file.transaction().unwrap_err();
-    assert!(error.contains(&format!("not signed by {}", account(&alice))), "{error}");
+    assert!(
+        error.contains(&format!("not signed by {}", account(&alice))),
+        "{error}"
+    );
 
     file.sign(&message, &alice);
     let verified = file.verified(&message).unwrap();

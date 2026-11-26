@@ -271,7 +271,10 @@ mod tests {
             "state": { "defined": "A" }
         })))
         .unwrap_err();
-        assert!(err.contains("state_types") && err.contains("Regenerate"), "{err}");
+        assert!(
+            err.contains("state_types") && err.contains("Regenerate"),
+            "{err}"
+        );
     }
 
     #[test]

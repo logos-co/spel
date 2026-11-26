@@ -306,7 +306,10 @@ fn state_markers_name_the_state_types_in_source_order() {
     let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
     // Declaration order, a module's items at its `mod` line: `oracle` comes first.
     assert_eq!(idl.state_types, ["OraclePrice", "PriceObservations"]);
-    assert!(idl.type_def("Tick").is_some(), "referenced by a marked type");
+    assert!(
+        idl.type_def("Tick").is_some(),
+        "referenced by a marked type"
+    );
     assert!(idl.type_def("NotMarked").is_none());
 }
 
@@ -353,7 +356,10 @@ fn markers_behind_a_feature_count() {
 fn the_message_marker_follows_the_qualified_path_into_modules() {
     let dir = shape_crate(
         "pub mod api;\n",
-        &[("api.rs", "#[spel_attrs::message]\npub enum Request { Ping }\n")],
+        &[(
+            "api.rs",
+            "#[spel_attrs::message]\npub enum Request { Ping }\n",
+        )],
     );
     let mut opts = options(dir.path(), "unused", None, None);
     opts.message = None;
@@ -367,7 +373,10 @@ fn without_a_named_or_marked_message_enum_generation_fails() {
     let mut opts = options(dir.path(), "unused", None, None);
     opts.message = None;
     let err = generate(&opts).unwrap_err().to_string();
-    assert!(err.contains("--message") && err.contains("#[message]"), "{err}");
+    assert!(
+        err.contains("--message") && err.contains("#[message]"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -395,7 +404,10 @@ fn a_named_message_enum_wins_over_the_marker_with_a_warning() {
     .unwrap();
     assert_eq!(idl.messages[0].name, "Pong");
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("`Other`") && warnings[0].contains("(Message)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("`Other`") && warnings[0].contains("(Message)"),
+        "{warnings:?}"
+    );
 
     // Naming the marked enum is quiet.
     let idl = generate(&options(dir.path(), "Message", None, None)).unwrap();
@@ -415,7 +427,10 @@ fn named_state_types_win_over_markers_with_a_warning() {
     .unwrap();
     assert_eq!(idl.state_types, ["B"]);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("(B)") && warnings[0].contains("(A)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("(B)") && warnings[0].contains("(A)"),
+        "{warnings:?}"
+    );
 
     // Naming what the markers say is quiet.
     let idl = generate(&options(dir.path(), "Message", Some("A"), None)).unwrap();
@@ -424,7 +439,10 @@ fn named_state_types_win_over_markers_with_a_warning() {
 
 #[test]
 fn a_missing_one_of_several_state_types_fails() {
-    let dir = shape_crate("pub enum Message { Ping }\npub struct A { pub x: u8 }\n", &[]);
+    let dir = shape_crate(
+        "pub enum Message { Ping }\npub struct A { pub x: u8 }\n",
+        &[],
+    );
     let mut opts = options(dir.path(), "Message", None, None);
     opts.states = vec!["A".into(), "Nope".into()];
     let err = generate(&opts).unwrap_err().to_string();
@@ -556,7 +574,10 @@ fn a_named_events_module_wins_over_the_marker_with_a_warning() {
     let names: Vec<&str> = idl.events.iter().map(|e| e.name.as_str()).collect();
     assert_eq!(names, ["Legacy"]);
     assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(warnings[0].contains("`other`") && warnings[0].contains("(Ev)"), "{warnings:?}");
+    assert!(
+        warnings[0].contains("`other`") && warnings[0].contains("(Ev)"),
+        "{warnings:?}"
+    );
 
     // Naming the module that holds the marked trait's impls is quiet.
     let mut warnings = Vec::new();

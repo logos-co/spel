@@ -214,7 +214,10 @@ pub fn generate_idl<F: FnMut(String)>(
             let mut named: Vec<&str> = found.iter().map(|(_, s)| s.as_str()).collect();
             named.sort_unstable();
             let marker_impls = trait_impls(&own, &event_traits);
-            let mut markers: Vec<&str> = marker_impls.iter().map(|i| i.struct_name.as_str()).collect();
+            let mut markers: Vec<&str> = marker_impls
+                .iter()
+                .map(|i| i.struct_name.as_str())
+                .collect();
             markers.sort_unstable();
             if !event_traits.is_empty() && named != markers {
                 on_warning(format!(
@@ -226,7 +229,11 @@ pub fn generate_idl<F: FnMut(String)>(
         },
         None => marked_events(&own, &event_traits)?,
     };
-    let source = if options.events.is_some() { "--events" } else { "#[event]" };
+    let source = if options.events.is_some() {
+        "--events"
+    } else {
+        "#[event]"
+    };
     let mut events: Vec<IdlEvent> = Vec::new();
     for (name, struct_name) in found {
         if events.iter().any(|e| e.name == name) {

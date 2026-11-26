@@ -273,8 +273,8 @@ pub async fn run() {
                     eprintln!("{}", generate_idl::USAGE);
                     process::exit(1);
                 };
-                let parsed =
-                    generate_idl::parse_args(&remaining_args[2..]).unwrap_or_else(|e| usage_error(e));
+                let parsed = generate_idl::parse_args(&remaining_args[2..])
+                    .unwrap_or_else(|e| usage_error(e));
                 // spel.toml fills the gaps when --program names one of its programs, or when no
                 // crate directory is given (then its default program). A crate directory alone
                 // never picks up another program's settings.
@@ -293,9 +293,9 @@ pub async fn run() {
                         cfg.resolve_program(None)
                             .unwrap_or_else(|e| usage_error(format!("missing <CRATE_DIR>: {e}"))),
                     )),
-                    (None, Some(name)) => usage_error(format!(
-                        "--program {name}: no spel.toml found to name it"
-                    )),
+                    (None, Some(name)) => {
+                        usage_error(format!("--program {name}: no spel.toml found to name it"))
+                    },
                     _ => None,
                 };
                 let options = generate_idl::resolve(
@@ -308,7 +308,10 @@ pub async fn run() {
                         "generate-idl: {} (from {}) · message: {} · state: {} · events: {}",
                         options.crate_dir.display(),
                         path.display(),
-                        options.message.as_deref().unwrap_or("from #[message] marker"),
+                        options
+                            .message
+                            .as_deref()
+                            .unwrap_or("from #[message] marker"),
                         if options.states.is_empty() {
                             "from #[state] markers".to_owned()
                         } else {
@@ -351,10 +354,15 @@ pub async fn run() {
                     println!("{}", init::USAGE);
                     println!();
                     println!("Scaffold an actor program: a counter with a core crate (marked for");
-                    println!("generate-idl), a handler crate and a risc0 guest, plus a spel.toml and a");
+                    println!(
+                        "generate-idl), a handler crate and a risc0 guest, plus a spel.toml and a"
+                    );
                     println!("Makefile (build, idl, deploy, test).");
                     println!();
-                    println!("  --lez-tag / --lez-rev    LEZ version (default: tag {})", init::DEFAULT_LEZ_TAG);
+                    println!(
+                        "  --lez-tag / --lez-rev    LEZ version (default: tag {})",
+                        init::DEFAULT_LEZ_TAG
+                    );
                     println!("  --spel-tag / --spel-rev  spel version for spel-attrs (default: this spel's commit)");
                     println!("  --spel-git <URL>         spel repository (default: logos-co/spel)");
                     println!("  --spel-path <DIR>        a local spel checkout instead of git");
@@ -500,7 +508,9 @@ pub async fn run() {
         eprintln!(
             "  generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>]"
         );
-        eprintln!("                           Missing values come from spel.toml (`core`, [idl-gen])");
+        eprintln!(
+            "                           Missing values come from spel.toml (`core`, [idl-gen])"
+        );
         eprintln!();
         eprintln!("  pda --program <HEX> <SEED> [SEED...]  Compute a public PDA from raw seeds");
         eprintln!(
