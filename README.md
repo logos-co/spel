@@ -77,7 +77,7 @@ spel inspect alice@token
 | `--program <ADDRESS> pda <SEED>…` | derive a public PDA from raw seeds |
 | `pda <SEED> --owner <ACCOUNT> \| --group <GROUP> [--register]` | derive a private PDA under an owned account's keys or a wallet group's, and record it in the wallet |
 | `blind <BASE> <FACTOR>` | `AccountId::blinded`, for derived seeds and pseudonyms |
-| `transfer --from <ACCOUNT> --to <ACCOUNT \| keys:FILE> --amount <N>` | move native balance, public or private |
+| `transfer --from <ACCOUNT> --to <ACCOUNT \| keys:FILE \| pda:SEED> --amount <N>` | move native balance, public or private; `pda:` funds a public PDA of `--program` |
 | `idl` | print the loaded IDL |
 
 `spel --idl <IDL>` with no command lists the IDL's messages and their flags;

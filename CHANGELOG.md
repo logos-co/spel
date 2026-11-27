@@ -17,6 +17,10 @@
   from `wallet account show-keys`), sealed from private execution or with a recovery binding
   from public execution. A public recipient is refused: it's declared with `--actor
   ACCOUNT@PROGRAM`, so the credit reaches the right actor.
+- **`spel transfer --to pda:SEED`** funds a public PDA of `--program`. A fresh public account
+  is credited only with evidence that someone controls it; `pda:` names the PDA by program and
+  seed, which is that evidence. By its bare id, a PDA's first deposit was refused ("declared
+  public but not admitted").
 - **`--fee-payer`** is checked before sending: the wallet must hold its key, and its privacy must
   match the call's (a private call pays from an owned private account). A private call with no
   payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.

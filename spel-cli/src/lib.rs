@@ -387,7 +387,12 @@ pub async fn run() {
                 return;
             },
             "transfer" => {
-                private_cmds::transfer_command(&remaining_args[2..]).await;
+                private_cmds::transfer_command(
+                    &remaining_args[2..],
+                    program_address.as_deref(),
+                    config_programs(config.as_ref().map(|(_, cfg)| cfg)),
+                )
+                .await;
                 return;
             },
             "sign" | "submit" => {

@@ -152,6 +152,7 @@ spel -p <P> pda account:seat --owner seat --register --label treasury       # pr
 spel -p <P> pda 0x<seed> --group g1 --register --label vault                # private PDA, a group's keys
 spel blind <BASE> <FACTOR> [--hex]                         # AccountId::blinded; factor may be le64:N
 spel transfer --from seat --to treasury --amount 1000      # native balance, public or private
+spel --program payroll transfer --from alice --to pda:account:boss --amount 1000   # a public PDA (first deposit needs pda:)
 spel --idl token.json idl                                  # print the IDL
 spel --idl token.json                                      # help with the IDL's messages
 ```

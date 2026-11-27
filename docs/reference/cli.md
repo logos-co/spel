@@ -631,12 +631,23 @@ PSEUDONYM=$(spel blind seat $(spel blind 0x$SECRET 0x$CREATE_KEY))     # a self-
 ## `transfer`
 
 ```bash
-spel transfer --from <ACCOUNT> --to <ACCOUNT | keys:FILE> --amount <N>
+spel [--program <P>] transfer --from <ACCOUNT> --to <ACCOUNT | keys:FILE | pda:SEED[,SEED...]> --amount <N>
 ```
 
 Moves native balance between any two accounts the wallet can act for (public, private, or a
 registered private PDA, including a group's), or to a private account known by its keys, whose
-credit waits for its owner. Private sides make it a privacy-preserving transaction. It prints the
+credit waits for its owner.
+
+`pda:SEED` is a public PDA of `--program` (else the `spel.toml` default), with seeds as in
+[`pda`](#pda), comma-separated. LEZ credits a public account that doesn't exist yet only with
+evidence that someone controls it, and a PDA has no key: so its first deposit has to name it by
+program and seed, which is what `pda:` does. By its bare id the deposit is refused (the account
+is "declared public but not admitted"). Program custody accounts are funded this way:
+
+```bash
+spel --program payroll transfer --from alice --to pda:account:boss --amount 1000
+```
+ Private sides make it a privacy-preserving transaction. It prints the
 hash on stdout and waits for the block; a revert exits `2`.
 
 ---

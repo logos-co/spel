@@ -20,8 +20,8 @@ pub const PDA_USAGE: &str = "Usage: spel --program <PROGRAM> pda <SEED>... (--ow
 
 pub const BLIND_USAGE: &str = "Usage: spel blind <BASE> <FACTOR> [--hex]";
 
-pub const TRANSFER_USAGE: &str =
-    "Usage: spel transfer --from <ACCOUNT> --to <ACCOUNT | keys:FILE> --amount <N>";
+pub const TRANSFER_USAGE: &str = "Usage: spel [--program <P>] transfer --from <ACCOUNT> \
+     --to <ACCOUNT | keys:FILE | pda:SEED[,SEED...]> --amount <N>";
 
 fn fail(msg: impl std::fmt::Display) -> ! {
     eprintln!("❌ {msg}");
@@ -221,9 +221,36 @@ pub fn blind_command(args: &[String]) {
     }
 }
 
-/// `spel transfer`: move native balance between any two accounts this wallet can act for, or to
-/// a private account known by its keys (`keys:FILE`, whose credit waits for its owner).
-pub async fn transfer_command(args: &[String]) {
+/// The destination `pda:SEED[,SEED...]`: `program`'s public PDA, named by its program and seed so
+/// the transaction carries the evidence that admits it. A fresh public account can't be credited
+/// by its bare id: nothing shows that someone controls it.
+///
+/// # Errors
+/// If a seed is malformed.
+pub fn public_pda_destination(
+    seeds: &str,
+    program: AccountId,
+    names: &Names<'_>,
+) -> Result<AccountIdentity, String> {
+    let seeds = seeds
+        .split(',')
+        .map(|raw| seed_bytes(raw, names))
+        .collect::<Result<Vec<_>, String>>()
+        .map_err(|e| format!("--to pda:{seeds}: {e}"))?;
+    Ok(AccountIdentity::PublicPda {
+        program,
+        seed: combine_seeds(&seeds),
+    })
+}
+
+/// `spel transfer`: move native balance between any two accounts this wallet can act for, to a
+/// private account known by its keys (`keys:FILE`, whose credit waits for its owner), or to a
+/// public PDA of `--program` (`pda:SEED`, which a first deposit creates).
+pub async fn transfer_command(
+    args: &[String],
+    program: Option<&str>,
+    programs: Vec<(String, AccountId)>,
+) {
     let (mut from, mut to, mut amount) = (None, None, None);
     let mut iter = args.iter();
     while let Some(arg) = iter.next() {
@@ -255,7 +282,7 @@ pub async fn transfer_command(args: &[String]) {
     let (sender, recipient) = {
         let names = Names {
             wallet: Some(&wallet),
-            programs: Vec::new(),
+            programs,
         };
         let sender = match names
             .account_with_privacy(&from)
@@ -266,7 +293,15 @@ pub async fn transfer_command(args: &[String]) {
                 private::private_identity(&wallet, id).unwrap_or_else(|e| fail(e))
             },
         };
-        let recipient = if to.starts_with("keys:") {
+        let recipient = if let Some(seeds) = to.strip_prefix("pda:") {
+            let program = program.unwrap_or_else(|| {
+                fail(format!(
+                    "--to {to}: a PDA is its program's; pass --program\n{TRANSFER_USAGE}"
+                ))
+            });
+            let program = names.program(program).unwrap_or_else(|e| fail(e));
+            public_pda_destination(seeds, program, &names).unwrap_or_else(|e| fail(e))
+        } else if to.starts_with("keys:") {
             private::destination(&names, &to)
                 .unwrap_or_else(|e| fail(e))
                 .identity
