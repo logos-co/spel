@@ -1,528 +1,684 @@
 # CLI
 
-The `spel-cli` crate provides a generic, IDL-driven command-line interface for any SPEL program. Programs get a complete CLI by writing a three-line wrapper — the binary is named `spel`.
+`spel` is an IDL-driven command-line client for programs on LEZ's actor model. It generates
+IDLs from a program's core crate, sends messages to actors through LEZ's wallet, reads and
+decodes actor state, and deploys programs.
 
-For a guided walkthrough, see the [Tutorial](../tutorial.md). For other reference topics, see the [Reference Index](README.md).
-
----
-
-## Quick Start
-
-```rust
-#[tokio::main]
-async fn main() {
-    spel::run().await;
-}
-```
+For a guided walkthrough, see the [Tutorial](../tutorial.md). The IDL format is in
+[idl.md](idl.md).
 
 ---
 
-## Invocation Syntax
+## Invocation
 
+```bash
+spel [GLOBAL OPTIONS] <COMMAND> [ARGS]
+spel [GLOBAL OPTIONS] -- <COMMAND> [ARGS]
 ```
-spel <COMMAND> [ARGS]                  (with spel.toml)
-spel [OPTIONS] -- <COMMAND> [ARGS]     (without spel.toml)
-```
 
-The `--` separator is required whenever you pass global `OPTIONS` (like `--idl` or `--program`) together with a command that also takes its own `--`-flags. Without it, the first `--foo` after the command name would be parsed as a global flag, not an instruction argument.
+Global options may appear anywhere before `--`. Everything after `--` belongs to the command
+(for `send`, the message and its fields), so a message field never collides with a global
+option.
 
-When a `spel.toml` is present in the current directory (or any ancestor), `--idl` and `--program` are resolved from it automatically — the `--` separator is not needed in that case.
+### Global options
+
+| option | meaning |
+| --- | --- |
+| `-i, --idl <FILE>` | the IDL (v2). Overrides a `spel.toml` IDL. |
+| `-p, --program <NAME\|ADDRESS>` | a `spel.toml` program name (also loads its IDL), or a program address in base58 or hex |
+| `--fee-payer <ACCOUNT>` | the account that pays the fee (`send`, `deploy`); for a private call, an owned private account |
+| `--binary <FILE>` | a program's binary (the R0BF `.bin`), repeatable. A private call uses each one whose ImageID matches a program it runs, instead of loading that program from the chain. `deploy` takes one, which overrides the `spel.toml` `binary` |
+| `-t, --type <TYPE>` | `inspect`: decode as this IDL type instead of the state type |
+| `-d, --data <HEX>` | `inspect`: decode these bytes offline instead of fetching |
+| `--format <text\|hex\|json>` | `program-id` output format |
+
+### Wallet
+
+Commands that touch the chain open LEZ's wallet from `LEE_WALLET_HOME_DIR`
+(`LEE_WALLET_PASSWORD` for encrypted storage). The wallet's config names the sequencer.
+
+### Accounts and programs
+
+- **Accounts** are base58 or hex ids, with an optional `Public/` or `Private/` prefix, or
+  **wallet labels** (`wallet account new public --label alice`). Labels resolve in `--root`,
+  `--actor`, `--signer`, `--fee-payer`, `inspect`, and in account-typed message fields. A
+  message field (or a `Vec<account_id>` element) also takes `keys:<FILE>`: a private account
+  known by its keys (`wallet account show-keys` output), whose id they derive.
+  An account is **private** when it has the `Private/` prefix, when its label names a private
+  account, or when it's a bare id the wallet witnesses as private. That makes `send` use a
+  [private call](#private-calls).
+- **Programs** are addressed by their header account (the address `spel deploy` prints), not
+  their ImageID. A `spel.toml` name works wherever a program is expected. `native` is the native
+  token program: an account's actor under it is its balance.
+- **Actors** are written `ACCOUNT@PROGRAM`: `alice@token`, `vault@native`.
 
 ---
 
 ## Configuration: `spel.toml`
 
-A `spel.toml` file in your project root lets you drop `--idl`/`--program` flags and makes multi-program projects ergonomic. `spel` walks up from the current directory until it finds one.
-
-**Single-program projects:**
-
-```toml
-[program]
-idl    = "my-program-idl.json"
-binary = "target/riscv32im-risc0-zkvm-elf/docker/my_program.bin"
-```
-
-**Multi-program projects:**
+`spel` walks up from the current directory to the first `spel.toml`. Paths in it are relative
+to the file.
 
 ```toml
-[programs.game]
-idl    = "game-idl.json"
-binary = "target/game.bin"
+[programs.token]
+address = "B6Es5QgFbbB47PLmrBW7qnFzATpXeRrBG2P3XdKQs86C"   # the deployed header account
+idl     = "artifacts/token-idl.json"
+binary  = "target/guest/token.bin"                          # deploy default; a local copy for private calls
 
 [programs.nft]
-idl    = "nft-idl.json"
-binary = "target/nft.bin"
+address = "9Afg4tSzEQJAiWF2WoQXonY8Chqg4k2njXsy8ywyz69b"
+idl     = "artifacts/nft-idl.json"
 ```
 
-With a multi-program config, pick one with `--program <name>`:
+- `--program <name>` selects an entry: its `address` becomes the default program and its
+  `idl` the IDL.
+- `ACCOUNT@<name>` names an entry's program; `inspect ACCOUNT@<name>` also loads that entry's
+  IDL (an explicit `--idl` wins).
+- With exactly one `[programs.<name>]`, or a single unnamed `[program]` table, it is selected
+  without `--program`. With several, pass `--program`.
+- `[program]` and `[programs]` are mutually exclusive.
+- Each deployment gets a fresh address: update `address` after every deploy.
 
-```bash
-spel --program game create --name "first-game"
+**IDL generation settings:** a program's `core` crate and an `[idl-gen]` table let
+`spel generate-idl --program <name>` run with no other arguments (see
+[`generate-idl`](#generate-idl)):
+
+```toml
+[programs.token]
+idl  = "artifacts/token-idl.json"
+core = "programs/token/core"           # the crate generate-idl reads
+
+[programs.token.idl-gen]
+message = "Message"
+state   = "TokenState"                 # or a list: ["PriceObservations", "OraclePrice"]
+events  = "event"
+# namespace = "token"                  # defaults to the crate name without `_core`
 ```
 
-When only one `[programs.<name>]` entry exists it is auto-selected; with multiple entries and no `--program <name>`, the CLI errors out listing the available names.
+Unlike the program keys, a misspelled key in `[idl-gen]` is an error.
 
-`[program]` and `[programs]` are mutually exclusive. Paths inside the config are resolved relative to the `spel.toml` file, so invocations from subdirectories work.
+**IDL/program check:** when a program has a `spel.toml` name, `send` and `inspect` refuse an
+IDL whose `name` differs from it. Layouts of different programs can line up, so a token IDL
+would otherwise "decode" an NFT actor into plausible nonsense. With a raw program id the IDL
+you pass is trusted.
 
 ---
 
-## Global Options
+## `send`
 
-| Option | Short | Description |
-|--------|-------|-------------|
-| `--idl <FILE>` | `-i` | Path to the IDL JSON file. Required if not set in `spel.toml`. |
-| `--program <NAME\|HEX\|FILE>` | `-p` | Accepts one of three things: (a) a program **name** from `spel.toml` → resolves both IDL and binary; (b) a 64-char **hex program ID** → skips binary loading; (c) a **file path** to the program ELF binary. |
-| `--dry-run[=text\|json]` | | Resolve everything (PDAs, accounts, signer nonces, serialized data) and print without submitting. `--dry-run` and `--dry-run=text` produce a human-readable report; `--dry-run=json` emits a machine-readable document on stdout. |
-| `--bin-<NAME> <FILE>` | | Additional program binary. Auto-fills `--<NAME>-program-id` from the binary's image ID. Useful for cross-program references. |
-| `--program-id <HEX>` | | **Deprecated** — prefer `--program <HEX>`. Still accepted. |
-
----
-
-## `init`
-
-Scaffold a new SPEL project. This is the command that creates everything described below — "scaffolding" and `init` refer to the same operation.
+Send one message to an actor.
 
 ```bash
-spel init [OPTIONS] <project-name>
+spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MESSAGE> [--<field> <value>]...
 ```
 
-**Does not require `--idl`.**
+| option | meaning |
+| --- | --- |
+| `--root <ACCOUNT>[@<PROGRAM>]` | **required.** The actor that receives the message. |
+| `--actor <ACCOUNT>[@<PROGRAM>]` | declare one more actor (repeatable). `PROGRAM` defaults to the root's. |
+| `--signer <ACCOUNT>` | authorize this account (repeatable): a public one signs, a private one uses this wallet's authorization key. The wallet must hold the key. |
+| `--co-signer <ACCOUNT>` | a public account that signs in another wallet (repeatable); needs `--export`. See [Signing in several wallets](#signing-in-several-wallets) |
+| `--export <FILE>` | write the public transaction to `FILE`, signed by this wallet's signers, instead of sending it |
+| `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable; not a public account, which is declared with `--actor`). Makes the call private |
+| `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private, unless the recipient's binding is already on chain |
+| `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
+| `--gas-limit <N>` | execution gas limit (a wallet config override for this call) |
+| `--dry-run`, `--dry-run=json` | print the transaction and send nothing |
 
-> Options must come **before** the project name — the argument loop stops at the
-> first non-flag token, so anything after the name is ignored.
+The message name is the IDL variant in kebab-case, snake_case or as written (`new-definition`,
+`new_definition`, `NewDefinition`). Fields are `--<field>` in kebab-case; unknown fields are
+refused. `spel --idl <IDL> -- <message> --help` lists a message's fields and documentation.
 
-Available options: `--lez-tag <TAG>`, `--lez-rev <REV>`, `--spel-tag <TAG>`,
-`--spel-rev <REV>`, and `--spel-git <URL>` (the git URL the scaffolded project
-pulls the framework from; defaults to `https://github.com/logos-co/spel.git`).
-A fork's CI passes its own URL so the scaffolded project tests the fork's code.
+### The root's program
 
-Whatever you pass applies to **every** crate the scaffold writes — the guest,
-`examples/` and the FFI crate — and so do the defaults (LEZ `v0.2.4`, framework
-`branch = "main"`). They have to agree: `spel-client-gen` generates FFI code
-against the current framework, so an FFI crate pinned to an older one fails
-`make ffi`. Run `spel init --help` for the defaults your binary actually uses.
+From `@PROGRAM` on `--root`; else `--program`; else the `spel.toml` program named like the IDL
+(`token` for the token IDL). Without any of these `send` stops.
 
-Creates a complete project structure with:
-- Workspace `Cargo.toml`
-- `{name}_core/` crate for shared types
-- `methods/guest/` with a skeleton `#[lez_program]` guest binary
-- `examples/` with `generate_idl.rs` and `{name}_cli.rs`
-- `Makefile` with `build`, `idl`, `cli`, `deploy`, `inspect`, `setup`, `status`, `clean` targets
-- `spel.toml` (so you can run `spel` without `--idl`/`--program`)
-- `README.md` with quick start guide
-- `.gitignore`
+### The access list
 
-**Options:**
+LEZ loads only the actors a transaction declares; a message to an undeclared actor fails the
+whole transaction. `send` declares, in order:
 
-| Flag | Purpose |
-|------|---------|
-| `--lez-tag <TAG>` | LEZ version tag to pin (e.g. `v0.2.4`). |
-| `--spel-tag <TAG>` | SPEL version tag to pin. |
-| `--lez-rev <REV>` | LEZ git revision (alternative to `--lez-tag`). |
-| `--spel-rev <REV>` | SPEL git revision (alternative to `--spel-tag`). |
+1. the root;
+2. each `--actor`;
+3. unless `--no-auto-actors`: an actor on the root's program for each message field of type
+   `account_id` or `Option<account_id>` (a `none` adds nothing), except for accounts that
+   already have an actor in the list (so an explicit `--actor` replaces the default);
+4. an actor on the root's program for each signer whose account has none yet.
 
-**Example:**
+Each actor is declared once. Ids nested in structs or vectors don't add actors, and neither
+do actors a conversation reaches through state alone; declare those with `--actor`. Example:
+a token `burn` reaches the holding's definition, which is not a message field:
 
 ```bash
-spel init my-token
-cd my-token
-# Edit methods/guest/src/bin/my_token.rs with your program logic
-make idl
-make cli ARGS="--help"
+spel --program token send --root bob --signer bob --actor usdc -- burn --amount 20
+```
+
+Declaring an actor that nothing reaches is harmless.
+
+### Signers
+
+Signers are never inferred. A signature authorizes an **account**, not an actor: every actor
+of a signing account in the access list is authorized, under every program, for every message
+in the transaction. Before sending, `send` prints the access list and what each signature
+authorizes:
+
+```text
+transfer (tag 2, 49 bytes) to (alice (J3q2…), token)
+Access list:
+  (alice (J3q2…), token)   root, signs
+  (bob (rdey…), token)     field `to`
+alice (J3q2…) signs. In this transaction that authorizes:
+  (alice (J3q2…), token)   root
+```
+
+A signer whose key the wallet doesn't hold is refused before anything is sent.
+
+### Fees
+
+`--fee-payer` names the paying account; it may be outside the access list, and authorizes only
+the fee. The wallet must hold its key, which `send` checks before sending. A public call's
+payer is a public account, which co-signs; without `--fee-payer` the wallet picks a funded
+signer. A private call's fee is paid in the proof by an owned private account (not a PDA);
+without `--fee-payer` the wallet picks an authorized private account (a private `--signer`), or
+failing that one of its own that can pay, and the guardrail says so. If none can, `send` fails
+and suggests `--signer` or `--fee-payer`.
+
+### Signing in several wallets
+
+When a call needs a signature from an account whose key is in another wallet, the wallet that
+starts it exports the transaction instead of sending it, each other signer signs the file, and
+anyone submits it:
+
+```bash
+# Wallet A: alice signs in wallet B; A's account pays
+spel send --root alice --co-signer alice --fee-payer <A-ACCOUNT> --export increment.json -- increment --by 4
+# Wallet B: check what it does, add alice's signature
+spel sign increment.json
+# Anyone, once every signer signed
+spel submit increment.json
+```
+
+A co-signer authorizes its actors like a `--signer`; only the signature comes later. The export
+fixes everything the signatures cover: each signer's nonce, the authorized accounts, and the
+fee, measured as `send` measures it (simulated with every signer authorized, priced at the base
+fees the wallet's fee headroom could reach). The payer is `--fee-payer`, else the first signer;
+it signs too. A call that reverts in simulation isn't written (exit `2`). Only public calls
+export.
+
+`spel sign FILE [--yes]` checks the signatures already in the file, prints the exporter's
+summary and, decoded from the message bytes, what the signature covers: the root, the message
+(with the root program's IDL from `spel.toml`, or `--idl`), the actors, the fee and the signers.
+It then signs for every missing signer whose key this wallet holds, after a prompt (`--yes`
+skips it; without a terminal, `--yes` is required). `spel submit FILE` refuses a file a signer
+hasn't signed or whose message changed after signing, then sends it and waits for its block:
+exit `0` included, `2` included but reverted, `1` otherwise. Submitting it again finds the same
+inclusion.
+
+The file is JSON: `version` (2), `summary`, `message` (the Borsh-encoded
+`public_transaction::Message`, hex; signatures cover its hash) and `witnesses`
+(`{public_key, signature}`). It goes stale when a signer's nonce moves or the fee no longer
+covers the base fees; export it again.
+
+### Private calls
+
+A call is sent as a **privacy-preserving transaction** when an actor's account is private, or
+when it has a `--seal` credit, or a `--recover` credit whose recipient has no recovery binding on
+chain yet. The wallet runs the call locally, against the
+decrypted states it holds, and proves it. Only the proof, nullifiers, encrypted notes and
+whatever crosses into public execution are published.
+
+**The programs it runs** are loaded for the wallet's simulation and proof: every program a
+declared actor is on, then each program the simulation reaches (`program nft: from the chain`).
+A program comes from a local binary whose ImageID matches the deployed header's (`--binary`, any
+`spel.toml` `binary`), else from the chain, where its bytecode is stored. A local binary that
+isn't the deployed code is never used, since its proof would claim the wrong ImageID; a
+`--binary` that matched nothing is reported after sending. The native token program is the
+protocol's own and needs nothing. A program not deployed through the program loader (a builtin)
+can't be loaded.
+
+**Private accounts take part through the wallet's keys**, not signatures:
+- an account of the wallet's own key tree;
+- a private PDA keyed by one of them, or by a wallet group's secret, which must be registered
+  first with [`pda --register`](#pda).
+
+**Authority comes only from `--signer`**, as in a public call. A private signer authorizes with
+this wallet's authorization key, the private counterpart of a signature, and covers every
+actor of its account. A private account declared with `--root` or `--actor` alone takes part
+with only its nullifier key: it can be credited, but not debited. A private PDA's keys never
+authorize it, so `--signer` refuses one; only its program's seed grant can.
+
+**The access list is inferred from simulation**, not from the message's fields: a field may name
+a private account no one in the transaction can witness. The wallet simulates the call before
+proving it. When the simulation reaches an actor that isn't declared, `send` adds it **without
+authority** (resolved through the wallet: private if registered, else public) and simulates
+again, up to 8 times:
+- a private account comes in with only its nullifier key, a public one unsigned, so the program
+  can only do what it allows any account (such as crediting it). If it needs more, the next
+  simulation refuses the call, and you declare the actor yourself.
+- LEZ gives an account one authority across all its actors. So an actor of an account the call
+  already authorizes (a signer) isn't added: `send` stops, sends nothing, exits `2`, and prints
+  the command that declares it.
+- A ninth undeclared actor stops the send the same way (exit `2`): `send` lists the actors it
+  added and the next one, and prints the command that declares them all. That command still
+  infers, so a call that reaches more continues from there.
+
+Each added actor is printed with its authority:
+
+```text
+pay (tag 3, 33 bytes) to (seat (9Wj…), payroll), as a privacy-preserving transaction
+Access list:
+  (seat (9Wj…), payroll) root, private: authorized by this wallet's keys
+Credit sealed to emp1
+  + (treasury (8bw…), payroll) reached in simulation, private PDA: only its program's seed grant can authorize it
+```
+
+When anything was inferred, `send` also prints the call with every actor declared
+(`--no-auto-actors`). The simulation finds the actors a call reaches by sync messages. It
+doesn't find the destination of an **async** credit, so declare a witnessed account's balance
+(`--actor seat@native`) for its credit to apply in the transaction.
+
+**Credits to a private recipient** need the recipient's keys:
+
+| `DEST` | |
+| --- | --- |
+| a private account of this wallet (label, `Private/<id>`) | its keys; the credit still waits for it, and isn't applied in the transaction |
+| `keys:<FILE>` | keys from `wallet account show-keys` output (two lines: npk, then vpk), for someone else's account |
+
+Naming a recipient in a message field (`--employee keys:emp1.keys`) only gives the program its
+id; the credit still needs its `--seal` or `--recover`. A call can carry several, one per
+recipient: the wallet matches each credit to the seal of its destination, and a seal no credit
+uses is ignored. When private execution sends an async message that no `--seal` covers, the
+wallet refuses the call, and `send` names the destination and prints the command with the
+`--seal` added: the `keys:<FILE>` a field named it by, `Private/<id>` for an account of this
+wallet, else a `keys:<FILE>` placeholder (or, for a public account, `--actor <id>@<PROGRAM>`).
+
+A credit from private execution is **sealed** (`--seal`): only the recipient reads it, and it
+comes from a blinded alias. A credit from a public actor can't be sealed, so it goes with a
+**recovery binding** (`--recover`): its amount and sender are public. The recipient collects
+either with `wallet pending receive`.
+
+An address has one recovery binding, published by the first credit that needs it and reused by
+every later one. So before planning, `send` asks the sequencer for each `--recover` recipient's
+binding, as the wallet does before sending. A recipient already bound adds nothing private, and
+the guardrail says so. If nothing else in the call is private (no private actor, no `--seal`, no
+binding left to publish), it's sent as a **public** transaction: its fee is paid by a public
+account (`--fee-payer`, else the first signer), and a private `--fee-payer` is refused. The dry
+run shows the same decision, with the bound recipients under `recover_bound`; without a wallet
+it can't ask, and counts every `--recover` as unbound.
+
+**A public recipient** is never sealed: `--seal` and `--recover` refuse one. Declare it under the
+program its credit goes to (`--actor bob@token`, `--actor bob@native` for a native balance), and
+the credit applies publicly in the transaction. The private sender shows up there as a fresh
+blinded alias; the recipient's change, and so the amount, is public. A public recipient must
+already exist on chain, or the call is refused (`UnadmittedPublicActor`).
+
+```bash
+spel --program token send --root alice --signer alice --actor bob@token -- transfer --to bob --amount 300
+```
+
+With credits, only the listed ones are delivered in the transaction. Without them, every async
+message to a witnessed account is.
+
+After inclusion, `send` waits for the block, fails with exit `2` if the transaction reverted
+there (its fee is still charged), syncs the wallet's private accounts, and prints what changed,
+with private states read from the wallet's decrypted copies. A dry run of a private call shows
+the declared actors only: inference needs the wallet's simulation, which runs only when sending.
+
+```bash
+# Payroll: the treasury is a private PDA keyed by the seat; the payee's credit is sealed.
+spel --program payroll pda account:seat --owner seat --register --label treasury
+spel --program payroll send --root seat --signer seat -- open --treasury treasury --period-ms 60000
+spel --program payroll send --root seat --signer seat --seal emp1 -- pay --employee emp1
+spel --program payroll send --root seat --signer seat --seal keys:bob.keys -- pay --employee keys:bob.keys
+spel --program payroll send --root seat --signer seat --actor seat@native -- withdraw --amount 500000
+```
+
+### Outcome and exit codes
+
+The wallet simulates the transaction before sending it. If it would be refused, by the program
+or by LEZ's rules (an undeclared actor, say), the wallet doesn't send it, since a refused
+transaction still pays its fee, and `send` prints the reason and exits `2`. Otherwise `send` reads every declared actor before and after the
+transaction and prints the ones that changed, decoded through the IDL where it describes their
+program:
+
+```text
+Submitted af5b…, waiting for a block...
+Included in block 356. Changed:
+  (alice (J3q2…), token)
+    before: {"Holding":{"balance":"1000","definition_id":"2hiv…"}}
+    after:  {"Holding":{"balance":"700","definition_id":"2hiv…"}}
+  (bob (rdey…), token)
+    before: {"Holding":{"balance":"0","definition_id":"2hiv…"}}
+    after:  {"Holding":{"balance":"300","definition_id":"2hiv…"}}
+```
+
+| exit | meaning |
+| --- | --- |
+| `0` | included; at least one declared actor changed |
+| `2` | nothing changed: refused in simulation (not sent; the reason is printed), reverted after inclusion (private calls; the fee is charged), or it was included and changed no declared actor (a no-op, like a second `initialize-holding`) |
+| `1` | not sent or not included: bad arguments, unknown message or field, unresolvable account or program, a signer without a key in the wallet, an IDL that doesn't match the root's program, a wallet error, or a timeout |
+
+stdout carries only the transaction hash; the guardrail, progress and diff go to stderr.
+
+### Dry run
+
+`--dry-run` prints the guardrail and the encoded message and sends nothing. `--dry-run=json`
+prints a machine-readable plan:
+
+```json
+{
+  "message": { "name": "Transfer", "tag": 2, "hex": "02…" },
+  "root": { "account": "J3q2…", "program": "B6Es…" },
+  "actors": [
+    { "account": "J3q2…", "program": "B6Es…", "authorizes": true,  "private": false, "pda": false, "reason": "root" },
+    { "account": "rdey…", "program": "B6Es…", "authorizes": false, "private": false, "pda": false, "reason": "field `to`" }
+  ],
+  "signers": ["J3q2…"],
+  "fee_payer": null,
+  "private": false,
+  "seal": [],
+  "recover": [],
+  "recover_bound": []
+}
+```
+
+A dry run works without a wallet (raw ids only; labels don't resolve and keys aren't checked).
+
+### Examples
+
+```bash
+# Token: create, initialize, transfer, mint (definition is its own authority)
+spel --program token send --root usdc --signer usdc --signer alice -- \
+  new-definition --name USDC --total-supply 1000 --mint-authority usdc --holding alice
+spel --program token send --root bob --signer bob -- initialize-holding --definition usdc
+spel --program token send --root alice --signer alice -- transfer --to bob --amount 300
+spel --program token send --root usdc --signer usdc -- mint --definition usdc --to bob --amount 50
+
+# NFT: a struct field as a JSON object
+spel --program nft send --root art --signer art --signer alice -- new-definition \
+  --name Art --printable-supply 3 \
+  --metadata '{"standard":"Simple","uri":"ipfs://…","creators":"me"}' --master alice
+
+# Script-friendly: the hash on stdout, the outcome in the exit code
+if TX=$(spel --program token send --root alice --signer alice -- transfer --to bob --amount 1); then
+  echo "changed state in $TX"
+elif [ $? -eq 2 ]; then
+  echo "refused or a no-op: nothing changed"
+fi
 ```
 
 ---
 
 ## `inspect`
 
-Decodes on-chain account data. **`--idl` and `--type` are both required**, and
-`inspect` no longer reads program binaries — use [`program-id`](#program-id) for
-that. Passing a file path here reports `Account inspection requires --idl <IDL_FILE>`.
-
-- **Decimal**: comma-separated `[u32; 8]` values
-- **Hex**: comma-separated hex `[u32; 8]` values
-- **ImageID hex bytes**: 64-character hex string (little-endian byte representation). This is the value to pass to `--program <HEX>`.
-
-**Example:**
+Read an actor's state and decode it through the IDL.
 
 ```bash
-spel inspect methods/guest/target/riscv32im-risc0-zkvm-elf/docker/my_program.bin
+spel [--idl <IDL>] [--program <P>] inspect <ACCOUNT>[@<PROGRAM>] [--type <TYPE>]
+spel --idl <IDL> inspect <anything> --data <HEX> [--type <TYPE>]
 ```
 
-### Mode 2: Decode account data
+- **With a program** (`@PROGRAM`, else `--program`, else the `spel.toml` program named like the
+  IDL): prints the actor's state decoded as the IDL's state type, or as `--type`. An actor with
+  no state prints `null` (and "no state" on stderr). Without an IDL the state is printed as hex.
+  An IDL with several `state_types` prints hex too, listing them on stderr:
+  the bytes don't say which one the actor holds, so pick one with `--type`.
+- **Without a program:** lists every program holding state on the account, keyed by `spel.toml`
+  name or program id, as hex:
+
+  ```bash
+  $ spel inspect alice
+  {
+    "nft": "01a25f…",
+    "token": "01194a…"
+  }
+  ```
+
+- **`--data <HEX>`** decodes bytes offline; no wallet or sequencer needed.
+- **A private account** is read from the wallet's decrypted copy, after syncing the wallet's
+  private accounts. Only a wallet that witnesses it can read it.
+- **`ACCOUNT@native`** prints the account's balance: `{"balance": "1000"}`.
+
+Decoding consumes every byte: leftover bytes are an error, so a wrong type doesn't decode
+silently. The JSON follows the core types' serde form, with two differences: `u64`/`u128`
+(and `i64`/`i128`) are strings so JSON readers keep their precision, and fixed byte arrays
+are hex. Account ids are base58. Enums are `{"Variant": value}` (a unit variant is just
+`"Variant"`); a tuple variant with one field holds that value, with several an array.
 
 ```bash
-spel inspect <ACCOUNT-ID> --idl <IDL_FILE> --type <TYPE> [--data <BORSH_HEX>]
-```
-
-Fetches the account (or decodes supplied borsh-hex bytes) and renders the data as JSON using the IDL-declared type.
-
-```bash
-spel inspect <account-id> --idl my_program-idl.json --type VaultState
-spel inspect <account-id> --idl my_program-idl.json --type VaultState --data <borsh-hex>
+$ spel --program token inspect alice
+{
+  "Holding": {
+    "balance": "700",
+    "definition_id": "2hivK471mcXpSnfRiKDhKjEKCqsD4wQ88BpBLoZyy3Xn"
+  }
+}
 ```
 
 ---
 
-## `idl` (command)
+## `encode`
 
-Print the loaded IDL as pretty-printed JSON.
-
-```bash
-spel --idl <IDL_FILE> idl
-```
-
-With `spel.toml`:
+Print a message's Borsh encoding as hex: the variant tag, then each field in declaration order.
 
 ```bash
-spel idl
+spel --idl token.json encode transfer --to <ACCOUNT_ID> --amount 300
+# 02<32-byte to><u128 LE amount>
 ```
+
+Fields take the same values as in `send`, except that wallet labels don't resolve.
+
+---
+
+## `init`
+
+Scaffold an actor program: a counter to start from.
+
+```bash
+spel init <PROJECT> [--lez-tag <TAG> | --lez-rev <REV>] [--spel-tag <TAG> | --spel-rev <REV> | --spel-path <DIR>] [--spel-git <URL>]
+```
+
+| option | meaning |
+| --- | --- |
+| `<PROJECT>` | the directory to create; its name (`my-counter`) gives the crate names (`my_counter_core`, …) |
+| `--lez-tag` / `--lez-rev` | the LEZ version the crates depend on; default: the tag this spel links (`v0.4.0-rc3`) |
+| `--spel-tag` / `--spel-rev` | the spel version of `spel-attrs`; default: the commit this spel was built from |
+| `--spel-git <URL>` | the spel repository; default: logos-co/spel |
+| `--spel-path <DIR>` | a local spel checkout instead of git |
+
+It writes:
+
+| path | contents |
+| --- | --- |
+| `<snake>_core/` | the `Message` enum and `CounterState`, marked for `generate-idl` behind the `idl` feature ([idl.md](idl.md#markers)) |
+| `<snake>_program/` | `handle_message`: the counter's logic, with host tests |
+| `guest/` | the risc0 guest, `lee_core::actor_entrypoint!(handle_message)`; its own workspace, built in Docker |
+| `spel.toml` | the program's `idl`, `binary` and `core`; `make deploy` fills in `address` |
+| `Makefile` | `build` (`cargo risczero build`), `idl`, `deploy FEE_PAYER=<account>`, `test` |
+
+```bash
+spel init my-counter && cd my-counter
+make build idl
+make deploy FEE_PAYER=<funded account>
+spel send --root alice --signer alice -- increment --by 2
+spel inspect alice@my_counter
+```
+
+The guest needs Docker and `cargo risczero` (`rzup`).
 
 ---
 
 ## `generate-idl`
 
-Generate IDL JSON directly from a program source file. Useful if you don't want a runtime `examples/generate_idl.rs` binary.
+Generate an IDL v2 from a program's core crate. The program needs no annotations.
 
 ```bash
-spel generate-idl <PATH>
+spel generate-idl [<CRATE_DIR>] [--message <ENUM>] [--state <TYPE>]... [--events <MODULE>] [--namespace <NAME>]
 ```
 
-**Does not require `--idl`.**
+| option | meaning |
+| --- | --- |
+| `<CRATE_DIR>` | the core crate (with `Cargo.toml` and `src/lib.rs`); else the program's `core` in `spel.toml` |
+| `--message <ENUM>` | the external message enum; its variant order gives the Borsh tags. Without it (or `message` in `[idl-gen]`), the enum the crate marks `#[message]` ([idl.md](idl.md#markers)) |
+| `--state <TYPE>` | the actor state type, written to the IDL's `state_types`. Repeat it for a program that stores several untagged state types. Without it (and without `state` in spel.toml), the types the crate marks `#[state]` ([idl.md](idl.md#markers)) |
+| `--events <MODULE>` | the module holding the events (`event`, or nested `a::b`). Without it (or `events` in `[idl-gen]`), the impls of the trait the crate marks `#[event]` ([idl.md](idl.md#markers)); with neither, no events |
+| `--namespace <NAME>` | the IDL name and event namespace; defaults to the crate name without `_core` |
 
-- `<PATH>` may be a single source file, or a project directory to search for `#[lez_program]` entry points.
-- Single match → IDL JSON printed to stdout.
-- Multiple matches → one `<name>-idl.json` file written per program.
+```bash
+spel generate-idl programs/token/core --message Message --state TokenState --events event > token-idl.json
+```
+
+**From `spel.toml`:** values not given on the command line come from the program's `core` and
+its [`[idl-gen]` table](#configuration-speltoml). That program is the one `--program <name>`
+names, or, when no `<CRATE_DIR>` is given, the default program. A crate directory without
+`--program` uses only the command line. Each flag wins over its key; `--state` replaces the
+configured list. spel prints what it took on stderr.
+
+```bash
+spel generate-idl --program token > artifacts/token-idl.json
+```
+
+What it reads, and the failures it reports, are described in [idl.md](idl.md#generation).
+The IDL goes to stdout.
 
 ---
 
-## `pda` (IDL mode)
-
-Compute a PDA address from the IDL-defined seeds.
+## `idl`
 
 ```bash
-spel --idl <IDL_FILE> --program <NAME|HEX|FILE> pda <ACCOUNT_NAME> [--<seed-arg> <value> ...]
+spel --idl <IDL> idl
 ```
 
-Looks up the named account across all instructions in the IDL, finds its PDA seed definition, resolves all seeds, and prints the base58 AccountId.
-
-**Seed resolution:**
-- `const` seeds: resolved from the IDL definition
-- `arg` seeds: must be provided via `--<arg-name> <value>` (parsed through the IDL type of the owning instruction's argument)
-- `account` seeds: must be provided via `--<account-name> <hex|base58>`
-
-**Private PDAs.** An account declared `#[account(private_pda, …)]` derives its
-address from the caller's key material as well as the seeds, so computing it needs
-two extra flags:
-
-```bash
-spel pda <ACCOUNT_NAME> --npk <64-char-hex> --vpk <2368-char-hex> [--identifier <u128>]
-```
-
-`--npk` is the `NullifierPublicKey` (32 bytes) and `--vpk` the `ViewingPublicKey`
-(an ML-KEM-768 encapsulation key, 1184 bytes). Both are printed by
-`wallet account show-keys` for a private account. Omitting either is an error —
-the address cannot be derived without them.
-
-Since LEZ v0.2.1 the derivation is
-`SHA256(prefix || program_id || seed || npk || vpk || identifier)`. Pass
-`--identifier` (decimal or `0x`-hex `u128`) when the program derives the PDA with
-a non-zero one; it defaults to 0.
-
-- On a **public** PDA, `--identifier` is an error — it only applies to private PDAs.
-- If the owning instruction has a **seed argument named `identifier`**,
-  `--identifier` fills that seed instead, and the private-PDA identifier stays 0
-  (a warning says so).
-
-**ProgramId resolution** (in priority order):
-1. `--program <64-char-hex>`
-2. `--program <name-from-spel.toml>` → resolved binary loaded
-3. `--program <path>` → binary loaded
-
-**Example:**
-
-```bash
-# Simple PDA with only const seeds
-spel --idl my_program-idl.json --program abc123...def pda counter
-
-# PDA with arg seed (with spel.toml set up)
-spel pda multisig_state --create-key 0a1b2c...
-
-# List available PDAs
-spel --idl my_program-idl.json pda
-```
-
-**If no account name is given**, prints all PDA accounts found in the IDL.
+Prints the loaded IDL. `spel --idl <IDL>` with no command prints help with the IDL's messages
+and their flags. IDLs of version 1 (instruction-based) are refused with a message to
+regenerate.
 
 ---
 
-## `pda` (raw mode)
-
-Compute an arbitrary PDA from a program ID and raw seeds — no IDL required.
+## `deploy`
 
 ```bash
-spel --program <64-CHAR-HEX> pda <SEED1> [SEED2] ...
+spel deploy [BINARY] --fee-payer <ACCOUNT> [--immutable]
 ```
 
-**Does not require `--idl`.**
+Deploys a program through LEZ's `program_loader`: creates a fresh header account and the
+segment accounts the binary needs in the wallet, uploads the binary, and prints the program's
+address (the header account) on stdout; progress goes to stderr, so
+`ADDR=$(spel deploy … )` works. `BINARY` defaults to the `spel.toml` program's `binary`.
+`--fee-payer` must be a funded account in the wallet, since the new accounts hold nothing.
+`--immutable` marks the program as one that can't be upgraded later.
 
-Each seed can be:
-- **64-character hex string**: interpreted as 32 raw bytes
-- **Plain string**: UTF-8 encoded and zero-padded to 32 bytes (max 32 bytes)
-
-**Multi-seed derivation:** `SHA-256(seed1_32 || seed2_32 || ...)`
-
-**Output:** base58 AccountId
-
-**Example:**
-
-```bash
-# Single seed
-spel --program abc123...def pda my_state_name
-
-# Multiple seeds
-spel --program abc123...def pda multisig_vault__ 0a1b2c3d...
-```
-
----
-
-## Instruction Execution
-
-Execute any instruction defined in the IDL. The CLI auto-generates subcommands from the IDL.
-
-```bash
-spel --idl <IDL_FILE> --program <NAME|HEX|FILE> -- <INSTRUCTION> [--<arg> <value> ...] [--<account> <hex|base58> ...]
-```
-
-With `spel.toml`:
-
-```bash
-spel <INSTRUCTION> [--<arg> <value> ...] [--<account> <hex|base58> ...]
-```
-
-Instruction names are converted from `snake_case` to `kebab-case` in CLI commands (e.g., `create_proposal` → `create-proposal`).
-
-**Arguments:**
-- Instruction args: `--<arg-name> <value>` (type-aware parsing from IDL)
-- Non-PDA accounts: `--<account-name> <base58|hex>` (64 hex chars or base58 string) — the flag is just the account's parameter name, no suffix
-- PDA accounts: **auto-computed** from seeds — not passed as arguments
-- Rest (variadic) accounts: optional, comma-separated list of account IDs
-
-**Additional program binaries:** Use `--bin-<name> <file>` to auto-fill `--<name>-program-id` from the binary's image ID.
-
-**Transaction flow:**
-1. Parse and validate all arguments
-2. Auto-fill program IDs from `--bin-*` flags
-3. Serialize instruction data in risc0 serde format
-4. Resolve PDA accounts from seeds (printing each seed input it used)
-5. Initialize wallet from `NSSA_WALLET_HOME_DIR` environment variable
-6. Fetch nonces for signer accounts
-7. Build, sign, and submit the transaction
-8. Poll for confirmation
-
-**Per-instruction help:**
-
-```bash
-spel <INSTRUCTION> --help
-```
-
-Shows accounts (with flags like `[mut, signer, init]`), PDA status, and argument types.
-
-**Example (no spel.toml):**
-
-```bash
-# Execute a create instruction
-spel --idl multisig-idl.json --program multisig.bin -- create \
-  --create-key 0a1b2c3d4e5f... \
-  --threshold 2 \
-  --members "aabb...00,ccdd...00" \
-  --creator EjR7...base58
-
-# Auto-fill cross-program reference
-spel --idl treasury-idl.json --program treasury.bin \
-  --bin-token token.bin -- \
-  transfer --amount 100 \
-  --from aabb...00 \
-  --to ccdd...00
-```
-
-**Example (with spel.toml in the project root):**
-
-```bash
-spel create \
-  --create-key 0a1b2c3d4e5f... \
-  --threshold 2 \
-  --members "aabb...00,ccdd...00" \
-  --creator EjR7...base58
-```
-
----
-
-## Multi-signature: `--export`, `--co-signer`, `sign`, `submit`
-
-When an instruction needs signatures from keys held in different wallets, build the
-transaction once and pass it around as a blob instead of trying to gather every key
-in one place.
-
-```bash
-# wallet A: build a partial transaction naming the other required signer
-spel --export tx.json --co-signer <SIGNER_B> transfer --owner <SIGNER_A> --amount 10
-
-# wallet B: add its witness (prompts, showing the decoded instruction)
-spel sign tx.json
-
-# anyone: submit once every witness is present
-spel submit tx.json
-```
-
-`--export <PATH>` writes the partial transaction rather than submitting it, and
-cannot be combined with `--dry-run`. `--co-signer <ACCOUNT_ID>` may be repeated to
-name several additional signers.
-
-`spel sign <PATH>` appends a witness for any required signer whose key this wallet
-holds, and reports when the blob is complete. `spel submit <PATH>` assembles the
-witness set and broadcasts. Submit refuses a blob with a missing witness, and
-refuses one whose message no longer matches what the witnesses signed.
+Each deploy produces a new address. The header's key stays in the wallet.
 
 ---
 
 ## `program-id`
 
 ```bash
-spel program-id <BINARY> [--format text|hex|json]
+spel program-id <BINARY>... [--format text|hex|json]
 ```
 
-Prints the `ProgramId` derived from a compiled guest binary. This is the current
-name for what `inspect <FILE>` used to do. `inspect` is now account-decoding only
-(see above).
-
-`<BINARY>` is the **R0BF `.bin`** the guest build writes to
-`methods/guest/target/riscv32im-risc0-zkvm-elf/docker/<name>.bin`, not the raw
-ELF beside it. Given a raw ELF, the command says so rather than failing
-opaquely:
-
-```text
-this is a raw RISC-V ELF; spel program-id expects the R0BF ProgramBinary wrapper —
-point it at the .bin artefact the guest build emits beside the ELF
-```
+Prints the ImageID of a packaged guest binary (the R0BF `.bin`, not the raw ELF beside it; a
+raw ELF is recognised and reported). The ImageID identifies the code; it is **not** the
+program's address, which `spel deploy` prints.
 
 ---
 
-## Dry Run
-
-`--dry-run` resolves the entire transaction — PDAs, non-PDA account IDs, signer nonces, serialized instruction bytes — and prints it without submitting. Useful for CI golden tests, for previewing a TX before signing, and for scripting.
+## `pda`
 
 ```bash
-spel --dry-run <INSTRUCTION> --arg1 value1           # text, human-readable (default)
-spel --dry-run=text <INSTRUCTION> --arg1 value1      # same as above, explicit
-spel --dry-run=json <INSTRUCTION> --arg1 value1      # machine-readable JSON
+spel --program <ADDRESS> pda <SEED> [SEED]...
 ```
 
-**Text output:**
+Derives a public PDA of the program: `AccountId::for_public_pda(program, seed)`. Each seed is
+64 hex characters (32 bytes, optionally `0x`), `account:<ACCOUNT>` (that account's id; a label
+resolves through the wallet), or a string of at most 32 bytes, zero-padded. Several seeds are
+combined as `SHA-256(seed1 ‖ seed2 ‖ …)`. Programs document their own seeds; the IDL has none.
 
-```
-=== Dry Run ===
-Program ID: abc123...def
-Instruction: transfer
+### Private PDAs
 
-Accounts:
-  PDA vault → 4Lp3gkH... [writable]
-    seeds: [program_id, "state"]
-  recipient → 0xaabb...00
-  sender → 0xccdd...00 [signer]
-
-Arguments:
-  --amount 1000
-
-Instruction data: 0x01000000e803000000000000...
-
-Signers:
-  sender: nonce=42
-================
-Dry run complete — not submitted.
+```bash
+spel --program <P> pda <SEED>... --owner <ACCOUNT> [--register [--label <LABEL>] [--rescan]]
+spel --program <P> pda <SEED>... --group <GROUP> [--register [--label <LABEL>] [--rescan]]
 ```
 
-**JSON output (shape):**
+A private PDA, `AccountId::for_private_pda(program, seed, npk, vpk)`, with the keys of:
+- **`--owner`**: a private account of this wallet's key tree. Only its owner can put the PDA in a
+  transaction.
+- **`--group`**: a wallet group's secret (`wallet group new | join`), derived for the program's
+  ImageID, read from its deployed header (so a stale local build can't derive another
+  address). Every holder of the secret derives the same PDA and can put it in a transaction.
+  Upgrading a mutable program changes its ImageID: a PDA registered before still works, but
+  deriving it afresh afterwards gives another address.
 
-```json
-{
-  "program_id": "abc123...def",
-  "instruction": "transfer",
-  "accounts": [
-    {
-      "name": "vault", "id": "4Lp3gkH...", "flags": ["writable"],
-      "is_pda": true,
-      "seeds": [{"kind": "const", "value": "state"}]
-    },
-    { "name": "sender", "id": "0xccdd...00", "flags": ["signer"] }
-  ],
-  "arguments": { "amount": 1000 },
-  "instruction_data": "01000000e803000000000000...",
-  "signers": { "sender": {"nonce": "42"} }
-}
-```
+The wallet can't find a PDA from what it stores, so `--register` records it, labelled `--label`
+if that label is free; `send` can then witness it, and syncs follow it. `--rescan` then
+rediscovers private accounts from genesis, for a PDA that already has history on chain. The
+address goes to stdout either way.
 
-Numeric values that exceed JSON's 53-bit integer precision (`u128` args and nonces) are emitted as decimal strings to avoid silent truncation.
-
-In JSON mode, all human-readable preamble is suppressed — only the JSON document goes to stdout — so it's safe to pipe through `jq`.
+Seeds are as for a public PDA.
 
 ---
 
-## Type Format Table
+## `blind`
 
-How to pass values for each IDL type on the command line:
+```bash
+spel blind <BASE> <FACTOR> [--hex]
+```
 
-| IDL Type | CLI Format | Example |
-|----------|-----------|---------|
-| `u8` | Decimal number | `255` |
-| `u32` | Decimal number | `1000000` |
-| `u64` | Decimal number | `1000000000` |
-| `u128` | Decimal number | `340282366920938463463374607431768211455` |
-| `bool` | `true`/`false`/`1`/`0`/`yes`/`no` | `true` |
-| `string` / `String` | Plain text | `"hello world"` |
-| `[u8; N]` | Hex string (`2*N` hex chars) **or** UTF-8 string (≤N chars, zero-padded) | `0a1b2c...` (64 chars for N=32) or `my_string` |
-| `[u32; 8]` / `program_id` | 8 comma-separated u32 values, or 64 hex chars | `0,0,0,0,0,0,0,0` or `abc123...def` |
-| `Vec<[u8; 32]>` | Comma-separated hex strings | `"aabb...00,ccdd...00"` |
-| `Vec<u8>` | Comma-separated decimal bytes | `1,2,3,4,5` |
-| `Vec<u32>` | Comma-separated u32 values | `100,200,300` |
-| `Vec<u64>` / `Vec<u128>` / `Vec<bool>` | Comma-separated values | `300,700` or `true,false` |
-| `Vec<String>` | Repeat the flag once per element | `--tag a --tag b` |
-| `Option<T>` | `none`/`null`/empty for None; otherwise same as inner type | `none` or `42` |
-| Account IDs | Base58 string **or** 64 hex chars (with optional `0x` prefix) | `EjR7...` or `0xaabb...00` |
+Prints `AccountId::blinded(base, factor)` in base58 (or `0x` hex with `--hex`): the
+domain-separated SHA-256 LEZ uses for blinded addresses, which programs also use to derive
+seeds and pseudonyms. `BASE` and `FACTOR` are 64 hex characters (optionally `0x`), base58 ids,
+wallet labels, or `le64:N` (N as 8 little-endian bytes, zero-padded to 32). Blinds compose:
 
-**Notes:**
-- `[u8; N]` accepts both hex and string formats. Hex is detected by length (exactly `2*N` chars, all hex digits). Otherwise treated as UTF-8 and zero-padded.
-- `0x` prefix is accepted and stripped for hex values.
-- `program_id` values can also use `0x`-prefixed hex for individual u32 components.
-- For `Vec<u64>`, `Vec<u128>` and `Vec<bool>`, an empty string is an empty list.
-  An empty element inside a non-empty list is an error rather than being
-  dropped, reported with its index: `"1,,2"` gives
-  `Element [1]: empty element in Vec<u64>`. A malformed element is reported the
-  same way — `Element [1]: Invalid u128 'seven'`.
+```bash
+SEED=$(spel blind 0x$CREATE_KEY le64:1 --hex)                          # a generation's seed
+PSEUDONYM=$(spel blind seat $(spel blind 0x$SECRET 0x$CREATE_KEY))     # a self-named member
+```
 
 ---
 
-## Serialization (spel-cli internals)
+## `transfer`
 
-The CLI serializes instruction data using `risc0_zkvm::serde::to_vec` (risc0 serde format, `Vec<u32>`) for submission to the zkVM guest. The format is:
-
-```
-[variant_index: u32, field1_words..., field2_words..., ...]
+```bash
+spel [--program <P>] transfer --from <ACCOUNT> --to <ACCOUNT | keys:FILE | pda:SEED[,SEED...]> --amount <N>
 ```
 
-**Per-type encoding:**
+Moves native balance between any two accounts the wallet can act for (public, private, or a
+registered private PDA, including a group's), or to a private account known by its keys, whose
+credit waits for its owner.
 
-| Type | Encoding |
-|------|----------|
-| `bool` | 1 word: `0` or `1` |
-| `u8` | 1 word (zero-extended) |
-| `u32` | 1 word |
-| `u64` | 2 words (little-endian) |
-| `u128` | 4 words (little-endian) |
-| `program_id` / `[u32; 8]` | 8 words |
-| `[u8; N]` | N words (each byte zero-extended to u32) |
-| `String` | `[length: u32, bytes...]` (bytes padded to u32 words) |
-| `Vec<T>` | `[length: u32, elements...]` |
-| `Option<T>` | `[0]` for None; `[1, value...]` for Some |
+`pda:SEED` is a public PDA of `--program` (else the `spel.toml` default), with seeds as in
+[`pda`](#pda), comma-separated. LEZ credits a public account that doesn't exist yet only with
+evidence that someone controls it, and a PDA has no key: so its first deposit has to name it by
+program and seed, which is what `pda:` does. By its bare id the deposit is refused (the account
+is "declared public but not admitted"). Program custody accounts are funded this way:
 
-This matches `risc0_zkvm::serde::to_vec` for enum struct variants.
+```bash
+spel --program payroll transfer --from alice --to pda:account:boss --amount 1000
+```
+ Private sides make it a privacy-preserving transaction. It prints the
+hash on stdout and waits for the block; a revert exits `2`.
+
+---
+
+## Value formats
+
+| IDL type | CLI value |
+| --- | --- |
+| `u8` … `u128`, `i8` … `i128` | decimal |
+| `bool` | `true` / `false` (a bare flag means `true`) |
+| `string` | as is |
+| `account_id` | base58 or hex; in `send` also a wallet label |
+| `program_id` | eight comma-separated `u32`s |
+| `[u8; N]` | 2N hex characters, or a string of at most N bytes (right-padded) |
+| `Vec<u8>`, `Vec<u32>`, `Vec<u64>`, `Vec<u128>`, `Vec<bool>` | comma-separated: `1,2,3` |
+| `Vec<[u8; 32]>`, `Vec<account_id>` | comma-separated base58 or hex ids |
+| `Vec<string>` | repeat the flag: `--tag a --tag b` |
+| `Option<T>` | the value, or `none` |
+| struct | JSON object keyed by field name; a tuple struct takes a JSON array |
+| enum | the variant name for a unit variant, or `{"Variant": {…fields}}` |
+
+Inside JSON, strings are given as JSON strings and everything else in its JSON form:
+`'{"kind":"B","uri":"ipfs://x","owner":"none"}'`.

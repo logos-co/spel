@@ -47,7 +47,12 @@ jobs:
             echo ""
             echo "**Installation** (Cargo.toml):"
             echo '```toml'
-            echo "spel-framework = { git = \"https://github.com/logos-co/spel.git\", tag = \"v${VERSION}\" }"
+            echo "spel-attrs = { git = \"https://github.com/logos-co/spel.git\", tag = \"v${VERSION}\", optional = true }"
+            echo '```'
+            echo ""
+            echo "**CLI:**"
+            echo '```sh'
+            echo "cargo install --git https://github.com/logos-co/spel.git --tag v${VERSION} spel"
             echo '```'
           } >> release-notes.md
           echo "Release notes:"; cat release-notes.md

@@ -1,3 +1,72 @@
+## Unreleased (private calls, on the LEZ v0.4.0-rc3 port)
+
+### ✨ Features
+
+- **Private calls.** `spel send` sends a privacy-preserving transaction when an actor's account
+  is private (`Private/<id>`, a private label, or an id the wallet witnesses privately), or when
+  it has a `--seal DEST` / `--recover DEST` credit. The programs it runs, the root's and every
+  one the simulation reaches, are loaded from the chain, or from a local binary (the new
+  repeatable global `--binary`, or any `spel.toml` `binary`) whose ImageID matches the deployed
+  code. Only `--signer` authorizes, as in public
+  calls: a private signer with the wallet's authorization key (a private PDA can't be one).
+  Actors the call reaches by sync messages are inferred from the wallet's
+  simulation and added without authority; one on a signer's account stops
+  the send with the command that declares it. A revert after inclusion
+  exits `2`, and private states are reported before and after from the wallet's decrypted copy.
+- **`--seal` / `--recover`:** a credit to a private recipient (a wallet account, or `keys:FILE`
+  from `wallet account show-keys`), sealed from private execution or with a recovery binding
+  from public execution. A public recipient is refused: it's declared with `--actor
+  ACCOUNT@PROGRAM`, so the credit reaches the right actor.
+- **`spel transfer --to pda:SEED`** funds a public PDA of `--program`. A fresh public account
+  is credited only with evidence that someone controls it; `pda:` names the PDA by program and
+  seed, which is that evidence. By its bare id, a PDA's first deposit was refused ("declared
+  public but not admitted").
+- **A public `spel pda` takes the private PDA's seed formats** (`account:<ACCOUNT>`, `0x` hex):
+  it read `account:boss` as the string "account:boss", so it disagreed with the private PDA and
+  with `transfer --to pda:` on the same seed.
+- **A `--recover` to a recipient already bound on chain** adds nothing private: the wallet
+  reuses the binding. `send` looks the bindings up before planning, so a call with nothing else
+  private is planned, shown (guardrail and dry run, `recover_bound`) and paid as the public
+  transaction the wallet sends: a public `--fee-payer` pays, a private one is refused. It used to
+  plan a private call, ignore the private payer, and charge the first signer.
+- **`--fee-payer`** is checked before sending: the wallet must hold its key, and its privacy must
+  match the call's (a private call pays from an owned private account). A private call with no
+  payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.
+- **`keys:FILE` in account fields:** `send … -- pay --employee keys:emp1.keys` fills in the id
+  derived from the keys (also in `Vec<account_id>` elements). The credit still needs `--seal`.
+- **A missing seal** is named: when private execution sends an async message nothing seals,
+  `send` prints the destination and the command with the `--seal` added.
+- **`native`** names the native token program: `ACCOUNT@native` is an account's balance, which
+  `inspect` prints as `{"balance": …}`.
+- **`spel inspect`** reads private accounts, syncing the wallet first.
+- **`spel pda … --owner ACCOUNT | --group GROUP [--register [--label L] [--rescan]]`** derives a
+  private PDA under an owned account's keys or a wallet group's secret, and records it in the
+  wallet so calls can witness it. Seeds may be `account:<ACCOUNT>` or `0x`-prefixed hex. A
+  group's PDA derives from the program's ImageID, read from its deployed header.
+- **`spel blind BASE FACTOR [--hex]`:** `AccountId::blinded`, for derived seeds and pseudonyms.
+- **`spel transfer --from A --to B --amount N`:** native balance between any accounts the wallet
+  can act for, including group-shared private PDAs, or to `keys:FILE`.
+
+- **Signing in several wallets** is back, for v0.4 public transactions. `send --co-signer
+  ACCOUNT --export FILE` writes the transaction with its fee measured (simulated with every
+  signer authorized) and this wallet's signers signed; `spel sign FILE [--yes]` checks the
+  signatures, shows what the message does (decoded with the root program's IDL), and signs for
+  this wallet's missing signers; `spel submit FILE` sends it once every signer signed. The file
+  format is version 2 (JSON over the Borsh `public_transaction::Message`).
+- **`spel init <PROJECT>`** is back, for actor programs: it scaffolds a counter with a core
+  crate, a handler crate with host tests, a risc0 guest (`lee_core::actor_entrypoint!`), a
+  `spel.toml` and a Makefile (`build`, `idl`, `deploy`, `test`). It pins LEZ `v0.4.0-rc3`
+  (`--lez-tag`/`--lez-rev`) and spel-attrs at the commit spel was built from
+  (`--spel-tag`/`--spel-rev`/`--spel-path`, `--spel-git`). The guest uses risc0-zkvm 3.1 (every
+  3.0 release is yanked) and resolves dependencies for its rustc 1.88.
+- **`generate-idl` reads markers behind a feature:** `#[cfg_attr(feature = "idl",
+  spel_attrs::message)]` counts, so `spel-attrs` can be an optional dependency.
+
+### 🐛 Fixes
+
+- `generate-idl` describes `PdaSeed` (as `[u8; 32]`) instead of failing on it.
+- `Vec<account_id>` message fields take comma-separated ids instead of failing to encode.
+
 ## v0.7.0 (2026-09-16)
 
 ### 💥 Breaking Changes

@@ -1,6 +1,6 @@
-# SPEL Framework Reference
+# SPEL Reference
 
-Comprehensive API reference for the SPEL framework (`logos-co/spel`). This document covers every macro, type, CLI command, IDL schema, and code generation feature.
+Reference for SPEL, the client toolchain for programs on LEZ's actor model.
 
 For a guided walkthrough, see the [Tutorial](../tutorial.md).
 
@@ -8,9 +8,6 @@ For a guided walkthrough, see the [Tutorial](../tutorial.md).
 
 ## Reference Pages
 
-- [**Macros**](macros.md) — `#[lez_program]`, `#[instruction]`, `generate_idl!`, and generated validation functions
-- [**Types**](types.md) — Framework types: `SpelOutput`, `SpelError`, `AccountConstraint`, `ChainedCall`, `PdaSeed`, and the prelude
-- [**CLI**](cli.md) — All `spel` commands (`init`, `inspect`, `idl`, `pda`, instruction execution) with flags, examples, and type format table
-- [**IDL Format**](idl.md) — IDL JSON schema, instruction/account/arg definitions, discriminators, and lssa-lang compatibility fields
-- [**Extensions**](extensions.md) — activating an extension, `[package.metadata.spel]`, writing one, and what the consumer's IDL gets
-- [**Client Code Generation**](client-gen.md) — `spel-client-gen` CLI, library API, generated Rust client, C FFI wrappers, C header, and C++/Qt integration example
+- [**CLI**](cli.md) — every `spel` command (`send`, `inspect`, `encode`, `generate-idl`, `deploy`, `program-id`, `pda`, `idl`), `spel.toml`, exit codes and value formats
+- [**IDL Format**](idl.md) — IDL v2: messages, state, events and types, and how they are generated from a core crate
+- [**Client Code Generation**](client-gen.md) — *parked*: `spel-client-gen` reads v1 IDLs and is excluded from the workspace until it is ported to actor programs

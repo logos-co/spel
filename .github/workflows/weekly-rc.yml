@@ -57,8 +57,8 @@ jobs:
         id: version
         if: steps.check.outputs.has_changes == 'true'
         run: |
-          # Get current stable version from spel-framework/Cargo.toml
-          STABLE=$(grep '^version = ' spel-framework/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          # Get current stable version from spel-cli/Cargo.toml
+          STABLE=$(grep '^version = ' spel-cli/Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
           echo "Stable version: $STABLE"
 
           # Find the highest existing RC number for this stable version
@@ -170,5 +170,10 @@ jobs:
 
             **Installation** (Cargo.toml):
             ```toml
-            spel-framework = { git = "https://github.com/logos-co/spel.git", tag = "v${{ steps.version.outputs.rc_version }}" }
+            spel-attrs = { git = "https://github.com/logos-co/spel.git", tag = "v${{ steps.version.outputs.rc_version }}", optional = true }
+            ```
+
+            **CLI:**
+            ```sh
+            cargo install --git https://github.com/logos-co/spel.git --tag v${{ steps.version.outputs.rc_version }} spel
             ```

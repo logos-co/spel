@@ -26,6 +26,40 @@ pub struct ProgramConfig {
     /// The packaged program binary. Needed only for the privacy-preserving path,
     /// which proves against the ELF; a public transaction needs just `address`.
     pub binary: Option<String>,
+    /// The program's core crate, which `spel generate-idl` reads when no `<CRATE_DIR>` is given.
+    pub core: Option<String>,
+    /// `spel generate-idl` settings: `[programs.<name>.idl-gen]`. Command-line flags win.
+    #[serde(rename = "idl-gen")]
+    pub idl_gen: Option<IdlGenConfig>,
+}
+
+/// `[programs.<name>.idl-gen]`: the names `spel generate-idl` reads from the core crate.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IdlGenConfig {
+    pub message: Option<String>,
+    /// One state type, or a list for a program that stores several untagged ones.
+    pub state: Option<OneOrMany>,
+    pub events: Option<String>,
+    pub namespace: Option<String>,
+}
+
+/// A string or a list of strings.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+pub enum OneOrMany {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl OneOrMany {
+    #[must_use]
+    pub fn into_vec(self) -> Vec<String> {
+        match self {
+            Self::One(one) => vec![one],
+            Self::Many(many) => many,
+        }
+    }
 }
 
 impl SpelConfig {
@@ -275,6 +309,54 @@ idl = "game.json"
         let config = SpelConfig::load(&config_path).unwrap();
         assert!(config.has_program("game"));
         assert!(!config.has_program("nope"));
+    }
+
+    #[test]
+    fn parse_idl_gen_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("spel.toml");
+        fs::write(
+            &config_path,
+            r#"
+[programs.token]
+core = "programs/token/core"
+
+[programs.token.idl-gen]
+message = "Message"
+state = "TokenState"
+events = "event"
+
+[programs.oracle.idl-gen]
+state = ["PriceObservations", "OraclePrice"]
+namespace = "oracle"
+"#,
+        )
+        .unwrap();
+
+        let config = SpelConfig::load(&config_path).unwrap();
+        let token = config.resolve_program(Some("token")).unwrap();
+        assert_eq!(token.core.as_deref(), Some("programs/token/core"));
+        let gen = token.idl_gen.clone().unwrap();
+        assert_eq!(gen.message.as_deref(), Some("Message"));
+        assert_eq!(gen.state.unwrap().into_vec(), ["TokenState"]);
+        assert_eq!(gen.events.as_deref(), Some("event"));
+
+        let oracle = config.resolve_program(Some("oracle")).unwrap();
+        let gen = oracle.idl_gen.clone().unwrap();
+        assert_eq!(
+            gen.state.unwrap().into_vec(),
+            ["PriceObservations", "OraclePrice"]
+        );
+        assert_eq!(gen.namespace.as_deref(), Some("oracle"));
+    }
+
+    #[test]
+    fn a_misspelled_idl_gen_key_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("spel.toml");
+        fs::write(&config_path, "[program.idl-gen]\nstates = \"S\"\n").unwrap();
+        let err = SpelConfig::load(&config_path).unwrap_err();
+        assert!(err.contains("states"), "{err}");
     }
 
     #[test]

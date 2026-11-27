@@ -1,952 +1,597 @@
-//! Project scaffolding: `spel init <name>`
+//! `spel init`: scaffold an actor program for LEZ.
+//!
+//! The project is a counter: one message enum and one state type in a core crate, marked for
+//! `spel generate-idl`; a handler in a program crate, unit-testable on the host; and a risc0
+//! guest that runs the handler. Its `spel.toml` names the IDL, the binary and the core crate, so
+//! `make build idl deploy` and then `spel send` / `spel inspect` need no further flags.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
-/// LEZ tag a scaffold pins when neither `--lez-tag` nor `--lez-rev` is given.
+pub const USAGE: &str = "Usage: spel init <PROJECT> [--lez-tag <TAG> | --lez-rev <REV>] \
+     [--spel-tag <TAG> | --spel-rev <REV> | --spel-path <DIR>] [--spel-git <URL>]";
+
+/// The LEZ tag a scaffold pins unless `--lez-tag` or `--lez-rev` says otherwise: the one this
+/// spel links.
+pub const DEFAULT_LEZ_TAG: &str = "v0.4.0-rc3";
+
+const LEZ_GIT: &str = "https://github.com/logos-blockchain/logos-execution-zone.git";
+const SPEL_GIT: &str = "https://github.com/logos-co/spel.git";
+
+/// The commit this spel was built from (empty outside a git checkout), see `build.rs`.
+const SPEL_GIT_REV: &str = env!("SPEL_GIT_REV");
+
+/// Where a scaffold's dependencies come from.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct InitArgs {
+    pub project: String,
+    pub lez_tag: Option<String>,
+    pub lez_rev: Option<String>,
+    pub spel_tag: Option<String>,
+    pub spel_rev: Option<String>,
+    pub spel_path: Option<String>,
+    pub spel_git: Option<String>,
+}
+
+/// Parse the arguments after `init`.
 ///
-/// Must equal the tag the framework crates pin: a scaffold's guest depends on
-/// both `spel-framework` and LEZ directly, so a different tag puts two
-/// `lee_core` versions in its graph and `#[lez_program]` fails to compile.
-/// `default_lez_tag_matches_framework` guards it.
-pub const DEFAULT_LEZ_TAG: &str = "v0.2.5-rc2";
-
-/// Framework branch a scaffold pins when neither `--spel-tag` nor `--spel-rev`
-/// is given.
-///
-/// Every crate `init` writes — the guest, `examples/` and the FFI crate — takes
-/// this one value. `spel-client-gen` generates FFI code against the current
-/// framework, so an FFI crate pinned to an older one fails `make ffi`; the FFI
-/// default used to be a separate literal that stayed at `v0.4.0` for three
-/// releases and broke exactly that way.
-pub const DEFAULT_SPEL_BRANCH: &str = "main";
-
-/// The `tag = …` / `rev = …` / default selector for one git dependency.
-fn git_ref(tag: Option<&str>, rev: Option<&str>, default: String) -> String {
-    match (tag, rev) {
-        (Some(t), _) => format!("tag = \"{t}\""),
-        (_, Some(r)) => format!("rev = \"{r}\""),
-        _ => default,
+/// # Errors
+/// An unknown flag, a flag without its value, two ways to name one dependency, or no project.
+pub fn parse_args(args: &[String]) -> Result<InitArgs, String> {
+    let mut parsed = InitArgs::default();
+    let mut project = None;
+    let mut iter = args.iter();
+    while let Some(arg) = iter.next() {
+        let mut value = |flag: &str| {
+            iter.next()
+                .filter(|v| !v.starts_with("--"))
+                .cloned()
+                .ok_or_else(|| format!("{flag} needs a value"))
+        };
+        match arg.as_str() {
+            "--lez-tag" => parsed.lez_tag = Some(value(arg)?),
+            "--lez-rev" => parsed.lez_rev = Some(value(arg)?),
+            "--spel-tag" => parsed.spel_tag = Some(value(arg)?),
+            "--spel-rev" => parsed.spel_rev = Some(value(arg)?),
+            "--spel-path" => parsed.spel_path = Some(value(arg)?),
+            "--spel-git" => parsed.spel_git = Some(value(arg)?),
+            flag if flag.starts_with('-') => return Err(format!("unknown option '{flag}'")),
+            name if project.is_none() => project = Some(name.to_owned()),
+            name => return Err(format!("one project at a time, got another: '{name}'")),
+        }
     }
-}
-
-fn default_lez_ref() -> String {
-    format!("tag = \"{DEFAULT_LEZ_TAG}\"")
-}
-
-fn default_spel_ref() -> String {
-    format!("branch = \"{DEFAULT_SPEL_BRANCH}\"")
-}
-
-pub fn init_project(
-    name: &str,
-    lez_tag: Option<&str>,
-    spel_tag: Option<&str>,
-    lez_rev: Option<&str>,
-    spel_rev: Option<&str>,
-    spel_git: Option<&str>,
-) {
-    // The git URL the scaffolded project pulls the framework from. CI on a
-    // fork passes the fork's own URL so refs like refs/pull/N/head resolve.
-    let spel_git = spel_git.unwrap_or("https://github.com/logos-co/spel.git");
-    let root = Path::new(name);
-    if root.exists() {
-        eprintln!("❌ Directory '{}' already exists", name);
-        std::process::exit(1);
+    if parsed.lez_tag.is_some() && parsed.lez_rev.is_some() {
+        return Err("pass --lez-tag or --lez-rev, not both".into());
     }
+    let spel_refs = [&parsed.spel_tag, &parsed.spel_rev, &parsed.spel_path]
+        .iter()
+        .filter(|r| r.is_some())
+        .count();
+    if spel_refs > 1 {
+        return Err("pass one of --spel-tag, --spel-rev and --spel-path".into());
+    }
+    if parsed.spel_path.is_some() && parsed.spel_git.is_some() {
+        return Err("--spel-git names a repository; --spel-path a local checkout. Pass one".into());
+    }
+    parsed.project = project.ok_or("which project? spel init <PROJECT>")?;
+    Ok(parsed)
+}
 
-    // Extract just the directory name for use as the project name,
-    // so absolute paths like "/tmp/my-project" yield "my-project".
-    let project_name = root
+/// The names a project directory yields: `my-counter` is the project, `my_counter` the Rust and
+/// spel.toml name.
+fn names(project_dir: &Path) -> Result<(String, String), String> {
+    let project = project_dir
         .file_name()
         .and_then(|n| n.to_str())
-        .unwrap_or_else(|| {
-            eprintln!("❌ Could not extract project name from '{}'", name);
-            std::process::exit(1);
-        });
-
-    println!("🚀 Creating SPEL project '{}'...", project_name);
-
-    let snake_name = project_name.replace('-', "_");
-
-    // Detect spel-client-gen: check the directory next to the running binary first
-    // (covers `cargo run`, installed builds, and CI). Fall back to bare name (PATH lookup).
-    let spel_client_gen = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|d| d.join("spel-client-gen")))
-        .filter(|p| p.exists())
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|| "spel-client-gen".to_string());
-
-    // Create directories
-    let dirs = [
-        "",
-        &format!("{}_core/src", snake_name),
-        "methods/src",
-        &format!("methods/guest/src/bin"),
-        "examples/src/bin",
-        &format!("{}_ffi/src", snake_name),
-        &format!("{}_ffi/generated", snake_name),
-        "scripts",
-    ];
-    for dir in &dirs {
-        let p = root.join(dir);
-        fs::create_dir_all(&p).unwrap_or_else(|e| {
-            eprintln!("❌ Failed to create {}: {}", p.display(), e);
-            std::process::exit(1);
-        });
+        .ok_or_else(|| format!("no project name in '{}'", project_dir.display()))?
+        .to_owned();
+    let snake = project.replace('-', "_");
+    let valid = snake
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_lowercase() || c == '_')
+        && snake
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_');
+    if !valid {
+        return Err(format!(
+            "'{project}' isn't a usable project name: use lowercase letters, digits, '-' and '_', \
+             starting with a letter"
+        ));
     }
+    Ok((project, snake))
+}
 
-    // Root Cargo.toml (workspace)
-    write_file(
-        root,
-        "Cargo.toml",
-        &format!(
-            r#"[workspace]
-members = [
-    "{snake_name}_core",
-    "{snake_name}_ffi",
-    "methods",
-    "examples",
-]
-exclude = [
-    "methods/guest",
-]
+/// A Cargo git dependency selector for LEZ.
+fn lez_dependency(args: &InitArgs) -> String {
+    match (&args.lez_tag, &args.lez_rev) {
+        (_, Some(rev)) => format!(r#"git = "{LEZ_GIT}", rev = "{rev}""#),
+        (Some(tag), _) => format!(r#"git = "{LEZ_GIT}", tag = "{tag}""#),
+        _ => format!(r#"git = "{LEZ_GIT}", tag = "{DEFAULT_LEZ_TAG}""#),
+    }
+}
+
+/// The `spel-attrs` dependency: a local checkout, a given tag or revision, else the commit this
+/// spel was built from.
+///
+/// # Errors
+/// If `--spel-path` doesn't hold a spel checkout, or no revision is known.
+fn spel_attrs_dependency(args: &InitArgs) -> Result<String, String> {
+    if let Some(path) = &args.spel_path {
+        let attrs = Path::new(path).join("spel-attrs");
+        if !attrs.join("Cargo.toml").exists() {
+            return Err(format!("--spel-path {path}: no spel-attrs crate in it"));
+        }
+        let absolute = attrs
+            .canonicalize()
+            .map_err(|e| format!("--spel-path {path}: {e}"))?;
+        return Ok(format!(r#"path = "{}""#, absolute.display()));
+    }
+    let git = args.spel_git.as_deref().unwrap_or(SPEL_GIT);
+    Ok(match (&args.spel_tag, &args.spel_rev) {
+        (Some(tag), _) => format!(r#"git = "{git}", tag = "{tag}""#),
+        (_, Some(rev)) => format!(r#"git = "{git}", rev = "{rev}""#),
+        _ if !SPEL_GIT_REV.is_empty() => format!(r#"git = "{git}", rev = "{SPEL_GIT_REV}""#),
+        _ => {
+            return Err(
+                "this spel wasn't built from a git checkout, so it can't pin its own commit: pass \
+                 --spel-tag, --spel-rev or --spel-path"
+                    .into(),
+            )
+        },
+    })
+}
+
+/// Every file of a scaffold, as (path, content).
+///
+/// # Errors
+/// As [`spel_attrs_dependency`].
+pub fn scaffold(
+    project: &str,
+    snake: &str,
+    args: &InitArgs,
+) -> Result<Vec<(String, String)>, String> {
+    let lez = lez_dependency(args);
+    let spel_attrs = spel_attrs_dependency(args)?;
+    let core = format!("{snake}_core");
+    let program = format!("{snake}_program");
+    let bin_dir = "guest/target/riscv32im-risc0-zkvm-elf/docker";
+
+    let files = vec![
+        (
+            "Cargo.toml".to_owned(),
+            format!(
+                r#"[workspace]
+members = ["{core}", "{program}"]
+# The guest builds for the zkVM with its own toolchain: `make build`.
+exclude = ["guest"]
 resolver = "2"
 "#
+            ),
         ),
-    );
-
-    // .gitignore
-    write_file(
-        root,
-        ".gitignore",
-        &format!(
-            r#"target/
-methods/guest/target/
-*.bin
-.{snake_name}-state
-.{snake_name}-state.tmp
-ui/
-"#
+        (
+            ".gitignore".to_owned(),
+            "target/\nguest/target/\n".to_owned(),
         ),
-    );
-
-    // FFI crate: Cargo.toml (cdylib — compiled into a .so for Qt to link against)
-    let lez_ref_ffi = git_ref(lez_tag, lez_rev, default_lez_ref());
-    let spel_ref_ffi = git_ref(spel_tag, spel_rev, default_spel_ref());
-    write_file(
-        root,
-        &format!("{snake_name}_ffi/Cargo.toml"),
-        &format!(
-            r#"[package]
-name = "{snake_name}_ffi"
-version = "0.1.0"
-edition = "2021"
-
-[lib]
-crate-type = ["cdylib"]
-
-[dependencies]
-nssa        = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee" }}
-nssa_core   = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, package = "lee_core" }}
-common      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-sequencer_service_rpc = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi}, features = ["client"] }}
-wallet      = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref_ffi} }}
-spel-framework-core = {{ git = "{spel_git}", {spel_ref_ffi} }}
-serde_json  = "1"
-serde       = {{ version = "1", features = ["derive"] }}
-borsh       = "1.5"
-tokio       = {{ version = "1", features = ["rt-multi-thread"] }}
-hex         = "0.4"
-sha2        = "0.10"
-{snake_name}_core = {{ path = "../{snake_name}_core" }}
-"#
-        ),
-    );
-
-    // FFI crate: src/lib.rs — includes generated code produced by `make ffi-gen`
-    write_file(
-        root,
-        &format!("{snake_name}_ffi/src/lib.rs"),
-        &format!(
-            r#"// Auto-generated FFI for the {project_name} program.
-// Run `make ffi-gen` to regenerate from the IDL, then `make ffi` to build the .so.
-#![allow(dead_code, unused_imports, unused_variables)]
-include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/{snake_name}_ffi.rs"));
-"#
-        ),
-    );
-
-    // FFI crate: generated stub — replaced by `make ffi-gen`
-    write_file(
-        root,
-        &format!("{snake_name}_ffi/generated/{snake_name}_ffi.rs"),
-        r#"// Stub — run `make ffi-gen` to populate this file with the real FFI implementation.
-"#,
-    );
-
-    // Standalone LGX installer — works on any machine, no lgx sign needed.
-    write_file(
-        root,
-        "scripts/install_lgx.py",
-        r#"#!/usr/bin/env python3
-"""Install a Basecamp LGX module directly to the plugins directory.
-
-Installs by extracting the package variant directly into the Basecamp plugins
-directory, bypassing the in-app UI entirely.  Use this as a fallback when
-the Basecamp 'Install Plugin' button is unavailable or inconvenient.
-
-Note: Basecamp accepts unsigned LGX packages with a warning when using its
-'Install Plugin' button — no signing step is required for normal distribution.
-
-Usage:
-    python3 scripts/install_lgx.py <module.lgx>
-
-After running, restart Basecamp to load the new module.
-"""
-import gzip, io, json, os, pathlib, platform, sys, tarfile
-
-def detect_variant(members):
-    arch = "amd64" if platform.machine() == "x86_64" else "arm64"
-    system = platform.system().lower()
-    # Try variants in priority order
-    for v in [f"{system}-{arch}", f"{system}-{arch}-dev", f"{system}-x86_64-dev"]:
-        prefix = f"variants/{v}/"
-        if any(m.name.startswith(prefix) for m in members):
-            return v, prefix, f"{system}-{arch}"
-    available = sorted({m.name.split("/")[1] for m in members if m.name.startswith("variants/") and "/" in m.name[9:]})
-    raise SystemExit(f"No compatible variant found.\nAvailable variants: {available}")
-
-def main():
-    if len(sys.argv) != 2 or sys.argv[1] in ("-h", "--help"):
-        print(__doc__)
-        sys.exit(0 if sys.argv[1:] else 1)
-
-    lgx_path = sys.argv[1]
-    with gzip.open(lgx_path, "rb") as gz:
-        raw = gz.read()
-
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
-        members = tf.getmembers()
-        manifest = json.loads(tf.extractfile("manifest.json").read())
-        name = manifest["name"]
-        variant, prefix, install_variant = detect_variant(members)
-
-        install_dir = (
-            pathlib.Path.home()
-            / ".local/share/Logos/LogosBasecamp/plugins"
-            / name
-        )
-        install_dir.mkdir(parents=True, exist_ok=True)
-
-        for m in members:
-            if not m.name.startswith(prefix) or not m.isfile():
-                continue
-            rel = m.name[len(prefix):]
-            dest = install_dir / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            data = tf.extractfile(m).read()
-            dest.write_bytes(data)
-            if rel.endswith(".so"):
-                os.chmod(dest, 0o755)
-
-    (install_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
-    (install_dir / "variant").write_text(install_variant)
-
-    print(f"Installed '{name}' to {install_dir}")
-    print("Restart Basecamp to load the module.")
-
-if __name__ == "__main__":
-    main()
-"#,
-    );
-
-    // LGX packaging helper — replaces the root manifest.json in the .lgx tarball
-    // with the pre-generated manifest.json produced by spel-client-gen (0.2.0 format).
-    write_file(
-        root,
-        "scripts/patch_lgx_manifest.py",
-        r#"#!/usr/bin/env python3
-"""Replace manifest.json in an LGX archive with a pre-generated manifest file.
-Usage: python3 scripts/patch_lgx_manifest.py <pkg.lgx> <manifest.json>
-"""
-import sys, tarfile, gzip, json, io
-
-def main():
-    if len(sys.argv) != 3:
-        print(f"Usage: {sys.argv[0]} <pkg.lgx> <manifest.json>", file=sys.stderr)
-        sys.exit(1)
-    lgx_path, manifest_path = sys.argv[1], sys.argv[2]
-    manifest = json.load(open(manifest_path))
-
-    with gzip.open(lgx_path, "rb") as gz:
-        raw = gz.read()
-    with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
-        members = [
-            (m, tf.extractfile(m).read() if m.isfile() else None)
-            for m in tf.getmembers()
-        ]
-
-    # Keep only manifest "main" entries whose variant directory actually exists in the archive.
-    archive_variants = {
-        m.name.split("/")[1]
-        for m, _ in members
-        if m.name.startswith("variants/") and m.name.count("/") >= 1 and m.name.split("/")[1]
-    }
-    if "main" in manifest and archive_variants:
-        manifest["main"] = {k: v for k, v in manifest["main"].items() if k in archive_variants}
-
-    buf = io.BytesIO()
-    with gzip.GzipFile(fileobj=buf, mode="wb", mtime=0) as gz_out:
-        with tarfile.open(fileobj=gz_out, mode="w") as tf_out:
-            mb = json.dumps(manifest, indent=2, sort_keys=True).encode()
-            info = tarfile.TarInfo("manifest.json")
-            info.size = len(mb)
-            info.mtime = info.uid = info.gid = 0
-            info.mode = 0o644
-            tf_out.addfile(info, io.BytesIO(mb))
-            for m, data in members:
-                if m.name == "manifest.json":
-                    continue
-                tf_out.addfile(m, io.BytesIO(data)) if data is not None else tf_out.addfile(m)
-
-    with open(lgx_path, "wb") as f:
-        f.write(buf.getvalue())
-    print(f"Patched {lgx_path}: manifest.json replaced from {manifest_path}")
-
-if __name__ == "__main__":
-    main()
-"#,
-    );
-
-    // spel.toml
-    write_file(
-        root,
-        "spel.toml",
-        &format!(
-            r#"[program]
-idl = "{project_name}-idl.json"
-binary = "methods/guest/target/riscv32im-risc0-zkvm-elf/docker/{snake_name}.bin"
-"#
-        ),
-    );
-
-    // Makefile
-    write_file(
-        root,
-        "Makefile",
-        &format!(
-            r#"# {project_name} — SPEL Program
+        (
+            "spel.toml".to_owned(),
+            format!(
+                r#"# {project}: a spel project. Paths are relative to this file.
 #
-# Quick start:
-#   make all        # full build (guest binary → IDL → FFI → UI)
-#   make deploy     # deploy to sequencer
-#   make setup      # create accounts
-#   make cli ARGS="<command> --arg1 value1"
-#   make install    # install plugin to Basecamp
+# `address` is the program's header account, which `spel deploy` prints. It isn't derivable
+# from the binary, and every deploy creates a new one; `make deploy` records it here.
 
+[programs.{snake}]
+# address = ""
+idl    = "{snake}-idl.json"
+binary = "{bin_dir}/{snake}.bin"
+core   = "{core}"
+"#
+            ),
+        ),
+        (
+            "Makefile".to_owned(),
+            format!(
+                r#"# {project}: build the guest, generate its IDL, deploy it.
+#
+#   make build                 the guest binary (needs the risc0 toolchain and Docker)
+#   make idl                   {snake}-idl.json, from {core}
+#   make deploy FEE_PAYER=…    deploy, and record the address in spel.toml
+#   make test                  the handler's unit tests
 
 SHELL := /bin/bash
-STATE_FILE := .{snake_name}-state
-IDL_FILE := {project_name}-idl.json
-PROGRAMS_DIR := methods/guest/target/riscv32im-risc0-zkvm-elf/docker
-PROGRAM_BIN := $(PROGRAMS_DIR)/{snake_name}.bin
-SPEL_CLIENT_GEN ?= {spel_client_gen}
-UI_OUT_DIR := ui/{project_name}
-FFI_LIB := target/debug/lib{snake_name}_ffi.so
-FFI_LIB_REL := ../../$(FFI_LIB)
-LGX_FILE := $(UI_OUT_DIR)/{project_name}.lgx
-LGX_STAGING := $(UI_OUT_DIR)/.lgx-staging
-ARCH := $(shell uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
-OS := $(shell uname -s | tr 'A-Z' 'a-z')
-VARIANT := linux-$(ARCH)
+SPEL ?= spel
+FEE_PAYER ?=
 
-# Load saved state if it exists
--include $(STATE_FILE)
-
-define save_var
-	@grep -v '^$(1)=' $(STATE_FILE) 2>/dev/null > $(STATE_FILE).tmp || true
-	@echo '$(1)=$(2)' >> $(STATE_FILE).tmp
-	@mv $(STATE_FILE).tmp $(STATE_FILE)
-endef
-
-.PHONY: help all build idl cli deploy setup inspect status clean ffi-gen ffi ui-gen ui-regen ui-build ui-run ui-package lgx lgx-sign install
+.PHONY: help build idl deploy test
 
 help: ## Show this help
-	@echo "{project_name} — SPEL Program"
-	@echo ""
-	@echo "  make all         Full build: guest binary → IDL → FFI → UI scaffold → UI app"
-	@echo "  make build       Build the guest binary (needs risc0 toolchain)"
-	@echo "  make idl         Generate IDL from program source"
-	@echo "  make cli ARGS=   Run the IDL-driven CLI (reads spel.toml for config)"
-	@echo "  make deploy      Deploy program to sequencer"
-	@echo "  make setup       Create accounts needed for the program"
-	@echo "  make inspect     Show ProgramId for built binary"
-	@echo "  make status      Show saved state and binary info"
-	@echo "  make clean       Remove saved state"
-	@echo ""
-	@echo "  make ffi-gen     Generate FFI Rust source from IDL"
-	@echo "  make ffi         Build FFI shared library (.so)"
-	@echo "  make ui-gen      Generate Qt/QML Basecamp module scaffold from IDL (full, first run)"
-	@echo "  make ui-regen    Regenerate C++ backend only; keep hand-written qml/Main.qml"
-	@echo "  make ui-build    Build the Qt/QML standalone preview app (needs Qt6 + CMake)"
-	@echo "  make ui-run      Run the standalone preview app"
-	@echo "  make install     Install plugin directly to Basecamp plugins directory"
-	@echo "  make lgx         Build a portable LGX archive for distribution"
-	@echo "  make lgx-sign    Sign LGX with a dev key (run lgx keygen --name devkey first)"
-	@echo ""
-	@echo "  Distribution workflow:"
-	@echo "    lgx keygen --name devkey    # one-time key generation"
-	@echo "    make lgx && make lgx-sign   # build + sign"
-	@echo "    # Share $(LGX_FILE) — recipients install via Basecamp 'Install Plugin'"
-	@echo "  Dev install (direct, no signing needed):"
-	@echo "    make install"
-	@echo ""
-	@echo "Example:"
-	@echo "  make all         # full build from scratch"
-	@echo "  make all deploy  # full build + deploy to sequencer"
-	@echo "  make cli ARGS=\"--help\""
-	@echo "  make cli ARGS=\"<command> --arg1 value1\""
-
-all: build idl ffi ui-gen ui-build ## Full build: guest binary → IDL → FFI → UI scaffold → UI app
-	@echo ""
-	@echo "✅ Full build complete!"
-	@echo "   Run with: make ui-run"
-	@echo "   Install:  make install"
-	@echo "   Deploy:   make deploy  (then make setup)"
+	@grep -E '^[a-z]+:.*## ' $(MAKEFILE_LIST) | sed -E 's/:.*## /\t/'
 
 build: ## Build the guest binary
-	cargo risczero build --manifest-path methods/guest/Cargo.toml \
-		2> >(grep -Ev "Falling back to slow ImageID|No such file or directory \(os error 2\)" >&2)
-	@echo ""
-	@echo "✅ Guest binary built: $(PROGRAM_BIN)"
-	@ls -la $(PROGRAM_BIN) 2>/dev/null || true
+	cargo risczero build --manifest-path guest/Cargo.toml
+	@echo "✅ {bin_dir}/{snake}.bin"
 
-idl: ## Generate IDL JSON from program source
-	cargo run --bin generate_idl > $(IDL_FILE)
-	@echo "✅ IDL written to $(IDL_FILE)"
+idl: ## Generate the IDL from the core crate (spel.toml names everything)
+	$(SPEL) generate-idl > {snake}-idl.json
+	@echo "✅ {snake}-idl.json"
 
-cli: ## Run the IDL-driven CLI (ARGS="...")
-	cargo run --bin {snake_name}_cli -- $(ARGS)
+deploy: ## Deploy the guest and record its address in spel.toml
+	@test -n "$(FEE_PAYER)" || {{ echo "make deploy FEE_PAYER=<funded wallet account>"; exit 1; }}
+	@ADDR=$$($(SPEL) deploy --fee-payer $(FEE_PAYER)) && \
+	  sed -i.bak -E 's|^#? *address *=.*|address = "'"$$ADDR"'"|' spel.toml && rm -f spel.toml.bak && \
+	  echo "✅ deployed at $$ADDR (recorded in spel.toml)"
 
-deploy: ## Deploy program to sequencer (FEE_PAYER=<funded account>)
-	@test -f "$(PROGRAM_BIN)" || (echo "ERROR: Binary not found. Run 'make build' first."; exit 1)
-	@test -n "$(FEE_PAYER)" || (echo "ERROR: set FEE_PAYER=<funded account id>. The program's new header and segment accounts hold nothing to pay fees with."; exit 1)
-	$(eval PROGRAM_ADDRESS := $(shell cargo run -q --bin {snake_name}_cli -- deploy $(PROGRAM_BIN) --fee-payer $(FEE_PAYER)))
-	@test -n "$(PROGRAM_ADDRESS)" || (echo "ERROR: deploy failed"; exit 1)
-	$(call save_var,PROGRAM_ADDRESS,$(PROGRAM_ADDRESS))
-	@echo "✅ Program deployed at $(PROGRAM_ADDRESS)"
-	@echo "   Add address = \"$(PROGRAM_ADDRESS)\" to [program] in spel.toml"
-
-inspect: ## Show ProgramId for built binary
-	cargo run --bin {snake_name}_cli -- inspect $(PROGRAM_BIN)
-
-setup: ## Create accounts needed for the program
-	@echo "Creating signer account..."
-	$(eval SIGNER_ID := $(shell wallet account new public 2>&1 | sed -n 's/.*Public\/\([A-Za-z0-9]*\).*/\1/p'))
-	@echo "Signer: $(SIGNER_ID)"
-	$(call save_var,SIGNER_ID,$(SIGNER_ID))
-	@echo ""
-	@echo "✅ Account saved to $(STATE_FILE)"
-
-status: ## Show saved state and binary info
-	@echo "{project_name} Status"
-	@echo "──────────────────────────────────────"
-	@if [ -f "$(STATE_FILE)" ]; then cat $(STATE_FILE); else echo "(no state — run 'make setup')"; fi
-	@echo ""
-	@echo "Binaries:"
-	@ls -la $(PROGRAM_BIN) 2>/dev/null || echo "  {snake_name}.bin: NOT BUILT (run 'make build')"
-	@ls -la $(FFI_LIB) 2>/dev/null || echo "  {snake_name}_ffi.so: NOT BUILT (run 'make ffi')"
-	@echo ""
-	@echo "IDL:"
-	@ls -la $(IDL_FILE) 2>/dev/null || echo "  $(IDL_FILE): NOT GENERATED (run 'make idl')"
-
-clean: ## Remove saved state
-	rm -f $(STATE_FILE) $(STATE_FILE).tmp
-	@echo "✅ State cleaned"
-
-ffi-gen: idl ## Generate FFI Rust source from IDL
-	$(SPEL_CLIENT_GEN) --idl $(IDL_FILE) --out-dir {snake_name}_ffi/generated --target rust+ffi
-	@echo "✅ FFI source generated in {snake_name}_ffi/generated/"
-
-ffi: ffi-gen ## Build the FFI shared library (.so)
-	cargo build -p {snake_name}_ffi
-	@echo ""
-	@echo "✅ FFI library: $(FFI_LIB)"
-
-ui-gen: idl ffi ## Generate Qt/QML Basecamp module scaffold from IDL (overwrites all files)
-	$(SPEL_CLIENT_GEN) --idl $(IDL_FILE) --out-dir $(UI_OUT_DIR) --target logos-module \
-	    --ffi-lib-path $(FFI_LIB_REL)
-	@echo ""
-	@echo "✅ UI scaffold generated in $(UI_OUT_DIR)/"
-	@echo "   Next: make ui-build  (or make install)"
-	@echo "   Tip:  use 'make ui-regen' after the first run to keep hand-written qml/Main.qml"
-
-ui-regen: idl ffi ## Regenerate C++ backend + build files; preserve hand-written qml/Main.qml
-	@test -d "$(UI_OUT_DIR)" || (echo "ERROR: UI scaffold not found. Run 'make ui-gen' first."; exit 1)
-	$(SPEL_CLIENT_GEN) --idl $(IDL_FILE) --out-dir $(UI_OUT_DIR) --target logos-module \
-	    --ffi-lib-path $(FFI_LIB_REL) --skip-ui
-	@echo ""
-	@echo "✅ C++ backend regenerated in $(UI_OUT_DIR)/ (qml/Main.qml preserved)"
-	@echo "   Next: make ui-build"
-
-ui-build: ffi ## Build the Qt/QML standalone preview app (needs Qt6 + CMake)
-	@test -d "$(UI_OUT_DIR)" || (echo "ERROR: UI scaffold not found. Run 'make ui-gen' first."; exit 1)
-	cmake -B $(UI_OUT_DIR)/build $(UI_OUT_DIR)
-	cmake --build $(UI_OUT_DIR)/build --parallel
-	@echo ""
-	@echo "✅ Preview app built in $(UI_OUT_DIR)/build/"
-	@echo "   Run with: make ui-run  or install with: make install"
-
-ui-run: ui-build ## Run the Qt/QML standalone preview app
-	@APP=$$(find $(UI_OUT_DIR)/build -maxdepth 1 -name '*App' -type f | head -1); \
-	test -n "$$APP" || (echo "ERROR: no *App binary found in $(UI_OUT_DIR)/build/"; exit 1); \
-	exec "$$APP"
-
-ui-package: ui-build ## Package plugin + FFI .so for loading in Basecamp
-	mkdir -p $(UI_OUT_DIR)/lib
-	cp $(FFI_LIB) $(UI_OUT_DIR)/lib/
-	@echo ""
-	@echo "✅ Module packaged: $(UI_OUT_DIR)/"
-	@echo "   Load in Basecamp by pointing to $(UI_OUT_DIR)/"
-
-lgx: ui-build ## Build a portable LGX archive for distribution
-	@command -v lgx >/dev/null 2>&1 || \
-	    (echo "ERROR: lgx not found. Get it from https://github.com/logos-co/logos-package"; exit 1)
-	@test -f "$(FFI_LIB)" || (echo "ERROR: FFI library not built. Run 'make ffi' first."; exit 1)
-	rm -rf $(LGX_STAGING) $(LGX_FILE)
-	mkdir -p $(LGX_STAGING)
-	cp $(UI_OUT_DIR)/build/lib{snake_name}_plugin.so $(LGX_STAGING)/
-	cp $(FFI_LIB) $(LGX_STAGING)/
-	cp $(UI_OUT_DIR)/qml/Main.qml $(LGX_STAGING)/
-	cd $(UI_OUT_DIR) && lgx create {project_name}
-	lgx add $(LGX_FILE) -v $(VARIANT) -f $(LGX_STAGING) -m lib{snake_name}_plugin.so -y
-	python3 scripts/patch_lgx_manifest.py $(LGX_FILE) $(UI_OUT_DIR)/manifest.json
-	lgx verify $(LGX_FILE)
-	rm -rf $(LGX_STAGING)
-	@echo ""
-	@echo "✅ LGX package: $(LGX_FILE)"
-	@echo "   Dev install:  make install"
-	@echo "   To distribute: make lgx-sign  then share $(LGX_FILE)"
-
-lgx-sign: ## Sign LGX with a dev key (run 'lgx keygen --name devkey' first)
-	@test -f "$(LGX_FILE)" || (echo "ERROR: LGX not built. Run 'make lgx' first."; exit 1)
-	@command -v lgx >/dev/null 2>&1 || \
-	    (echo "ERROR: lgx not found. Get it from https://github.com/logos-co/logos-package"; exit 1)
-	lgx sign $(LGX_FILE) --key devkey
-	lgx verify $(LGX_FILE)
-	@echo ""
-	@echo "✅ Signed: $(LGX_FILE)"
-	@echo "   Share the file — recipients install via Basecamp 'Install Plugin'"
-
-install: ui-build ## Install plugin directly to Basecamp plugins directory (no LGX/signature needed)
-	$(eval INSTALL_DIR := $(HOME)/.local/share/Logos/LogosBasecamp/plugins/{snake_name})
-	mkdir -p $(INSTALL_DIR)
-	cp $(UI_OUT_DIR)/build/lib{snake_name}_plugin.so $(INSTALL_DIR)/
-	cp $(UI_OUT_DIR)/qml/Main.qml $(INSTALL_DIR)/
-	cp $(UI_OUT_DIR)/manifest.json $(INSTALL_DIR)/
-	@printf '%s' '$(VARIANT)' > $(INSTALL_DIR)/variant
-	@echo ""
-	@echo "✅ Installed to $(INSTALL_DIR)"
-	@echo "   Restart Basecamp to load the module"
+test: ## Run the handler's unit tests
+	cargo test
 "#
+            ),
         ),
-    );
+        (
+            "README.md".to_owned(),
+            format!(
+                r#"# {project}
 
-    // README
-    write_file(
-        root,
-        "README.md",
-        &format!(
-            r#"# {project_name}
+An actor program for LEZ, scaffolded by `spel init`: a counter. Each account that the program
+has state on keeps its own count.
 
-A SPEL program built with [spel-framework](https://github.com/logos-co/spel).
+| path | contents |
+| --- | --- |
+| `{core}/` | the message enum and the state type, shared by the guest and clients |
+| `{program}/` | the handler: one message for one actor, `(account, {snake})` |
+| `guest/` | the zkVM binary that runs the handler |
+| `spel.toml` | the program's IDL, binary, core crate and (after deploying) address |
 
-## Prerequisites
-
-- Rust + [risc0 toolchain](https://dev.risczero.com/api/zkvm/install)
-- [LSSA wallet CLI](https://github.com/logos-blockchain/lssa) (`wallet` binary)
-- A running sequencer
-
-## Quick Start
+## Build, generate the IDL, deploy
 
 ```bash
-# 1. Build the guest binary
-make build
-
-# 2. Generate the IDL (auto-extracts from #[lez_program] annotations)
-make idl
-
-# 3. Deploy to sequencer. The fee payer is a funded account in your wallet;
-#    deploy prints the program address: add it to spel.toml as `address`.
-make deploy FEE_PAYER=<account-id>
-
-# 4. See available commands (auto-generated from your program)
-make cli ARGS="--help"
-
-# 5. Run an instruction (spel.toml provides the IDL and program address)
-make cli ARGS="<command> --arg1 value1 --arg2 value2"
-
-# Dry run (no submission):
-make cli ARGS="--dry-run -- <command> --arg1 value1"
+make build                      # needs the risc0 toolchain (rzup) and Docker
+make idl                        # spel generate-idl, no flags: the core crate marks its types
+make deploy FEE_PAYER=<account> # a funded account in the wallet at LEE_WALLET_HOME_DIR
 ```
 
-## Make Targets
+## Send and inspect
 
-| Target | Description |
-|--------|-------------|
-| `make all` | Full build: guest binary → IDL → FFI → UI scaffold → UI app |
-| `make build` | Build the guest binary (risc0) |
-| `make idl` | Generate IDL JSON from program source |
-| `make cli ARGS="..."` | Run the IDL-driven CLI |
-| `make deploy FEE_PAYER=<id>` | Deploy program to sequencer, print its address |
-| `make inspect` | Show ProgramId for built binary |
-| `make setup` | Create accounts via wallet |
-| `make status` | Show saved state and binary info |
-| `make clean` | Remove saved state |
-| `make ffi-gen` | Generate FFI Rust source from IDL |
-| `make ffi` | Build FFI shared library (.so) |
-| `make ui-gen` | Generate Qt/QML Basecamp module scaffold (first run, overwrites all) |
-| `make ui-regen` | Regenerate C++ backend + build files; keep hand-written `qml/Main.qml` |
-| `make ui-build` | Build the Qt/QML standalone preview app |
-| `make ui-run` | Run the standalone preview app |
-| `make install` | Install plugin to Basecamp plugins directory |
-| `make lgx` | Build a portable LGX archive for distribution |
-| `make lgx-sign` | Sign LGX with a dev key (`lgx keygen --name devkey` first) |
-| `python3 scripts/install_lgx.py <f.lgx>` | Direct install (bypasses Basecamp UI) |
+Accounts are labels in LEZ's wallet (`wallet account new public --label alice`).
 
-## Project Structure
-
-```
-{project_name}/
-├── {snake_name}_core/    # Shared types (used by guest + host)
-│   └── src/lib.rs
-├── {snake_name}_ffi/     # C FFI cdylib (compiled to .so for Qt)
-│   ├── src/lib.rs        # includes generated/ at build time
-│   └── generated/        # populated by `make ffi-gen` (git-ignored)
-├── methods/
-│   └── guest/            # RISC Zero guest program (runs on-chain)
-│       └── src/bin/{snake_name}.rs
-├── examples/             # CLI tools
-│   └── src/bin/
-│       ├── generate_idl.rs    # One-liner IDL generator
-│       └── {snake_name}_cli.rs # Three-line CLI wrapper
-├── spel.toml                         # SPEL CLI config (IDL and binary paths)
-├── Makefile
-└── {project_name}-idl.json       # Auto-generated IDL
+```bash
+spel send --root alice --signer alice -- increment --by 2
+spel inspect alice@{snake}      # {{"count": "2"}}
+spel send --root alice --signer alice -- reset
 ```
 
-## How It Works
+`increment` and `reset` require the account's authority, so the account signs (`--signer`).
 
-The `#[lez_program]` macro in your guest binary defines your on-chain program.
-The framework automatically:
+## Privately
 
-1. **Generates an `Instruction` enum** from your function signatures
-2. **Generates an IDL** (Interface Description Language) describing your program
-3. **Provides a full CLI** for building, inspecting, and submitting transactions
+The same messages to a private account (`wallet account new private --label carol`) are sent
+as a privacy-preserving transaction: the wallet runs the handler locally and proves it, and only
+the proof and encrypted notes are published. The account authorizes with the wallet's key and
+pays the fee in the proof.
 
-You write the program logic. The framework handles the rest.
+```bash
+spel send --root carol --signer carol -- increment --by 5
+spel inspect carol@{snake}      # read from the wallet's decrypted copy
+```
+
+## Changing the program
+
+- Messages and state are Borsh: add new message variants at the end, never reorder or edit
+  existing ones, since a variant's position is its tag.
+- After a change, `make build idl` and deploy again (a new deploy is a new address).
+- Events: mark the program's event trait `#[cfg_attr(feature = "idl", spel_attrs::event)]`, and
+  `make idl` lists its impls.
 "#
+            ),
         ),
-    );
-
-    // program_core
-    write_file(
-        root,
-        &format!("{}_core/Cargo.toml", snake_name),
-        &format!(
-            r#"[package]
-name = "{snake_name}_core"
+        // Core crate
+        (
+            format!("{core}/Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{core}"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-serde = {{ version = "1.0", features = ["derive"] }}
-borsh = "1.5"
+borsh = {{ version = "1.5", features = ["derive"] }}
+# The inert #[message] / #[state] markers `spel generate-idl` reads from the source. Optional:
+# the generator finds them either way, and the guest never builds this crate.
+spel-attrs = {{ {spel_attrs}, optional = true }}
 
+[features]
+# `cargo check --features idl` checks the markers compile.
+idl = ["dep:spel-attrs"]
 "#
+            ),
         ),
-    );
+        (
+            format!("{core}/src/lib.rs"),
+            format!(
+                r#"//! Types shared by the {project} program and its clients: the message it accepts and the
+//! state it keeps on each account.
+//!
+//! Borsh encodes an enum variant as a leading tag byte, so the message enum is append-only: add
+//! variants at the end, never reorder or edit existing ones.
 
-    write_file(
-        root,
-        &format!("{}_core/src/lib.rs", snake_name),
-        r#"use serde::{Deserialize, Serialize};
+use borsh::{{BorshDeserialize, BorshSerialize}};
 
-/// Example state struct — customize for your program.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ProgramState {
-    pub initialized: bool,
-    pub owner: [u8; 32],
-}
-"#,
-    );
+/// What the program accepts.
+#[cfg_attr(feature = "idl", spel_attrs::message)]
+#[derive(Debug, Clone, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub enum Message {{
+    /// Add `by` to the receiving account's count. The account must authorize.
+    Increment {{ by: u64 }},
+    /// Set the receiving account's count back to zero. The account must authorize.
+    Reset,
+}}
 
-    // methods/Cargo.toml
-    write_file(
-        root,
-        "methods/Cargo.toml",
-        &format!(
-            r#"[package]
-name = "{snake_name}-methods"
+/// The program's state on one account. An account it has never written to has none, which
+/// counts as zero.
+#[cfg_attr(feature = "idl", spel_attrs::state)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, BorshSerialize, BorshDeserialize)]
+pub struct CounterState {{
+    pub count: u64,
+}}
+"#
+            ),
+        ),
+        // Program crate
+        (
+            format!("{program}/Cargo.toml"),
+            format!(
+                r#"[package]
+name = "{program}"
 version = "0.1.0"
 edition = "2021"
 
-[build-dependencies]
-risc0-build = "=3.0.5"
-
 [dependencies]
-risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
-{snake_name}_core = {{ path = "../{snake_name}_core" }}
+# Without the `host` feature: the guest builds this crate too.
+lee_core = {{ {lez} }}
+{core} = {{ path = "../{core}" }}
+borsh = {{ version = "1.5", features = ["derive"] }}
+
+[dev-dependencies]
+# `host` derives `Debug` and `PartialEq` on `Response`, for assertions.
+lee_core = {{ {lez}, features = ["host"] }}
 "#
+            ),
         ),
-    );
+        (
+            format!("{program}/src/lib.rs"),
+            format!(
+                r#"//! The {project} program. Each run handles one message for one actor: the receiving
+//! account's state under this program.
 
-    // methods/build.rs
-    write_file(
-        root,
-        "methods/build.rs",
-        r#"fn main() {
-    risc0_build::embed_methods();
-}
-"#,
-    );
+use lee_core::program::{{ReceiveInput, Response}};
+use {core}::{{CounterState, Message}};
 
-    // methods/src/lib.rs
-    write_file(
-        root,
-        "methods/src/lib.rs",
-        r#"include!(concat!(env!("OUT_DIR"), "/methods.rs"));
-"#,
-    );
+/// The handler the guest runs.
+///
+/// # Panics
+/// If the receiving account doesn't authorize, or the count would overflow. A panic refuses the
+/// message: the wallet's simulation reports it, and nothing is sent.
+pub fn handle_message(input: &ReceiveInput, message: Message) -> Response {{
+    assert!(input.is_authorized, "the counter's account must authorize");
+    let mut state = if input.pre_state.is_empty() {{
+        CounterState::default()
+    }} else {{
+        borsh::from_slice(&input.pre_state).expect("counter state must decode")
+    }};
+    match message {{
+        Message::Increment {{ by }} => {{
+            state.count = state.count.checked_add(by).expect("count overflow");
+        }},
+        Message::Reset => state.count = 0,
+    }}
+    Response::set_state(borsh::to_vec(&state).expect("borsh serialization is infallible"))
+}}
 
-    let lez_ref = git_ref(lez_tag, lez_rev, default_lez_ref());
-    let spel_ref = git_ref(spel_tag, spel_rev, default_spel_ref());
-    // methods/guest/Cargo.toml
-    write_file(
-        root,
-        "methods/guest/Cargo.toml",
-        &format!(
-            r#"[package]
-name = "{snake_name}-guest"
-version = "0.1.0"
-edition = "2021"
-
-[workspace]
-
-[[bin]]
-name = "{snake_name}"
-path = "src/bin/{snake_name}.rs"
-
-[dependencies]
-spel-framework = {{ git = "{spel_git}", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
-risc0-zkvm = {{ version = "=3.0.5", features = ["std"] }}
-{snake_name}_core = {{ path = "../../{snake_name}_core" }}
-serde = {{ version = "1.0", features = ["derive"] }}
-borsh = "1.5"
-ruint = "=1.17.0"
-
-"#
-        ),
-    );
-
-    // Guest program skeleton
-    write_file(
-        root,
-        &format!("methods/guest/src/bin/{}.rs", snake_name),
-        &format!(
-            r#"#![no_main]
-
-use spel_framework::prelude::*;
-use nssa_core::account::Data;
-
-risc0_zkvm::guest::entry!(main);
-
-#[lez_program]
-mod {snake_name} {{
-    #[allow(unused_imports)]
+#[cfg(test)]
+mod tests {{
     use super::*;
+    use lee_core::account::{{AccountId, Actor, ActorState}};
 
-    /// Program state stored in a PDA account.
-    #[derive(BorshSerialize, BorshDeserialize)]
-    #[account_type]
-    pub struct ProgramState {{
-        pub initialized: bool,
-        pub owner: [u8; 32],
-    }}
-
-    /// Initialize the program state.
-    #[instruction]
-    pub fn initialize(
-        _ctx: ProgramContext,
-        #[account(init, pda = literal("state"))]
-        mut state: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
-    ) -> SpelResult {{
-        let ps = ProgramState {{
-            initialized: true,
-            owner: *owner.account_id.value(),
+    fn run(is_authorized: bool, count: Option<u64>, message: Message) -> Response {{
+        let input = ReceiveInput {{
+            receiver: Actor::new(AccountId::new([1; 32]), AccountId::new([9; 32])),
+            from: None,
+            is_authorized,
+            pre_state: ActorState::from(
+                count
+                    .map(|count| borsh::to_vec(&CounterState {{ count }}).unwrap())
+                    .unwrap_or_default(),
+            ),
+            message: borsh::to_vec(&message).unwrap(),
         }};
-        let bytes = borsh::to_vec(&ps).map_err(|e| SpelError::custom(999, format!("borsh error: {{e}}")))?;
-        state.account.data = Data::try_from(bytes).map_err(|_| SpelError::custom(999, "data too big"))?;
-        Ok(SpelOutput::execute(vec![state, owner], vec![]))
+        handle_message(&input, message)
     }}
 
-    /// Example instruction — replace with your own.
-    #[instruction]
-    pub fn do_something(
-        #[account(mut, pda = literal("state"))]
-        state: AccountWithMetadata,
-        #[account(signer)]
-        owner: AccountWithMetadata,
-        _amount: u64,
-    ) -> SpelResult {{
-        // TODO: implement your logic
-        Ok(SpelOutput::execute(vec![state, owner], vec![]))
+    fn counted(count: u64) -> Response {{
+        Response::set_state(borsh::to_vec(&CounterState {{ count }}).unwrap())
+    }}
+
+    #[test]
+    fn increment_adds_to_the_count() {{
+        assert_eq!(run(true, None, Message::Increment {{ by: 2 }}), counted(2));
+        assert_eq!(run(true, Some(2), Message::Increment {{ by: 3 }}), counted(5));
+    }}
+
+    #[test]
+    fn reset_sets_the_count_to_zero() {{
+        assert_eq!(run(true, Some(7), Message::Reset), counted(0));
+    }}
+
+    #[test]
+    #[should_panic(expected = "must authorize")]
+    fn an_unauthorized_account_is_refused() {{
+        let _refused = run(false, Some(1), Message::Increment {{ by: 1 }});
     }}
 }}
 "#
+            ),
         ),
-    );
-
-    // examples/Cargo.toml
-    write_file(
-        root,
-        "examples/Cargo.toml",
-        &format!(
-            r#"[package]
-name = "{snake_name}-examples"
+        // Guest
+        (
+            "guest/Cargo.toml".to_owned(),
+            format!(
+                r#"[package]
+name = "{snake}-guest"
 version = "0.1.0"
 edition = "2021"
+# The risc0 guest toolchain's rustc: dependencies resolve to versions that support it.
+rust-version = "1.88"
+
+# Its own workspace: the guest builds for the zkVM with the risc0 toolchain.
+[workspace]
+resolver = "3"
+
+[profile.release]
+debug = 0
+strip = "symbols"
 
 [[bin]]
-name = "generate_idl"
-path = "src/bin/generate_idl.rs"
-
-[[bin]]
-name = "{snake_name}_cli"
-path = "src/bin/{snake_name}_cli.rs"
+name = "{snake}"
+path = "src/bin/{snake}.rs"
 
 [dependencies]
-spel-framework = {{ git = "{spel_git}", {spel_ref} }}
-nssa_core = {{ git = "https://github.com/logos-blockchain/logos-execution-zone.git", {lez_ref}, package = "lee_core" }}
-spel = {{ git = "{spel_git}", {spel_ref} }}
-{snake_name}_core = {{ path = "../{snake_name}_core" }}
-serde_json = "1.0"
-tokio = {{ version = "1.28.2", features = ["net", "rt-multi-thread", "sync", "macros"] }}
+lee_core = {{ {lez} }}
+{program} = {{ path = "../{program}" }}
+# 3.1: every 3.0 release is yanked.
+risc0-zkvm = {{ version = "3.1", default-features = false }}
 "#
-        ),
-    );
-
-    // generate_idl.rs
-    write_file(
-        root,
-        "examples/src/bin/generate_idl.rs",
-        &format!(
-            r#"/// Generate IDL JSON for the {project_name} program.
-///
-/// Usage:
-///   cargo run --bin generate_idl > {project_name}-idl.json
-
-spel_framework::generate_idl!("../methods/guest/src/bin/{snake_name}.rs");
-"#
-        ),
-    );
-
-    // CLI wrapper
-    write_file(
-        root,
-        &format!("examples/src/bin/{}_cli.rs", snake_name),
-        r#"#[tokio::main]
-async fn main() {
-    spel::run().await;
-}
-"#,
-    );
-
-    println!();
-    // Generate Cargo.lock for the guest to pin dependency versions
-    // (prevents getrandom 0.3.x breakage in Docker builds)
-    let guest_dir = root.join("methods/guest");
-    let status = std::process::Command::new("cargo")
-        .arg("generate-lockfile")
-        .current_dir(&guest_dir)
-        .status();
-    match status {
-        Ok(s) if s.success() => {},
-        Ok(s) => eprintln!("⚠️  cargo generate-lockfile exited with: {}", s),
-        Err(e) => eprintln!(
-            "⚠️  Failed to generate Cargo.lock (cargo not found?): {}",
-            e
-        ),
-    }
-
-    // Pin the enum-ordinalize crates to the version LEZ uses (4.3.2).
-    // `educe`'s `^4` range otherwise resolves to 4.4.1, which requires rustc
-    // 1.89, but the guest is built with the risc0 zkVM toolchain (rustc 1.88).
-    // Both enum-ordinalize and its companion proc-macro enum-ordinalize-derive
-    // resolve independently, so each needs its own pin. LEZ's own lockfile
-    // pins 4.3.2, so this keeps the guest in sync and buildable under risc0.
-    // Best-effort: init still succeeds if a pin fails (e.g. a future LEZ drops
-    // the dep, or raises educe's floor above 4.3.2), in which case cargo prints
-    // the reason on stderr just above this warning.
-    for pkg in ["enum-ordinalize", "enum-ordinalize-derive"] {
-        let status = std::process::Command::new("cargo")
-            .args(["update", "-p", pkg, "--precise", "4.3.2"])
-            .current_dir(&guest_dir)
-            .status();
-        match status {
-            Ok(s) if s.success() => {},
-            Ok(s) => eprintln!(
-                "⚠️  Could not pin {} to 4.3.2 (cargo exited {}); see cargo output above. If the guest fails to build under risc0, check the resolved enum-ordinalize versions.",
-                pkg, s
             ),
-            Err(e) => {
-                eprintln!("⚠️  Failed to pin {} (cargo not found?): {}", pkg, e)
-            },
-        }
-    }
+        ),
+        (
+            format!("guest/src/bin/{snake}.rs"),
+            format!(
+                r"//! The {project} guest: decodes the message and runs the handler, one actor per run.
 
-    println!("✅ Project '{}' created!", project_name);
-    println!();
-    println!("Next steps:");
-    println!("  cd {}", name);
-    println!(
-        "  # Edit methods/guest/src/bin/{}.rs with your program logic",
-        snake_name
-    );
-    println!("  # Edit {}_core/src/lib.rs with your types", snake_name);
-    println!("  make idl        # Generate the IDL");
-    println!("  make cli ARGS=\"--help\"  # See available commands");
+lee_core::actor_entrypoint!({program}::handle_message);
+"
+            ),
+        ),
+    ];
+    Ok(files)
 }
 
-fn write_file(root: &Path, rel_path: &str, content: &str) {
-    let path = root.join(rel_path);
-    fs::write(&path, content).unwrap_or_else(|e| {
-        eprintln!("❌ Failed to write {}: {}", path.display(), e);
-        std::process::exit(1);
-    });
+/// Run `spel init`: write the scaffold into a new directory.
+///
+/// # Errors
+/// If the directory exists, the name isn't usable, a dependency can't be pinned, or a file can't
+/// be written.
+pub fn init_command(args: &InitArgs) -> Result<PathBuf, String> {
+    let root = PathBuf::from(&args.project);
+    if root.exists() {
+        return Err(format!("'{}' already exists", root.display()));
+    }
+    let (project, snake) = names(&root)?;
+    let files = scaffold(&project, &snake, args)?;
+    for (rel, content) in files {
+        let path = root.join(&rel);
+        if let Some(dir) = path.parent() {
+            fs::create_dir_all(dir).map_err(|e| format!("creating {}: {e}", dir.display()))?;
+        }
+        fs::write(&path, content).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    }
+    Ok(root)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// The scaffold's default LEZ tag has to be the one spel-framework-core
-    /// is built against; see `DEFAULT_LEZ_TAG`.
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
     #[test]
-    fn default_lez_tag_matches_framework() {
-        let manifest = include_str!("../../spel-framework-core/Cargo.toml");
-        let pin = manifest
-            .lines()
-            .find(|l| l.trim_start().starts_with("nssa_core") && l.contains("logos-execution-zone"))
-            .expect("spel-framework-core/Cargo.toml has no LEZ nssa_core dependency");
+    fn a_project_name_becomes_the_rust_name() {
+        assert_eq!(
+            names(Path::new("/tmp/my-counter")).unwrap(),
+            ("my-counter".to_owned(), "my_counter".to_owned())
+        );
+        assert!(names(Path::new("2fast")).is_err());
+        assert!(names(Path::new("My-Counter")).is_err());
+    }
+
+    #[test]
+    fn one_way_to_name_each_dependency() {
+        assert!(parse_args(&args("x --lez-tag a --lez-rev b")).is_err());
+        assert!(parse_args(&args("x --spel-rev a --spel-path b")).is_err());
+        assert!(parse_args(&args("x --spel-path a --spel-git b")).is_err());
+        assert!(parse_args(&args("--lez-tag a")).is_err());
+        assert_eq!(
+            parse_args(&args("x --lez-rev abc --spel-tag v1")).unwrap(),
+            InitArgs {
+                project: "x".into(),
+                lez_rev: Some("abc".into()),
+                spel_tag: Some("v1".into()),
+                ..InitArgs::default()
+            }
+        );
+    }
+
+    #[test]
+    fn dependencies_follow_the_flags() {
+        let parsed = parse_args(&args(
+            "x --lez-rev abc --spel-tag v1 --spel-git https://g/s",
+        ))
+        .unwrap();
+        assert_eq!(
+            lez_dependency(&parsed),
+            format!(r#"git = "{LEZ_GIT}", rev = "abc""#)
+        );
+        assert_eq!(
+            spel_attrs_dependency(&parsed).unwrap(),
+            r#"git = "https://g/s", tag = "v1""#
+        );
+        let defaults = parse_args(&args("x")).unwrap();
+        assert_eq!(
+            lez_dependency(&defaults),
+            format!(r#"git = "{LEZ_GIT}", tag = "{DEFAULT_LEZ_TAG}""#)
+        );
+        if !SPEL_GIT_REV.is_empty() {
+            assert_eq!(
+                spel_attrs_dependency(&defaults).unwrap(),
+                format!(r#"git = "{SPEL_GIT}", rev = "{SPEL_GIT_REV}""#)
+            );
+        }
+    }
+
+    #[test]
+    fn a_spel_path_must_hold_spel_attrs() {
+        let repo = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let parsed = parse_args(&args(&format!("x --spel-path {}", repo.display()))).unwrap();
+        let dependency = spel_attrs_dependency(&parsed).unwrap();
+        assert!(dependency.starts_with("path = \"") && dependency.ends_with("spel-attrs\""));
+        let empty = tempfile::tempdir().unwrap();
+        let parsed =
+            parse_args(&args(&format!("x --spel-path {}", empty.path().display()))).unwrap();
+        assert!(spel_attrs_dependency(&parsed)
+            .unwrap_err()
+            .contains("no spel-attrs"));
+    }
+
+    #[test]
+    fn the_scaffold_names_everything_after_the_project() {
+        let parsed = parse_args(&args("my-counter --spel-tag v1")).unwrap();
+        let files = scaffold("my-counter", "my_counter", &parsed).unwrap();
+        let file = |name: &str| {
+            &files
+                .iter()
+                .find(|(path, _)| path == name)
+                .unwrap_or_else(|| panic!("no {name}"))
+                .1
+        };
+        assert!(file("spel.toml").contains("[programs.my_counter]"));
+        assert!(file("spel.toml").contains("core   = \"my_counter_core\""));
+        assert!(file("my_counter_core/src/lib.rs")
+            .contains(r#"#[cfg_attr(feature = "idl", spel_attrs::message)]"#));
+        assert!(file("guest/src/bin/my_counter.rs")
+            .contains("actor_entrypoint!(my_counter_program::handle_message)"));
         assert!(
-            pin.contains(&format!("tag = \"{DEFAULT_LEZ_TAG}\"")),
-            "DEFAULT_LEZ_TAG ({DEFAULT_LEZ_TAG}) differs from spel-framework-core's LEZ pin: {pin}"
+            file("Cargo.toml").contains(r#"members = ["my_counter_core", "my_counter_program"]"#)
         );
     }
 }

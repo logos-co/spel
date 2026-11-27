@@ -142,6 +142,12 @@ fn to_dynamic_value(ty: &IdlType, val: &ParsedValue) -> Result<DynamicValue, Ser
             // Non-None, non-Some value with Option type -> wrap as Some
             Ok(DynamicValue::Some(Box::new(to_dynamic_value(option, val)?)))
         },
+        (IdlType::Defined { .. }, ParsedValue::Struct(fields)) => Ok(DynamicValue::Tuple(
+            fields
+                .iter()
+                .map(|(_, fty, fval)| to_dynamic_value(fty, fval))
+                .collect::<Result<_, _>>()?,
+        )),
         (IdlType::Defined { .. }, ParsedValue::EnumVariant { index, fields, .. }) => {
             if fields.is_empty() {
                 Ok(DynamicValue::UnitVariant(*index))

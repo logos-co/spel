@@ -9,8 +9,12 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  unit-tests:
-    name: Unit Tests
+  # LEZ actor-model port: the framework, its macros and the FFI compile test are retired. The
+  # sequencer jobs are replaced by the smoke, multisig and payroll tests (scripts/smoke-test.sh,
+  # scripts/multisig-e2e-test.sh, scripts/payroll-e2e-test.sh) and the init test
+  # (scripts/init-e2e-test.sh). The FFI test returns with client generation.
+  build-and-test:
+    name: Build and test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,74 +22,46 @@ jobs:
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
       - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "unit"
-      - name: Build (framework + codegen)
-        run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen
-      - name: Unit tests
-        run: cargo test -p spel-framework-core -p spel-framework-macros -p spel-client-gen
-
-  e2e-tests:
-    name: E2E Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-      - uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: "e2e"
       - name: Install logos-blockchain-circuits
         run: |
           curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build (all packages including spel)
-        run: cargo build -p spel-framework -p spel-framework-core -p spel-framework-macros -p spel-client-gen -p spel
-      - name: E2E tests
-        run: cargo test -p spel-framework
-      - name: Compile-check generated FFI
-        run: cargo check -p spel-ffi-compile-test
+      - name: Build
+        run: cargo build --workspace --all-targets
+      - name: Test
+        run: cargo test --workspace --all-targets
 
-  sequencer-setup:
-    name: Sequencer Setup (shared)
+  smoke-test:
+    name: Sequencer e2e (smoke, multisig, payroll)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 90
     env:
       RISC0_VERSION: "3.0.5"
-    outputs:
-      lez-tag: ${{ steps.lez-ref.outputs.LEZ_TAG }}
-      lez-rev: ${{ steps.lez-ref.outputs.LEZ_REV }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
+      - uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: "smoke"
 
-      - name: Generate Cargo.lock
-        run: cargo generate-lockfile
-
-      - name: Extract LEZ revision from spel-framework/Cargo.toml
-        id: lez-ref
+      - name: LEZ tag spel links
+        id: lez
         run: |
-          # Support both tag = "..." and rev = "..." formats
-          LEZ_REV=$(grep 'nssa_core' spel-framework/Cargo.toml | grep -oE '(tag|rev) = "[^"]*"' | cut -d'"' -f2)
-          if [ -z "$LEZ_REV" ]; then
-            echo "ERROR: Could not extract LEZ revision from spel-framework/Cargo.toml"
-            exit 1
-          fi
-          echo "LEZ_REV=$LEZ_REV" >> $GITHUB_OUTPUT
-          echo "LEZ_TAG=$LEZ_REV" >> $GITHUB_OUTPUT
+          TAG=$(grep -m1 '^lee = ' spel-cli/Cargo.toml | grep -oE 'tag = "[^"]*"' | cut -d'"' -f2)
+          [ -n "$TAG" ] || { echo "no LEZ tag in spel-cli/Cargo.toml"; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       - name: Install risc0 toolchain
         env:
-          # rzup looks releases up via the GitHub API. Unauthenticated, that is
-          # 60 requests/hour shared by every job on the runner's IP.
+          # rzup looks releases up via the GitHub API; unauthenticated, that is 60 requests/hour
+          # shared by every job on the runner's IP.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
-          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
           rzup install rust
@@ -96,77 +72,58 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Clone LEZ at correct revision
-        run: |
-          rm -rf /tmp/lssa
-          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
-          cd /tmp/lssa
-          git fetch --depth 1 origin ${{ steps.lez-ref.outputs.LEZ_REV }}
-          git checkout ${{ steps.lez-ref.outputs.LEZ_REV }}
+      - name: Clone LEZ
+        run: git clone --depth 1 --branch ${{ steps.lez.outputs.tag }} https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lez
 
-      - name: Cache & build sequencer
-        id: cache-sequencer
+      - name: Cache the sequencer and wallet
+        id: lez-bins
         uses: actions/cache@v4
         with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ steps.lez-ref.outputs.LEZ_REV }}
-          restore-keys: |
-            sequencer-
+          path: |
+            /tmp/lez/target/release/sequencer_service
+            /tmp/lez/target/release/wallet
+          key: lez-bins-${{ steps.lez.outputs.tag }}
 
-      - name: Build sequencer (cache miss)
-        if: steps.cache-sequencer.outputs.cache-hit != 'true'
+      - name: Build the sequencer and wallet
+        if: steps.lez-bins.outputs.cache-hit != 'true'
+        working-directory: /tmp/lez
         run: |
-          cd /tmp/lssa
           cargo build --release --features standalone -p sequencer_service
-
-      - name: Save sequencer cache
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ steps.lez-ref.outputs.LEZ_REV }}
-
-      - name: Cache & build wallet
-        id: cache-wallet
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
-          restore-keys: |
-            wallet-
-
-      - name: Build wallet (cache miss)
-        if: steps.cache-wallet.outputs.cache-hit != 'true'
-        run: |
-          cd /tmp/lssa
           cargo build --release -p wallet
+          # Keep the two binaries, free the rest of LEZ's target for spel's build.
+          find target/release -mindepth 1 -maxdepth 1 ! -name sequencer_service ! -name wallet -exec rm -rf {} +
 
-      - name: Save wallet cache
-        if: always()
-        uses: actions/cache/save@v4
+      - name: Run the smoke test
+        env:
+          LEZ_DIR: /tmp/lez
+        run: scripts/smoke-test.sh /tmp/spel-smoke
+
+      - name: Run the multisig e2e
+        env:
+          LEZ_DIR: /tmp/lez
+          SPEL_BIN: target/release/spel
+        run: scripts/multisig-e2e-test.sh /tmp/spel-multisig
+
+      - name: Run the payroll e2e (private calls)
+        env:
+          LEZ_DIR: /tmp/lez
+          SPEL_BIN: target/release/spel
+        run: scripts/payroll-e2e-test.sh /tmp/spel-payroll
+
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ steps.lez-ref.outputs.LEZ_REV }}
+          name: sequencer-e2e-logs
+          path: |
+            /tmp/spel-smoke/logs
+            /tmp/spel-multisig/logs
+            /tmp/spel-payroll/logs
 
-      - name: Build spel CLI
-        run: cargo build -p spel --release
-
-      - name: Copy spel CLI to LEZ dir
-        run: |
-          mkdir -p /tmp/lssa/target/release
-          cp target/release/spel /tmp/lssa/target/release/spel
-
-      - name: Save spel CLI cache (PR-specific key)
-        uses: actions/cache/save@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ steps.lez-ref.outputs.LEZ_REV }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
-
-  privacy-smoke-test:
-    name: Privacy Smoke Test
-    needs: [sequencer-setup]
+  init-e2e:
+    name: Init e2e (default dependencies)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     env:
       RISC0_VERSION: "3.0.5"
     steps:
@@ -174,63 +131,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
-      - name: Clone LEZ at correct revision
-        run: |
-          rm -rf /tmp/lssa
-          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
-          cd /tmp/lssa
-          git fetch --depth 1 origin ${{ needs.sequencer-setup.outputs.lez-rev }}
-          git checkout ${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore sequencer cache
-        uses: actions/cache@v4
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore wallet cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Restore spel CLI cache (PR-specific)
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
-
-      - name: Determine SPEL ref for testing
-        id: spel-ref
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
-          else
-            SPEL_REF="${{ github.sha }}"
-          fi
-          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
+          prefix-key: "init-e2e"
 
       - name: Install risc0 toolchain
         env:
-          # rzup looks releases up via the GitHub API. Unauthenticated, that is
-          # 60 requests/hour shared by every job on the runner's IP.
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           curl -L https://risc0.com/install | bash
-          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
+          echo "$HOME/.risc0/bin" >> "$GITHUB_PATH"
           export PATH="$HOME/.risc0/bin:$PATH"
           rzup install cargo-risczero ${{ env.RISC0_VERSION }}
           rzup install rust
@@ -241,254 +151,16 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Run privacy smoke test
+      # spel-attrs defaults to the commit spel is built from: on a pull request, the merge commit
+      # GitHub keeps under refs/pull/, in this repository (hence --spel-git, which forks need).
+      - name: Run the init test
         env:
-          LSSA_DIR: /tmp/lssa
-          LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
-          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
-          SPEL_GIT: ${{ github.server_url }}/${{ github.repository }}.git
-        run: |
-          export PATH="/tmp/lssa/target/release:$PATH"
-          scripts/smoke-test-privacy.sh /tmp/privacy-smoke
+          SPEL_INIT_ARGS: --spel-git ${{ github.server_url }}/${{ github.repository }}.git
+        run: scripts/init-e2e-test.sh /tmp/spel-init-e2e
 
-  ffi-call-test:
-    name: FFI Call Test
-    needs: [sequencer-setup]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    env:
-      RISC0_VERSION: "3.0.5"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
-      - name: Clone LEZ at correct revision
-        run: |
-          rm -rf /tmp/lssa
-          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
-          cd /tmp/lssa
-          git fetch --depth 1 origin ${{ needs.sequencer-setup.outputs.lez-rev }}
-          git checkout ${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore sequencer cache
-        uses: actions/cache@v4
+      - name: Upload logs
+        if: failure()
+        uses: actions/upload-artifact@v4
         with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore wallet cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Restore spel CLI cache (PR-specific)
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
-
-      - name: Determine SPEL ref for testing
-        id: spel-ref
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
-          else
-            SPEL_REF="${{ github.sha }}"
-          fi
-          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
-
-      - name: Install risc0 toolchain
-        env:
-          # rzup looks releases up via the GitHub API. Unauthenticated, that is
-          # 60 requests/hour shared by every job on the runner's IP.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -L https://risc0.com/install | bash
-          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.risc0/bin:$PATH"
-          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
-          rzup install rust
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Run FFI call test
-        env:
-          LSSA_DIR: /tmp/lssa
-          LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
-          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
-          SPEL_GIT: ${{ github.server_url }}/${{ github.repository }}.git
-        run: |
-          export PATH="/tmp/lssa/target/release:$PATH"
-          scripts/ffi-call-test.sh /tmp/ffi-call-test
-
-  multisig-e2e-test:
-    name: Multisig E2E (witness exchange)
-    needs: [sequencer-setup]
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      RISC0_VERSION: "3.0.5"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
-      - name: Clone LEZ at correct revision
-        run: |
-          rm -rf /tmp/lssa
-          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
-          cd /tmp/lssa
-          git fetch --depth 1 origin ${{ needs.sequencer-setup.outputs.lez-rev }}
-          git checkout ${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore sequencer cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore wallet cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Restore spel CLI cache (PR-specific)
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
-
-      - name: Determine SPEL ref for testing
-        id: spel-ref
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
-          else
-            SPEL_REF="${{ github.sha }}"
-          fi
-          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
-
-      - name: Install risc0 toolchain
-        env:
-          # rzup looks releases up via the GitHub API. Unauthenticated, that is
-          # 60 requests/hour shared by every job on the runner's IP.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -L https://risc0.com/install | bash
-          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.risc0/bin:$PATH"
-          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
-          rzup install rust
-
-      - name: Run multisig E2E test
-        env:
-          LSSA_DIR: /tmp/lssa
-          LEZ_TAG: ${{ needs.sequencer-setup.outputs.lez-tag }}
-          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
-          SPEL_GIT: ${{ github.server_url }}/${{ github.repository }}.git
-        run: |
-          export PATH="/tmp/lssa/target/release:$PATH"
-          scripts/multisig-e2e-test.sh /tmp/multisig-e2e-test
-
-  init-e2e-test:
-    name: Init E2E (default flags)
-    needs: [sequencer-setup]
-    runs-on: ubuntu-latest
-    timeout-minutes: 35
-    env:
-      RISC0_VERSION: "3.0.5"
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite-dev
-
-      - name: Clone LEZ at correct revision
-        run: |
-          rm -rf /tmp/lssa
-          git clone https://github.com/logos-blockchain/logos-execution-zone.git /tmp/lssa
-          cd /tmp/lssa
-          git fetch --depth 1 origin ${{ needs.sequencer-setup.outputs.lez-rev }}
-          git checkout ${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore sequencer cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/sequencer_service
-          key: sequencer-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Restore wallet cache
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/wallet
-          key: wallet-${{ needs.sequencer-setup.outputs.lez-rev }}
-
-      - name: Install logos-blockchain-circuits
-        run: |
-          curl -sSL https://raw.githubusercontent.com/logos-blockchain/logos-blockchain/1da154c74b911318fb853d37261f8a05ffe513b4/scripts/setup-logos-blockchain-circuits.sh | bash
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Restore spel CLI cache (PR-specific)
-        uses: actions/cache@v4
-        with:
-          path: /tmp/lssa/target/release/spel
-          key: spel-cli-${{ needs.sequencer-setup.outputs.lez-rev }}-pr${{ github.event.pull_request.number || 'main' }}-${{ github.run_id }}
-
-      - name: Determine SPEL ref for testing
-        id: spel-ref
-        run: |
-          if [ "${{ github.event_name }}" = "pull_request" ]; then
-            SPEL_REF="refs/pull/${{ github.event.pull_request.number }}/merge"
-          else
-            SPEL_REF=""
-          fi
-          echo "SPEL_REF=$SPEL_REF" >> $GITHUB_OUTPUT
-
-      - name: Install risc0 toolchain
-        env:
-          # rzup looks releases up via the GitHub API. Unauthenticated, that is
-          # 60 requests/hour shared by every job on the runner's IP.
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          curl -L https://risc0.com/install | bash
-          echo "$HOME/.risc0/bin" >> $GITHUB_PATH
-          export PATH="$HOME/.risc0/bin:$PATH"
-          rzup install cargo-risczero ${{ env.RISC0_VERSION }}
-          rzup install rust
-
-      - name: Run init E2E test (default LEZ, PR spel on PRs)
-        env:
-          LSSA_DIR: /tmp/lssa
-          SPEL_TAG: ${{ steps.spel-ref.outputs.SPEL_REF }}
-          SPEL_GIT: ${{ github.server_url }}/${{ github.repository }}.git
-        run: |
-          export PATH="/tmp/lssa/target/release:$PATH"
-          scripts/init-e2e-test.sh /tmp/init-e2e-test
+          name: init-e2e-logs
+          path: /tmp/spel-init-e2e/logs

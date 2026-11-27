@@ -1,5 +1,10 @@
 # Client Code Generation
 
+> **Parked.** `spel-client-gen` generates clients from version 1 (instruction-based) IDLs
+> of the retired `#[lez_program]` framework. It is excluded from the workspace and doesn't
+> build against the current LEZ; it returns once it is ported to IDL v2 and actor programs.
+> This page describes the old behaviour.
+
 `spel-client-gen` generates typed Rust client code and C FFI wrappers from LEZ program IDL JSON. Useful for integrating LEZ programs into applications (e.g., C++/Qt desktop apps).
 
 For a guided walkthrough, see the [Tutorial](../tutorial.md). For other reference topics, see the [Reference Index](README.md).

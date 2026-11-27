@@ -54,10 +54,9 @@ jobs:
           fi
 
           # Update deps
-          for f in spel-cli/Cargo.toml spel-framework-core/Cargo.toml spel-framework/Cargo.toml tests/e2e/fixture_program/Cargo.toml; do
-            [ -f "$f" ] || continue
-            sed -i "s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
-            sed -i "s|logos-blockchain/lssa\.git|logos-blockchain/logos-execution-zone.git|g" "$f"
+          # Every manifest pinning LEZ, by tag or by rev: the crates and the test fixtures.
+          for f in $(git ls-files '*Cargo.toml' | xargs grep -l 'logos-execution-zone'); do
+            sed -i "s|tag = \"[^\"]*\"|rev = \"$LEZ\"|g; s|rev = \"[a-f0-9]\{40\}\"|rev = \"$LEZ\"|g" "$f"
           done
 
           # Check if anything changed
@@ -125,11 +124,11 @@ jobs:
       - name: Cargo check (spel)
         run: cargo check -p spel
 
-      - name: Cargo check (spel-framework)
-        run: cargo check -p spel-framework
-
       - name: Cargo check (spel-framework-core)
         run: cargo check -p spel-framework-core
+
+      - name: Cargo check (spel-attrs)
+        run: cargo check -p spel-attrs
 
       - name: Report result
         if: always()

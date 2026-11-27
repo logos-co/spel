@@ -1,65 +1,23 @@
 //! # SPEL Framework Core
 //!
-//! Core types and traits for the SPEL program framework.
+//! The IDL types, the IDL generator and the helpers the SPEL CLI shares: PDA derivation and
+//! IDL-driven decoding.
+//!
+//! Programs on LEZ's actor model are written against `lee_core` directly; the guest framework
+//! (`spel-framework`, its macros and runtime types) is retired.
 
-pub mod context;
 #[cfg(feature = "decode")]
 pub mod decode;
-pub mod error;
 pub mod idl;
 pub mod pda;
-pub mod slot_layout;
-pub mod spel_output;
-pub mod types;
-pub mod validation;
 
 #[cfg(feature = "idl-gen")]
-pub mod account_types;
-#[cfg(feature = "idl-gen")]
-pub mod extension;
-#[cfg(feature = "idl-gen")]
 pub mod idl_gen;
+#[cfg(feature = "idl-gen")]
+pub mod source;
 
 #[cfg(feature = "idl-gen")]
 pub mod dep_walk;
 
 #[cfg(test)]
 mod test_utils;
-
-pub use slot_layout::{FixedBorshSize, SlotLayoutProbe};
-
-pub mod prelude {
-    pub use crate::error::{SpelError, SpelResult};
-    pub use crate::pda::{compute_pda, compute_pda_multi, seed_from_str, ToSeed};
-    pub use crate::types::{AccountConstraint, IntoStateDiff, SpelOutput, SpelOutputParts};
-
-    // nssa_core::account
-    pub use nssa_core::account::{Account, AccountId, AccountWithMetadata, BalanceDiff, Data};
-
-    // nssa_core::program
-    //
-    // `ProgramId` stays exported, but since LEZ v0.2.5 it is only a program's image
-    // id — a program's *identity* (owner, caller, PDA authority) is an `AccountId`.
-    pub use nssa_core::program::{
-        AccountStateDiff, BlockValidityWindow, ChainedCall, InvalidWindow, PdaSeed, ProgramId,
-        TimestampValidityWindow, ValidityWindow,
-    };
-
-    // nssa_core extras
-    pub use nssa_core::{BlockId, Timestamp};
-
-    // spel-framework additional re-exports
-    pub use nssa_core::program::{
-        read_lee_call, respond_unsupported_call, InstructionData, ProgramCall, ProgramInput,
-        ProgramOutput,
-    };
-
-    // Execution context for instruction handlers (issue #172)
-    pub use crate::context::ProgramContext;
-
-    pub use crate::slot_layout::{FixedBorshSize, SlotLayoutProbe};
-
-    // nssa::public_transaction (host-only)
-    #[cfg(feature = "host")]
-    pub use nssa::public_transaction::{Message, WitnessSet};
-}

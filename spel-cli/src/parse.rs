@@ -1,7 +1,7 @@
 //! IDL type-aware value parsing from CLI strings.
 
 use crate::hex::{hex_decode, hex_encode};
-use spel_framework_core::idl::{IdlType, IdlTypeDef};
+use spel_framework_core::idl::{IdlField, IdlType, IdlTypeDef};
 
 /// A parsed CLI value with type information preserved.
 #[derive(Debug, Clone)]
@@ -24,6 +24,7 @@ pub enum ParsedValue {
     Seq(Vec<ParsedValue>),      // Vec<u64> / Vec<u128> / Vec<bool>, one element per entry
     None,                       // Option::None
     Some(Box<ParsedValue>),     // Option::Some
+    Struct(Vec<(String, IdlType, ParsedValue)>),
     EnumVariant {
         name: String,
         index: u32,
@@ -87,6 +88,13 @@ impl std::fmt::Display for ParsedValue {
                     write!(f, "{} {{ {} }}", name, parts.join(", "))
                 }
             },
+            ParsedValue::Struct(fields) => {
+                let parts: Vec<String> = fields
+                    .iter()
+                    .map(|(n, _, v)| format!("{}: {}", n, v))
+                    .collect();
+                write!(f, "{{ {} }}", parts.join(", "))
+            },
             ParsedValue::Raw(s) => write!(f, "{}", s),
         }
     }
@@ -121,11 +129,15 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
         .iter()
         .find(|t| t.name == name)
         .ok_or_else(|| format!("type '{name}' not found in the IDL's type section"))?;
-    if def.kind != "enum" {
-        return Err(format!(
-            "'{name}' is {}; only enum arguments are supported for now",
-            def.kind,
-        ));
+    if def.kind == "struct" {
+        let json: serde_json::Value = serde_json::from_str(raw)
+            .map_err(|_| format!("expected a JSON object for struct '{name}'"))?;
+        return Ok(ParsedValue::Struct(parse_json_fields(
+            &json,
+            &def.fields,
+            name,
+            types,
+        )?));
     }
 
     // Bare word
@@ -162,15 +174,30 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
         .find(|(_, v)| &v.name == variant_name)
         .ok_or_else(|| format!("'{variant_name}' is not a variant of '{name}'"))?;
 
-    // Fields in the IDL's declaration order, values pulled from the JSON by name.
-    let mut fields = Vec::new();
-    for field in &variant.fields {
-        let field_json = payload.get(&field.name).ok_or_else(|| {
-            format!(
-                "missing field '{}' for variant '{variant_name}'",
-                field.name
-            )
-        })?;
+    Ok(ParsedValue::EnumVariant {
+        name: variant.name.clone(),
+        index: index as u32,
+        fields: parse_json_fields(payload, &variant.fields, variant_name, types)?,
+    })
+}
+
+/// Parse `fields` from a JSON object keyed by field name, or from a JSON array for positional
+/// fields, in the IDL's declaration order.
+fn parse_json_fields(
+    json: &serde_json::Value,
+    fields: &[IdlField],
+    owner: &str,
+    types: &[IdlTypeDef],
+) -> Result<Vec<(String, IdlType, ParsedValue)>, String> {
+    let positional = fields.iter().all(IdlField::is_positional);
+    let mut parsed = Vec::new();
+    for (i, field) in fields.iter().enumerate() {
+        let field_json = if positional && json.is_array() {
+            json.get(i)
+        } else {
+            json.get(&field.name)
+        }
+        .ok_or_else(|| format!("missing field '{}' for '{owner}'", field.name))?;
         // parse_value expects the CLI's raw-string form: strings drop their
         // JSON quotes (hex stays hex), everything else keeps its JSON text.
         let field_raw = match field_json {
@@ -179,14 +206,9 @@ fn parse_defined(raw: &str, name: &str, types: &[IdlTypeDef]) -> Result<ParsedVa
         };
         let value = parse_value(&field_raw, &field.type_, types)
             .map_err(|e| format!("field '{}': {e}", field.name))?;
-        fields.push((field.name.clone(), field.type_.clone(), value));
+        parsed.push((field.name.clone(), field.type_.clone(), value));
     }
-
-    Ok(ParsedValue::EnumVariant {
-        name: variant.name.clone(),
-        index: index as u32,
-        fields,
-    })
+    Ok(parsed)
 }
 
 fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
@@ -232,7 +254,7 @@ fn parse_primitive(raw: &str, prim: &str) -> Result<ParsedValue, String> {
         // input (base58 or 0x-hex) to canonical base58 and carry it as a string.
         "account_id" => {
             let bytes = crate::hex::decode_bytes_32(raw)?;
-            Ok(ParsedValue::Str(nssa::AccountId::new(bytes).to_string()))
+            Ok(ParsedValue::Str(lee::AccountId::new(bytes).to_string()))
         },
         "bool" => match raw {
             "true" | "1" | "yes" => Ok(ParsedValue::Bool(true)),
@@ -431,7 +453,7 @@ fn parse_vec(raw: &str, elem_type: &IdlType) -> Result<ParsedValue, String> {
         // element with the primitive parser. An empty (or whitespace-only) string is an
         // empty list; an empty element inside a non-empty list (`"1,,2"`, `","`) is an
         // error rather than being silently dropped.
-        IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" => {
+        IdlType::Primitive(p) if p == "u64" || p == "u128" || p == "bool" || p == "account_id" => {
             if raw.trim().is_empty() {
                 return Ok(ParsedValue::Seq(Vec::new()));
             }
@@ -590,6 +612,21 @@ mod tests {
         IdlType::Vec {
             vec: Box::new(IdlType::Primitive(prim.to_string())),
         }
+    }
+
+    #[test]
+    fn a_vec_of_account_ids_encodes_like_borsh() {
+        use lee_core::account::AccountId;
+        let (a, b) = (AccountId::new([1; 32]), AccountId::new([2; 32]));
+        let ty = vec_of("account_id");
+        let parsed = parse_value(&format!("{a},{b}"), &ty, &[]).expect("parses");
+        let bytes = crate::serialize::serialize_to_borsh(0, &[(&ty, &parsed)]).expect("encodes");
+        // The variant's tag, then the field.
+        let field = borsh::to_vec(&vec![[1_u8; 32], [2_u8; 32]]).unwrap();
+        assert!(
+            bytes.ends_with(&field) && bytes.len() - field.len() <= 4,
+            "{bytes:?}"
+        );
     }
 
     #[test]

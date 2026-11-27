@@ -11,12 +11,24 @@
 use std::path::Path;
 use std::process;
 
-use nssa::AccountId;
+use lee::AccountId;
 use program_loader_core::{MAX_PROGRAM_SEGMENTS, MAX_SEGMENT_DATA_LEN};
 use wallet::program_facades::program_loader::ProgramLoader;
 use wallet::WalletCore;
 
 use crate::hex::decode_bytes_32;
+
+/// Segment accounts `program_loader` needs for a program binary.
+///
+/// The loader segments the *user ELF* inside a packaged `.bin` (the R0BF container also holds
+/// the kernel), so the count is taken over that, not over the whole file. A file that is not a
+/// packaged binary is counted as is.
+fn segments_for(bytes: &[u8]) -> usize {
+    match risc0_binfmt::ProgramBinary::decode(bytes) {
+        Ok(binary) => segment_count(binary.user_elf.len()),
+        Err(_) => segment_count(bytes.len()),
+    }
+}
 
 /// Number of segment accounts `program_loader` needs for a binary of `len` bytes.
 pub fn segment_count(len: usize) -> usize {
@@ -43,7 +55,7 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
         eprintln!("❌ Program binary '{}' is empty", binary.display());
         process::exit(1);
     }
-    let n_segments = segment_count(bytes.len());
+    let n_segments = segments_for(&bytes);
     if n_segments > MAX_PROGRAM_SEGMENTS {
         eprintln!(
             "❌ '{}' is {} bytes: {} segments of {} bytes, over program_loader's cap of {}",
@@ -74,7 +86,7 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
     // but the address printed at the end.
     let quiet = StdoutToStderr::new();
 
-    let mut wallet_core = WalletCore::from_env().await.unwrap_or_else(|e| {
+    let mut wallet_core = WalletCore::from_env().unwrap_or_else(|e| {
         eprintln!("❌ Failed to initialize wallet: {:?}", e);
         eprintln!("   Set LEE_WALLET_HOME_DIR environment variable");
         process::exit(1);
@@ -117,15 +129,16 @@ pub async fn deploy_command(binary: &Path, fee_payer: Option<&str>, immutable: b
 
 /// Points file descriptor 1 at stderr until dropped, then restores it.
 /// A no-op where that isn't possible (non-Unix, or dup failing).
-struct StdoutToStderr {
+pub(crate) struct StdoutToStderr {
     #[cfg(unix)]
     saved: Option<i32>,
 }
 
 impl StdoutToStderr {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        // Best effort: a failed flush only reorders output between the streams.
+        std::io::stdout().flush().ok();
         #[cfg(unix)]
         {
             // SAFETY: dup/dup2/close on the process's own standard descriptors.
@@ -150,7 +163,8 @@ impl StdoutToStderr {
 impl Drop for StdoutToStderr {
     fn drop(&mut self) {
         use std::io::Write as _;
-        let _ = std::io::stdout().flush();
+        // Best effort: a failed flush only reorders output between the streams.
+        std::io::stdout().flush().ok();
         #[cfg(unix)]
         if let Some(saved) = self.saved.take() {
             // SAFETY: restores the descriptor saved in `new`.
@@ -165,6 +179,20 @@ impl Drop for StdoutToStderr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn segments_are_counted_over_the_user_elf_not_the_kernel() {
+        let user_elf = vec![1u8; MAX_SEGMENT_DATA_LEN * 2 - 10];
+        let kernel = vec![2u8; MAX_SEGMENT_DATA_LEN];
+        let packaged = risc0_binfmt::ProgramBinary::new(&user_elf, &kernel).encode();
+        assert!(
+            segment_count(packaged.len()) > 2,
+            "the whole file spills over"
+        );
+        assert_eq!(segments_for(&packaged), 2);
+        // Not a packaged binary: counted as is.
+        assert_eq!(segments_for(&user_elf), 2);
+    }
 
     #[test]
     fn segment_count_rounds_up() {
