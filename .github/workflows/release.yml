@@ -52,10 +52,10 @@ jobs:
       - name: Bump versions in Cargo.toml files
         run: |
           VERSION="${{ inputs.version }}"
+          # spel-client-gen is outside the workspace (parked) but keeps the shared version.
           for toml in \
+            spel-attrs/Cargo.toml \
             spel-framework-core/Cargo.toml \
-            spel-framework-macros/Cargo.toml \
-            spel-framework/Cargo.toml \
             spel-client-gen/Cargo.toml \
             spel-cli/Cargo.toml; do
             sed -i "s/^version = \".*\"/version = \"$VERSION\"/" "$toml"

@@ -294,7 +294,7 @@ jobs:
           FAILED=()
           PASSED=()
           
-          for crate in spel-framework-core spel-framework spel-cli; do
+          for crate in spel-attrs spel-framework-core spel; do
             if cargo check -p "$crate" 2>&1; then
               echo "✓ $crate: PASS"
               PASSED+=("$crate")
