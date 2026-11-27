@@ -60,6 +60,26 @@ fn several_seeds_are_hashed_together() {
 }
 
 #[test]
+fn an_account_seed_is_its_id_as_for_a_private_pda() {
+    // The seed formats of a private PDA and of `transfer --to pda:`: an `account:` seed is the
+    // account's id, `0x` hex is its bytes. A raw id needs no wallet.
+    let seat = AccountId::new([7; 32]);
+    let out = spel_in_empty_dir(&[
+        "--program",
+        PROGRAM_ADDRESS_HEX,
+        "pda",
+        &format!("account:{seat}"),
+    ]);
+    assert!(out.status.success(), "stderr: {}", stderr_of(&out));
+    let expected = AccountId::for_public_pda(&program_id(), &PdaSeed::new([7; 32]));
+    assert_eq!(stdout_of(&out), expected.to_string());
+
+    let hex = format!("0x{}", "07".repeat(32));
+    let out = spel_in_empty_dir(&["--program", PROGRAM_ADDRESS_HEX, "pda", &hex]);
+    assert_eq!(stdout_of(&out), expected.to_string());
+}
+
+#[test]
 fn a_seed_longer_than_32_bytes_is_refused() {
     let out = spel_in_empty_dir(&["--program", PROGRAM_ADDRESS_HEX, "pda", &"x".repeat(33)]);
     assert!(!out.status.success());
