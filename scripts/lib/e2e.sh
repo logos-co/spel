@@ -96,14 +96,26 @@ e2e_init() {
 }
 
 # Scaffold PROJECT in WORK_DIR, test, build and generate its IDL; cd into it. Sets PROGRAM.
+# With FIXTURE (a directory under scripts/fixtures), its files replace the scaffold's counter, and
+# the caller checks the IDL; without it, the counter's IDL is checked here.
 e2e_scaffold() {
-    local project="$1"
+    local project="$1" fixture="${2:-}"
     PROGRAM="${project//-/_}"
     log "Scaffolding $project..."
     cd "$WORK_DIR"
     # shellcheck disable=SC2086  # SPEL_INIT_ARGS is a list of flags
     step init "$SPEL_BIN" init "$project" ${SPEL_INIT_ARGS:---spel-path "$SPEL_DIR"}
     cd "$project"
+    if [ -n "$fixture" ]; then
+        cp -R "$SPEL_DIR/scripts/fixtures/$fixture/." .
+        # The fixture's core crate names accounts: it needs lee_core, at the scaffold's LEZ.
+        local lee_core
+        lee_core="$(grep -m1 '^lee_core = ' "${PROGRAM}_program/Cargo.toml")"
+        sed -i.bak "/^\[dependencies\]/a\\
+$lee_core
+" "${PROGRAM}_core/Cargo.toml"
+        rm -f "${PROGRAM}_core/Cargo.toml.bak"
+    fi
 
     log "Host tests..."
     step host-tests cargo test
@@ -114,6 +126,7 @@ e2e_scaffold() {
 
     log "Generating the IDL..."
     step idl make idl SPEL="$SPEL_BIN"
+    [ -z "$fixture" ] || return 0
     python3 - "$PROGRAM-idl.json" <<'PY' || fail "unexpected IDL (see $PWD/$PROGRAM-idl.json)"
 import json, sys
 idl = json.load(open(sys.argv[1]))

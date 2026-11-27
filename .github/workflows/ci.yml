@@ -10,9 +10,9 @@ env:
 
 jobs:
   # LEZ actor-model port: the framework, its macros and the FFI compile test are retired. The
-  # sequencer jobs are replaced by the smoke and multisig tests (scripts/smoke-test.sh,
-  # scripts/multisig-e2e-test.sh) and the init test (scripts/init-e2e-test.sh). The FFI test
-  # returns with client generation.
+  # sequencer jobs are replaced by the smoke, multisig and payroll tests (scripts/smoke-test.sh,
+  # scripts/multisig-e2e-test.sh, scripts/payroll-e2e-test.sh) and the init test
+  # (scripts/init-e2e-test.sh). The FFI test returns with client generation.
   build-and-test:
     name: Build and test
     runs-on: ubuntu-latest
@@ -33,7 +33,7 @@ jobs:
         run: cargo test --workspace --all-targets
 
   smoke-test:
-    name: Sequencer e2e (smoke, multisig)
+    name: Sequencer e2e (smoke, multisig, payroll)
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -104,6 +104,12 @@ jobs:
           SPEL_BIN: target/release/spel
         run: scripts/multisig-e2e-test.sh /tmp/spel-multisig
 
+      - name: Run the payroll e2e (private calls)
+        env:
+          LEZ_DIR: /tmp/lez
+          SPEL_BIN: target/release/spel
+        run: scripts/payroll-e2e-test.sh /tmp/spel-payroll
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -112,6 +118,7 @@ jobs:
           path: |
             /tmp/spel-smoke/logs
             /tmp/spel-multisig/logs
+            /tmp/spel-payroll/logs
 
   init-e2e:
     name: Init e2e (default dependencies)
