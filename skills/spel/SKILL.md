@@ -43,7 +43,7 @@ The old `#[lez_program]` guest framework and instruction calls are retired. Clie
   actors on another program need `--actor ACCOUNT@PROGRAM`.
 - **Signers are never inferred.** One signature authorizes every actor of that account in the
   transaction, under every program.
-- **Private calls** (an actor that is `Private/…`, a private label, `--seal` or `--recover`) need
+- **Private calls** (an actor that is `Private/…`, a private label, `--seal`, or `--recover` to an unbound recipient) need
   no binary: each program it runs is loaded from the chain, or from a `--binary` / spel.toml
   `binary` whose ImageID matches the deployed code. Only `--signer` authorizes, as in
   public calls: a private signer through the wallet's authorization key. A private root or

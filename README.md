@@ -111,7 +111,8 @@ works. `--dry-run` (or `--dry-run=json`) prints the transaction without sending.
 ## Private calls
 
 A call is a **privacy-preserving transaction** when an actor's account is private
-(`Private/<id>`, a private wallet label), or when it sends a credit with `--seal` / `--recover`.
+(`Private/<id>`, a private wallet label), or when it sends a credit with `--seal`, or with
+`--recover` to a recipient whose recovery binding isn't on chain yet.
 The wallet runs it locally against its decrypted states and proves it; only the proof,
 nullifiers, encrypted notes and what crosses into public execution are published. The programs
 it runs are loaded from the chain, or from a local binary (`--binary`, repeatable, or a

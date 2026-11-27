@@ -120,7 +120,7 @@ spel [GLOBAL OPTIONS] send --root <ACCOUNT>[@<PROGRAM>] [SEND OPTIONS] [--] <MES
 | `--co-signer <ACCOUNT>` | a public account that signs in another wallet (repeatable); needs `--export`. See [Signing in several wallets](#signing-in-several-wallets) |
 | `--export <FILE>` | write the public transaction to `FILE`, signed by this wallet's signers, instead of sending it |
 | `--seal <DEST>` | a credit the call sends from private execution, sealed to its private recipient (repeatable; not a public account, which is declared with `--actor`). Makes the call private |
-| `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private |
+| `--recover <DEST>` | a credit the call sends from public execution to a private recipient, published with a recovery binding (repeatable). Makes the call private, unless the recipient's binding is already on chain |
 | `--no-auto-actors` | declare only the root, the `--actor`s and the signers; a private call infers nothing |
 | `--gas-limit <N>` | execution gas limit (a wallet config override for this call) |
 | `--dry-run`, `--dry-run=json` | print the transaction and send nothing |
@@ -223,7 +223,8 @@ covers the base fees; export it again.
 ### Private calls
 
 A call is sent as a **privacy-preserving transaction** when an actor's account is private, or
-when it has a `--seal` or `--recover` credit. The wallet runs the call locally, against the
+when it has a `--seal` credit, or a `--recover` credit whose recipient has no recovery binding on
+chain yet. The wallet runs the call locally, against the
 decrypted states it holds, and proves it. Only the proof, nullifiers, encrypted notes and
 whatever crosses into public execution are published.
 
@@ -297,6 +298,15 @@ comes from a blinded alias. A credit from a public actor can't be sealed, so it 
 **recovery binding** (`--recover`): its amount and sender are public. The recipient collects
 either with `wallet pending receive`.
 
+An address has one recovery binding, published by the first credit that needs it and reused by
+every later one. So before planning, `send` asks the sequencer for each `--recover` recipient's
+binding, as the wallet does before sending. A recipient already bound adds nothing private, and
+the guardrail says so. If nothing else in the call is private (no private actor, no `--seal`, no
+binding left to publish), it's sent as a **public** transaction: its fee is paid by a public
+account (`--fee-payer`, else the first signer), and a private `--fee-payer` is refused. The dry
+run shows the same decision, with the bound recipients under `recover_bound`; without a wallet
+it can't ask, and counts every `--recover` as unbound.
+
 **A public recipient** is never sealed: `--seal` and `--recover` refuse one. Declare it under the
 program its credit goes to (`--actor bob@token`, `--actor bob@native` for a native balance), and
 the credit applies publicly in the transaction. The private sender shows up there as a fresh
@@ -368,7 +378,8 @@ prints a machine-readable plan:
   "fee_payer": null,
   "private": false,
   "seal": [],
-  "recover": []
+  "recover": [],
+  "recover_bound": []
 }
 ```
 

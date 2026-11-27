@@ -57,7 +57,7 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 | `--signer A` | authorize an account (repeatable): public signs, private uses the wallet's authorization key; the wallet must hold the key |
 | `--co-signer A` | a public signer whose key is in another wallet (repeatable); needs `--export` |
 | `--export FILE` | write the public transaction (fee measured, our signers signed) instead of sending |
-| `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private. A public recipient is refused: declare it, `--actor bob@token` |
+| `--seal D` / `--recover D` | a credit to private recipient `D` (a wallet account or `keys:FILE`), sealed (from private execution) or with a recovery binding (from public execution); makes the call private, except a `--recover` whose recipient is already bound on chain (then, with nothing else private, the call is public and a public account pays its fee). A public recipient is refused: declare it, `--actor bob@token` |
 | `--no-auto-actors` | no actors from message fields (public) or from simulation (private) |
 | `--gas-limit N` | gas limit for this call |
 | `--dry-run[=json]` | print, don't send (works without a wallet on raw ids) |
@@ -65,7 +65,7 @@ spel --program token send --root alice --signer alice --dry-run=json -- transfer
 Message names: kebab-case, snake_case or the variant name. Fields: `--<field>` in kebab-case;
 unknown fields are refused. `spel --idl X -- <message> --help` shows a message.
 
-Private calls (a private actor, `--seal` or `--recover`): the programs they run are loaded
+Private calls (a private actor, `--seal`, or a `--recover` to an unbound recipient): the programs they run are loaded
 from matching local binaries or the chain; only
 `--signer` authorizes, as in public calls (a private root or `--actor` alone can be credited,
 not debited; a private PDA only through its program's seed grant, so `--signer` refuses it);

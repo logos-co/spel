@@ -24,6 +24,11 @@
 - **A public `spel pda` takes the private PDA's seed formats** (`account:<ACCOUNT>`, `0x` hex):
   it read `account:boss` as the string "account:boss", so it disagreed with the private PDA and
   with `transfer --to pda:` on the same seed.
+- **A `--recover` to a recipient already bound on chain** adds nothing private: the wallet
+  reuses the binding. `send` looks the bindings up before planning, so a call with nothing else
+  private is planned, shown (guardrail and dry run, `recover_bound`) and paid as the public
+  transaction the wallet sends: a public `--fee-payer` pays, a private one is refused. It used to
+  plan a private call, ignore the private payer, and charge the first signer.
 - **`--fee-payer`** is checked before sending: the wallet must hold its key, and its privacy must
   match the call's (a private call pays from an owned private account). A private call with no
   payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.

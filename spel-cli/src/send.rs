@@ -470,19 +470,26 @@ struct Prepared {
     /// The signers whose keys are in other wallets.
     co_signers: Vec<AccountId>,
     fee_payer: Option<AccountId>,
-    /// Sent as a privacy-preserving transaction: an actor is private, or a credit is sealed or
-    /// recoverable.
+    /// Sent as a privacy-preserving transaction: an actor is private, a credit is sealed, or a
+    /// credit's recovery binding isn't on chain yet.
     private: bool,
+    /// The `--recover` destinations whose recovery binding is already on chain. The wallet reuses
+    /// it, so they add nothing private: a call with nothing else private is sent publicly.
+    bound_recovers: Vec<String>,
     /// The accounts message fields name by `keys:<FILE>`, with that value.
     keyed: BTreeMap<AccountId, String>,
 }
 
+///
+/// `bound` are the `--recover` values whose destination already has a recovery binding on chain
+/// ([`bound_recoveries`]).
 fn prepare(
     flags: &SendFlags,
     idl: &SpelIdl,
     default_program: Option<&str>,
     fee_payer: Option<&str>,
     names: &Names<'_>,
+    bound: &[String],
 ) -> Result<Prepared, String> {
     let message = idl.message(&flags.message).ok_or_else(|| {
         let known: Vec<String> = idl.messages.iter().map(|m| to_kebab(&m.name)).collect();
@@ -572,8 +579,13 @@ fn prepare(
             ));
         }
     }
-    let private =
-        !private_accounts.is_empty() || !flags.seals.is_empty() || !flags.recovers.is_empty();
+    // The wallet publishes a recovery binding only for an address that has none: one already on
+    // chain is reused, and its credit can go in a public transaction.
+    let bound_recovers: Vec<String> =
+        flags.recovers.iter().filter(|raw| bound.contains(raw)).cloned().collect();
+    let private = !private_accounts.is_empty()
+        || !flags.seals.is_empty()
+        || flags.recovers.len() > bound_recovers.len();
     if private && flags.export.is_some() {
         return Err(
             "--export writes a public transaction, and this call is private (a private \
@@ -601,6 +613,13 @@ fn prepare(
                 "--fee-payer {raw}: a private call's fee is paid in the proof, from a private \
                  account of this wallet; name one"
             )),
+            (AccountIdWithPrivacy::Private(_), false) if !flags.recovers.is_empty() => {
+                Err(format!(
+                    "--fee-payer {raw}: every --recover destination's recovery binding is already \
+                     on chain, so nothing in this call is private and it's sent as a public \
+                     transaction, whose fee a public account pays; name one"
+                ))
+            },
             (AccountIdWithPrivacy::Private(_), false) => Err(format!(
                 "--fee-payer {raw}: a public call's fee is paid by a public account; name one"
             )),
@@ -633,8 +652,42 @@ fn prepare(
         co_signers,
         fee_payer,
         private,
+        bound_recovers,
         keyed,
     })
+}
+
+/// The `--recover` values whose destination already has a recovery binding on chain, looked up
+/// as the wallet does before it sends. A value that names no private account is left for
+/// [`prepare`] to refuse.
+///
+/// # Errors
+/// If the sequencer can't be asked.
+async fn bound_recoveries(
+    wallet: &Wallet,
+    names: &Names<'_>,
+    recovers: &[String],
+) -> Result<Vec<String>, String> {
+    let mut bound = Vec::new();
+    for raw in recovers {
+        // spel addresses a credit to the destination's account id, never a blinded address.
+        let address = match field_account(names, raw) {
+            Ok(id) if raw.starts_with("keys:") => id,
+            Ok(_) => match names.account_with_privacy(raw) {
+                Ok(AccountIdWithPrivacy::Private(id)) => id,
+                _ => continue,
+            },
+            Err(_) => continue,
+        };
+        let binding = wallet
+            .get_recovery_binding(address)
+            .await
+            .map_err(|e| format!("--recover {raw}: looking up its recovery binding: {e:#}"))?;
+        if binding.is_some() {
+            bound.push(raw.clone());
+        }
+    }
+    Ok(bound)
 }
 
 fn actor_name(names: &Names<'_>, account: AccountId, program: AccountId) -> String {
@@ -678,7 +731,19 @@ fn guardrail(prepared: &Prepared, flags: &SendFlags, names: &Names<'_>) -> Strin
         out.push(format!("Credit sealed to {seal}"));
     }
     for recover in &flags.recovers {
-        out.push(format!("Credit to {recover}, with a recovery binding"));
+        out.push(if !prepared.bound_recovers.contains(recover) {
+            format!("Credit to {recover}, with a recovery binding")
+        } else if prepared.private {
+            format!(
+                "Credit to {recover}: its recovery binding is already on chain, and the wallet \
+                 reuses it (--recover {recover} adds nothing)"
+            )
+        } else {
+            format!(
+                "Credit to {recover}: its recovery binding is already on chain, so it is \
+                 published by a public transaction (--recover {recover} adds nothing)"
+            )
+        });
     }
     if prepared.signers.is_empty() {
         out.push("No signers: no actor is authorized.".to_owned());
@@ -741,6 +806,7 @@ fn dry_run_json(prepared: &Prepared, flags: &SendFlags) -> Value {
         "private": prepared.private,
         "seal": flags.seals,
         "recover": flags.recovers,
+        "recover_bound": prepared.bound_recovers,
     })
 }
 
@@ -836,8 +902,15 @@ pub async fn send_command(
             wallet: wallet.as_ref(),
             programs: programs.clone(),
         };
-        let prepared =
-            prepare(&flags, idl, default_program, fee_payer, &names).unwrap_or_else(|e| fail(e));
+        // Without a wallet (a dry run), bindings can't be looked up: every --recover counts.
+        let bound = match &wallet {
+            Some(wallet) => bound_recoveries(wallet, &names, &flags.recovers)
+                .await
+                .unwrap_or_else(|e| fail(e)),
+            None => Vec::new(),
+        };
+        let prepared = prepare(&flags, idl, default_program, fee_payer, &names, &bound)
+            .unwrap_or_else(|e| fail(e));
         if let Some(wallet) = &wallet {
             // A co-signer signs in its own wallet.
             let public_signers = prepared
@@ -1885,6 +1958,7 @@ mod tests {
             co_signers: Vec::new(),
             fee_payer: None,
             private: true,
+            bound_recovers: Vec::new(),
             keyed,
         }
     }
@@ -1945,7 +2019,7 @@ mod tests {
         fn prepared(args_: &str, fee_payer: Option<&str>) -> Result<Prepared, String> {
             let idl = SpelIdl::from_json(IDL)?;
             let flags = parse_send_args(&args(args_))?;
-            prepare(&flags, &idl, None, fee_payer, &no_wallet())
+            prepare(&flags, &idl, None, fee_payer, &no_wallet(), &[])
         }
 
         /// A keys file (`wallet account show-keys` output) and the id its keys derive.
