@@ -37,6 +37,21 @@ step new-alice "$WALLET_BIN" account new public --label alice
 send 0 public-increment send --root alice --signer alice --fee-payer "$FEE_PAYER" -- increment --by 2
 send 0 public-increment-2 send --root alice --signer alice --fee-payer "$FEE_PAYER" -- increment --by 3
 count_is "alice@$PROGRAM" 5
+# A dry run prints the plan and sends nothing.
+send 0 public-dry-run send --root alice --signer alice --fee-payer "$FEE_PAYER" --dry-run -- increment --by 1
+grep -q "Dry run: nothing sent." "$LOG_DIR/public-dry-run.log" || fail "public-dry-run: no dry-run notice"
+send 0 public-dry-run-json send --root alice --signer alice --fee-payer "$FEE_PAYER" --dry-run=json -- increment --by 1
+step encode "$SPEL_BIN" encode increment --by 1
+python3 - "$LOG_DIR/public-dry-run-json.log" "$(tail -1 "$LOG_DIR/encode.log")" <<'PY' \
+    || fail "unexpected dry-run plan (see $LOG_DIR/public-dry-run-json.log)"
+import json, sys
+plan = json.load(open(sys.argv[1]))
+assert plan["message"]["name"] == "Increment", plan["message"]
+assert plan["message"]["hex"] == sys.argv[2].strip().removeprefix("0x"), (plan["message"], sys.argv[2])
+assert len(plan["signers"]) == 1 and plan["fee_payer"], plan
+assert not plan["private"], plan
+PY
+count_is "alice@$PROGRAM" 5
 # Without --signer the counter refuses (it asserts authorization): refused in simulation, exit 2.
 send 2 public-unsigned send --root alice --fee-payer "$FEE_PAYER" -- increment --by 1
 count_is "alice@$PROGRAM" 5
