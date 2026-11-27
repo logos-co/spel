@@ -2017,9 +2017,18 @@ mod tests {
 
         /// `spel send <args>` prepared against the payroll IDL, with no wallet (raw ids only).
         fn prepared(args_: &str, fee_payer: Option<&str>) -> Result<Prepared, String> {
+            prepared_bound(args_, fee_payer, &[])
+        }
+
+        /// The same, with `bound` the --recover values whose recovery binding is on chain.
+        fn prepared_bound(
+            args_: &str,
+            fee_payer: Option<&str>,
+            bound: &[String],
+        ) -> Result<Prepared, String> {
             let idl = SpelIdl::from_json(IDL)?;
             let flags = parse_send_args(&args(args_))?;
-            prepare(&flags, &idl, None, fee_payer, &no_wallet(), &[])
+            prepare(&flags, &idl, None, fee_payer, &no_wallet(), bound)
         }
 
         /// A keys file (`wallet account show-keys` output) and the id its keys derive.
@@ -2122,6 +2131,69 @@ mod tests {
                 .expect("refused");
             assert!(error.contains("a private call's fee is paid in the proof"));
             assert!(prepared(&private_call, Some(&format!("Private/{}", hex(4)))).is_ok());
+        }
+
+        /// alice (public) pays bob, known by his keys, with a recovery binding.
+        fn recover_call(keys: &str, extra: &str) -> String {
+            format!(
+                "--root {}@{} --signer {} --recover keys:{keys} {extra} -- transfer --to \
+                 keys:{keys} --amount 30",
+                hex(1),
+                hex(9),
+                hex(1)
+            )
+        }
+
+        #[test]
+        fn a_recovery_to_an_unbound_address_is_private() {
+            let dir = tempfile::tempdir().unwrap();
+            let (keys, _) = keys_file(&dir);
+            let p = prepared(&recover_call(&keys, ""), Some(&format!("Private/{}", hex(4))))
+                .unwrap();
+            assert!(p.private);
+            assert!(p.bound_recovers.is_empty());
+            assert_eq!(p.fee_payer, Some(id(4)));
+        }
+
+        #[test]
+        fn a_recovery_to_a_bound_address_alone_is_public() {
+            let dir = tempfile::tempdir().unwrap();
+            let (keys, _) = keys_file(&dir);
+            let call = recover_call(&keys, "");
+            let bound = [format!("keys:{keys}")];
+            let p = prepared_bound(&call, Some(&hex(4)), &bound).unwrap();
+            assert!(!p.private);
+            assert_eq!(p.bound_recovers, bound);
+            assert_eq!(p.fee_payer, Some(id(4)));
+
+            let flags = parse_send_args(&args(&call)).unwrap();
+            let summary = guardrail(&p, &flags, &no_wallet());
+            assert!(!summary.contains("privacy-preserving"), "{summary}");
+            assert!(
+                summary.contains("binding is already on chain, so it is published by a public \
+                     transaction"),
+                "{summary}"
+            );
+            assert_eq!(dry_run_json(&p, &flags)["private"], false);
+            assert_eq!(dry_run_json(&p, &flags)["recover_bound"][0], bound[0]);
+
+            let error = prepared_bound(&call, Some(&format!("Private/{}", hex(4))), &bound)
+                .err()
+                .expect("refused");
+            assert!(error.contains("recovery binding is already on chain"), "{error}");
+        }
+
+        #[test]
+        fn a_bound_recovery_beside_a_seal_stays_private() {
+            let dir = tempfile::tempdir().unwrap();
+            let (keys, _) = keys_file(&dir);
+            let call = recover_call(&keys, &format!("--seal keys:{keys}"));
+            let bound = [format!("keys:{keys}")];
+            let p = prepared_bound(&call, None, &bound).unwrap();
+            assert!(p.private);
+            let flags = parse_send_args(&args(&call)).unwrap();
+            let summary = guardrail(&p, &flags, &no_wallet());
+            assert!(summary.contains("the wallet reuses it"), "{summary}");
         }
 
         #[test]
