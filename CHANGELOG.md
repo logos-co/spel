@@ -21,6 +21,9 @@
   is credited only with evidence that someone controls it; `pda:` names the PDA by program and
   seed, which is that evidence. By its bare id, a PDA's first deposit was refused ("declared
   public but not admitted").
+- **A public `spel pda` takes the private PDA's seed formats** (`account:<ACCOUNT>`, `0x` hex):
+  it read `account:boss` as the string "account:boss", so it disagreed with the private PDA and
+  with `transfer --to pda:` on the same seed.
 - **`--fee-payer`** is checked before sending: the wallet must hold its key, and its privacy must
   match the call's (a private call pays from an owned private account). A private call with no
   payer the wallet can find fails with a hint to pass `--signer` or `--fee-payer`.

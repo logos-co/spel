@@ -581,7 +581,8 @@ spel --program <ADDRESS> pda <SEED> [SEED]...
 ```
 
 Derives a public PDA of the program: `AccountId::for_public_pda(program, seed)`. Each seed is
-64 hex characters (32 bytes) or a string of at most 32 bytes, zero-padded. Several seeds are
+64 hex characters (32 bytes, optionally `0x`), `account:<ACCOUNT>` (that account's id; a label
+resolves through the wallet), or a string of at most 32 bytes, zero-padded. Several seeds are
 combined as `SHA-256(seed1 ‖ seed2 ‖ …)`. Programs document their own seeds; the IDL has none.
 
 ### Private PDAs
@@ -605,8 +606,7 @@ if that label is free; `send` can then witness it, and syncs follow it. `--resca
 rediscovers private accounts from genesis, for a PDA that already has history on chain. The
 address goes to stdout either way.
 
-A seed here may also be 64 hex characters with `0x`, or `account:<ACCOUNT>`: that account's id
-(a label resolves through the wallet).
+Seeds are as for a public PDA.
 
 ---
 

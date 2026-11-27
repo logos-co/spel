@@ -703,7 +703,6 @@ fn load_idl(path: &str) -> SpelIdl {
 /// Example:
 ///   multisig --program-id abc123... pda multisig_vault__ <create_key_hex>
 fn compute_pda_raw(args: &[String]) {
-    use crate::hex::decode_bytes_32;
     use lee::AccountId;
     use lee_core::program::PdaSeed;
 
@@ -723,7 +722,7 @@ fn compute_pda_raw(args: &[String]) {
     let program_account_id = AccountId::new(pid_bytes);
 
     // Collect seed args (everything that's not --program-id or its value)
-    let mut seeds: Vec<[u8; 32]> = Vec::new();
+    let mut raw_seeds: Vec<&str> = Vec::new();
     let mut skip_next = false;
     for arg in args {
         if skip_next {
@@ -737,47 +736,34 @@ fn compute_pda_raw(args: &[String]) {
         if arg.starts_with("--") {
             continue;
         }
-
-        // Try as 64-char hex first, then as zero-padded string
-        let seed_bytes: [u8; 32] = if arg.len() == 64 && arg.chars().all(|c| c.is_ascii_hexdigit())
-        {
-            decode_bytes_32(arg).unwrap_or_else(|e| {
-                eprintln!("❌ Invalid hex seed '{}': {}", arg, e);
-                process::exit(1);
-            })
-        } else {
-            let mut bytes = [0u8; 32];
-            let src = arg.as_bytes();
-            if src.len() > 32 {
-                eprintln!("❌ Seed '{}' is {} bytes, max 32", arg, src.len());
-                process::exit(1);
-            }
-            bytes[..src.len()].copy_from_slice(src);
-            bytes
-        };
-        seeds.push(seed_bytes);
+        raw_seeds.push(arg);
     }
-
-    if seeds.is_empty() {
+    if raw_seeds.is_empty() {
         eprintln!("❌ At least one seed required");
         eprintln!("Usage: pda --program-id <address> <seed1> [seed2] ...");
         process::exit(1);
     }
 
-    // Combine seeds via SHA-256(seed1 || seed2 || ...)
-    use risc0_zkvm::sha::{Impl, Sha256};
-    let combined: [u8; 32] = if seeds.len() == 1 {
-        seeds[0]
-    } else {
-        let mut input = Vec::with_capacity(seeds.len() * 32);
-        for s in &seeds {
-            input.extend_from_slice(s);
-        }
-        Impl::hash_bytes(&input)
-            .as_bytes()
-            .try_into()
-            .expect("SHA-256 is 32 bytes")
+    // The seed formats of a private PDA and of `transfer --to pda:`, so all three agree on an
+    // address. Only an `account:` seed with a label needs the wallet.
+    let wallet = raw_seeds
+        .iter()
+        .any(|raw| raw.starts_with("account:"))
+        .then(|| send::open_wallet(None).ok())
+        .flatten();
+    let names = send::Names {
+        wallet: wallet.as_ref(),
+        programs: Vec::new(),
     };
+    let seeds = raw_seeds
+        .iter()
+        .map(|raw| private_cmds::seed_bytes(raw, &names))
+        .collect::<Result<Vec<_>, String>>()
+        .unwrap_or_else(|e| {
+            eprintln!("❌ {e}");
+            process::exit(1);
+        });
+    let combined = *private_cmds::combine_seeds(&seeds).as_bytes();
 
     let pda_seed = PdaSeed::new(combined);
     let account_id = AccountId::for_public_pda(&program_account_id, &pda_seed);
