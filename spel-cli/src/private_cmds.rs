@@ -347,6 +347,28 @@ mod tests {
     }
 
     #[test]
+    fn a_pda_destination_carries_its_program_and_seed() {
+        let program = AccountId::new([9; 32]);
+        let one = public_pda_destination("vault", program, &names()).unwrap();
+        let mut vault = [0_u8; 32];
+        vault[..5].copy_from_slice(b"vault");
+        assert_eq!(
+            one.account_id(),
+            AccountId::for_public_pda(&program, &PdaSeed::new(vault))
+        );
+        assert!(matches!(one, AccountIdentity::PublicPda { .. }));
+        // Several seeds combine as `spel pda` combines them.
+        let seat = AccountId::new([5; 32]);
+        let two = public_pda_destination(&format!("vault,account:{seat}"), program, &names())
+            .unwrap();
+        assert_eq!(
+            two.account_id(),
+            AccountId::for_public_pda(&program, &combine_seeds(&[vault, [5; 32]]))
+        );
+        assert!(public_pda_destination(&"x".repeat(33), program, &names()).is_err());
+    }
+
+    #[test]
     fn seeds_take_hex_accounts_and_strings() {
         let id = AccountId::new([5; 32]);
         assert_eq!(
